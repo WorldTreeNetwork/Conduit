@@ -9,7 +9,7 @@ use std::env;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use axum::{extract::State, routing::{get, post, put}, Json, Router};
+use axum::{extract::State, middleware, routing::{get, post, put}, Json, Router};
 use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine as _};
 use chrono::Utc;
 use ed25519_dalek::Signer as _;
@@ -22,7 +22,16 @@ use tracing_subscriber::EnvFilter;
 use hickory_resolver::TokioAsyncResolver;
 
 use conduit::{keys::ServerKey, storage::Storage};
-use conduit_server::{api::client::{AuthState, TxnCacheKey}, federation, keys, PostgresStorage, RemoteKeyCache};
+use conduit_server::{
+    api::client::{AuthState, TxnCacheKey},
+    federation,
+    federation::{
+        FedState, XMatrixMiddlewareState, RateLimiter, federation_router,
+        middleware::verify_xmatrix,
+        rate_limit::rate_limit,
+    },
+    keys, PostgresStorage, RemoteKeyCache,
+};
 
 /// Shared application state threaded through axum.
 #[derive(Clone)]
@@ -139,6 +148,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     use conduit_server::api::client::rooms as rooms;
     use conduit_server::api::client::sync as sync_api;
 
+    // Build the X-Matrix middleware state (for inbound federation auth).
+    let xmatrix_state = XMatrixMiddlewareState {
+        server_name: Arc::clone(&state.server_name),
+        remote_keys: Arc::clone(&state.remote_keys),
+        http: state.http.clone(),
+    };
+
+    // Build the per-origin rate limiter.
+    let rate_limiter = RateLimiter::default_federation();
+
+    // Build the federation inbound handler state.
+    let fed_state = FedState {
+        storage: Arc::clone(&state.storage),
+        server_name: Arc::clone(&state.server_name),
+        server_key: Arc::clone(&state.server_key),
+        remote_keys: Arc::clone(&state.remote_keys),
+        http: state.http.clone(),
+        events_tx: state.events_tx.clone(),
+        fed_client: Arc::clone(&state.federation),
+    };
+
+    // Federation inbound subrouter: X-Matrix auth → rate limit → handlers.
+    // Layers are applied before with_state so the middleware state is bound.
+    // with_state::<AppState> converts Router<FedState> → Router<AppState>.
+    let fed_router: Router<AppState> = federation_router()
+        .layer(middleware::from_fn_with_state(rate_limiter, rate_limit))
+        .layer(middleware::from_fn_with_state(xmatrix_state, verify_xmatrix))
+        .with_state::<AppState>(fed_state);
+
     let app = Router::new()
         .route("/health", get(health))
         .route("/_matrix/client/versions", get(versions))
@@ -174,6 +212,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Client-Server API: sync
         .route("/_matrix/client/v3/sync",
             get(sync_api::sync::<AppState>))
+        // Federation inbound (E09)
+        .nest("/_matrix/federation/v1", fed_router)
         .with_state(state)
         .layer(TraceLayer::new_for_http());
 
