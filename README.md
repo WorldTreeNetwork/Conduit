@@ -15,10 +15,24 @@ binary to run it.
 ```sh
 cargo build                       # default
 cargo build --features iroh       # compile in the iroh transport (~30MB)
-cargo run -p conduit-server       # serves on :8008
 ```
 
-Once running, hit:
+## Run
+
+`conduit-server` requires a Postgres database. See [AGENTS.md](AGENTS.md)
+for the database conventions.
+
+```sh
+# one-time: create a database
+createdb conduit
+
+# every run: point the binary at it
+DATABASE_URL="postgresql://postgres@localhost/conduit" \
+    cargo run -p conduit-server
+```
+
+Migrations under `conduit-server/migrations/` apply automatically on
+startup. Then hit:
 
 - `GET /health` → `ok`
 - `GET /_matrix/client/versions` → JSON listing supported spec versions

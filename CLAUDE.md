@@ -52,12 +52,24 @@ bd close <id>         # Complete work
 
 ## Build & Test
 
-_Add your build and test commands here_
-
 ```bash
-# Example:
-# npm install
-# npm test
+# Build everything
+cargo build --workspace
+
+# With iroh transport compiled in (~30MB heavier)
+cargo build --workspace --features conduit-server/iroh
+
+# Run the server (Postgres required; see AGENTS.md → Database Conventions)
+createdb conduit                                                   # once
+DATABASE_URL="postgresql://postgres@localhost/conduit" \
+    cargo run -p conduit-server                                    # :8008
+
+# Verify endpoints
+curl localhost:8008/health
+curl localhost:8008/_matrix/client/versions
+
+# Test (when there are tests)
+cargo test --workspace
 ```
 
 ## Architecture Overview
