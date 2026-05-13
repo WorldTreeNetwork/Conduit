@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM pushers WHERE user_id = $1 AND pushkey = $2 AND app_id = $3",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "dbe6ab6b2642803c3e772874a5c60af412a6eb4981a3bd0385dea2ef15594820"
+}

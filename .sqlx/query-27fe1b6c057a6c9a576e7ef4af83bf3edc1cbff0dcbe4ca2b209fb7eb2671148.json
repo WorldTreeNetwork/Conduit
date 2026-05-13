@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO room_keys_versions (user_id, version, algorithm, auth_data, count, etag)\n            VALUES ($1, $2, $3, $4, 0, $5)\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "Jsonb",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "27fe1b6c057a6c9a576e7ef4af83bf3edc1cbff0dcbe4ca2b209fb7eb2671148"
+}

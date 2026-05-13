@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO cross_signing_signatures\n                (signer_user_id, signer_key_id, target_user_id, target_key_id, signature)\n            VALUES ($1, $2, $3, $4, $5)\n            ON CONFLICT (signer_user_id, signer_key_id, target_user_id, target_key_id)\n            DO UPDATE SET signature = EXCLUDED.signature\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "047557480de15ec3e2dbee4fdd0c0226a7c1ffd49579ee631258ff17c41db7bd"
+}

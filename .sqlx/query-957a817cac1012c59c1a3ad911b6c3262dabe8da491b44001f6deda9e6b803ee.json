@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO room_keys_backup (user_id, version, room_id, session_id, key_data)\n            VALUES ($1, $2, $3, $4, $5)\n            ON CONFLICT (user_id, version, room_id, session_id)\n            DO UPDATE SET key_data = EXCLUDED.key_data\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Jsonb"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "957a817cac1012c59c1a3ad911b6c3262dabe8da491b44001f6deda9e6b803ee"
+}

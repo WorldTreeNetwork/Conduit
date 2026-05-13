@@ -124,3 +124,16 @@ The pure `conduit` library exposes a `Storage` trait — backends live
 elsewhere. The PG impl + migrations currently live in `conduit-server`.
 A future split into a dedicated `conduit-storage-postgres` crate is
 filed in bd but deferred until there's a second `Storage` implementor.
+
+### sqlx offline cache
+
+`.sqlx/` at the repo root caches the compile-time metadata for every
+`sqlx::query!` / `query_as!` invocation, so builds don't require a
+live Postgres.
+
+- **Build without a live PG:** `SQLX_OFFLINE=true cargo build --workspace`.
+- **After changing any `query!`/`query_as!`:** install `sqlx-cli` once
+  (`cargo install sqlx-cli --no-default-features --features postgres,rustls`),
+  then with `DATABASE_URL` set to a migrated database run
+  `cargo sqlx prepare --workspace`. **Commit the resulting `.sqlx/`
+  changes.** CI relies on this cache.

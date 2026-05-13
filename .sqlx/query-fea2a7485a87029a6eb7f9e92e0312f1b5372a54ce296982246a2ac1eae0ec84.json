@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO cross_signing_keys (user_id, key_type, key_json)\n            VALUES ($1, $2, $3)\n            ON CONFLICT (user_id, key_type)\n            DO UPDATE SET key_json = EXCLUDED.key_json\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Jsonb"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "fea2a7485a87029a6eb7f9e92e0312f1b5372a54ce296982246a2ac1eae0ec84"
+}

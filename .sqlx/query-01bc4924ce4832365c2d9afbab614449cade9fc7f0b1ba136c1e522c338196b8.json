@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT algorithm, COUNT(*) AS count\n            FROM one_time_keys\n            WHERE user_id = $1 AND device_id = $2\n            GROUP BY algorithm\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "algorithm",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "count",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      null
+    ]
+  },
+  "hash": "01bc4924ce4832365c2d9afbab614449cade9fc7f0b1ba136c1e522c338196b8"
+}

@@ -1,0 +1,47 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT user_id, device_id, display_name, last_seen_ts,\n                   last_seen_ip::TEXT AS last_seen_ip\n            FROM devices\n            WHERE user_id = $1 AND device_id = $2\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "device_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "display_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "last_seen_ts",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 4,
+        "name": "last_seen_ip",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      true,
+      null
+    ]
+  },
+  "hash": "f6e9ec1dcaa564be981c12a709537c483b4191686f981fdb24ef9de09bc37079"
+}

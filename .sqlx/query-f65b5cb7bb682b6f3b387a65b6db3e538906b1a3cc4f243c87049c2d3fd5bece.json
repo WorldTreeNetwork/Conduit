@@ -1,0 +1,30 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE fallback_keys\n            SET used = true\n            WHERE user_id = $1 AND device_id = $2 AND algorithm = $3\n            RETURNING key_id, key_json\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "key_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "key_json",
+        "type_info": "Jsonb"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "f65b5cb7bb682b6f3b387a65b6db3e538906b1a3cc4f243c87049c2d3fd5bece"
+}

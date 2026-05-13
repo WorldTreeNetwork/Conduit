@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE room_keys_versions SET deleted = true\n            WHERE user_id = $1 AND version = $2\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "1f2c801cf8b1e294e58dcadc915699db0b8081008bd564cac4ac8b9f753c6537"
+}

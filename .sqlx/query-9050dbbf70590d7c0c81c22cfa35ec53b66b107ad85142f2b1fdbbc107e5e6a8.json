@@ -1,0 +1,77 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT media_id, origin_server, uploader, content_type, upload_name,\n                   file_size, sha256, storage_path, uploaded_at, last_accessed\n            FROM media\n            ORDER BY uploaded_at DESC\n            LIMIT $2 OFFSET $1\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "media_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "origin_server",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "uploader",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "content_type",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "upload_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "file_size",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 6,
+        "name": "sha256",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "storage_path",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 8,
+        "name": "uploaded_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 9,
+        "name": "last_accessed",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      true,
+      true,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "9050dbbf70590d7c0c81c22cfa35ec53b66b107ad85142f2b1fdbbc107e5e6a8"
+}

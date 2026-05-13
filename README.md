@@ -13,8 +13,8 @@ binary to run it.
 ## Build
 
 ```sh
-cargo build                       # default
-cargo build --features iroh       # compile in the iroh transport (~30MB)
+cargo build --workspace                            # default
+cargo build --workspace --features conduit-server/iroh   # compile in the iroh transport (~30MB)
 ```
 
 ## Run
@@ -23,31 +23,48 @@ cargo build --features iroh       # compile in the iroh transport (~30MB)
 for the database conventions.
 
 ```sh
-# one-time: create a database
-createdb conduit
-
-# every run: point the binary at it
+createdb conduit                                                   # one-time
 DATABASE_URL="postgresql://postgres@localhost/conduit" \
-    cargo run -p conduit-server
+    CONDUIT_SERVER_NAME="localhost" \
+    cargo run -p conduit-server                                    # :8008
 ```
 
 Migrations under `conduit-server/migrations/` apply automatically on
-startup. Then hit:
-
-- `GET /health` → `ok`
-- `GET /_matrix/client/versions` → JSON listing supported spec versions
+startup. See [docs/element-bringup.md](docs/element-bringup.md) for
+the full Element-web verification flow.
 
 ## Status
 
-Foundation only. The module skeleton is in place — event types, error
-types, config, room/state-res hook, storage trait + in-memory impl,
-transport abstraction, axum host with `/health` and
-`/_matrix/client/versions`. Everything else is `TODO`. The Matrix
-specification at <https://spec.matrix.org/> is the source of truth.
+The shape of a real Matrix homeserver is in. Working subsystems:
 
-The `iroh` feature exists end-to-end as a flag but currently gates a
-stub module — wire up `iroh::Endpoint` and add `iroh` as a real
-optional dep when you're ready (see `conduit/src/transport/iroh.rs`).
+- **Storage** — PostgreSQL via sqlx; migrations 0001–0005 in place; full `Storage` trait covers events, rooms, accounts, devices, tokens, signing keys, account data, receipts, media, push, app services, audit log.
+- **Events & signing** — v11 PDUs, canonical JSON, content hash, event ID (reference hash), Ed25519 keypair generation with restart-stable persistence, sign/verify events, `GET /_matrix/key/v2/server`, remote key cache, key rotation with grace window.
+- **Auth & state machine** — room v11 authorization rules, typed state-event content (create / member / power_levels / join_rules / history_visibility), auth-event lookup, `apply_state_event`, state resolution v2.
+- **Client-Server API** — register / login / logout / whoami, createRoom + the initial-state cascade, membership ops (join / leave / kick / ban / unban / invite), send + state PUT/GET, /messages with pagination, **`/sync` with long-poll**, filters, profile, account data, typing, receipts, presence.
+- **Media** — upload, download (legacy + authenticated), thumbnail generation (`image` crate), federation fetch + cache, safe headers (CSP sandbox / nosniff / Content-Disposition), retention policy.
+- **End-to-end encryption support** — `/keys/upload`, `/query`, atomic `/claim`, `/changes`, fallback keys, `/sendToDevice`, cross-signing (master / self-signing / user-signing), `m.device_list_update` EDU, server-side room-keys backup.
+- **Federation** — server discovery (`.well-known` + SRV + DNS), X-Matrix outgoing + incoming signed requests, send transactions with per-destination exponential-backoff queue, make_join + send_join, invite, state / state_ids, backfill, get_missing_events, query/profile + query/directory, federation `/send_to_device`, per-origin rate limiting, in-process Conduit↔Conduit roundtrip tests.
+- **Push notifications** — pushers, push rules (CRUD + 10 default rules + evaluator: `event_match`, `room_member_count`, `sender_notification_permission`), notification queue + HTTP gateway delivery, notification counts in `/sync`.
+- **Application services** — YAML registration loading, namespace enforcement, AS-authenticated calls, per-AS transaction queue.
+- **Admin** — `/_matrix/conduit/admin/v1/...` for users / rooms / media / federation, with audit log.
+
+**Tests:** ~180 across the workspace (unit + integration). `DATABASE_URL=postgresql://postgres@localhost/conduit cargo test --workspace`.
+
+**Status caveats** — there are known gaps tracked as P2/P3 follow-ups in `bd`:
+
+- Sign/verify uses simplified field-stripping (signatures + unsigned). Full v11 redaction (per-event-type content pruning) is filed as `conduit-sv4.11`.
+- AS ghost user auto-creation (`conduit-5vr`) and AS query endpoints (`conduit-dhd`) are stubbed.
+- Some `/sync` streams are still scaffolding-only (presence federation, full filter implementation).
+- Run `bd ready` to see the current backlog.
+
+**Experimental** — the `iroh` feature is a stub module; story group `conduit-91r` will wire up real `iroh::Endpoint` peer-to-peer federation.
+
+## Layout
+
+- `conduit/` — pure library. No HTTP server, no I/O loop. All Matrix logic: events, rooms, state, auth, state resolution, signing, hashing, canonical JSON, storage trait + in-memory backend.
+- `conduit-server/` — webserver binary. Tokio + axum + sqlx + PostgresStorage. Wires HTTP routes onto the library; carries `RemoteKeyCache`, `federation::Client`, `federation::Queue`, `PushWorker`, `BlobStore`, app-service workers in `AppState`.
+- `docs/` — per-feature implementation guides for any Matrix homeserver implementer.
+- `epics/` (in `bd`): 12 epics tracked via Steve Yegge's [beads](https://github.com/steveyegge/beads).
 
 ## Lineage
 

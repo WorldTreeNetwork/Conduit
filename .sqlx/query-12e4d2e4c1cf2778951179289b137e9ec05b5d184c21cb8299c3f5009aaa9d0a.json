@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE room_keys_versions\n            SET auth_data = $3, etag = $4\n            WHERE user_id = $1 AND version = $2 AND deleted = false\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Jsonb",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "12e4d2e4c1cf2778951179289b137e9ec05b5d184c21cb8299c3f5009aaa9d0a"
+}

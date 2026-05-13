@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT content\n            FROM account_data\n            WHERE user_id = $1\n              AND event_type = $3\n              AND (($2::TEXT IS NULL AND room_id IS NULL) OR room_id = $2)\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "content",
+        "type_info": "Jsonb"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "346740971e6356b3f99b1ce2314453270e3bf1719f5fcfe46fc18d851a1a1b76"
+}

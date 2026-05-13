@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO server_signing_keys (key_id, private_key, public_key, valid_until_ts)\n            VALUES ($1, $2, $3, $4)\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Bytea",
+        "Bytea",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a6ba2521a8d91cfd4e0c28c544d22ebc8f354eefd13c4b80998c83ba20e350aa"
+}

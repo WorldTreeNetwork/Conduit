@@ -1,0 +1,46 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                SELECT version, algorithm, auth_data, count, etag\n                FROM room_keys_versions\n                WHERE user_id = $1 AND deleted = false\n                ORDER BY version DESC\n                LIMIT 1\n                ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "version",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "algorithm",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "auth_data",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 3,
+        "name": "count",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 4,
+        "name": "etag",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "efe8c27a4da9c98dc82feaa277248821ad1533435afd29c5ceab7396674163bf"
+}

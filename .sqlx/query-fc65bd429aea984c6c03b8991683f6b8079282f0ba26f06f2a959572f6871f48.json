@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE media SET last_accessed = now()\n            WHERE media_id = $1 AND origin_server = $2\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "fc65bd429aea984c6c03b8991683f6b8079282f0ba26f06f2a959572f6871f48"
+}

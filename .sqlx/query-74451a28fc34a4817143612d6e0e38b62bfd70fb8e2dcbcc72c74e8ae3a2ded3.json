@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO fallback_keys (user_id, device_id, algorithm, key_id, key_json, used)\n            VALUES ($1, $2, $3, $4, $5, false)\n            ON CONFLICT (user_id, device_id, algorithm)\n            DO UPDATE SET key_id = EXCLUDED.key_id,\n                          key_json = EXCLUDED.key_json,\n                          used = false\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Jsonb"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "74451a28fc34a4817143612d6e0e38b62bfd70fb8e2dcbcc72c74e8ae3a2ded3"
+}

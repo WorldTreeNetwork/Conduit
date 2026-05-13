@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO devices (user_id, device_id, display_name)\n            VALUES ($1, $2, $3)\n            ON CONFLICT (user_id, device_id)\n            DO UPDATE SET display_name = EXCLUDED.display_name\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "5e1f1ff8d71af4f84790f1d184e21337ebb4d520246d936521cdccb83fbeb895"
+}

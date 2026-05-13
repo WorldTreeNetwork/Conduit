@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE room_keys_versions\n            SET count = (\n                SELECT COUNT(*) FROM room_keys_backup\n                WHERE user_id = $1 AND version = $2\n            )\n            WHERE user_id = $1 AND version = $2\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "bcd11220e8b5a3615134362a30058987405de12a4644acc1d0150732ff5066c0"
+}
