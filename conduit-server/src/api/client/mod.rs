@@ -7,16 +7,24 @@
 //!   POST /_matrix/client/v3/logout
 //!   GET  /_matrix/client/v3/account/whoami
 
+pub mod account_data;
 pub mod event_pipeline;
 pub mod keys;
+pub mod presence;
+pub mod profile;
+pub mod receipts;
 pub mod rooms;
 pub mod sync;
+pub mod typing;
 pub mod uia;
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use tokio::sync::{RwLock, broadcast};
+
+pub use typing::TypingStore;
+pub use presence::PresenceStore;
 
 use argon2::{
     Argon2,
@@ -59,6 +67,12 @@ pub trait AuthState: Clone + Send + Sync + 'static {
     /// Broadcast sender for new stream positions.  `/sync` long-poll
     /// subscribes to this to wake up when new events arrive.
     fn events_tx(&self) -> &broadcast::Sender<i64>;
+    /// Ephemeral in-memory typing store.
+    fn typing_store(&self) -> &Arc<TypingStore>;
+    /// Broadcast sender: emits room_id when typing state changes.
+    fn typing_tx(&self) -> &broadcast::Sender<String>;
+    /// Ephemeral in-memory presence store.
+    fn presence_store(&self) -> &Arc<PresenceStore>;
 }
 
 // ---------------------------------------------------------------------------
@@ -95,6 +109,9 @@ impl MatrixError {
     }
     pub fn unknown(msg: impl Into<String>) -> (StatusCode, Json<MatrixError>) {
         (StatusCode::INTERNAL_SERVER_ERROR, Json(Self::new("M_UNKNOWN", msg)))
+    }
+    pub fn new_not_found(msg: impl Into<String>) -> (StatusCode, Json<MatrixError>) {
+        (StatusCode::NOT_FOUND, Json(Self::new("M_NOT_FOUND", msg)))
     }
 }
 

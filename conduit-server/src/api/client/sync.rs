@@ -26,27 +26,37 @@ use super::{AuthState, AuthedUser, MatrixError};
 // Token helpers (il0.17)
 // ---------------------------------------------------------------------------
 
-/// Combined sync token: `"s{events_pos}_d{device_pos}"`.
+/// Combined sync token: `"s{events_pos}_d{device_pos}_a{account_data_pos}_r{receipts_pos}"`.
 ///
-/// The events stream and device-list stream use independent cursors.
-/// Encoding both in the next_batch token lets clients resume either stream
-/// without an extra round-trip.  The `s` prefix retains backward
-/// compatibility with old clients that only look at the events part.
+/// Streams and their cursor positions:
+///   - `s` — event stream_position
+///   - `d` — device list change stream position
+///   - `a` — account_data stream_pos (default 0)
+///   - `r` — receipts stream_pos (default 0)
+///
+/// Old formats (`s{e}` and `s{e}_d{d}`) are accepted on parse and
+/// extended with default zero cursors.
 struct SyncToken {
     events_pos: i64,
     device_pos: i64,
+    account_data_pos: i64,
+    receipts_pos: i64,
 }
 
 impl SyncToken {
     fn encode(&self) -> String {
-        format!("s{}_d{}", self.events_pos, self.device_pos)
+        format!(
+            "s{}_d{}_a{}_r{}",
+            self.events_pos, self.device_pos, self.account_data_pos, self.receipts_pos
+        )
     }
 }
 
 /// Parse a sync `since` token.
 /// Accepts:
-///   - `"s{events}"` (legacy, device_pos = 0)
-///   - `"s{events}_d{device}"` (current format)
+///   - `"s{events}"` (legacy)
+///   - `"s{events}_d{device}"` (previous format)
+///   - `"s{events}_d{device}_a{acct}_r{rcpts}"` (current format)
 fn parse_since(raw: &str) -> Result<SyncToken, Response> {
     let bad = || {
         (
@@ -61,14 +71,36 @@ fn parse_since(raw: &str) -> Result<SyncToken, Response> {
 
     let s_part = raw.strip_prefix('s').ok_or_else(bad)?;
 
-    if let Some(idx) = s_part.find("_d") {
-        let events_pos = s_part[..idx].parse::<i64>().map_err(|_| bad())?;
-        let device_pos = s_part[idx + 2..].parse::<i64>().map_err(|_| bad())?;
-        Ok(SyncToken { events_pos, device_pos })
+    // Split by '_' into up to 4 parts: events, d{device}, a{acct}, r{rcpts}
+    let events_pos: i64;
+    let mut device_pos = 0i64;
+    let mut account_data_pos = 0i64;
+    let mut receipts_pos = 0i64;
+
+    // Parse the events part (everything before the first '_').
+    let rest = if let Some(idx) = s_part.find('_') {
+        events_pos = s_part[..idx].parse::<i64>().map_err(|_| bad())?;
+        &s_part[idx + 1..]
     } else {
-        let events_pos = s_part.parse::<i64>().map_err(|_| bad())?;
-        Ok(SyncToken { events_pos, device_pos: 0 })
+        events_pos = s_part.parse::<i64>().map_err(|_| bad())?;
+        ""
+    };
+
+    for segment in rest.split('_') {
+        if segment.is_empty() {
+            continue;
+        }
+        if let Some(v) = segment.strip_prefix('d') {
+            device_pos = v.parse::<i64>().map_err(|_| bad())?;
+        } else if let Some(v) = segment.strip_prefix('a') {
+            account_data_pos = v.parse::<i64>().map_err(|_| bad())?;
+        } else if let Some(v) = segment.strip_prefix('r') {
+            receipts_pos = v.parse::<i64>().map_err(|_| bad())?;
+        }
+        // Unknown segments are ignored for forward-compat.
     }
+
+    Ok(SyncToken { events_pos, device_pos, account_data_pos, receipts_pos })
 }
 
 fn encode_token(pos: i64) -> String {
@@ -252,6 +284,60 @@ async fn build_sync_response<S: AuthState>(
 
     let since = since_token.as_ref().map(|t| t.events_pos).unwrap_or(0);
     let device_since = since_token.as_ref().map(|t| t.device_pos).unwrap_or(0);
+    let account_data_since = since_token.as_ref().map(|t| t.account_data_pos).unwrap_or(0);
+    let receipts_since = since_token.as_ref().map(|t| t.receipts_pos).unwrap_or(0);
+
+    // --- Global account data (1mo.8) ---
+    // Must be computed before the room loop so per-room data is available.
+    let acct_data_changes = match storage.account_data_since(user_id, account_data_since).await {
+        Ok(v) => v,
+        Err(_) => vec![],
+    };
+    // next_account_data_pos: bump by number of changes seen (conservative).
+    let next_account_data_pos = if !acct_data_changes.is_empty() {
+        account_data_since + acct_data_changes.len() as i64
+    } else {
+        account_data_since
+    };
+
+    let global_account_data_events: Vec<Value> = acct_data_changes
+        .iter()
+        .filter(|(room_id, _, _)| room_id.is_none())
+        .map(|(_, event_type, content)| {
+            json!({ "type": event_type, "content": content })
+        })
+        .collect();
+
+    // Per-room account data: group by room_id.
+    let mut per_room_account_data: HashMap<String, Vec<Value>> = HashMap::new();
+    for (room_id_opt, event_type, content) in &acct_data_changes {
+        if let Some(rid) = room_id_opt {
+            per_room_account_data
+                .entry(rid.clone())
+                .or_default()
+                .push(json!({ "type": event_type, "content": content }));
+        }
+    }
+
+    // --- Receipts EDU (1mo.8) ---
+    let receipt_changes = match storage.receipts_since(receipts_since).await {
+        Ok(v) => v,
+        Err(_) => vec![],
+    };
+    let next_receipts_pos = if !receipt_changes.is_empty() {
+        receipts_since + receipt_changes.len() as i64
+    } else {
+        receipts_since
+    };
+
+    // Group receipts by room.
+    let mut receipts_by_room: HashMap<String, Vec<(String, String, String, i64)>> = HashMap::new();
+    for (room_id, uid, receipt_type, event_id, ts) in &receipt_changes {
+        receipts_by_room
+            .entry(room_id.clone())
+            .or_default()
+            .push((uid.clone(), receipt_type.clone(), event_id.clone(), *ts));
+    }
 
     // Collect all new events since `since` (large limit for correctness; v0).
     let new_events = match storage.events_since(since, 10_000).await {
@@ -269,7 +355,7 @@ async fn build_sync_response<S: AuthState>(
 
     // For initial sync, we also need rooms with no new events but where user
     // was already joined. We find those by scanning all events (since=0).
-    // For incremental sync we only include rooms with new activity.
+    // For incremental sync we include rooms with new events OR new receipts.
     let all_rooms_to_check: Vec<String> = if since_token.is_none() {
         // Initial: check all rooms with any events.
         match storage.events_since(0, 100_000).await {
@@ -281,7 +367,13 @@ async fn build_sync_response<S: AuthState>(
             Err(e) => return MatrixError::unknown(e.to_string()).into_response(),
         }
     } else {
-        new_event_room_ids.clone()
+        // Include rooms with new events OR rooms with new receipts.
+        let mut seen = std::collections::HashSet::new();
+        new_event_room_ids.iter().for_each(|r| { seen.insert(r.clone()); });
+        for room_id in receipts_by_room.keys() {
+            seen.insert(room_id.clone());
+        }
+        seen.into_iter().collect()
     };
 
     // Apply room filter.
@@ -333,6 +425,39 @@ async fn build_sync_response<S: AuthState>(
             )
         };
 
+        // Inject per-room account data.
+        let mut block = block;
+        if let Some(ad_events) = per_room_account_data.get(room_id) {
+            block.account_data.events.extend(ad_events.iter().cloned());
+        }
+
+        // Inject ephemeral EDUs: typing + receipts.
+        // Typing (m.typing):
+        let typers = state.typing_store().typers_in_room(room_id).await;
+        if !typers.is_empty() {
+            block.ephemeral.events.push(json!({
+                "type": "m.typing",
+                "room_id": room_id,
+                "content": { "user_ids": typers }
+            }));
+        }
+
+        // Receipts (m.receipt):
+        if let Some(room_receipts) = receipts_by_room.get(room_id) {
+            let mut receipt_content: serde_json::Map<String, Value> = serde_json::Map::new();
+            for (uid, receipt_type, event_id, ts) in room_receipts {
+                let ev_entry = receipt_content
+                    .entry(event_id.clone())
+                    .or_insert_with(|| json!({}));
+                ev_entry[receipt_type] = json!({ uid: { "ts": ts } });
+            }
+            block.ephemeral.events.push(json!({
+                "type": "m.receipt",
+                "room_id": room_id,
+                "content": receipt_content
+            }));
+        }
+
         joined_rooms.insert(room_id.clone(), block);
     }
 
@@ -345,9 +470,36 @@ async fn build_sync_response<S: AuthState>(
         Ok(p) => p,
         Err(e) => return MatrixError::unknown(e.to_string()).into_response(),
     };
+
+    // --- Presence EDU (1mo.8) ---
+    // v0: include all known presence entries.
+    let all_presence = state.presence_store().all_entries().await;
+    let presence_events: Vec<Value> = all_presence
+        .into_iter()
+        .map(|(uid, entry)| {
+            let last_active_ago = entry.last_changed_at.elapsed().as_millis() as u64;
+            let effective = entry.effective_presence().to_owned();
+            let mut ev = json!({
+                "type": "m.presence",
+                "sender": uid,
+                "content": {
+                    "presence": effective,
+                    "last_active_ago": last_active_ago,
+                    "currently_active": effective == "online",
+                }
+            });
+            if let Some(msg) = &entry.status_msg {
+                ev["content"]["status_msg"] = json!(msg);
+            }
+            ev
+        })
+        .collect();
+
     let next_batch = SyncToken {
         events_pos: next_events_pos,
         device_pos: next_device_pos,
+        account_data_pos: next_account_data_pos,
+        receipts_pos: next_receipts_pos,
     }
     .encode();
 
@@ -413,8 +565,8 @@ async fn build_sync_response<S: AuthState>(
         Json(json!({
             "next_batch": next_batch,
             "rooms": rooms_obj,
-            "presence":     { "events": [] },
-            "account_data": { "events": [] },
+            "presence":     { "events": presence_events },
+            "account_data": { "events": global_account_data_events },
             "to_device":    { "events": to_device_json },
             "device_lists": { "changed": device_list_changed, "left": [] },
             "device_one_time_keys_count": otk_counts_json,

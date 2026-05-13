@@ -30,7 +30,7 @@ use conduit::keys::ServerKey;
 use conduit::storage::Storage;
 use conduit_server::{
     PostgresStorage,
-    api::client::{self as auth, AuthState, TxnCacheKey},
+    api::client::{self as auth, AuthState, TxnCacheKey, TypingStore, PresenceStore},
 };
 
 // ---------------------------------------------------------------------------
@@ -122,6 +122,9 @@ struct TestState {
     server_key: Arc<ServerKey>,
     txn_cache: Arc<RwLock<HashMap<TxnCacheKey, String>>>,
     events_tx: broadcast::Sender<i64>,
+    typing_store: Arc<TypingStore>,
+    typing_tx: broadcast::Sender<String>,
+    presence_store: Arc<PresenceStore>,
 }
 
 impl AuthState for TestState {
@@ -139,6 +142,15 @@ impl AuthState for TestState {
     }
     fn events_tx(&self) -> &broadcast::Sender<i64> {
         &self.events_tx
+    }
+    fn typing_store(&self) -> &Arc<TypingStore> {
+        &self.typing_store
+    }
+    fn typing_tx(&self) -> &broadcast::Sender<String> {
+        &self.typing_tx
+    }
+    fn presence_store(&self) -> &Arc<PresenceStore> {
+        &self.presence_store
     }
 }
 
@@ -234,7 +246,9 @@ async fn do_logout(app: &Router, token: &str) -> axum::response::Response {
 async fn register_creates_account_returns_token() {
     let db = TempDb::new().await;
     let (events_tx, _) = broadcast::channel(256);
-    let state = TestState { storage: db.storage(), server_name: "localhost".into(), server_key: Arc::new(conduit::keys::generate_server_key()), txn_cache: Arc::new(RwLock::new(HashMap::new())), events_tx };
+        let (typing_store, typing_tx) = TypingStore::new();
+        let presence_store = PresenceStore::new();
+    let state = TestState { storage: db.storage(), server_name: "localhost".into(), server_key: Arc::new(conduit::keys::generate_server_key()), txn_cache: Arc::new(RwLock::new(HashMap::new())), events_tx, typing_store, typing_tx, presence_store };
     let app = build_router(state);
 
     let resp = do_register(&app, "alice", "secret123").await;
@@ -254,7 +268,9 @@ async fn register_creates_account_returns_token() {
 async fn register_duplicate_user_rejected() {
     let db = TempDb::new().await;
     let (events_tx, _) = broadcast::channel(256);
-    let state = TestState { storage: db.storage(), server_name: "localhost".into(), server_key: Arc::new(conduit::keys::generate_server_key()), txn_cache: Arc::new(RwLock::new(HashMap::new())), events_tx };
+        let (typing_store, typing_tx) = TypingStore::new();
+        let presence_store = PresenceStore::new();
+    let state = TestState { storage: db.storage(), server_name: "localhost".into(), server_key: Arc::new(conduit::keys::generate_server_key()), txn_cache: Arc::new(RwLock::new(HashMap::new())), events_tx, typing_store, typing_tx, presence_store };
     let app = build_router(state);
 
     let resp1 = do_register(&app, "bob", "pass1").await;
@@ -275,7 +291,9 @@ async fn register_duplicate_user_rejected() {
 async fn login_with_correct_password_returns_token() {
     let db = TempDb::new().await;
     let (events_tx, _) = broadcast::channel(256);
-    let state = TestState { storage: db.storage(), server_name: "localhost".into(), server_key: Arc::new(conduit::keys::generate_server_key()), txn_cache: Arc::new(RwLock::new(HashMap::new())), events_tx };
+        let (typing_store, typing_tx) = TypingStore::new();
+        let presence_store = PresenceStore::new();
+    let state = TestState { storage: db.storage(), server_name: "localhost".into(), server_key: Arc::new(conduit::keys::generate_server_key()), txn_cache: Arc::new(RwLock::new(HashMap::new())), events_tx, typing_store, typing_tx, presence_store };
     let app = build_router(state);
 
     // Register first.
@@ -304,7 +322,9 @@ async fn login_with_correct_password_returns_token() {
 async fn login_with_wrong_password_rejected() {
     let db = TempDb::new().await;
     let (events_tx, _) = broadcast::channel(256);
-    let state = TestState { storage: db.storage(), server_name: "localhost".into(), server_key: Arc::new(conduit::keys::generate_server_key()), txn_cache: Arc::new(RwLock::new(HashMap::new())), events_tx };
+        let (typing_store, typing_tx) = TypingStore::new();
+        let presence_store = PresenceStore::new();
+    let state = TestState { storage: db.storage(), server_name: "localhost".into(), server_key: Arc::new(conduit::keys::generate_server_key()), txn_cache: Arc::new(RwLock::new(HashMap::new())), events_tx, typing_store, typing_tx, presence_store };
     let app = build_router(state);
 
     do_register(&app, "dave", "rightpass").await;
@@ -324,7 +344,9 @@ async fn login_with_wrong_password_rejected() {
 async fn whoami_with_valid_token() {
     let db = TempDb::new().await;
     let (events_tx, _) = broadcast::channel(256);
-    let state = TestState { storage: db.storage(), server_name: "localhost".into(), server_key: Arc::new(conduit::keys::generate_server_key()), txn_cache: Arc::new(RwLock::new(HashMap::new())), events_tx };
+        let (typing_store, typing_tx) = TypingStore::new();
+        let presence_store = PresenceStore::new();
+    let state = TestState { storage: db.storage(), server_name: "localhost".into(), server_key: Arc::new(conduit::keys::generate_server_key()), txn_cache: Arc::new(RwLock::new(HashMap::new())), events_tx, typing_store, typing_tx, presence_store };
     let app = build_router(state);
 
     let reg = do_register(&app, "eve", "pass").await;
@@ -350,7 +372,9 @@ async fn whoami_with_valid_token() {
 async fn whoami_with_no_token() {
     let db = TempDb::new().await;
     let (events_tx, _) = broadcast::channel(256);
-    let state = TestState { storage: db.storage(), server_name: "localhost".into(), server_key: Arc::new(conduit::keys::generate_server_key()), txn_cache: Arc::new(RwLock::new(HashMap::new())), events_tx };
+        let (typing_store, typing_tx) = TypingStore::new();
+        let presence_store = PresenceStore::new();
+    let state = TestState { storage: db.storage(), server_name: "localhost".into(), server_key: Arc::new(conduit::keys::generate_server_key()), txn_cache: Arc::new(RwLock::new(HashMap::new())), events_tx, typing_store, typing_tx, presence_store };
     let app = build_router(state);
 
     let req = Request::builder()
@@ -373,7 +397,9 @@ async fn whoami_with_no_token() {
 async fn whoami_with_unknown_token() {
     let db = TempDb::new().await;
     let (events_tx, _) = broadcast::channel(256);
-    let state = TestState { storage: db.storage(), server_name: "localhost".into(), server_key: Arc::new(conduit::keys::generate_server_key()), txn_cache: Arc::new(RwLock::new(HashMap::new())), events_tx };
+        let (typing_store, typing_tx) = TypingStore::new();
+        let presence_store = PresenceStore::new();
+    let state = TestState { storage: db.storage(), server_name: "localhost".into(), server_key: Arc::new(conduit::keys::generate_server_key()), txn_cache: Arc::new(RwLock::new(HashMap::new())), events_tx, typing_store, typing_tx, presence_store };
     let app = build_router(state);
 
     let resp = do_whoami(&app, "totally-made-up-token").await;
@@ -391,7 +417,9 @@ async fn whoami_with_unknown_token() {
 async fn logout_invalidates_token() {
     let db = TempDb::new().await;
     let (events_tx, _) = broadcast::channel(256);
-    let state = TestState { storage: db.storage(), server_name: "localhost".into(), server_key: Arc::new(conduit::keys::generate_server_key()), txn_cache: Arc::new(RwLock::new(HashMap::new())), events_tx };
+        let (typing_store, typing_tx) = TypingStore::new();
+        let presence_store = PresenceStore::new();
+    let state = TestState { storage: db.storage(), server_name: "localhost".into(), server_key: Arc::new(conduit::keys::generate_server_key()), txn_cache: Arc::new(RwLock::new(HashMap::new())), events_tx, typing_store, typing_tx, presence_store };
     let app = build_router(state);
 
     let reg = do_register(&app, "frank", "pass123").await;

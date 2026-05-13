@@ -188,7 +188,8 @@ impl Storage for PostgresStorage {
     async fn get_account(&self, user_id: &str) -> Result<Option<Account>> {
         let row = sqlx::query!(
             r#"
-            SELECT user_id, password_hash, is_admin, created_at, deactivated_at
+            SELECT user_id, password_hash, is_admin, created_at, deactivated_at,
+                   displayname, avatar_url
             FROM accounts
             WHERE user_id = $1
             "#,
@@ -206,6 +207,8 @@ impl Storage for PostgresStorage {
             is_admin: r.is_admin,
             created_at: r.created_at,
             deactivated_at: r.deactivated_at,
+            displayname: r.displayname,
+            avatar_url: r.avatar_url,
         }))
     }
 
@@ -1422,5 +1425,215 @@ impl Storage for PostgresStorage {
         .await
         .map_err(map_sqlx)?;
         Ok(deleted)
+    }
+
+    // -----------------------------------------------------------------------
+    // Profile (1mo.1, 1mo.2)
+    // -----------------------------------------------------------------------
+
+    async fn set_displayname(&self, user_id: &str, displayname: Option<&str>) -> Result<()> {
+        sqlx::query!(
+            r#"UPDATE accounts SET displayname = $2 WHERE user_id = $1"#,
+            user_id,
+            displayname
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(())
+    }
+
+    async fn set_avatar_url(&self, user_id: &str, avatar_url: Option<&str>) -> Result<()> {
+        sqlx::query!(
+            r#"UPDATE accounts SET avatar_url = $2 WHERE user_id = $1"#,
+            user_id,
+            avatar_url
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Account data (1mo.3, 1mo.4)
+    // -----------------------------------------------------------------------
+
+    async fn set_account_data(
+        &self,
+        user_id: &str,
+        room_id: Option<&str>,
+        event_type: &str,
+        content: &Value,
+    ) -> Result<i64> {
+        // PostgreSQL partial unique indexes cannot be referenced by name in
+        // ON CONFLICT clauses — we must use the DELETE + INSERT pattern or
+        // a direct UPDATE + INSERT dance instead.
+        let row = sqlx::query!(
+            r#"
+            INSERT INTO account_data (user_id, room_id, event_type, content, updated_at)
+            VALUES ($1, $2, $3, $4, now())
+            ON CONFLICT (user_id, event_type) WHERE room_id IS NULL
+                DO UPDATE SET content = EXCLUDED.content, updated_at = now()
+            RETURNING stream_pos
+            "#,
+            user_id,
+            room_id as Option<&str>,
+            event_type,
+            content
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+
+        if let Some(r) = row {
+            return Ok(r.stream_pos);
+        }
+
+        // Per-room path (room_id IS NOT NULL).
+        let row2 = sqlx::query!(
+            r#"
+            INSERT INTO account_data (user_id, room_id, event_type, content, updated_at)
+            VALUES ($1, $2, $3, $4, now())
+            ON CONFLICT (user_id, room_id, event_type) WHERE room_id IS NOT NULL
+                DO UPDATE SET content = EXCLUDED.content, updated_at = now()
+            RETURNING stream_pos
+            "#,
+            user_id,
+            room_id as Option<&str>,
+            event_type,
+            content
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+
+        Ok(row2.stream_pos)
+    }
+
+    async fn get_account_data(
+        &self,
+        user_id: &str,
+        room_id: Option<&str>,
+        event_type: &str,
+    ) -> Result<Option<Value>> {
+        let row = sqlx::query!(
+            r#"
+            SELECT content
+            FROM account_data
+            WHERE user_id = $1
+              AND event_type = $3
+              AND (($2::TEXT IS NULL AND room_id IS NULL) OR room_id = $2)
+            "#,
+            user_id,
+            room_id,
+            event_type
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(row.map(|r| r.content))
+    }
+
+    async fn account_data_since(
+        &self,
+        user_id: &str,
+        since_pos: i64,
+    ) -> Result<Vec<(Option<String>, String, Value)>> {
+        let rows = sqlx::query!(
+            r#"
+            SELECT room_id, event_type, content
+            FROM account_data
+            WHERE user_id = $1 AND stream_pos > $2
+            ORDER BY stream_pos ASC
+            "#,
+            user_id,
+            since_pos
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| (r.room_id, r.event_type, r.content))
+            .collect())
+    }
+
+    // -----------------------------------------------------------------------
+    // Receipts (1mo.6)
+    // -----------------------------------------------------------------------
+
+    async fn set_receipt(
+        &self,
+        room_id: &str,
+        user_id: &str,
+        receipt_type: &str,
+        event_id: &str,
+        ts: i64,
+    ) -> Result<i64> {
+        let row = sqlx::query!(
+            r#"
+            INSERT INTO receipts (room_id, user_id, receipt_type, event_id, ts)
+            VALUES ($1, $2, $3, $4, $5)
+            ON CONFLICT (room_id, user_id, receipt_type)
+                DO UPDATE SET event_id = EXCLUDED.event_id, ts = EXCLUDED.ts
+            RETURNING stream_pos
+            "#,
+            room_id,
+            user_id,
+            receipt_type,
+            event_id,
+            ts
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(row.stream_pos)
+    }
+
+    async fn receipts_for_room(
+        &self,
+        room_id: &str,
+    ) -> Result<Vec<(String, String, String, i64)>> {
+        let rows = sqlx::query!(
+            r#"
+            SELECT user_id, receipt_type, event_id, ts
+            FROM receipts
+            WHERE room_id = $1
+            "#,
+            room_id
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| (r.user_id, r.receipt_type, r.event_id, r.ts))
+            .collect())
+    }
+
+    async fn receipts_since(
+        &self,
+        since_pos: i64,
+    ) -> Result<Vec<(String, String, String, String, i64)>> {
+        let rows = sqlx::query!(
+            r#"
+            SELECT room_id, user_id, receipt_type, event_id, ts
+            FROM receipts
+            WHERE stream_pos > $1
+            ORDER BY stream_pos ASC
+            "#,
+            since_pos
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| (r.room_id, r.user_id, r.receipt_type, r.event_id, r.ts))
+            .collect())
     }
 }

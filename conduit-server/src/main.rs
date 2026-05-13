@@ -23,7 +23,7 @@ use hickory_resolver::TokioAsyncResolver;
 
 use conduit::{keys::ServerKey, storage::Storage};
 use conduit_server::{
-    api::client::{AuthState, TxnCacheKey},
+    api::client::{AuthState, TxnCacheKey, TypingStore, PresenceStore},
     federation,
     federation::{
         FedState, XMatrixMiddlewareState, RateLimiter, federation_router,
@@ -49,6 +49,12 @@ struct AppState {
     federation: Arc<federation::Client>,
     /// Per-destination outbound send queue (E08).
     federation_queue: Arc<federation::Queue>,
+    /// Ephemeral in-memory typing store (E06 1mo.5).
+    typing_store: Arc<TypingStore>,
+    /// Broadcast channel: emits room_id when typing state changes.
+    typing_tx: broadcast::Sender<String>,
+    /// Ephemeral in-memory presence store (E06 1mo.7).
+    presence_store: Arc<PresenceStore>,
 }
 
 impl AuthState for AppState {
@@ -66,6 +72,15 @@ impl AuthState for AppState {
     }
     fn events_tx(&self) -> &broadcast::Sender<i64> {
         &self.events_tx
+    }
+    fn typing_store(&self) -> &Arc<TypingStore> {
+        &self.typing_store
+    }
+    fn typing_tx(&self) -> &broadcast::Sender<String> {
+        &self.typing_tx
+    }
+    fn presence_store(&self) -> &Arc<PresenceStore> {
+        &self.presence_store
     }
 }
 
@@ -118,6 +133,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // re-poll once the sleep expires.
     let (events_tx, _) = broadcast::channel::<i64>(256);
 
+    // Ephemeral typing + presence stores (E06).
+    let (typing_store, typing_tx) = TypingStore::new();
+    let presence_store = PresenceStore::new();
+
     // Build the DNS resolver for federation server discovery.
     let resolver = TokioAsyncResolver::tokio_from_system_conf()
         .expect("DNS resolver config");
@@ -142,12 +161,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         events_tx,
         federation: federation_client,
         federation_queue,
+        typing_store,
+        typing_tx,
+        presence_store,
     };
 
     use conduit_server::api::client as auth;
+    use conduit_server::api::client::account_data as account_data_api;
     use conduit_server::api::client::keys as keys_api;
+    use conduit_server::api::client::presence as presence_api;
+    use conduit_server::api::client::profile as profile_api;
+    use conduit_server::api::client::receipts as receipts_api;
     use conduit_server::api::client::rooms as rooms;
     use conduit_server::api::client::sync as sync_api;
+    use conduit_server::api::client::typing as typing_api;
 
     // Build the X-Matrix middleware state (for inbound federation auth).
     let xmatrix_state = XMatrixMiddlewareState {
@@ -246,6 +273,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/_matrix/client/v3/room_keys/keys/:roomId/:sessionId",
             get(keys_api::room_keys_get_session::<AppState>)
             .put(keys_api::room_keys_put_session::<AppState>))
+        // Profile (E06 1mo.1, 1mo.2)
+        .route("/_matrix/client/v3/profile/:userId/displayname",
+            get(profile_api::get_displayname::<AppState>)
+            .put(profile_api::put_displayname::<AppState>))
+        .route("/_matrix/client/v3/profile/:userId/avatar_url",
+            get(profile_api::get_avatar_url::<AppState>)
+            .put(profile_api::put_avatar_url::<AppState>))
+        .route("/_matrix/client/v3/profile/:userId",
+            get(profile_api::get_profile::<AppState>))
+        // Account data (E06 1mo.3, 1mo.4)
+        .route("/_matrix/client/v3/user/:userId/account_data/:type",
+            get(account_data_api::get_account_data::<AppState>)
+            .put(account_data_api::put_account_data::<AppState>))
+        .route("/_matrix/client/v3/user/:userId/rooms/:roomId/account_data/:type",
+            get(account_data_api::get_room_account_data::<AppState>)
+            .put(account_data_api::put_room_account_data::<AppState>))
+        // Typing (E06 1mo.5)
+        .route("/_matrix/client/v3/rooms/:roomId/typing/:userId",
+            put(typing_api::put_typing::<AppState>))
+        // Receipts (E06 1mo.6)
+        .route("/_matrix/client/v3/rooms/:roomId/receipt/:receiptType/:eventId",
+            post(receipts_api::post_receipt::<AppState>))
+        // Presence (E06 1mo.7)
+        .route("/_matrix/client/v3/presence/:userId/status",
+            get(presence_api::get_presence::<AppState>)
+            .put(presence_api::put_presence::<AppState>))
         // Federation inbound (E09)
         .nest("/_matrix/federation/v1", fed_router)
         .with_state(state)

@@ -29,7 +29,7 @@ use conduit::keys::ServerKey;
 use conduit::storage::Storage;
 use conduit_server::{
     PostgresStorage,
-    api::client::{self as auth, AuthState, TxnCacheKey},
+    api::client::{self as auth, AuthState, TxnCacheKey, TypingStore, PresenceStore},
     api::client::rooms,
 };
 
@@ -123,17 +123,27 @@ struct TestState {
     server_key: Arc<ServerKey>,
     txn_cache: Arc<RwLock<HashMap<TxnCacheKey, String>>>,
     events_tx: broadcast::Sender<i64>,
+    typing_store: Arc<TypingStore>,
+    typing_tx: broadcast::Sender<String>,
+    presence_store: Arc<PresenceStore>,
 }
 
 impl TestState {
     fn new(storage: Arc<dyn Storage>) -> Self {
         let (events_tx, _) = broadcast::channel(256);
+        let (typing_store, typing_tx) = TypingStore::new();
+        let presence_store = PresenceStore::new();
+        let (typing_store, typing_tx) = TypingStore::new();
+        let presence_store = PresenceStore::new();
         Self {
             storage,
             server_name: "localhost".into(),
             server_key: Arc::new(conduit::keys::generate_server_key()),
             txn_cache: Arc::new(RwLock::new(HashMap::new())),
             events_tx,
+            typing_store,
+            typing_tx,
+            presence_store,
         }
     }
 }
@@ -153,6 +163,15 @@ impl AuthState for TestState {
     }
     fn events_tx(&self) -> &broadcast::Sender<i64> {
         &self.events_tx
+    }
+    fn typing_store(&self) -> &Arc<TypingStore> {
+        &self.typing_store
+    }
+    fn typing_tx(&self) -> &broadcast::Sender<String> {
+        &self.typing_tx
+    }
+    fn presence_store(&self) -> &Arc<PresenceStore> {
+        &self.presence_store
     }
 }
 

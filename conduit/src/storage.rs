@@ -52,6 +52,10 @@ pub struct Account {
     pub created_at: DateTime<Utc>,
     /// `Some` when the account has been deactivated.
     pub deactivated_at: Option<DateTime<Utc>>,
+    /// Display name set via `PUT /profile/{userId}/displayname`.
+    pub displayname: Option<String>,
+    /// Avatar URL set via `PUT /profile/{userId}/avatar_url`.
+    pub avatar_url: Option<String>,
 }
 
 /// A client device registered to a user.
@@ -392,6 +396,63 @@ pub trait Storage: Send + Sync + 'static {
         room_id: Option<&str>,
         session_id: Option<&str>,
     ) -> Result<i64>;
+
+    // --- Profile (1mo.1, 1mo.2) ----------------------------------------------
+
+    async fn set_displayname(&self, user_id: &str, displayname: Option<&str>) -> Result<()>;
+    async fn set_avatar_url(&self, user_id: &str, avatar_url: Option<&str>) -> Result<()>;
+
+    // --- Account data (1mo.3, 1mo.4) -----------------------------------------
+
+    /// Upsert account data. Returns the new stream_pos.
+    async fn set_account_data(
+        &self,
+        user_id: &str,
+        room_id: Option<&str>,
+        event_type: &str,
+        content: &Value,
+    ) -> Result<i64>;
+
+    async fn get_account_data(
+        &self,
+        user_id: &str,
+        room_id: Option<&str>,
+        event_type: &str,
+    ) -> Result<Option<Value>>;
+
+    /// All account data (global + per-room) changed since `since_pos`.
+    /// Returns `(room_id, event_type, content)` — `room_id` is `None` for global entries.
+    async fn account_data_since(
+        &self,
+        user_id: &str,
+        since_pos: i64,
+    ) -> Result<Vec<(Option<String>, String, Value)>>;
+
+    // --- Receipts (1mo.6) ----------------------------------------------------
+
+    /// Upsert a read receipt. Returns the new stream_pos.
+    async fn set_receipt(
+        &self,
+        room_id: &str,
+        user_id: &str,
+        receipt_type: &str,
+        event_id: &str,
+        ts: i64,
+    ) -> Result<i64>;
+
+    /// All receipts for a room (current snapshot, any type).
+    /// Returns `(user_id, receipt_type, event_id, ts)`.
+    async fn receipts_for_room(
+        &self,
+        room_id: &str,
+    ) -> Result<Vec<(String, String, String, i64)>>;
+
+    /// Receipts whose stream_pos is strictly greater than `since_pos`.
+    /// Returns `(room_id, user_id, receipt_type, event_id, ts)`.
+    async fn receipts_since(
+        &self,
+        since_pos: i64,
+    ) -> Result<Vec<(String, String, String, String, i64)>>;
 }
 
 // ---------------------------------------------------------------------------
@@ -437,6 +498,13 @@ struct MemoryInner {
     room_key_versions: HashMap<(String, String), (RoomKeyVersion, bool)>,
     /// (user_id, version, room_id, session_id) → key_data
     room_keys: HashMap<(String, String, String, String), Value>,
+    // Presence layer (1mo.3–1mo.6)
+    /// (user_id, room_id_or_empty, event_type) → (stream_pos, content)
+    account_data: HashMap<(String, Option<String>, String), (i64, Value)>,
+    account_data_next_pos: i64,
+    /// (room_id, user_id, receipt_type) → (event_id, ts, stream_pos)
+    receipts: HashMap<(String, String, String), (String, i64, i64)>,
+    receipts_next_pos: i64,
 }
 
 #[async_trait]
@@ -489,6 +557,8 @@ impl Storage for MemoryStorage {
                 is_admin: false,
                 created_at: Utc::now(),
                 deactivated_at: None,
+                displayname: None,
+                avatar_url: None,
             },
         );
         Ok(())
@@ -1191,6 +1261,124 @@ impl Storage for MemoryStorage {
             rv.count = count;
         }
         Ok(deleted)
+    }
+
+    // --- Profile --------------------------------------------------------------
+
+    async fn set_displayname(&self, user_id: &str, displayname: Option<&str>) -> Result<()> {
+        let mut inner = self.inner.write().await;
+        if let Some(acct) = inner.accounts.get_mut(user_id) {
+            acct.displayname = displayname.map(|s| s.to_owned());
+        }
+        Ok(())
+    }
+
+    async fn set_avatar_url(&self, user_id: &str, avatar_url: Option<&str>) -> Result<()> {
+        let mut inner = self.inner.write().await;
+        if let Some(acct) = inner.accounts.get_mut(user_id) {
+            acct.avatar_url = avatar_url.map(|s| s.to_owned());
+        }
+        Ok(())
+    }
+
+    // --- Account data ---------------------------------------------------------
+
+    async fn set_account_data(
+        &self,
+        user_id: &str,
+        room_id: Option<&str>,
+        event_type: &str,
+        content: &Value,
+    ) -> Result<i64> {
+        let mut inner = self.inner.write().await;
+        inner.account_data_next_pos += 1;
+        let pos = inner.account_data_next_pos;
+        inner.account_data.insert(
+            (user_id.to_owned(), room_id.map(|s| s.to_owned()), event_type.to_owned()),
+            (pos, content.clone()),
+        );
+        Ok(pos)
+    }
+
+    async fn get_account_data(
+        &self,
+        user_id: &str,
+        room_id: Option<&str>,
+        event_type: &str,
+    ) -> Result<Option<Value>> {
+        let inner = self.inner.read().await;
+        let key = (user_id.to_owned(), room_id.map(|s| s.to_owned()), event_type.to_owned());
+        Ok(inner.account_data.get(&key).map(|(_, v)| v.clone()))
+    }
+
+    async fn account_data_since(
+        &self,
+        user_id: &str,
+        since_pos: i64,
+    ) -> Result<Vec<(Option<String>, String, Value)>> {
+        let inner = self.inner.read().await;
+        let mut results: Vec<(Option<String>, String, Value, i64)> = inner
+            .account_data
+            .iter()
+            .filter(|((u, _, _), (pos, _))| u == user_id && *pos > since_pos)
+            .map(|((_, room_id, event_type), (pos, content))| {
+                (room_id.clone(), event_type.clone(), content.clone(), *pos)
+            })
+            .collect();
+        results.sort_by_key(|(_, _, _, pos)| *pos);
+        Ok(results.into_iter().map(|(r, e, c, _)| (r, e, c)).collect())
+    }
+
+    // --- Receipts -------------------------------------------------------------
+
+    async fn set_receipt(
+        &self,
+        room_id: &str,
+        user_id: &str,
+        receipt_type: &str,
+        event_id: &str,
+        ts: i64,
+    ) -> Result<i64> {
+        let mut inner = self.inner.write().await;
+        inner.receipts_next_pos += 1;
+        let pos = inner.receipts_next_pos;
+        inner.receipts.insert(
+            (room_id.to_owned(), user_id.to_owned(), receipt_type.to_owned()),
+            (event_id.to_owned(), ts, pos),
+        );
+        Ok(pos)
+    }
+
+    async fn receipts_for_room(
+        &self,
+        room_id: &str,
+    ) -> Result<Vec<(String, String, String, i64)>> {
+        let inner = self.inner.read().await;
+        Ok(inner
+            .receipts
+            .iter()
+            .filter(|((r, _, _), _)| r == room_id)
+            .map(|((_, user_id, receipt_type), (event_id, ts, _))| {
+                (user_id.clone(), receipt_type.clone(), event_id.clone(), *ts)
+            })
+            .collect())
+    }
+
+    async fn receipts_since(
+        &self,
+        since_pos: i64,
+    ) -> Result<Vec<(String, String, String, String, i64)>> {
+        let inner = self.inner.read().await;
+        let mut results: Vec<(String, String, String, String, i64, i64)> = inner
+            .receipts
+            .iter()
+            .filter(|(_, (_, _, pos))| *pos > since_pos)
+            .map(|((room_id, user_id, receipt_type), (event_id, ts, pos))| {
+                (room_id.clone(), user_id.clone(), receipt_type.clone(), event_id.clone(), *ts, *pos)
+            })
+            .collect();
+        results.sort_by_key(|(_, _, _, _, _, pos)| *pos);
+        Ok(results.into_iter().map(|(r, u, t, e, ts, _)| (r, u, t, e, ts)).collect())
     }
 }
 
