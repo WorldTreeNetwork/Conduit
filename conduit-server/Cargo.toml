@@ -8,7 +8,7 @@ authors.workspace = true
 
 [features]
 default = []
-iroh = ["conduit/iroh"]
+iroh = ["conduit/iroh", "dep:iroh"]
 
 [dependencies]
 conduit = { path = "../conduit" }
@@ -37,6 +37,7 @@ image = { workspace = true }
 infer = { workspace = true }
 serde_yaml = { workspace = true }
 regex = { workspace = true }
+iroh = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

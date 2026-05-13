@@ -7,11 +7,17 @@
 //! See: <https://spec.matrix.org/latest/server-server-api/>
 
 use std::sync::Arc;
+#[cfg(feature = "iroh")]
+use std::collections::HashMap;
+#[cfg(feature = "iroh")]
+use std::time::{Duration, Instant};
 
 use hickory_resolver::TokioAsyncResolver;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
+#[cfg(feature = "iroh")]
+use tokio::sync::RwLock;
 
 use conduit::event::Event;
 use conduit::keys::ServerKey;
@@ -109,6 +115,21 @@ pub struct DirectoryResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Iroh NodeId cache (91r.7)
+// ---------------------------------------------------------------------------
+
+/// Cached per-destination iroh NodeId with a TTL of 5 minutes.
+#[cfg(feature = "iroh")]
+struct IrohNodeEntry {
+    /// `None` means the peer does not advertise an iroh NodeId.
+    node_id: Option<iroh::PublicKey>,
+    fetched_at: Instant,
+}
+
+#[cfg(feature = "iroh")]
+const IROH_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
+
+// ---------------------------------------------------------------------------
 // Client
 // ---------------------------------------------------------------------------
 
@@ -127,6 +148,12 @@ pub struct Client {
     /// Optional override: if set, all requests go to this base URL regardless
     /// of the destination server name.  Used by tests only.
     pub(crate) test_base_url: Option<String>,
+    /// Cache of per-destination iroh NodeIds (feature `iroh`, 91r.7).
+    #[cfg(feature = "iroh")]
+    pub(crate) iroh_node_cache: Arc<RwLock<HashMap<String, IrohNodeEntry>>>,
+    /// Our own iroh endpoint for outbound connections (feature `iroh`, 91r.5).
+    #[cfg(feature = "iroh")]
+    pub(crate) iroh_endpoint: Option<Arc<iroh::Endpoint>>,
 }
 
 impl Client {
@@ -146,6 +173,10 @@ impl Client {
             server_name,
             discovery_cache: Arc::new(DiscoveryCache::new()),
             test_base_url: None,
+            #[cfg(feature = "iroh")]
+            iroh_node_cache: Arc::new(RwLock::new(HashMap::new())),
+            #[cfg(feature = "iroh")]
+            iroh_endpoint: None,
         }
     }
 
@@ -153,6 +184,15 @@ impl Client {
     pub fn with_test_base_url(self, url: String) -> Self {
         Self {
             test_base_url: Some(url),
+            ..self
+        }
+    }
+
+    /// Attach an iroh endpoint for P2P outbound federation (91r.5).
+    #[cfg(feature = "iroh")]
+    pub fn with_iroh_endpoint(self, endpoint: Arc<iroh::Endpoint>) -> Self {
+        Self {
+            iroh_endpoint: Some(endpoint),
             ..self
         }
     }
@@ -341,12 +381,125 @@ impl Client {
     }
 
     // ------------------------------------------------------------------
+    // iroh helpers (91r.5, 91r.7)
+    // ------------------------------------------------------------------
+
+    /// Look up the iroh NodeId advertised by `dest` in its server-key response.
+    ///
+    /// Results are cached for 5 minutes.  Returns `None` if the peer does not
+    /// advertise an iroh NodeId or if the lookup fails.
+    #[cfg(feature = "iroh")]
+    async fn iroh_node_id_for(&self, dest: &str) -> Option<iroh::PublicKey> {
+        // Check cache first.
+        {
+            let cache = self.iroh_node_cache.read().await;
+            if let Some(entry) = cache.get(dest) {
+                if entry.fetched_at.elapsed() < IROH_CACHE_TTL {
+                    return entry.node_id.clone();
+                }
+            }
+        }
+
+        // Fetch /_matrix/key/v2/server from the destination.
+        let node_id: Option<iroh::PublicKey> = async {
+            let (url, resolved) = self.resolve_url(dest, "/_matrix/key/v2/server").await.ok()?;
+            let resp = self
+                .http
+                .get(&url)
+                .header("Host", &resolved.host_header)
+                .send()
+                .await
+                .ok()?;
+            if !resp.status().is_success() {
+                return None;
+            }
+            let body: Value = resp.json().await.ok()?;
+            let node_id_str = body
+                .get("x_conduit_iroh")?
+                .get("node_id")?
+                .as_str()?;
+            node_id_str.parse::<iroh::PublicKey>().ok()
+        }
+        .await;
+
+        // Store in cache.
+        {
+            let mut cache = self.iroh_node_cache.write().await;
+            cache.insert(
+                dest.to_owned(),
+                IrohNodeEntry {
+                    node_id: node_id.clone(),
+                    fetched_at: Instant::now(),
+                },
+            );
+        }
+
+        node_id
+    }
+
+    /// Send a signed request to `dest` preferring iroh when both ends support
+    /// it (91r.5 + 91r.7).  Falls back to HTTPS on any iroh-side error.
+    #[cfg(feature = "iroh")]
+    async fn signed_put_with_iroh_fallback<B: Serialize, T: for<'de> Deserialize<'de>>(
+        &self,
+        dest: &str,
+        path: &str,
+        body: &B,
+    ) -> Result<T, FederationError> {
+        // Only attempt iroh if we have a bound endpoint.
+        if let Some(ep) = self.iroh_endpoint.as_ref() {
+            // Look up peer's NodeId.
+            if let Some(node_id) = self.iroh_node_id_for(dest).await {
+                let auth = sign_request(
+                    "PUT",
+                    path,
+                    &self.server_name,
+                    dest,
+                    Some(body),
+                    &self.server_key,
+                );
+                let body_bytes = serde_json::to_vec(body)
+                    .map_err(|e| FederationError::Parse(e.to_string()))?;
+
+                match super::iroh_client::send_via_iroh(
+                    ep,
+                    node_id,
+                    "PUT",
+                    path,
+                    &auth,
+                    &body_bytes,
+                )
+                .await
+                {
+                    Ok((_status, resp_bytes)) => {
+                        return serde_json::from_slice(&resp_bytes)
+                            .map_err(|e| FederationError::Parse(e.to_string()));
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            dest,
+                            error = %e,
+                            "iroh send failed, falling back to HTTPS"
+                        );
+                        // Fall through to HTTPS.
+                    }
+                }
+            }
+        }
+
+        // HTTPS path (fallback or no iroh).
+        self.signed_put(dest, path, body).await
+    }
+
+    // ------------------------------------------------------------------
     // Public API methods (7t4.5, 7t4.7-11)
     // ------------------------------------------------------------------
 
     /// `PUT /_matrix/federation/v1/send/{txnId}`
     ///
     /// Send a transaction of PDUs and EDUs to `dest`.
+    /// When the `iroh` feature is enabled and the peer advertises an iroh
+    /// NodeId, prefers the QUIC transport and falls back to HTTPS on error.
     pub async fn send_transaction(
         &self,
         dest: &str,
@@ -361,6 +514,11 @@ impl Client {
             "pdus": pdus,
             "edus": edus,
         });
+        #[cfg(feature = "iroh")]
+        {
+            return self.signed_put_with_iroh_fallback(dest, &path, &body).await;
+        }
+        #[cfg(not(feature = "iroh"))]
         self.signed_put(dest, &path, &body).await
     }
 

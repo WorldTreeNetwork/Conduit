@@ -30,6 +30,10 @@ pub mod pipeline;
 pub mod queue;
 pub mod rate_limit;
 pub mod server;
+#[cfg(feature = "iroh")]
+pub mod iroh_client;
+#[cfg(feature = "iroh")]
+pub mod iroh_server;
 
 pub use client::{
     Client, DirectoryResponse, FederationError, MakeJoinResponse, SendJoinResponse,

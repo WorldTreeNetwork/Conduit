@@ -61,6 +61,9 @@ struct AppState {
     blob_store: BlobStore,
     /// Loaded Application Service registrations (E11 AS1).
     app_services: Arc<Vec<AppService>>,
+    /// iroh endpoint for P2P federation (E12, feature `iroh`).
+    #[cfg(feature = "iroh")]
+    iroh_endpoint: Option<Arc<iroh::Endpoint>>,
 }
 
 impl AuthState for AppState {
@@ -171,14 +174,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let resolver = TokioAsyncResolver::tokio_from_system_conf()
         .expect("DNS resolver config");
 
+    // Bind iroh endpoint for P2P federation (E12, feature `iroh`).
+    #[cfg(feature = "iroh")]
+    let iroh_endpoint: Option<Arc<iroh::Endpoint>> = {
+        match conduit::transport::iroh::bind_endpoint(&server_key).await {
+            Ok(ep) => {
+                let node_id = ep.id();
+                tracing::info!(
+                    node_id = %node_id,
+                    "iroh federation endpoint bound",
+                );
+                Some(Arc::new(ep))
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to bind iroh endpoint — P2P federation disabled");
+                None
+            }
+        }
+    };
+
     // Build the outbound federation client and send queue.
-    let federation_client = Arc::new(federation::Client::new(
+    #[allow(unused_mut)]
+    let mut federation_client = federation::Client::new(
         http.clone(),
         resolver,
         Arc::clone(&remote_keys),
         Arc::clone(&server_key),
         Arc::clone(&server_name),
-    ));
+    );
+    #[cfg(feature = "iroh")]
+    if let Some(ep) = iroh_endpoint.as_ref() {
+        federation_client = federation_client.with_iroh_endpoint(Arc::clone(ep));
+    }
+    let federation_client = Arc::new(federation_client);
     let federation_queue = Arc::new(federation::Queue::new(Arc::clone(&federation_client)));
 
     // Blob storage for media.
@@ -207,6 +235,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         presence_store,
         blob_store,
         app_services,
+        #[cfg(feature = "iroh")]
+        iroh_endpoint,
     };
 
     use conduit_server::api::client as auth;
@@ -464,6 +494,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
+    // Spawn iroh P2P accept loop (E12 91r.6).
+    // We pass the full app router so iroh-arriving federation requests are
+    // handled by the same handlers as HTTPS-arriving ones.
+    #[cfg(feature = "iroh")]
+    if let Some(ep) = state.iroh_endpoint.as_ref().map(Arc::clone) {
+        let iroh_router = app.clone();
+        conduit_server::federation::iroh_server::spawn_iroh_accept_loop(
+            (*ep).clone(),
+            iroh_router,
+        );
+    }
+
     let addr: SocketAddr = "0.0.0.0:8008".parse()?;
     tracing::info!(%addr, "conduit-server listening");
 
@@ -542,6 +584,17 @@ async fn server_keys(State(state): State<AppState>) -> Json<serde_json::Value> {
             key_id: sig_b64
         }
     });
+
+    // Advertise the iroh node ID in a non-standard extension field (91r.4).
+    // Only peers that also have the `iroh` feature compiled in will use this.
+    // This field is NOT part of the Matrix spec.
+    #[cfg(feature = "iroh")]
+    if let Some(ep) = state.iroh_endpoint.as_ref() {
+        let node_id = ep.id();
+        response["x_conduit_iroh"] = json!({
+            "node_id": node_id.to_string()
+        });
+    }
 
     Json(response)
 }
