@@ -4,15 +4,19 @@
 //! the `Storage` trait using compile-time-checked `sqlx::query!` macros.
 //! Requires `DATABASE_URL` to be set at build time for macro expansion.
 
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
-use std::sync::Arc;
+
+use serde_json::Value;
 
 use conduit::{
     Error, Result,
     event::Event,
-    storage::{Account, Device, SigningKey, Storage, TokenOwner},
+    storage::{Account, Device, RoomKeyVersion, SigningKey, Storage, ToDeviceMessage, TokenOwner},
 };
 
 // ---------------------------------------------------------------------------
@@ -797,5 +801,626 @@ impl Storage for PostgresStorage {
         .map_err(map_sqlx)?;
 
         Ok(row.max_pos.unwrap_or(0))
+    }
+
+    // -----------------------------------------------------------------------
+    // Device keys (mrm.1, mrm.2)
+    // -----------------------------------------------------------------------
+
+    async fn upsert_device_keys(&self, user_id: &str, device_id: &str, keys: &Value) -> Result<()> {
+        sqlx::query!(
+            r#"
+            INSERT INTO device_keys (user_id, device_id, keys)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (user_id, device_id)
+            DO UPDATE SET keys = EXCLUDED.keys
+            "#,
+            user_id,
+            device_id,
+            keys
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(())
+    }
+
+    async fn get_device_keys(&self, user_id: &str, device_id: &str) -> Result<Option<Value>> {
+        let row = sqlx::query!(
+            r#"SELECT keys FROM device_keys WHERE user_id = $1 AND device_id = $2"#,
+            user_id,
+            device_id
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(row.map(|r| r.keys))
+    }
+
+    async fn get_device_keys_for_user(&self, user_id: &str) -> Result<HashMap<String, Value>> {
+        let rows = sqlx::query!(
+            r#"SELECT device_id, keys FROM device_keys WHERE user_id = $1"#,
+            user_id
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(rows.into_iter().map(|r| (r.device_id, r.keys)).collect())
+    }
+
+    // -----------------------------------------------------------------------
+    // One-time keys (mrm.1, mrm.3)
+    // -----------------------------------------------------------------------
+
+    async fn insert_one_time_keys(
+        &self,
+        user_id: &str,
+        device_id: &str,
+        keys: Vec<(String, String, Value)>,
+    ) -> Result<()> {
+        for (key_id, algorithm, key_json) in keys {
+            sqlx::query!(
+                r#"
+                INSERT INTO one_time_keys (user_id, device_id, key_id, algorithm, key_json)
+                VALUES ($1, $2, $3, $4, $5)
+                ON CONFLICT (user_id, device_id, key_id) DO NOTHING
+                "#,
+                user_id,
+                device_id,
+                key_id,
+                algorithm,
+                key_json
+            )
+            .execute(&self.pool)
+            .await
+            .map_err(map_sqlx)?;
+        }
+        Ok(())
+    }
+
+    async fn claim_one_time_key(
+        &self,
+        user_id: &str,
+        device_id: &str,
+        algorithm: &str,
+    ) -> Result<Option<(String, Value)>> {
+        // Atomic DELETE ... RETURNING for exactly-once delivery.
+        let row = sqlx::query!(
+            r#"
+            DELETE FROM one_time_keys
+            WHERE (user_id, device_id, key_id) = (
+                SELECT user_id, device_id, key_id
+                FROM one_time_keys
+                WHERE user_id = $1 AND device_id = $2 AND algorithm = $3
+                LIMIT 1
+                FOR UPDATE SKIP LOCKED
+            )
+            RETURNING key_id, key_json
+            "#,
+            user_id,
+            device_id,
+            algorithm
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(row.map(|r| (r.key_id, r.key_json)))
+    }
+
+    async fn one_time_key_counts(
+        &self,
+        user_id: &str,
+        device_id: &str,
+    ) -> Result<HashMap<String, i64>> {
+        let rows = sqlx::query!(
+            r#"
+            SELECT algorithm, COUNT(*) AS count
+            FROM one_time_keys
+            WHERE user_id = $1 AND device_id = $2
+            GROUP BY algorithm
+            "#,
+            user_id,
+            device_id
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(rows
+            .into_iter()
+            .map(|r| (r.algorithm, r.count.unwrap_or(0)))
+            .collect())
+    }
+
+    // -----------------------------------------------------------------------
+    // Fallback keys (mrm.5)
+    // -----------------------------------------------------------------------
+
+    async fn upsert_fallback_key(
+        &self,
+        user_id: &str,
+        device_id: &str,
+        algorithm: &str,
+        key_id: &str,
+        key_json: &Value,
+    ) -> Result<()> {
+        sqlx::query!(
+            r#"
+            INSERT INTO fallback_keys (user_id, device_id, algorithm, key_id, key_json, used)
+            VALUES ($1, $2, $3, $4, $5, false)
+            ON CONFLICT (user_id, device_id, algorithm)
+            DO UPDATE SET key_id = EXCLUDED.key_id,
+                          key_json = EXCLUDED.key_json,
+                          used = false
+            "#,
+            user_id,
+            device_id,
+            algorithm,
+            key_id,
+            key_json
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(())
+    }
+
+    async fn claim_fallback_key(
+        &self,
+        user_id: &str,
+        device_id: &str,
+        algorithm: &str,
+    ) -> Result<Option<(String, Value)>> {
+        let row = sqlx::query!(
+            r#"
+            UPDATE fallback_keys
+            SET used = true
+            WHERE user_id = $1 AND device_id = $2 AND algorithm = $3
+            RETURNING key_id, key_json
+            "#,
+            user_id,
+            device_id,
+            algorithm
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(row.map(|r| (r.key_id, r.key_json)))
+    }
+
+    // -----------------------------------------------------------------------
+    // Cross-signing (mrm.8, mrm.9)
+    // -----------------------------------------------------------------------
+
+    async fn upsert_cross_signing_key(
+        &self,
+        user_id: &str,
+        key_type: &str,
+        key_json: &Value,
+    ) -> Result<()> {
+        sqlx::query!(
+            r#"
+            INSERT INTO cross_signing_keys (user_id, key_type, key_json)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (user_id, key_type)
+            DO UPDATE SET key_json = EXCLUDED.key_json
+            "#,
+            user_id,
+            key_type,
+            key_json
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(())
+    }
+
+    async fn get_cross_signing_keys(&self, user_id: &str) -> Result<HashMap<String, Value>> {
+        let rows = sqlx::query!(
+            r#"SELECT key_type, key_json FROM cross_signing_keys WHERE user_id = $1"#,
+            user_id
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(rows.into_iter().map(|r| (r.key_type, r.key_json)).collect())
+    }
+
+    async fn insert_cross_signing_signature(
+        &self,
+        signer_user: &str,
+        signer_key: &str,
+        target_user: &str,
+        target_key: &str,
+        signature: &str,
+    ) -> Result<()> {
+        sqlx::query!(
+            r#"
+            INSERT INTO cross_signing_signatures
+                (signer_user_id, signer_key_id, target_user_id, target_key_id, signature)
+            VALUES ($1, $2, $3, $4, $5)
+            ON CONFLICT (signer_user_id, signer_key_id, target_user_id, target_key_id)
+            DO UPDATE SET signature = EXCLUDED.signature
+            "#,
+            signer_user,
+            signer_key,
+            target_user,
+            target_key,
+            signature
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // To-device queue (mrm.6, mrm.7, mrm.10)
+    // -----------------------------------------------------------------------
+
+    async fn enqueue_to_device(
+        &self,
+        target_user: &str,
+        target_device: &str,
+        sender: &str,
+        event_type: &str,
+        content: &Value,
+    ) -> Result<i64> {
+        let row = sqlx::query!(
+            r#"
+            INSERT INTO to_device_queue (target_user, target_device, sender, event_type, content)
+            VALUES ($1, $2, $3, $4, $5)
+            RETURNING id
+            "#,
+            target_user,
+            target_device,
+            sender,
+            event_type,
+            content
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(row.id)
+    }
+
+    async fn drain_to_device(
+        &self,
+        target_user: &str,
+        target_device: &str,
+        since_id: i64,
+        limit: i64,
+    ) -> Result<Vec<ToDeviceMessage>> {
+        let rows = sqlx::query!(
+            r#"
+            SELECT id, sender, event_type, content
+            FROM to_device_queue
+            WHERE target_user = $1 AND target_device = $2 AND id > $3
+            ORDER BY id ASC
+            LIMIT $4
+            "#,
+            target_user,
+            target_device,
+            since_id,
+            limit
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(rows
+            .into_iter()
+            .map(|r| ToDeviceMessage {
+                id: r.id,
+                sender: r.sender,
+                event_type: r.event_type,
+                content: r.content,
+            })
+            .collect())
+    }
+
+    async fn delete_to_device_before(
+        &self,
+        target_user: &str,
+        target_device: &str,
+        up_to_id: i64,
+    ) -> Result<()> {
+        sqlx::query!(
+            r#"
+            DELETE FROM to_device_queue
+            WHERE target_user = $1 AND target_device = $2 AND id <= $3
+            "#,
+            target_user,
+            target_device,
+            up_to_id
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Device list changes (mrm.4, mrm.11, mrm.12)
+    // -----------------------------------------------------------------------
+
+    async fn record_device_list_change(&self, user_id: &str) -> Result<i64> {
+        let row = sqlx::query!(
+            r#"
+            INSERT INTO device_list_changes (user_id)
+            VALUES ($1)
+            RETURNING id
+            "#,
+            user_id
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(row.id)
+    }
+
+    async fn device_list_changes_since(&self, since_pos: i64) -> Result<Vec<String>> {
+        let rows = sqlx::query!(
+            r#"
+            SELECT DISTINCT user_id
+            FROM device_list_changes
+            WHERE id > $1
+            ORDER BY user_id
+            "#,
+            since_pos
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(rows.into_iter().map(|r| r.user_id).collect())
+    }
+
+    async fn device_list_max_position(&self) -> Result<i64> {
+        let row = sqlx::query!(
+            r#"SELECT COALESCE(MAX(id), 0) AS max_id FROM device_list_changes"#
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(row.max_id.unwrap_or(0))
+    }
+
+    // -----------------------------------------------------------------------
+    // Room key backup (mrm.13)
+    // -----------------------------------------------------------------------
+
+    async fn create_room_keys_version(
+        &self,
+        user_id: &str,
+        version: &str,
+        algorithm: &str,
+        auth_data: &Value,
+    ) -> Result<String> {
+        let etag = format!("{}", chrono::Utc::now().timestamp_millis());
+        sqlx::query!(
+            r#"
+            INSERT INTO room_keys_versions (user_id, version, algorithm, auth_data, count, etag)
+            VALUES ($1, $2, $3, $4, 0, $5)
+            "#,
+            user_id,
+            version,
+            algorithm,
+            auth_data,
+            etag
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(etag)
+    }
+
+    async fn get_room_keys_version(
+        &self,
+        user_id: &str,
+        version: Option<&str>,
+    ) -> Result<Option<RoomKeyVersion>> {
+        if let Some(v) = version {
+            let row = sqlx::query!(
+                r#"
+                SELECT version, algorithm, auth_data, count, etag
+                FROM room_keys_versions
+                WHERE user_id = $1 AND version = $2 AND deleted = false
+                "#,
+                user_id,
+                v
+            )
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(map_sqlx)?;
+            Ok(row.map(|r| RoomKeyVersion {
+                version: r.version,
+                algorithm: r.algorithm,
+                auth_data: r.auth_data,
+                count: r.count,
+                etag: r.etag,
+            }))
+        } else {
+            let row = sqlx::query!(
+                r#"
+                SELECT version, algorithm, auth_data, count, etag
+                FROM room_keys_versions
+                WHERE user_id = $1 AND deleted = false
+                ORDER BY version DESC
+                LIMIT 1
+                "#,
+                user_id
+            )
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(map_sqlx)?;
+            Ok(row.map(|r| RoomKeyVersion {
+                version: r.version,
+                algorithm: r.algorithm,
+                auth_data: r.auth_data,
+                count: r.count,
+                etag: r.etag,
+            }))
+        }
+    }
+
+    async fn update_room_keys_version(
+        &self,
+        user_id: &str,
+        version: &str,
+        auth_data: &Value,
+    ) -> Result<()> {
+        let etag = format!("{}", chrono::Utc::now().timestamp_millis());
+        sqlx::query!(
+            r#"
+            UPDATE room_keys_versions
+            SET auth_data = $3, etag = $4
+            WHERE user_id = $1 AND version = $2 AND deleted = false
+            "#,
+            user_id,
+            version,
+            auth_data,
+            etag
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(())
+    }
+
+    async fn delete_room_keys_version(&self, user_id: &str, version: &str) -> Result<()> {
+        sqlx::query!(
+            r#"
+            UPDATE room_keys_versions SET deleted = true
+            WHERE user_id = $1 AND version = $2
+            "#,
+            user_id,
+            version
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(())
+    }
+
+    async fn upsert_room_key(
+        &self,
+        user_id: &str,
+        version: &str,
+        room_id: &str,
+        session_id: &str,
+        key_data: &Value,
+    ) -> Result<()> {
+        sqlx::query!(
+            r#"
+            INSERT INTO room_keys_backup (user_id, version, room_id, session_id, key_data)
+            VALUES ($1, $2, $3, $4, $5)
+            ON CONFLICT (user_id, version, room_id, session_id)
+            DO UPDATE SET key_data = EXCLUDED.key_data
+            "#,
+            user_id,
+            version,
+            room_id,
+            session_id,
+            key_data
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        // Update count + etag.
+        let etag = format!("{}", chrono::Utc::now().timestamp_millis());
+        sqlx::query!(
+            r#"
+            UPDATE room_keys_versions
+            SET count = (
+                SELECT COUNT(*) FROM room_keys_backup
+                WHERE user_id = $1 AND version = $2
+            ),
+            etag = $3
+            WHERE user_id = $1 AND version = $2
+            "#,
+            user_id,
+            version,
+            etag
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(())
+    }
+
+    async fn get_room_keys(
+        &self,
+        user_id: &str,
+        version: &str,
+        room_id: Option<&str>,
+        session_id: Option<&str>,
+    ) -> Result<HashMap<String, HashMap<String, Value>>> {
+        let rows = sqlx::query!(
+            r#"
+            SELECT room_id, session_id, key_data
+            FROM room_keys_backup
+            WHERE user_id = $1
+              AND version = $2
+              AND ($3::TEXT IS NULL OR room_id = $3)
+              AND ($4::TEXT IS NULL OR session_id = $4)
+            "#,
+            user_id,
+            version,
+            room_id,
+            session_id
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+
+        let mut result: HashMap<String, HashMap<String, Value>> = HashMap::new();
+        for r in rows {
+            result
+                .entry(r.room_id)
+                .or_default()
+                .insert(r.session_id, r.key_data);
+        }
+        Ok(result)
+    }
+
+    async fn delete_room_keys(
+        &self,
+        user_id: &str,
+        version: &str,
+        room_id: Option<&str>,
+        session_id: Option<&str>,
+    ) -> Result<i64> {
+        let result = sqlx::query!(
+            r#"
+            DELETE FROM room_keys_backup
+            WHERE user_id = $1
+              AND version = $2
+              AND ($3::TEXT IS NULL OR room_id = $3)
+              AND ($4::TEXT IS NULL OR session_id = $4)
+            "#,
+            user_id,
+            version,
+            room_id,
+            session_id
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        let deleted = result.rows_affected() as i64;
+        // Update count.
+        sqlx::query!(
+            r#"
+            UPDATE room_keys_versions
+            SET count = (
+                SELECT COUNT(*) FROM room_keys_backup
+                WHERE user_id = $1 AND version = $2
+            )
+            WHERE user_id = $1 AND version = $2
+            "#,
+            user_id,
+            version
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(deleted)
     }
 }

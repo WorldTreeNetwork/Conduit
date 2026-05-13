@@ -8,6 +8,7 @@
 //!   GET  /_matrix/client/v3/account/whoami
 
 pub mod event_pipeline;
+pub mod keys;
 pub mod rooms;
 pub mod sync;
 pub mod uia;

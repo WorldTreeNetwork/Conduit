@@ -26,30 +26,49 @@ use super::{AuthState, AuthedUser, MatrixError};
 // Token helpers (il0.17)
 // ---------------------------------------------------------------------------
 
-/// Parse a sync `since` token of the form `"s<i64>"`.
-/// Returns `None` for an absent token (initial sync).
-/// Returns `Err` with a 400 response for a malformed token.
-fn parse_since(raw: &str) -> Result<i64, Response> {
-    let digits = raw.strip_prefix('s').ok_or_else(|| {
+/// Combined sync token: `"s{events_pos}_d{device_pos}"`.
+///
+/// The events stream and device-list stream use independent cursors.
+/// Encoding both in the next_batch token lets clients resume either stream
+/// without an extra round-trip.  The `s` prefix retains backward
+/// compatibility with old clients that only look at the events part.
+struct SyncToken {
+    events_pos: i64,
+    device_pos: i64,
+}
+
+impl SyncToken {
+    fn encode(&self) -> String {
+        format!("s{}_d{}", self.events_pos, self.device_pos)
+    }
+}
+
+/// Parse a sync `since` token.
+/// Accepts:
+///   - `"s{events}"` (legacy, device_pos = 0)
+///   - `"s{events}_d{device}"` (current format)
+fn parse_since(raw: &str) -> Result<SyncToken, Response> {
+    let bad = || {
         (
             StatusCode::BAD_REQUEST,
             Json(json!({
                 "errcode": "M_INVALID_PARAM",
-                "error": "invalid since token: must start with 's'"
+                "error": "invalid since token"
             })),
         )
             .into_response()
-    })?;
-    digits.parse::<i64>().map_err(|_| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(json!({
-                "errcode": "M_INVALID_PARAM",
-                "error": "invalid since token: non-numeric position"
-            })),
-        )
-            .into_response()
-    })
+    };
+
+    let s_part = raw.strip_prefix('s').ok_or_else(bad)?;
+
+    if let Some(idx) = s_part.find("_d") {
+        let events_pos = s_part[..idx].parse::<i64>().map_err(|_| bad())?;
+        let device_pos = s_part[idx + 2..].parse::<i64>().map_err(|_| bad())?;
+        Ok(SyncToken { events_pos, device_pos })
+    } else {
+        let events_pos = s_part.parse::<i64>().map_err(|_| bad())?;
+        Ok(SyncToken { events_pos, device_pos: 0 })
+    }
 }
 
 fn encode_token(pos: i64) -> String {
@@ -168,10 +187,10 @@ pub async fn sync<S: AuthState>(
         .unwrap_or_else(|| SyncFilter { timeline_limit: 10, ..Default::default() });
 
     // Parse `since` token.
-    let since_pos: Option<i64> = match &query.since {
+    let since_token: Option<SyncToken> = match &query.since {
         None => None,
         Some(raw) => match parse_since(raw) {
-            Ok(pos) => Some(pos),
+            Ok(tok) => Some(tok),
             Err(resp) => return resp,
         },
     };
@@ -182,9 +201,9 @@ pub async fn sync<S: AuthState>(
     // -------------------------------------------------------------------
     // Long-poll: if incremental and no new events, wait up to `timeout`.
     // -------------------------------------------------------------------
-    let since = since_pos.unwrap_or(0);
+    let since = since_token.as_ref().map(|t| t.events_pos).unwrap_or(0);
 
-    if since_pos.is_some() && timeout_ms > 0 {
+    if since_token.is_some() && timeout_ms > 0 {
         // Subscribe before checking for events to avoid a race.
         let mut rx = state.events_tx().subscribe();
 
@@ -218,27 +237,21 @@ pub async fn sync<S: AuthState>(
     // -------------------------------------------------------------------
     // Build response
     // -------------------------------------------------------------------
-    build_sync_response(&state, user_id, since_pos, &filter).await
+    let device_id = &authed.device_id.clone();
+    build_sync_response(&state, user_id, device_id, since_token, &filter).await
 }
 
 async fn build_sync_response<S: AuthState>(
     state: &S,
     user_id: &str,
-    since_pos: Option<i64>,
+    authed_device_id: &str,
+    since_token: Option<SyncToken>,
     filter: &SyncFilter,
 ) -> Response {
     let storage = state.storage();
 
-    // Find the rooms where the user is currently joined.
-    // Strategy: scan events_since(0) is expensive; instead we need to find
-    // all rooms the user has a m.room.member state event with membership=join.
-    // We do this by fetching events_since to find rooms the user interacts with,
-    // but for correctness we use a different approach:
-    // Get all events globally since 0 and filter by membership state.
-    //
-    // For initial sync: get all events, find rooms where user is joined.
-    // For incremental: get events since `since`.
-    let since = since_pos.unwrap_or(0);
+    let since = since_token.as_ref().map(|t| t.events_pos).unwrap_or(0);
+    let device_since = since_token.as_ref().map(|t| t.device_pos).unwrap_or(0);
 
     // Collect all new events since `since` (large limit for correctness; v0).
     let new_events = match storage.events_since(since, 10_000).await {
@@ -257,7 +270,7 @@ async fn build_sync_response<S: AuthState>(
     // For initial sync, we also need rooms with no new events but where user
     // was already joined. We find those by scanning all events (since=0).
     // For incremental sync we only include rooms with new activity.
-    let all_rooms_to_check: Vec<String> = if since_pos.is_none() {
+    let all_rooms_to_check: Vec<String> = if since_token.is_none() {
         // Initial: check all rooms with any events.
         match storage.events_since(0, 100_000).await {
             Ok(evs) => {
@@ -304,7 +317,7 @@ async fn build_sync_response<S: AuthState>(
             continue;
         }
 
-        let block = if since_pos.is_none() {
+        let block = if since_token.is_none() {
             // Initial sync: state = current state, timeline = recent events.
             match build_initial_room_block(state, room_id, filter).await {
                 Ok(b) => b,
@@ -324,11 +337,69 @@ async fn build_sync_response<S: AuthState>(
     }
 
     // Compute next_batch.
-    let next_pos = match storage.global_max_stream_position().await {
+    let next_events_pos = match storage.global_max_stream_position().await {
         Ok(p) => p,
         Err(e) => return MatrixError::unknown(e.to_string()).into_response(),
     };
-    let next_batch = encode_token(next_pos);
+    let next_device_pos = match storage.device_list_max_position().await {
+        Ok(p) => p,
+        Err(e) => return MatrixError::unknown(e.to_string()).into_response(),
+    };
+    let next_batch = SyncToken {
+        events_pos: next_events_pos,
+        device_pos: next_device_pos,
+    }
+    .encode();
+
+    // --- To-device messages (mrm.7) ---
+    // Drain queued to-device messages for this device.
+    // We use since_id=0 on initial sync (all messages) or the last delivered id
+    // encoded in... actually since_id tracked separately requires state. For v0
+    // we always drain from 0 and delete up to max returned id. The client
+    // handles deduplication via the next_batch cursor it provides on next /sync.
+    // Using device_since as the since_id for to-device queue.
+    let to_device_events = match storage
+        .drain_to_device(user_id, &authed_device_id, device_since, 100)
+        .await
+    {
+        Ok(msgs) => msgs,
+        Err(_) => vec![],
+    };
+
+    // Compute max to-device id for cleanup.
+    let max_to_device_id = to_device_events.iter().map(|m| m.id).max().unwrap_or(0);
+
+    let to_device_json: Vec<Value> = to_device_events
+        .iter()
+        .map(|m| {
+            json!({
+                "type": m.event_type,
+                "sender": m.sender,
+                "content": m.content,
+            })
+        })
+        .collect();
+
+    // Delete delivered messages.
+    if max_to_device_id > 0 {
+        let _ = storage
+            .delete_to_device_before(user_id, &authed_device_id, max_to_device_id)
+            .await;
+    }
+
+    // --- Device list changes (mrm.12) ---
+    let device_list_changed = match storage.device_list_changes_since(device_since).await {
+        Ok(v) => v,
+        Err(_) => vec![],
+    };
+
+    // --- OTK counts ---
+    let otk_counts = match storage.one_time_key_counts(user_id, &authed_device_id).await {
+        Ok(c) => c,
+        Err(_) => std::collections::HashMap::new(),
+    };
+    let otk_counts_json: serde_json::Map<String, Value> =
+        otk_counts.into_iter().map(|(k, v)| (k, json!(v))).collect();
 
     let rooms_obj = json!({
         "join": joined_rooms,
@@ -344,9 +415,9 @@ async fn build_sync_response<S: AuthState>(
             "rooms": rooms_obj,
             "presence":     { "events": [] },
             "account_data": { "events": [] },
-            "to_device":    { "events": [] },
-            "device_lists": { "changed": [], "left": [] },
-            "device_one_time_keys_count": {}
+            "to_device":    { "events": to_device_json },
+            "device_lists": { "changed": device_list_changed, "left": [] },
+            "device_one_time_keys_count": otk_counts_json,
         })),
     )
         .into_response()

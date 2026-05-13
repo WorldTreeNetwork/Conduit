@@ -8,10 +8,34 @@ use std::collections::HashMap;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use serde_json::Value;
 use tokio::sync::RwLock;
 
 use crate::event::Event;
 use crate::Result;
+
+// ---------------------------------------------------------------------------
+// E2EE domain types
+// ---------------------------------------------------------------------------
+
+/// A pending to-device message from the queue.
+#[derive(Debug, Clone)]
+pub struct ToDeviceMessage {
+    pub id: i64,
+    pub sender: String,
+    pub event_type: String,
+    pub content: Value,
+}
+
+/// A room key backup version record.
+#[derive(Debug, Clone)]
+pub struct RoomKeyVersion {
+    pub version: String,
+    pub algorithm: String,
+    pub auth_data: Value,
+    pub count: i64,
+    pub etag: String,
+}
 
 // ---------------------------------------------------------------------------
 // Domain types
@@ -193,6 +217,181 @@ pub trait Storage: Send + Sync + 'static {
 
     /// The maximum stream_position across all rooms, or 0 if there are no events.
     async fn global_max_stream_position(&self) -> Result<i64>;
+
+    // --- Device keys (E2EE mrm.1, mrm.2) ------------------------------------
+
+    /// Upsert the full device keys JSON for (user_id, device_id).
+    async fn upsert_device_keys(&self, user_id: &str, device_id: &str, keys: &Value) -> Result<()>;
+
+    async fn get_device_keys(&self, user_id: &str, device_id: &str) -> Result<Option<Value>>;
+
+    /// All devices for a user: device_id → keys JSON.
+    async fn get_device_keys_for_user(&self, user_id: &str) -> Result<HashMap<String, Value>>;
+
+    // --- One-time keys (mrm.1, mrm.3) ----------------------------------------
+
+    /// Insert a batch of OTKs. Each tuple is (key_id, algorithm, key_json).
+    async fn insert_one_time_keys(
+        &self,
+        user_id: &str,
+        device_id: &str,
+        keys: Vec<(String, String, Value)>,
+    ) -> Result<()>;
+
+    /// Atomically claim one OTK for the given algorithm.
+    /// Returns `None` if no key is available (fallback should be consulted next).
+    async fn claim_one_time_key(
+        &self,
+        user_id: &str,
+        device_id: &str,
+        algorithm: &str,
+    ) -> Result<Option<(String, Value)>>;
+
+    /// Count available OTKs per algorithm for a device.
+    async fn one_time_key_counts(
+        &self,
+        user_id: &str,
+        device_id: &str,
+    ) -> Result<HashMap<String, i64>>;
+
+    // --- Fallback keys (mrm.5) -----------------------------------------------
+
+    /// Upsert the single fallback key for (user_id, device_id, algorithm).
+    async fn upsert_fallback_key(
+        &self,
+        user_id: &str,
+        device_id: &str,
+        algorithm: &str,
+        key_id: &str,
+        key_json: &Value,
+    ) -> Result<()>;
+
+    /// Claim the fallback key for a device algorithm (marks it used, returns it).
+    async fn claim_fallback_key(
+        &self,
+        user_id: &str,
+        device_id: &str,
+        algorithm: &str,
+    ) -> Result<Option<(String, Value)>>;
+
+    // --- Cross-signing (mrm.8, mrm.9) ----------------------------------------
+
+    async fn upsert_cross_signing_key(
+        &self,
+        user_id: &str,
+        key_type: &str,
+        key_json: &Value,
+    ) -> Result<()>;
+
+    /// Returns map: key_type → key_json.
+    async fn get_cross_signing_keys(&self, user_id: &str) -> Result<HashMap<String, Value>>;
+
+    async fn insert_cross_signing_signature(
+        &self,
+        signer_user: &str,
+        signer_key: &str,
+        target_user: &str,
+        target_key: &str,
+        signature: &str,
+    ) -> Result<()>;
+
+    // --- To-device queue (mrm.6, mrm.7, mrm.10) ------------------------------
+
+    /// Enqueue a to-device message. Returns the assigned queue id.
+    async fn enqueue_to_device(
+        &self,
+        target_user: &str,
+        target_device: &str,
+        sender: &str,
+        event_type: &str,
+        content: &Value,
+    ) -> Result<i64>;
+
+    /// Drain up to `limit` messages for a device with id > since_id.
+    async fn drain_to_device(
+        &self,
+        target_user: &str,
+        target_device: &str,
+        since_id: i64,
+        limit: i64,
+    ) -> Result<Vec<ToDeviceMessage>>;
+
+    /// Delete all messages for a device with id <= up_to_id.
+    async fn delete_to_device_before(
+        &self,
+        target_user: &str,
+        target_device: &str,
+        up_to_id: i64,
+    ) -> Result<()>;
+
+    // --- Device list changes (mrm.4, mrm.11, mrm.12) -------------------------
+
+    /// Record that user_id's device list changed. Returns the new stream position.
+    async fn record_device_list_change(&self, user_id: &str) -> Result<i64>;
+
+    /// Return distinct user_ids that have changed since stream position `since_pos`.
+    async fn device_list_changes_since(&self, since_pos: i64) -> Result<Vec<String>>;
+
+    /// The maximum device list stream position, or 0 if none.
+    async fn device_list_max_position(&self) -> Result<i64>;
+
+    // --- Room key backup (mrm.13) ---------------------------------------------
+
+    /// Create a new backup version. Returns the etag.
+    async fn create_room_keys_version(
+        &self,
+        user_id: &str,
+        version: &str,
+        algorithm: &str,
+        auth_data: &Value,
+    ) -> Result<String>;
+
+    /// Get a backup version. If version is None, returns the latest non-deleted one.
+    async fn get_room_keys_version(
+        &self,
+        user_id: &str,
+        version: Option<&str>,
+    ) -> Result<Option<RoomKeyVersion>>;
+
+    /// Update the auth_data of a backup version.
+    async fn update_room_keys_version(
+        &self,
+        user_id: &str,
+        version: &str,
+        auth_data: &Value,
+    ) -> Result<()>;
+
+    /// Mark a backup version as deleted.
+    async fn delete_room_keys_version(&self, user_id: &str, version: &str) -> Result<()>;
+
+    /// Upsert a single room key into a backup.
+    async fn upsert_room_key(
+        &self,
+        user_id: &str,
+        version: &str,
+        room_id: &str,
+        session_id: &str,
+        key_data: &Value,
+    ) -> Result<()>;
+
+    /// Get room keys. room_id=None means all rooms; session_id=None means all sessions.
+    /// Returns nested map: room_id → session_id → key_data.
+    async fn get_room_keys(
+        &self,
+        user_id: &str,
+        version: &str,
+        room_id: Option<&str>,
+        session_id: Option<&str>,
+    ) -> Result<HashMap<String, HashMap<String, Value>>>;
+
+    /// Delete room keys. Returns count deleted.
+    async fn delete_room_keys(
+        &self,
+        user_id: &str,
+        version: &str,
+        room_id: Option<&str>,
+        session_id: Option<&str>,
+    ) -> Result<i64>;
 }
 
 // ---------------------------------------------------------------------------
@@ -217,6 +416,27 @@ struct MemoryInner {
     signing_keys: Vec<SigningKey>,
     /// (room_id, type, state_key) → event_id
     room_state: HashMap<(String, String, String), String>,
+    // E2EE
+    /// (user_id, device_id) → keys JSON
+    device_keys: HashMap<(String, String), Value>,
+    /// (user_id, device_id, key_id) → (algorithm, key_json)
+    one_time_keys: HashMap<(String, String, String), (String, Value)>,
+    /// (user_id, device_id, algorithm) → (key_id, key_json, used)
+    fallback_keys: HashMap<(String, String, String), (String, Value, bool)>,
+    /// (user_id, key_type) → key_json
+    cross_signing_keys: HashMap<(String, String), Value>,
+    /// (signer_user, signer_key, target_user, target_key) → signature
+    cross_signing_sigs: HashMap<(String, String, String, String), String>,
+    /// to-device queue entries (id, target_user, target_device, sender, event_type, content)
+    to_device_queue: Vec<(i64, String, String, String, String, Value)>,
+    to_device_next_id: i64,
+    /// device list change log (id, user_id)
+    device_list_changes: Vec<(i64, String)>,
+    device_list_next_id: i64,
+    /// (user_id, version) → RoomKeyVersion + deleted flag
+    room_key_versions: HashMap<(String, String), (RoomKeyVersion, bool)>,
+    /// (user_id, version, room_id, session_id) → key_data
+    room_keys: HashMap<(String, String, String, String), Value>,
 }
 
 #[async_trait]
@@ -545,6 +765,432 @@ impl Storage for MemoryStorage {
     async fn global_max_stream_position(&self) -> Result<i64> {
         let inner = self.inner.read().await;
         Ok(inner.events.values().map(|e| e.depth).max().unwrap_or(0))
+    }
+
+    // --- Device keys ----------------------------------------------------------
+
+    async fn upsert_device_keys(&self, user_id: &str, device_id: &str, keys: &Value) -> Result<()> {
+        self.inner
+            .write()
+            .await
+            .device_keys
+            .insert((user_id.to_owned(), device_id.to_owned()), keys.clone());
+        Ok(())
+    }
+
+    async fn get_device_keys(&self, user_id: &str, device_id: &str) -> Result<Option<Value>> {
+        Ok(self
+            .inner
+            .read()
+            .await
+            .device_keys
+            .get(&(user_id.to_owned(), device_id.to_owned()))
+            .cloned())
+    }
+
+    async fn get_device_keys_for_user(&self, user_id: &str) -> Result<HashMap<String, Value>> {
+        let inner = self.inner.read().await;
+        let map = inner
+            .device_keys
+            .iter()
+            .filter(|((u, _), _)| u == user_id)
+            .map(|((_, d), v)| (d.clone(), v.clone()))
+            .collect();
+        Ok(map)
+    }
+
+    // --- One-time keys --------------------------------------------------------
+
+    async fn insert_one_time_keys(
+        &self,
+        user_id: &str,
+        device_id: &str,
+        keys: Vec<(String, String, Value)>,
+    ) -> Result<()> {
+        let mut inner = self.inner.write().await;
+        for (key_id, algorithm, key_json) in keys {
+            inner.one_time_keys.insert(
+                (user_id.to_owned(), device_id.to_owned(), key_id),
+                (algorithm, key_json),
+            );
+        }
+        Ok(())
+    }
+
+    async fn claim_one_time_key(
+        &self,
+        user_id: &str,
+        device_id: &str,
+        algorithm: &str,
+    ) -> Result<Option<(String, Value)>> {
+        let mut inner = self.inner.write().await;
+        // Find first key matching user/device/algorithm.
+        let found_key = inner
+            .one_time_keys
+            .iter()
+            .find(|((u, d, _), (alg, _))| u == user_id && d == device_id && alg == algorithm)
+            .map(|((_, _, kid), _)| kid.clone());
+        if let Some(kid) = found_key {
+            let map_key = (user_id.to_owned(), device_id.to_owned(), kid.clone());
+            if let Some((_, key_json)) = inner.one_time_keys.remove(&map_key) {
+                return Ok(Some((kid, key_json)));
+            }
+        }
+        Ok(None)
+    }
+
+    async fn one_time_key_counts(
+        &self,
+        user_id: &str,
+        device_id: &str,
+    ) -> Result<HashMap<String, i64>> {
+        let inner = self.inner.read().await;
+        let mut counts: HashMap<String, i64> = HashMap::new();
+        for ((u, d, _), (alg, _)) in &inner.one_time_keys {
+            if u == user_id && d == device_id {
+                *counts.entry(alg.clone()).or_insert(0) += 1;
+            }
+        }
+        Ok(counts)
+    }
+
+    // --- Fallback keys --------------------------------------------------------
+
+    async fn upsert_fallback_key(
+        &self,
+        user_id: &str,
+        device_id: &str,
+        algorithm: &str,
+        key_id: &str,
+        key_json: &Value,
+    ) -> Result<()> {
+        self.inner.write().await.fallback_keys.insert(
+            (user_id.to_owned(), device_id.to_owned(), algorithm.to_owned()),
+            (key_id.to_owned(), key_json.clone(), false),
+        );
+        Ok(())
+    }
+
+    async fn claim_fallback_key(
+        &self,
+        user_id: &str,
+        device_id: &str,
+        algorithm: &str,
+    ) -> Result<Option<(String, Value)>> {
+        let mut inner = self.inner.write().await;
+        let map_key = (user_id.to_owned(), device_id.to_owned(), algorithm.to_owned());
+        if let Some((kid, key_json, used)) = inner.fallback_keys.get_mut(&map_key) {
+            *used = true;
+            return Ok(Some((kid.clone(), key_json.clone())));
+        }
+        Ok(None)
+    }
+
+    // --- Cross-signing --------------------------------------------------------
+
+    async fn upsert_cross_signing_key(
+        &self,
+        user_id: &str,
+        key_type: &str,
+        key_json: &Value,
+    ) -> Result<()> {
+        self.inner
+            .write()
+            .await
+            .cross_signing_keys
+            .insert((user_id.to_owned(), key_type.to_owned()), key_json.clone());
+        Ok(())
+    }
+
+    async fn get_cross_signing_keys(&self, user_id: &str) -> Result<HashMap<String, Value>> {
+        let inner = self.inner.read().await;
+        let map = inner
+            .cross_signing_keys
+            .iter()
+            .filter(|((u, _), _)| u == user_id)
+            .map(|((_, kt), v)| (kt.clone(), v.clone()))
+            .collect();
+        Ok(map)
+    }
+
+    async fn insert_cross_signing_signature(
+        &self,
+        signer_user: &str,
+        signer_key: &str,
+        target_user: &str,
+        target_key: &str,
+        signature: &str,
+    ) -> Result<()> {
+        self.inner.write().await.cross_signing_sigs.insert(
+            (
+                signer_user.to_owned(),
+                signer_key.to_owned(),
+                target_user.to_owned(),
+                target_key.to_owned(),
+            ),
+            signature.to_owned(),
+        );
+        Ok(())
+    }
+
+    // --- To-device queue ------------------------------------------------------
+
+    async fn enqueue_to_device(
+        &self,
+        target_user: &str,
+        target_device: &str,
+        sender: &str,
+        event_type: &str,
+        content: &Value,
+    ) -> Result<i64> {
+        let mut inner = self.inner.write().await;
+        inner.to_device_next_id += 1;
+        let id = inner.to_device_next_id;
+        inner.to_device_queue.push((
+            id,
+            target_user.to_owned(),
+            target_device.to_owned(),
+            sender.to_owned(),
+            event_type.to_owned(),
+            content.clone(),
+        ));
+        Ok(id)
+    }
+
+    async fn drain_to_device(
+        &self,
+        target_user: &str,
+        target_device: &str,
+        since_id: i64,
+        limit: i64,
+    ) -> Result<Vec<ToDeviceMessage>> {
+        let inner = self.inner.read().await;
+        let msgs = inner
+            .to_device_queue
+            .iter()
+            .filter(|(id, tu, td, _, _, _)| {
+                *id > since_id && tu == target_user && td == target_device
+            })
+            .take(limit as usize)
+            .map(|(id, _, _, sender, event_type, content)| ToDeviceMessage {
+                id: *id,
+                sender: sender.clone(),
+                event_type: event_type.clone(),
+                content: content.clone(),
+            })
+            .collect();
+        Ok(msgs)
+    }
+
+    async fn delete_to_device_before(
+        &self,
+        target_user: &str,
+        target_device: &str,
+        up_to_id: i64,
+    ) -> Result<()> {
+        let mut inner = self.inner.write().await;
+        inner.to_device_queue.retain(|(id, tu, td, _, _, _)| {
+            !(*id <= up_to_id && tu == target_user && td == target_device)
+        });
+        Ok(())
+    }
+
+    // --- Device list changes --------------------------------------------------
+
+    async fn record_device_list_change(&self, user_id: &str) -> Result<i64> {
+        let mut inner = self.inner.write().await;
+        inner.device_list_next_id += 1;
+        let id = inner.device_list_next_id;
+        inner.device_list_changes.push((id, user_id.to_owned()));
+        Ok(id)
+    }
+
+    async fn device_list_changes_since(&self, since_pos: i64) -> Result<Vec<String>> {
+        let inner = self.inner.read().await;
+        let mut users: Vec<String> = inner
+            .device_list_changes
+            .iter()
+            .filter(|(id, _)| *id > since_pos)
+            .map(|(_, u)| u.clone())
+            .collect();
+        users.dedup();
+        Ok(users)
+    }
+
+    async fn device_list_max_position(&self) -> Result<i64> {
+        Ok(self.inner.read().await.device_list_next_id)
+    }
+
+    // --- Room key backup ------------------------------------------------------
+
+    async fn create_room_keys_version(
+        &self,
+        user_id: &str,
+        version: &str,
+        algorithm: &str,
+        auth_data: &Value,
+    ) -> Result<String> {
+        let etag = format!("{}", chrono::Utc::now().timestamp_millis());
+        let rv = RoomKeyVersion {
+            version: version.to_owned(),
+            algorithm: algorithm.to_owned(),
+            auth_data: auth_data.clone(),
+            count: 0,
+            etag: etag.clone(),
+        };
+        self.inner
+            .write()
+            .await
+            .room_key_versions
+            .insert((user_id.to_owned(), version.to_owned()), (rv, false));
+        Ok(etag)
+    }
+
+    async fn get_room_keys_version(
+        &self,
+        user_id: &str,
+        version: Option<&str>,
+    ) -> Result<Option<RoomKeyVersion>> {
+        let inner = self.inner.read().await;
+        if let Some(v) = version {
+            Ok(inner
+                .room_key_versions
+                .get(&(user_id.to_owned(), v.to_owned()))
+                .and_then(|(rv, deleted)| if *deleted { None } else { Some(rv.clone()) }))
+        } else {
+            // Return latest non-deleted version.
+            Ok(inner
+                .room_key_versions
+                .iter()
+                .filter(|((u, _), (_, deleted))| u == user_id && !*deleted)
+                .max_by(|((_, va), _), ((_, vb), _)| va.cmp(vb))
+                .map(|(_, (rv, _))| rv.clone()))
+        }
+    }
+
+    async fn update_room_keys_version(
+        &self,
+        user_id: &str,
+        version: &str,
+        auth_data: &Value,
+    ) -> Result<()> {
+        let mut inner = self.inner.write().await;
+        let key = (user_id.to_owned(), version.to_owned());
+        if let Some((rv, _)) = inner.room_key_versions.get_mut(&key) {
+            rv.auth_data = auth_data.clone();
+            rv.etag = format!("{}", chrono::Utc::now().timestamp_millis());
+        }
+        Ok(())
+    }
+
+    async fn delete_room_keys_version(&self, user_id: &str, version: &str) -> Result<()> {
+        let mut inner = self.inner.write().await;
+        let key = (user_id.to_owned(), version.to_owned());
+        if let Some((_, deleted)) = inner.room_key_versions.get_mut(&key) {
+            *deleted = true;
+        }
+        Ok(())
+    }
+
+    async fn upsert_room_key(
+        &self,
+        user_id: &str,
+        version: &str,
+        room_id: &str,
+        session_id: &str,
+        key_data: &Value,
+    ) -> Result<()> {
+        let mut inner = self.inner.write().await;
+        inner.room_keys.insert(
+            (
+                user_id.to_owned(),
+                version.to_owned(),
+                room_id.to_owned(),
+                session_id.to_owned(),
+            ),
+            key_data.clone(),
+        );
+        // Update count — compute before the mutable borrow.
+        let vk = (user_id.to_owned(), version.to_owned());
+        let count = inner
+            .room_keys
+            .keys()
+            .filter(|(u, v, _, _)| u == user_id && v == version)
+            .count() as i64;
+        if let Some((rv, _)) = inner.room_key_versions.get_mut(&vk) {
+            rv.count = count;
+        }
+        Ok(())
+    }
+
+    async fn get_room_keys(
+        &self,
+        user_id: &str,
+        version: &str,
+        room_id: Option<&str>,
+        session_id: Option<&str>,
+    ) -> Result<HashMap<String, HashMap<String, Value>>> {
+        let inner = self.inner.read().await;
+        let mut result: HashMap<String, HashMap<String, Value>> = HashMap::new();
+        for ((u, v, r, s), kd) in &inner.room_keys {
+            if u != user_id || v != version {
+                continue;
+            }
+            if let Some(rid) = room_id {
+                if r != rid {
+                    continue;
+                }
+            }
+            if let Some(sid) = session_id {
+                if s != sid {
+                    continue;
+                }
+            }
+            result
+                .entry(r.clone())
+                .or_default()
+                .insert(s.clone(), kd.clone());
+        }
+        Ok(result)
+    }
+
+    async fn delete_room_keys(
+        &self,
+        user_id: &str,
+        version: &str,
+        room_id: Option<&str>,
+        session_id: Option<&str>,
+    ) -> Result<i64> {
+        let mut inner = self.inner.write().await;
+        let before = inner.room_keys.len();
+        inner.room_keys.retain(|(u, v, r, s), _| {
+            if u != user_id || v != version {
+                return true;
+            }
+            if let Some(rid) = room_id {
+                if r != rid {
+                    return true;
+                }
+            }
+            if let Some(sid) = session_id {
+                if s != sid {
+                    return true;
+                }
+            }
+            false
+        });
+        let deleted = (before - inner.room_keys.len()) as i64;
+        // Update count — compute before the mutable borrow.
+        let vk = (user_id.to_owned(), version.to_owned());
+        let count = inner
+            .room_keys
+            .keys()
+            .filter(|(u, v, _, _)| u == user_id && v == version)
+            .count() as i64;
+        if let Some((rv, _)) = inner.room_key_versions.get_mut(&vk) {
+            rv.count = count;
+        }
+        Ok(deleted)
     }
 }
 

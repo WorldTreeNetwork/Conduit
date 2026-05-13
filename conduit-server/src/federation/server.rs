@@ -113,7 +113,12 @@ pub async fn send_transaction(
         None => return unauthorized("Not authenticated"),
     };
 
-    tracing::debug!(%origin, %txn_id, pdu_count = body.pdus.len(), "inbound federation transaction");
+    tracing::debug!(%origin, %txn_id, pdu_count = body.pdus.len(), edu_count = body.edus.len(), "inbound federation transaction");
+
+    // Process EDUs first (mrm.11).
+    for edu in &body.edus {
+        handle_edu(&state, edu).await;
+    }
 
     let mut pdu_results: HashMap<String, Value> = HashMap::new();
 
@@ -826,6 +831,95 @@ fn is_event_visible_to_server(
 }
 
 // ---------------------------------------------------------------------------
+// mrm.10 — PUT /send_to_device/:txnId
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct FedSendToDeviceBody {
+    /// The sending user.
+    #[serde(default)]
+    pub sender: Option<String>,
+    /// { user_id: { device_id: content } }
+    #[serde(default)]
+    pub messages: HashMap<String, HashMap<String, serde_json::Value>>,
+    /// message_type / event_type
+    #[serde(rename = "type", default)]
+    pub event_type: Option<String>,
+}
+
+/// `PUT /_matrix/federation/v1/send_to_device/:txnId`
+pub async fn fed_send_to_device(
+    State(state): State<FedState>,
+    origin_ext: Option<axum::extract::Extension<FederationOrigin>>,
+    Path(txn_id): Path<String>,
+    Json(body): Json<FedSendToDeviceBody>,
+) -> Response {
+    let origin = match origin_ext {
+        Some(axum::extract::Extension(o)) => o.server_name,
+        None => return unauthorized("Not authenticated"),
+    };
+
+    tracing::debug!(%origin, %txn_id, "inbound federation send_to_device");
+
+    let event_type = body.event_type.unwrap_or_else(|| "m.room.encrypted".to_owned());
+    let sender = body.sender.unwrap_or_else(|| format!("@federation:{}", origin));
+
+    for (target_user, devices) in &body.messages {
+        let target_server = target_user.split(':').nth(1).unwrap_or("");
+        if target_server != &*state.server_name {
+            continue; // Not our user — skip.
+        }
+        for (target_device, content) in devices {
+            if let Err(e) = state
+                .storage
+                .enqueue_to_device(target_user, target_device, &sender, &event_type, content)
+                .await
+            {
+                tracing::warn!(error = %e, "failed to enqueue federated to-device message");
+            }
+        }
+    }
+
+    (StatusCode::OK, Json(serde_json::json!({}))).into_response()
+}
+
+// ---------------------------------------------------------------------------
+// mrm.11 — handle m.device_list_update EDU in send_transaction
+// ---------------------------------------------------------------------------
+
+/// Handle EDUs in an inbound federation transaction.
+/// Currently processes `m.device_list_update`.
+pub(crate) async fn handle_edu(state: &FedState, edu: &serde_json::Value) {
+    let edu_type = edu.get("edu_type").and_then(|v| v.as_str()).unwrap_or("");
+    if edu_type == "m.device_list_update" {
+        let content = edu.get("content").unwrap_or(edu);
+        let user_id = match content.get("user_id").and_then(|v| v.as_str()) {
+            Some(u) => u.to_owned(),
+            None => return,
+        };
+        let device_id = content.get("device_id").and_then(|v| v.as_str()).unwrap_or("");
+        let deleted = content
+            .get("deleted")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        tracing::debug!(user_id = %user_id, device_id = %device_id, deleted, "m.device_list_update EDU");
+
+        // If the EDU includes the device keys, persist them.
+        if let Some(keys) = content.get("keys") {
+            if !deleted && !device_id.is_empty() {
+                let _ = state.storage.upsert_device_keys(&user_id, device_id, keys).await;
+            } else if deleted && !device_id.is_empty() {
+                // Deletion: we could remove device keys, but for now we just record the change.
+            }
+        }
+
+        // Record device list change so local /sync picks it up.
+        let _ = state.storage.record_device_list_change(&user_id).await;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Router builder
 // ---------------------------------------------------------------------------
 
@@ -838,6 +932,7 @@ pub fn federation_router() -> axum::Router<FedState> {
 
     axum::Router::new()
         .route("/send/:txnId", put(send_transaction))
+        .route("/send_to_device/:txnId", put(fed_send_to_device))
         .route("/make_join/:roomId/:userId", get(make_join))
         .route("/send_join/v2/:roomId/:eventId", put(send_join))
         .route("/invite/v2/:roomId/:eventId", put(invite))

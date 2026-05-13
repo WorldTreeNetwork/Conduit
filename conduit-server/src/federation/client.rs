@@ -505,6 +505,26 @@ impl Client {
         self.signed_get(dest, &path).await
     }
 
+    /// `PUT /_matrix/federation/v1/send_to_device/{txnId}`
+    ///
+    /// Send to-device messages to devices on `dest`.
+    /// `messages` is `{ user_id: { device_id: content } }`.
+    pub async fn send_to_device(
+        &self,
+        dest: &str,
+        txn_id: &str,
+        event_type: &str,
+        messages: serde_json::Value,
+    ) -> Result<Value, FederationError> {
+        let path = format!("/_matrix/federation/v1/send_to_device/{}/{}", urlencoding(event_type), urlencoding(txn_id));
+        let body = serde_json::json!({
+            "sender": &*self.server_name,
+            "type": event_type,
+            "messages": messages,
+        });
+        self.signed_put(dest, &path, &body).await
+    }
+
     /// `GET /_matrix/federation/v1/query/directory?room_alias={alias}`
     pub async fn query_directory(
         &self,

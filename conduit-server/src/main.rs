@@ -145,6 +145,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     use conduit_server::api::client as auth;
+    use conduit_server::api::client::keys as keys_api;
     use conduit_server::api::client::rooms as rooms;
     use conduit_server::api::client::sync as sync_api;
 
@@ -212,6 +213,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Client-Server API: sync
         .route("/_matrix/client/v3/sync",
             get(sync_api::sync::<AppState>))
+        // Client-Server API: E2EE keys (E10 mrm.1–mrm.9)
+        .route("/_matrix/client/v3/keys/upload",
+            post(keys_api::keys_upload::<AppState>))
+        .route("/_matrix/client/v3/keys/query",
+            post(keys_api::keys_query::<AppState>))
+        .route("/_matrix/client/v3/keys/claim",
+            post(keys_api::keys_claim::<AppState>))
+        .route("/_matrix/client/v3/keys/changes",
+            get(keys_api::keys_changes::<AppState>))
+        .route("/_matrix/client/v3/sendToDevice/:eventType/:txnId",
+            put(keys_api::send_to_device::<AppState>))
+        .route("/_matrix/client/v3/keys/device_signing/upload",
+            post(keys_api::device_signing_upload::<AppState>))
+        .route("/_matrix/client/v3/keys/signatures/upload",
+            post(keys_api::signatures_upload::<AppState>))
+        // Room key backup (mrm.13)
+        .route("/_matrix/client/v3/room_keys/version",
+            get(keys_api::room_keys_version_get_latest::<AppState>)
+            .post(keys_api::room_keys_version_create::<AppState>))
+        .route("/_matrix/client/v3/room_keys/version/:version",
+            get(keys_api::room_keys_version_get::<AppState>)
+            .put(keys_api::room_keys_version_update::<AppState>)
+            .delete(keys_api::room_keys_version_delete::<AppState>))
+        .route("/_matrix/client/v3/room_keys/keys",
+            get(keys_api::room_keys_get_all::<AppState>)
+            .put(keys_api::room_keys_put_all::<AppState>)
+            .delete(keys_api::room_keys_delete_all::<AppState>))
+        .route("/_matrix/client/v3/room_keys/keys/:roomId",
+            get(keys_api::room_keys_get_room::<AppState>)
+            .put(keys_api::room_keys_put_room::<AppState>))
+        .route("/_matrix/client/v3/room_keys/keys/:roomId/:sessionId",
+            get(keys_api::room_keys_get_session::<AppState>)
+            .put(keys_api::room_keys_put_session::<AppState>))
         // Federation inbound (E09)
         .nest("/_matrix/federation/v1", fed_router)
         .with_state(state)
