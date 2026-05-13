@@ -19,8 +19,10 @@ use tokio::sync::{RwLock, broadcast};
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
 
+use hickory_resolver::TokioAsyncResolver;
+
 use conduit::{keys::ServerKey, storage::Storage};
-use conduit_server::{api::client::{AuthState, TxnCacheKey}, keys, PostgresStorage, RemoteKeyCache};
+use conduit_server::{api::client::{AuthState, TxnCacheKey}, federation, keys, PostgresStorage, RemoteKeyCache};
 
 /// Shared application state threaded through axum.
 #[derive(Clone)]
@@ -34,6 +36,10 @@ struct AppState {
     /// Broadcast channel: sends the new global stream_position after each
     /// persisted event so `/sync` long-pollers can wake up.
     events_tx: broadcast::Sender<i64>,
+    /// Outbound federation HTTP client (E08).
+    federation: Arc<federation::Client>,
+    /// Per-destination outbound send queue (E08).
+    federation_queue: Arc<federation::Queue>,
 }
 
 impl AuthState for AppState {
@@ -103,6 +109,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // re-poll once the sleep expires.
     let (events_tx, _) = broadcast::channel::<i64>(256);
 
+    // Build the DNS resolver for federation server discovery.
+    let resolver = TokioAsyncResolver::tokio_from_system_conf()
+        .expect("DNS resolver config");
+
+    // Build the outbound federation client and send queue.
+    let federation_client = Arc::new(federation::Client::new(
+        http.clone(),
+        resolver,
+        Arc::clone(&remote_keys),
+        Arc::clone(&server_key),
+        Arc::clone(&server_name),
+    ));
+    let federation_queue = Arc::new(federation::Queue::new(Arc::clone(&federation_client)));
+
     let state = AppState {
         storage,
         server_key,
@@ -111,6 +131,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         remote_keys,
         txn_cache: Arc::new(RwLock::new(HashMap::new())),
         events_tx,
+        federation: federation_client,
+        federation_queue,
     };
 
     use conduit_server::api::client as auth;
