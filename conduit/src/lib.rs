@@ -26,6 +26,7 @@ pub mod event;
 pub mod hashing;
 pub mod keys;
 pub mod room;
+pub mod signing;
 pub mod storage;
 pub mod transport;
 
