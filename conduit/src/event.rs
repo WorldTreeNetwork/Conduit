@@ -14,7 +14,7 @@ use serde_json::Value;
 ///
 /// Field layout follows the v11 PDU wire format:
 /// <https://spec.matrix.org/latest/rooms/v11/>
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct Event {
     pub event_id: String,
     pub room_id: String,
