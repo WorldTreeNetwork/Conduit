@@ -7,17 +7,162 @@
 use std::collections::HashMap;
 
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use tokio::sync::RwLock;
 
 use crate::event::Event;
 use crate::Result;
 
+// ---------------------------------------------------------------------------
+// Domain types
+// ---------------------------------------------------------------------------
+
+/// A registered local user account.
+#[derive(Debug, Clone)]
+pub struct Account {
+    pub user_id: String,
+    /// Argon2 / bcrypt hash; `None` means the account has no password
+    /// (e.g. guest or SSO-only).
+    pub password_hash: Option<String>,
+    pub is_admin: bool,
+    pub created_at: DateTime<Utc>,
+    /// `Some` when the account has been deactivated.
+    pub deactivated_at: Option<DateTime<Utc>>,
+}
+
+/// A client device registered to a user.
+#[derive(Debug, Clone)]
+pub struct Device {
+    pub user_id: String,
+    pub device_id: String,
+    pub display_name: Option<String>,
+    /// Unix-ms timestamp of last activity, if recorded.
+    pub last_seen_ts: Option<i64>,
+    pub last_seen_ip: Option<String>,
+}
+
+/// The (user_id, device_id) pair that owns an access token.
+#[derive(Debug, Clone)]
+pub struct TokenOwner {
+    pub user_id: String,
+    pub device_id: String,
+}
+
+/// A server signing key (ed25519 or similar).
+#[derive(Debug, Clone)]
+pub struct SigningKey {
+    pub key_id: String,
+    pub private_key: Vec<u8>,
+    pub public_key: Vec<u8>,
+    /// Unix-ms timestamp after which this key should not be used for
+    /// signing new events.  `None` means no expiry declared.
+    pub valid_until_ts: Option<i64>,
+    pub created_at: DateTime<Utc>,
+}
+
+// ---------------------------------------------------------------------------
+// Storage trait
+// ---------------------------------------------------------------------------
+
 #[async_trait]
 pub trait Storage: Send + Sync + 'static {
+    // --- Events (unchanged) -------------------------------------------------
+
     async fn get_event(&self, event_id: &str) -> Result<Option<Event>>;
     async fn put_event(&self, event: &Event) -> Result<()>;
     async fn room_events(&self, room_id: &str) -> Result<Vec<Event>>;
+
+    // --- Accounts -----------------------------------------------------------
+
+    /// Create a new user account.  Fails if `user_id` already exists.
+    async fn create_account(
+        &self,
+        user_id: &str,
+        password_hash: Option<&str>,
+    ) -> Result<()>;
+
+    async fn get_account(&self, user_id: &str) -> Result<Option<Account>>;
+
+    /// Mark the account as deactivated (soft-delete).
+    async fn deactivate_account(&self, user_id: &str) -> Result<()>;
+
+    async fn set_admin(&self, user_id: &str, is_admin: bool) -> Result<()>;
+
+    // --- Devices ------------------------------------------------------------
+
+    /// Insert or update a device record (upsert on (user_id, device_id)).
+    async fn upsert_device(
+        &self,
+        user_id: &str,
+        device_id: &str,
+        display_name: Option<&str>,
+    ) -> Result<()>;
+
+    async fn get_device(
+        &self,
+        user_id: &str,
+        device_id: &str,
+    ) -> Result<Option<Device>>;
+
+    async fn list_devices_for_user(&self, user_id: &str) -> Result<Vec<Device>>;
+
+    // --- Access tokens ------------------------------------------------------
+
+    async fn insert_token(
+        &self,
+        token_hash: &str,
+        user_id: &str,
+        device_id: &str,
+        expires_at: Option<DateTime<Utc>>,
+    ) -> Result<()>;
+
+    async fn lookup_token(&self, token_hash: &str) -> Result<Option<TokenOwner>>;
+
+    async fn revoke_token(&self, token_hash: &str) -> Result<()>;
+
+    // --- Server signing keys ------------------------------------------------
+
+    async fn insert_signing_key(
+        &self,
+        key_id: &str,
+        private_key: &[u8],
+        public_key: &[u8],
+        valid_until_ts: Option<i64>,
+    ) -> Result<()>;
+
+    /// The most-recently inserted signing key, if any.
+    async fn current_signing_key(&self) -> Result<Option<SigningKey>>;
+
+    /// All keys — current and retired-but-still-valid — suitable for
+    /// verification of inbound federation events.
+    async fn signing_keys_for_verification(&self) -> Result<Vec<SigningKey>>;
+
+    // --- Room current state -------------------------------------------------
+
+    /// Upsert a (room_id, type, state_key) → event_id mapping.
+    async fn set_state_entry(
+        &self,
+        room_id: &str,
+        event_type: &str,
+        state_key: &str,
+        event_id: &str,
+    ) -> Result<()>;
+
+    /// Look up a single current-state event.
+    async fn get_state_entry(
+        &self,
+        room_id: &str,
+        event_type: &str,
+        state_key: &str,
+    ) -> Result<Option<Event>>;
+
+    /// All current-state events for a room.
+    async fn get_current_state(&self, room_id: &str) -> Result<Vec<Event>>;
 }
+
+// ---------------------------------------------------------------------------
+// MemoryStorage — in-memory backend for tests and demos.  Not durable.
+// ---------------------------------------------------------------------------
 
 /// An in-memory [`Storage`] for tests and demos. Not durable.
 #[derive(Default)]
@@ -28,10 +173,21 @@ pub struct MemoryStorage {
 #[derive(Default)]
 struct MemoryInner {
     events: HashMap<String, Event>,
+    accounts: HashMap<String, Account>,
+    /// (user_id, device_id) → Device
+    devices: HashMap<(String, String), Device>,
+    /// token_hash → (user_id, device_id, expires_at)
+    tokens: HashMap<String, (String, String, Option<DateTime<Utc>>)>,
+    /// Ordered list of signing keys (push_back = newest).
+    signing_keys: Vec<SigningKey>,
+    /// (room_id, type, state_key) → event_id
+    room_state: HashMap<(String, String, String), String>,
 }
 
 #[async_trait]
 impl Storage for MemoryStorage {
+    // --- Events -------------------------------------------------------------
+
     async fn get_event(&self, event_id: &str) -> Result<Option<Event>> {
         Ok(self.inner.read().await.events.get(event_id).cloned())
     }
@@ -55,5 +211,216 @@ impl Storage for MemoryStorage {
             .filter(|e| e.room_id == room_id)
             .cloned()
             .collect())
+    }
+
+    // --- Accounts -----------------------------------------------------------
+
+    async fn create_account(
+        &self,
+        user_id: &str,
+        password_hash: Option<&str>,
+    ) -> Result<()> {
+        let mut inner = self.inner.write().await;
+        if inner.accounts.contains_key(user_id) {
+            return Err(crate::Error::Storage(format!(
+                "account already exists: {user_id}"
+            )));
+        }
+        inner.accounts.insert(
+            user_id.to_owned(),
+            Account {
+                user_id: user_id.to_owned(),
+                password_hash: password_hash.map(|s| s.to_owned()),
+                is_admin: false,
+                created_at: Utc::now(),
+                deactivated_at: None,
+            },
+        );
+        Ok(())
+    }
+
+    async fn get_account(&self, user_id: &str) -> Result<Option<Account>> {
+        Ok(self.inner.read().await.accounts.get(user_id).cloned())
+    }
+
+    async fn deactivate_account(&self, user_id: &str) -> Result<()> {
+        let mut inner = self.inner.write().await;
+        if let Some(acct) = inner.accounts.get_mut(user_id) {
+            acct.deactivated_at = Some(Utc::now());
+        }
+        Ok(())
+    }
+
+    async fn set_admin(&self, user_id: &str, is_admin: bool) -> Result<()> {
+        let mut inner = self.inner.write().await;
+        if let Some(acct) = inner.accounts.get_mut(user_id) {
+            acct.is_admin = is_admin;
+        }
+        Ok(())
+    }
+
+    // --- Devices ------------------------------------------------------------
+
+    async fn upsert_device(
+        &self,
+        user_id: &str,
+        device_id: &str,
+        display_name: Option<&str>,
+    ) -> Result<()> {
+        let mut inner = self.inner.write().await;
+        let key = (user_id.to_owned(), device_id.to_owned());
+        let entry = inner.devices.entry(key).or_insert_with(|| Device {
+            user_id: user_id.to_owned(),
+            device_id: device_id.to_owned(),
+            display_name: None,
+            last_seen_ts: None,
+            last_seen_ip: None,
+        });
+        entry.display_name = display_name.map(|s| s.to_owned());
+        Ok(())
+    }
+
+    async fn get_device(
+        &self,
+        user_id: &str,
+        device_id: &str,
+    ) -> Result<Option<Device>> {
+        let key = (user_id.to_owned(), device_id.to_owned());
+        Ok(self.inner.read().await.devices.get(&key).cloned())
+    }
+
+    async fn list_devices_for_user(&self, user_id: &str) -> Result<Vec<Device>> {
+        Ok(self
+            .inner
+            .read()
+            .await
+            .devices
+            .values()
+            .filter(|d| d.user_id == user_id)
+            .cloned()
+            .collect())
+    }
+
+    // --- Access tokens ------------------------------------------------------
+
+    async fn insert_token(
+        &self,
+        token_hash: &str,
+        user_id: &str,
+        device_id: &str,
+        expires_at: Option<DateTime<Utc>>,
+    ) -> Result<()> {
+        self.inner.write().await.tokens.insert(
+            token_hash.to_owned(),
+            (user_id.to_owned(), device_id.to_owned(), expires_at),
+        );
+        Ok(())
+    }
+
+    async fn lookup_token(&self, token_hash: &str) -> Result<Option<TokenOwner>> {
+        let inner = self.inner.read().await;
+        let Some((user_id, device_id, expires_at)) = inner.tokens.get(token_hash)
+        else {
+            return Ok(None);
+        };
+        // Treat expired tokens as absent.
+        if let Some(exp) = expires_at {
+            if Utc::now() > *exp {
+                return Ok(None);
+            }
+        }
+        Ok(Some(TokenOwner {
+            user_id: user_id.clone(),
+            device_id: device_id.clone(),
+        }))
+    }
+
+    async fn revoke_token(&self, token_hash: &str) -> Result<()> {
+        self.inner.write().await.tokens.remove(token_hash);
+        Ok(())
+    }
+
+    // --- Server signing keys ------------------------------------------------
+
+    async fn insert_signing_key(
+        &self,
+        key_id: &str,
+        private_key: &[u8],
+        public_key: &[u8],
+        valid_until_ts: Option<i64>,
+    ) -> Result<()> {
+        let key = SigningKey {
+            key_id: key_id.to_owned(),
+            private_key: private_key.to_vec(),
+            public_key: public_key.to_vec(),
+            valid_until_ts,
+            created_at: Utc::now(),
+        };
+        self.inner.write().await.signing_keys.push(key);
+        Ok(())
+    }
+
+    async fn current_signing_key(&self) -> Result<Option<SigningKey>> {
+        Ok(self.inner.read().await.signing_keys.last().cloned())
+    }
+
+    async fn signing_keys_for_verification(&self) -> Result<Vec<SigningKey>> {
+        // Return all keys.  Callers filter by valid_until_ts as needed.
+        Ok(self.inner.read().await.signing_keys.clone())
+    }
+
+    // --- Room current state -------------------------------------------------
+
+    async fn set_state_entry(
+        &self,
+        room_id: &str,
+        event_type: &str,
+        state_key: &str,
+        event_id: &str,
+    ) -> Result<()> {
+        let map_key = (
+            room_id.to_owned(),
+            event_type.to_owned(),
+            state_key.to_owned(),
+        );
+        self.inner
+            .write()
+            .await
+            .room_state
+            .insert(map_key, event_id.to_owned());
+        Ok(())
+    }
+
+    async fn get_state_entry(
+        &self,
+        room_id: &str,
+        event_type: &str,
+        state_key: &str,
+    ) -> Result<Option<Event>> {
+        let inner = self.inner.read().await;
+        let map_key = (
+            room_id.to_owned(),
+            event_type.to_owned(),
+            state_key.to_owned(),
+        );
+        let Some(event_id) = inner.room_state.get(&map_key) else {
+            return Ok(None);
+        };
+        Ok(inner.events.get(event_id).cloned())
+    }
+
+    async fn get_current_state(&self, room_id: &str) -> Result<Vec<Event>> {
+        let inner = self.inner.read().await;
+        let event_ids: Vec<String> = inner
+            .room_state
+            .iter()
+            .filter(|((rid, _, _), _)| rid == room_id)
+            .map(|(_, eid)| eid.clone())
+            .collect();
+        let events = event_ids
+            .iter()
+            .filter_map(|eid| inner.events.get(eid).cloned())
+            .collect();
+        Ok(events)
     }
 }

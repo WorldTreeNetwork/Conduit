@@ -20,3 +20,4 @@ axum = "0.7"
 tower = "0.4"
 tower-http = { version = "0.5", features = ["trace"] }
 sqlx = { version = "0.8", features = ["postgres", "runtime-tokio", "tls-rustls", "macros", "migrate"] }
+chrono = { version = "0.4", features = ["serde"] }
