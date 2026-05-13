@@ -4,8 +4,6 @@
 //! mainstream Rust HTTP stack). Mount Matrix routes here as you build
 //! them out in the library.
 
-mod storage_pg;
-
 use std::env;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -17,6 +15,7 @@ use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
 
 use conduit::storage::Storage;
+use conduit_server::PostgresStorage;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -39,7 +38,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     sqlx::migrate!("./migrations").run(&pool).await?;
     tracing::info!("migrations applied");
 
-    let storage: Arc<dyn Storage> = storage_pg::PostgresStorage::new(pool).into_arc();
+    let storage: Arc<dyn Storage> = PostgresStorage::new(pool).into_arc();
 
     let app = Router::new()
         .route("/health", get(health))
