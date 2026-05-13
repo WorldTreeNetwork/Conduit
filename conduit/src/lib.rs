@@ -19,6 +19,7 @@
 //! [Matrix specification]: https://spec.matrix.org/
 
 pub mod api;
+pub mod auth;
 pub mod canonical_json;
 pub mod config;
 pub mod error;
@@ -27,6 +28,7 @@ pub mod hashing;
 pub mod keys;
 pub mod room;
 pub mod signing;
+pub mod state_events;
 pub mod storage;
 pub mod transport;
 
