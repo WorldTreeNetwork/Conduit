@@ -432,7 +432,48 @@ async fn room_current_state_round_trip() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 7: persists_across_pool_restart (the "process restart" check)
+// Test 7: signing_keys_rotation
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn signing_keys_rotation() {
+    let db = TempDb::new().await;
+    let s = db.storage();
+
+    // Insert the first key with no expiry.
+    s.insert_signing_key("ed25519:key1", b"priv1", b"pub1", None)
+        .await
+        .unwrap();
+
+    // Set an expiry on it — simulating retire-on-rotate.
+    s.set_signing_key_expiry("ed25519:key1", 99_999_999)
+        .await
+        .unwrap();
+
+    // Verify the row's valid_until_ts was updated.
+    let all = s.signing_keys_for_verification().await.unwrap();
+    assert_eq!(all.len(), 1);
+    assert_eq!(all[0].valid_until_ts, Some(99_999_999));
+
+    // Insert a second (newer) key.
+    s.insert_signing_key("ed25519:key2", b"priv2", b"pub2", None)
+        .await
+        .unwrap();
+
+    // current_signing_key returns the newer one.
+    let current = s.current_signing_key().await.unwrap().expect("must have current key");
+    assert_eq!(current.key_id, "ed25519:key2");
+
+    // signing_keys_for_verification returns both.
+    let all = s.signing_keys_for_verification().await.unwrap();
+    assert_eq!(all.len(), 2);
+    let ids: Vec<&str> = all.iter().map(|k| k.key_id.as_str()).collect();
+    assert!(ids.contains(&"ed25519:key1"), "retired key must still be present");
+    assert!(ids.contains(&"ed25519:key2"), "new key must be present");
+}
+
+// ---------------------------------------------------------------------------
+// Test 8: persists_across_pool_restart (the "process restart" check)
 // ---------------------------------------------------------------------------
 
 #[tokio::test]

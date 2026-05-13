@@ -137,6 +137,13 @@ pub trait Storage: Send + Sync + 'static {
     /// verification of inbound federation events.
     async fn signing_keys_for_verification(&self) -> Result<Vec<SigningKey>>;
 
+    /// Mark a signing key as retired by setting its `valid_until_ts`.
+    ///
+    /// After this, the key is no longer "current" (won't be returned by
+    /// `current_signing_key` once a newer key exists) but stays in
+    /// `signing_keys_for_verification` until callers filter by ts.
+    async fn set_signing_key_expiry(&self, key_id: &str, valid_until_ts: i64) -> Result<()>;
+
     // --- Room current state -------------------------------------------------
 
     /// Upsert a (room_id, type, state_key) → event_id mapping.
@@ -369,6 +376,17 @@ impl Storage for MemoryStorage {
         Ok(self.inner.read().await.signing_keys.clone())
     }
 
+    async fn set_signing_key_expiry(&self, key_id: &str, valid_until_ts: i64) -> Result<()> {
+        let mut inner = self.inner.write().await;
+        for key in inner.signing_keys.iter_mut() {
+            if key.key_id == key_id {
+                key.valid_until_ts = Some(valid_until_ts);
+                return Ok(());
+            }
+        }
+        Ok(())
+    }
+
     // --- Room current state -------------------------------------------------
 
     async fn set_state_entry(
@@ -422,5 +440,38 @@ impl Storage for MemoryStorage {
             .filter_map(|eid| inner.events.get(eid).cloned())
             .collect();
         Ok(events)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests for MemoryStorage
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn set_signing_key_expiry_updates_existing() {
+        let store = MemoryStorage::default();
+
+        store
+            .insert_signing_key("ed25519:abc", b"priv", b"pub", None)
+            .await
+            .unwrap();
+
+        // Confirm no expiry yet.
+        let keys = store.signing_keys_for_verification().await.unwrap();
+        assert_eq!(keys.len(), 1);
+        assert!(keys[0].valid_until_ts.is_none());
+
+        store
+            .set_signing_key_expiry("ed25519:abc", 12345)
+            .await
+            .unwrap();
+
+        let keys = store.signing_keys_for_verification().await.unwrap();
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].valid_until_ts, Some(12345));
     }
 }

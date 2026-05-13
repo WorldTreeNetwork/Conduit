@@ -464,6 +464,23 @@ impl Storage for PostgresStorage {
         Ok(keys)
     }
 
+    async fn set_signing_key_expiry(&self, key_id: &str, valid_until_ts: i64) -> Result<()> {
+        sqlx::query!(
+            r#"
+            UPDATE server_signing_keys
+            SET valid_until_ts = $2
+            WHERE key_id = $1
+            "#,
+            key_id,
+            valid_until_ts
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+
+        Ok(())
+    }
+
     // -----------------------------------------------------------------------
     // Room current state
     // -----------------------------------------------------------------------

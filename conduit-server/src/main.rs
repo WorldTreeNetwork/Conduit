@@ -119,7 +119,31 @@ async fn server_keys(State(state): State<AppState>) -> Json<serde_json::Value> {
     let pub_b64 = STANDARD_NO_PAD.encode(&pub_bytes);
 
     // valid_until_ts: 24 hours from now in milliseconds.
-    let valid_until_ts = Utc::now().timestamp_millis() + 24 * 60 * 60 * 1000;
+    let now_ms = Utc::now().timestamp_millis();
+    let valid_until_ts = now_ms + 24 * 60 * 60 * 1000;
+
+    // Build old_verify_keys: retired keys whose grace window hasn't expired.
+    let mut old_verify_keys = serde_json::Map::new();
+    if let Ok(all_keys) = state.storage.signing_keys_for_verification().await {
+        for k in all_keys {
+            // Skip the current key — it belongs in verify_keys, not old_verify_keys.
+            if k.key_id == *key_id {
+                continue;
+            }
+            // Only include keys that are still within their grace window.
+            if let Some(expiry) = k.valid_until_ts {
+                if expiry > now_ms {
+                    let k_pub_b64 = STANDARD_NO_PAD.encode(&k.public_key);
+                    old_verify_keys.insert(
+                        k.key_id.clone(),
+                        json!({ "key": k_pub_b64, "expired_ts": expiry }),
+                    );
+                }
+            }
+            // Keys with no valid_until_ts (shouldn't exist for retired keys,
+            // but defensively skip them — they aren't retired yet).
+        }
+    }
 
     // Build the unsigned response object.
     let unsigned = json!({
@@ -127,7 +151,7 @@ async fn server_keys(State(state): State<AppState>) -> Json<serde_json::Value> {
         "verify_keys": {
             key_id: { "key": pub_b64 }
         },
-        "old_verify_keys": {},
+        "old_verify_keys": old_verify_keys,
         "valid_until_ts": valid_until_ts
     });
 
