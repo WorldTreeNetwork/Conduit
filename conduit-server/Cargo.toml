@@ -23,6 +23,7 @@ sqlx = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }
 ed25519-dalek = { workspace = true }
+base64 = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
