@@ -21,3 +21,6 @@ tower = "0.4"
 tower-http = { version = "0.5", features = ["trace"] }
 sqlx = { version = "0.8", features = ["postgres", "runtime-tokio", "tls-rustls", "macros", "migrate", "chrono"] }
 chrono = { version = "0.4", features = ["serde"] }
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
+base64 = "0.22"

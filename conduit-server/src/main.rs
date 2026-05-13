@@ -15,7 +15,7 @@ use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
 
 use conduit::storage::Storage;
-use conduit_server::PostgresStorage;
+use conduit_server::{keys, PostgresStorage};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -39,6 +39,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!("migrations applied");
 
     let storage: Arc<dyn Storage> = PostgresStorage::new(pool).into_arc();
+
+    let server_key = keys::load_or_generate(&*storage).await?;
+    tracing::info!(key_id = %server_key.key_id, "server signing key ready");
 
     let app = Router::new()
         .route("/health", get(health))

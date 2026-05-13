@@ -22,6 +22,7 @@ serde_json = { workspace = true }
 sqlx = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }
+ed25519-dalek = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
