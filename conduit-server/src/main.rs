@@ -4,21 +4,23 @@
 //! mainstream Rust HTTP stack). Mount Matrix routes here as you build
 //! them out in the library.
 
+use std::collections::HashMap;
 use std::env;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use axum::{extract::State, routing::{get, post}, Json, Router};
+use axum::{extract::State, routing::{get, post, put}, Json, Router};
 use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine as _};
 use chrono::Utc;
 use ed25519_dalek::Signer as _;
 use serde_json::json;
 use sqlx::postgres::PgPoolOptions;
+use tokio::sync::RwLock;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
 
 use conduit::{keys::ServerKey, storage::Storage};
-use conduit_server::{api::client::AuthState, keys, PostgresStorage, RemoteKeyCache};
+use conduit_server::{api::client::{AuthState, TxnCacheKey}, keys, PostgresStorage, RemoteKeyCache};
 
 /// Shared application state threaded through axum.
 #[derive(Clone)]
@@ -28,6 +30,7 @@ struct AppState {
     server_name: Arc<str>,
     http: reqwest::Client,
     remote_keys: Arc<RemoteKeyCache>,
+    txn_cache: Arc<RwLock<HashMap<TxnCacheKey, String>>>,
 }
 
 impl AuthState for AppState {
@@ -36,6 +39,12 @@ impl AuthState for AppState {
     }
     fn server_name(&self) -> &str {
         &self.server_name
+    }
+    fn server_key(&self) -> Arc<conduit::keys::ServerKey> {
+        Arc::clone(&self.server_key)
+    }
+    fn txn_cache(&self) -> &Arc<RwLock<HashMap<TxnCacheKey, String>>> {
+        &self.txn_cache
     }
 }
 
@@ -89,20 +98,44 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         server_name,
         http,
         remote_keys,
+        txn_cache: Arc::new(RwLock::new(HashMap::new())),
     };
 
     use conduit_server::api::client as auth;
+    use conduit_server::api::client::rooms as rooms;
 
     let app = Router::new()
         .route("/health", get(health))
         .route("/_matrix/client/versions", get(versions))
         .route("/_matrix/key/v2/server", get(server_keys))
-        .route("/_matrix/key/v2/server/{key_id}", get(server_keys))
+        .route("/_matrix/key/v2/server/:key_id", get(server_keys))
         // Client-Server API: auth
         .route("/_matrix/client/v3/register", post(auth::register::<AppState>))
         .route("/_matrix/client/v3/login", get(auth::get_login_flows).post(auth::login::<AppState>))
         .route("/_matrix/client/v3/logout", post(auth::logout::<AppState>))
         .route("/_matrix/client/v3/account/whoami", get(auth::whoami))
+        // Client-Server API: rooms
+        .route("/_matrix/client/v3/createRoom", post(rooms::create_room::<AppState>))
+        .route("/_matrix/client/v3/join/:roomIdOrAlias", post(rooms::join_room::<AppState>))
+        .route("/_matrix/client/v3/rooms/:roomId/leave", post(rooms::leave_room::<AppState>))
+        .route("/_matrix/client/v3/rooms/:roomId/kick", post(rooms::kick_user::<AppState>))
+        .route("/_matrix/client/v3/rooms/:roomId/ban", post(rooms::ban_user::<AppState>))
+        .route("/_matrix/client/v3/rooms/:roomId/unban", post(rooms::unban_user::<AppState>))
+        .route("/_matrix/client/v3/rooms/:roomId/invite", post(rooms::invite_user::<AppState>))
+        .route("/_matrix/client/v3/rooms/:roomId/send/:eventType/:txnId",
+            put(rooms::send_message_event::<AppState>))
+        .route("/_matrix/client/v3/rooms/:roomId/state/:eventType",
+            put(rooms::send_state_event::<AppState>)
+            .get(rooms::get_state_event_no_key::<AppState>))
+        .route("/_matrix/client/v3/rooms/:roomId/state/:eventType/:stateKey",
+            put(rooms::send_state_event_with_key::<AppState>)
+            .get(rooms::get_state_event::<AppState>))
+        .route("/_matrix/client/v3/rooms/:roomId/state",
+            get(rooms::get_room_state::<AppState>))
+        .route("/_matrix/client/v3/rooms/:roomId/joined_members",
+            get(rooms::joined_members::<AppState>))
+        .route("/_matrix/client/v3/rooms/:roomId/messages",
+            get(rooms::get_messages::<AppState>))
         .with_state(state)
         .layer(TraceLayer::new_for_http());
 

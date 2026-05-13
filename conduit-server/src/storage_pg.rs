@@ -591,4 +591,157 @@ impl Storage for PostgresStorage {
 
         Ok(events)
     }
+
+    async fn room_events_paginated(
+        &self,
+        room_id: &str,
+        dir: char,
+        from: i64,
+        limit: i64,
+    ) -> Result<(Vec<Event>, Option<i64>)> {
+        // `from` is treated as an inclusive stream_position boundary.
+        // For 'b' (backwards): fetch events with stream_position <= from,
+        // ordered descending, limited to `limit`. The next cursor is the
+        // stream_position of the last returned event minus one.
+        // For 'f' (forwards): fetch events with stream_position >= from,
+        // ordered ascending, limited to `limit`.
+        struct Row {
+            event_id: String,
+            room_id: String,
+            sender: String,
+            event_type: String,
+            state_key: Option<String>,
+            content: serde_json::Value,
+            auth_events: Vec<String>,
+            prev_events: Vec<String>,
+            hashes: serde_json::Value,
+            signatures: serde_json::Value,
+            unsigned: Option<serde_json::Value>,
+            origin_server_ts: i64,
+            depth: i64,
+            stream_position: i64,
+        }
+
+        let rows: Vec<Row> = if dir == 'b' {
+            sqlx::query!(
+                r#"
+                SELECT event_id, room_id, sender, type AS event_type, state_key,
+                       content, auth_events, prev_events, hashes, signatures,
+                       unsigned, origin_server_ts, depth, stream_position
+                FROM events
+                WHERE room_id = $1 AND stream_position <= $2
+                ORDER BY stream_position DESC
+                LIMIT $3
+                "#,
+                room_id,
+                from,
+                limit
+            )
+            .fetch_all(&self.pool)
+            .await
+            .map_err(map_sqlx)?
+            .into_iter()
+            .map(|r| Row {
+                event_id: r.event_id,
+                room_id: r.room_id,
+                sender: r.sender,
+                event_type: r.event_type,
+                state_key: r.state_key,
+                content: r.content,
+                auth_events: r.auth_events,
+                prev_events: r.prev_events,
+                hashes: r.hashes,
+                signatures: r.signatures,
+                unsigned: r.unsigned,
+                origin_server_ts: r.origin_server_ts,
+                depth: r.depth,
+                stream_position: r.stream_position,
+            })
+            .collect()
+        } else {
+            sqlx::query!(
+                r#"
+                SELECT event_id, room_id, sender, type AS event_type, state_key,
+                       content, auth_events, prev_events, hashes, signatures,
+                       unsigned, origin_server_ts, depth, stream_position
+                FROM events
+                WHERE room_id = $1 AND stream_position >= $2
+                ORDER BY stream_position ASC
+                LIMIT $3
+                "#,
+                room_id,
+                from,
+                limit
+            )
+            .fetch_all(&self.pool)
+            .await
+            .map_err(map_sqlx)?
+            .into_iter()
+            .map(|r| Row {
+                event_id: r.event_id,
+                room_id: r.room_id,
+                sender: r.sender,
+                event_type: r.event_type,
+                state_key: r.state_key,
+                content: r.content,
+                auth_events: r.auth_events,
+                prev_events: r.prev_events,
+                hashes: r.hashes,
+                signatures: r.signatures,
+                unsigned: r.unsigned,
+                origin_server_ts: r.origin_server_ts,
+                depth: r.depth,
+                stream_position: r.stream_position,
+            })
+            .collect()
+        };
+
+        // Determine next cursor from the last event's stream_position.
+        let next: Option<i64> = rows.last().map(|r| {
+            if dir == 'b' {
+                r.stream_position - 1
+            } else {
+                r.stream_position + 1
+            }
+        });
+        // If we got fewer rows than limit, there is no next page.
+        let next = if (rows.len() as i64) < limit { None } else { next };
+
+        let events = rows
+            .into_iter()
+            .map(|r| Event {
+                event_id: r.event_id,
+                room_id: r.room_id,
+                sender: r.sender,
+                event_type: r.event_type,
+                state_key: r.state_key,
+                content: r.content,
+                origin_server_ts: r.origin_server_ts as u64,
+                auth_events: r.auth_events,
+                prev_events: r.prev_events,
+                hashes: r.hashes,
+                signatures: r.signatures,
+                depth: r.depth,
+                unsigned: r.unsigned,
+            })
+            .collect();
+
+        Ok((events, next))
+    }
+
+    async fn room_latest_stream_position(&self, room_id: &str) -> Result<Option<i64>> {
+        let row = sqlx::query!(
+            r#"
+            SELECT MAX(stream_position) AS max_pos
+            FROM events
+            WHERE room_id = $1
+            "#,
+            room_id
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+
+        Ok(row.max_pos)
+    }
 }

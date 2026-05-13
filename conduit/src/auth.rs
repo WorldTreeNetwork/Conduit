@@ -392,35 +392,46 @@ fn check_member(
                 return Err(AuthError::JoinTargetBanned);
             }
 
-            match &join_rule {
-                JoinRule::Public => {} // anyone can join
-                JoinRule::Invite | JoinRule::Knock => {
-                    // Must have a prior invite (or already joined).
-                    match &target_membership {
-                        Some(Membership::Invite) | Some(Membership::Join) => {}
-                        _ => {
-                            return Err(AuthError::JoinRequiresInvite {
-                                join_rule: join_rule.clone(),
-                            })
+            // Special exemption: if there is no m.room.join_rules event yet
+            // (absent from auth_state) and the sender is the room creator,
+            // allow the join.  This covers the creator's initial self-join
+            // during room bootstrapping before join_rules has been authored.
+            let join_rules_absent = !auth_state
+                .contains_key(&("m.room.join_rules".to_owned(), String::new()));
+            let sender_is_creator = creator.as_deref() == Some(event.sender.as_str());
+            if join_rules_absent && sender_is_creator && state_key == event.sender {
+                // Creator bootstrapping the room — allow unconditionally.
+            } else {
+                match &join_rule {
+                    JoinRule::Public => {} // anyone can join
+                    JoinRule::Invite | JoinRule::Knock => {
+                        // Must have a prior invite (or already joined).
+                        match &target_membership {
+                            Some(Membership::Invite) | Some(Membership::Join) => {}
+                            _ => {
+                                return Err(AuthError::JoinRequiresInvite {
+                                    join_rule: join_rule.clone(),
+                                })
+                            }
                         }
                     }
-                }
-                JoinRule::Restricted | JoinRule::KnockRestricted => {
-                    // Simplified: require invite (full restricted-room join
-                    // requires checking allow conditions — deferred to follow-up).
-                    match &target_membership {
-                        Some(Membership::Invite) | Some(Membership::Join) => {}
-                        _ => {
-                            return Err(AuthError::JoinRequiresInvite {
-                                join_rule: join_rule.clone(),
-                            })
+                    JoinRule::Restricted | JoinRule::KnockRestricted => {
+                        // Simplified: require invite (full restricted-room join
+                        // requires checking allow conditions — deferred to follow-up).
+                        match &target_membership {
+                            Some(Membership::Invite) | Some(Membership::Join) => {}
+                            _ => {
+                                return Err(AuthError::JoinRequiresInvite {
+                                    join_rule: join_rule.clone(),
+                                })
+                            }
                         }
                     }
-                }
-                JoinRule::Private => {
-                    return Err(AuthError::JoinRequiresInvite {
-                        join_rule: join_rule.clone(),
-                    });
+                    JoinRule::Private => {
+                        return Err(AuthError::JoinRequiresInvite {
+                            join_rule: join_rule.clone(),
+                        });
+                    }
                 }
             }
         }

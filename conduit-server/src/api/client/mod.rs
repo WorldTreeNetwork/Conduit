@@ -7,9 +7,14 @@
 //!   POST /_matrix/client/v3/logout
 //!   GET  /_matrix/client/v3/account/whoami
 
+pub mod event_pipeline;
+pub mod rooms;
 pub mod uia;
 
+use std::collections::HashMap;
 use std::sync::Arc;
+
+use tokio::sync::RwLock;
 
 use argon2::{
     Argon2,
@@ -28,6 +33,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
+use conduit::keys::ServerKey;
 use conduit::storage::Storage;
 
 // ---------------------------------------------------------------------------
@@ -38,9 +44,16 @@ use conduit::storage::Storage;
 /// Minimal state surface that auth handlers need.
 /// `main.rs` satisfies this by passing its concrete `AppState` which
 /// implements `Clone` and holds `storage` + `server_name`.
+/// Key type for the idempotency cache.
+pub type TxnCacheKey = (String, String, String); // (user_id, device_id, txn_id)
+
 pub trait AuthState: Clone + Send + Sync + 'static {
     fn storage(&self) -> &Arc<dyn Storage>;
     fn server_name(&self) -> &str;
+    /// The server's signing key (ed25519).  Used by the event pipeline.
+    fn server_key(&self) -> Arc<ServerKey>;
+    /// Shared in-memory idempotency cache for `PUT /send/.../:txnId`.
+    fn txn_cache(&self) -> &Arc<RwLock<HashMap<TxnCacheKey, String>>>;
 }
 
 // ---------------------------------------------------------------------------

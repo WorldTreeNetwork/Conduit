@@ -165,6 +165,25 @@ pub trait Storage: Send + Sync + 'static {
 
     /// All current-state events for a room.
     async fn get_current_state(&self, room_id: &str) -> Result<Vec<Event>>;
+
+    /// Paginated room timeline.
+    ///
+    /// `dir` is `'f'` (forward / chronological) or `'b'` (backward).
+    /// `from` is an inclusive stream_position cursor (0 = start of room).
+    /// Returns at most `limit` events ordered by stream_position in the
+    /// requested direction, together with the next cursor (or `None` if
+    /// the end has been reached).
+    async fn room_events_paginated(
+        &self,
+        room_id: &str,
+        dir: char,
+        from: i64,
+        limit: i64,
+    ) -> Result<(Vec<Event>, Option<i64>)>;
+
+    /// The highest stream_position for events in `room_id`, or `None` if the
+    /// room has no events yet.
+    async fn room_latest_stream_position(&self, room_id: &str) -> Result<Option<i64>>;
 }
 
 // ---------------------------------------------------------------------------
@@ -440,6 +459,64 @@ impl Storage for MemoryStorage {
             .filter_map(|eid| inner.events.get(eid).cloned())
             .collect();
         Ok(events)
+    }
+
+    async fn room_events_paginated(
+        &self,
+        room_id: &str,
+        dir: char,
+        from: i64,
+        limit: i64,
+    ) -> Result<(Vec<Event>, Option<i64>)> {
+        let inner = self.inner.read().await;
+        // MemoryStorage doesn't have stream_position; use insertion order via
+        // the events map. We simulate stream_position as the index in a sorted
+        // Vec of room events.
+        let mut room_evs: Vec<Event> = inner
+            .events
+            .values()
+            .filter(|e| e.room_id == room_id)
+            .cloned()
+            .collect();
+        // Stable sort by depth as a proxy for stream_position in memory tests.
+        room_evs.sort_by_key(|e| e.depth);
+
+        let total = room_evs.len() as i64;
+        let (slice, next): (Vec<Event>, Option<i64>) = match dir {
+            'b' => {
+                // backwards from `from` (inclusive)
+                let end = (from + 1).min(total) as usize;
+                let start = (end as i64 - limit).max(0) as usize;
+                let chunk: Vec<Event> = room_evs[start..end]
+                    .iter()
+                    .rev()
+                    .cloned()
+                    .collect();
+                let next = if start > 0 { Some(start as i64 - 1) } else { None };
+                (chunk, next)
+            }
+            _ => {
+                // forwards from `from` (inclusive)
+                let start = from.max(0) as usize;
+                let end = (start as i64 + limit).min(total) as usize;
+                let chunk: Vec<Event> = room_evs[start..end].to_vec();
+                let next = if (end as i64) < total { Some(end as i64) } else { None };
+                (chunk, next)
+            }
+        };
+        Ok((slice, next))
+    }
+
+    async fn room_latest_stream_position(&self, room_id: &str) -> Result<Option<i64>> {
+        let inner = self.inner.read().await;
+        let max_depth = inner
+            .events
+            .values()
+            .filter(|e| e.room_id == room_id)
+            .map(|e| e.depth)
+            .max();
+        // In MemoryStorage depth serves as stream_position proxy.
+        Ok(max_depth)
     }
 }
 
