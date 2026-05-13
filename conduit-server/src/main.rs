@@ -8,7 +8,7 @@ use std::env;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use axum::{extract::State, routing::get, Json, Router};
+use axum::{extract::State, routing::{get, post}, Json, Router};
 use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine as _};
 use chrono::Utc;
 use ed25519_dalek::Signer as _;
@@ -18,7 +18,7 @@ use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
 
 use conduit::{keys::ServerKey, storage::Storage};
-use conduit_server::{keys, PostgresStorage, RemoteKeyCache};
+use conduit_server::{api::client::AuthState, keys, PostgresStorage, RemoteKeyCache};
 
 /// Shared application state threaded through axum.
 #[derive(Clone)]
@@ -28,6 +28,15 @@ struct AppState {
     server_name: Arc<str>,
     http: reqwest::Client,
     remote_keys: Arc<RemoteKeyCache>,
+}
+
+impl AuthState for AppState {
+    fn storage(&self) -> &Arc<dyn Storage> {
+        &self.storage
+    }
+    fn server_name(&self) -> &str {
+        &self.server_name
+    }
 }
 
 #[tokio::main]
@@ -82,11 +91,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         remote_keys,
     };
 
+    use conduit_server::api::client as auth;
+
     let app = Router::new()
         .route("/health", get(health))
         .route("/_matrix/client/versions", get(versions))
         .route("/_matrix/key/v2/server", get(server_keys))
         .route("/_matrix/key/v2/server/{key_id}", get(server_keys))
+        // Client-Server API: auth
+        .route("/_matrix/client/v3/register", post(auth::register::<AppState>))
+        .route("/_matrix/client/v3/login", get(auth::get_login_flows).post(auth::login::<AppState>))
+        .route("/_matrix/client/v3/logout", post(auth::logout::<AppState>))
+        .route("/_matrix/client/v3/account/whoami", get(auth::whoami))
         .with_state(state)
         .layer(TraceLayer::new_for_http());
 
