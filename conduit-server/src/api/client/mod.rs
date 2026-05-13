@@ -13,6 +13,7 @@ pub mod keys;
 pub mod media;
 pub mod presence;
 pub mod profile;
+pub mod push;
 pub mod receipts;
 pub mod rooms;
 pub mod sync;

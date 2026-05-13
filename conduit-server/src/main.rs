@@ -25,13 +25,14 @@ use conduit::{keys::ServerKey, storage::Storage};
 use conduit_server::{
     api::client::{AuthState, TxnCacheKey, TypingStore, PresenceStore},
     api::client::media::{MediaState, cleanup_remote_media},
+    app_service::{self, AppService, AsQueues},
     federation,
     federation::{
         FedState, XMatrixMiddlewareState, RateLimiter, federation_router,
         middleware::verify_xmatrix,
         rate_limit::rate_limit,
     },
-    keys, BlobStore, PostgresStorage, RemoteKeyCache,
+    keys, push_worker, BlobStore, PostgresStorage, RemoteKeyCache,
 };
 
 /// Shared application state threaded through axum.
@@ -58,6 +59,8 @@ struct AppState {
     presence_store: Arc<PresenceStore>,
     /// Blob storage for uploaded / cached media (E07).
     blob_store: BlobStore,
+    /// Loaded Application Service registrations (E11 AS1).
+    app_services: Arc<Vec<AppService>>,
 }
 
 impl AuthState for AppState {
@@ -84,6 +87,15 @@ impl AuthState for AppState {
     }
     fn presence_store(&self) -> &Arc<PresenceStore> {
         &self.presence_store
+    }
+}
+
+impl conduit_server::app_service::AsState for AppState {
+    fn app_services(&self) -> &Arc<Vec<AppService>> {
+        &self.app_services
+    }
+    fn storage(&self) -> &Arc<dyn Storage> {
+        &self.storage
     }
 }
 
@@ -174,6 +186,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|e| format!("failed to initialise media blob store: {e}"))?;
     tracing::info!(root = ?std::env::var("CONDUIT_MEDIA_ROOT").unwrap_or_else(|_| "./media-data".to_owned()), "media blob store ready");
 
+    // Load Application Service registrations (E11 AS1).
+    let as_dir = env::var("CONDUIT_AS_REGISTRATIONS_DIR")
+        .unwrap_or_else(|_| "./as-registrations".to_owned());
+    let app_services: Arc<Vec<AppService>> = Arc::new(app_service::load_app_services(&as_dir));
+    tracing::info!(count = app_services.len(), "application services loaded");
+
     let state = AppState {
         storage,
         server_key,
@@ -188,6 +206,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         typing_tx,
         presence_store,
         blob_store,
+        app_services,
     };
 
     use conduit_server::api::client as auth;
@@ -196,10 +215,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     use conduit_server::api::client::media as media_api;
     use conduit_server::api::client::presence as presence_api;
     use conduit_server::api::client::profile as profile_api;
+    use conduit_server::api::client::push as push_api;
     use conduit_server::api::client::receipts as receipts_api;
     use conduit_server::api::client::rooms as rooms;
     use conduit_server::api::client::sync as sync_api;
     use conduit_server::api::client::typing as typing_api;
+    use conduit_server::api::admin as admin_api;
+
+    // Spawn push notification background worker (E11 P5).
+    {
+        let push_rx = state.events_tx.subscribe();
+        push_worker::spawn_push_worker(
+            Arc::clone(&state.storage),
+            state.http.clone(),
+            push_rx,
+        );
+        tracing::info!("push notification worker started");
+    }
+
+    // Spawn AS transaction pusher workers (E11 AS5, AS7).
+    {
+        let as_rx = state.events_tx.subscribe();
+        let as_queues = Arc::new(AsQueues::new(&state.app_services));
+        app_service::spawn_as_workers(
+            Arc::clone(&state.app_services),
+            Arc::clone(&as_queues),
+            state.http.clone(),
+            as_rx,
+            Arc::clone(&state.storage),
+        );
+        tracing::info!("AS transaction pusher workers started");
+    }
 
     // Build the X-Matrix middleware state (for inbound federation auth).
     let xmatrix_state = XMatrixMiddlewareState {
@@ -345,6 +391,52 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             get(media_api::thumbnail_authed::<AppState>))
         .route("/_matrix/client/v1/media/config",
             get(media_api::media_config::<AppState>))
+        // Push (E11 P1–P2)
+        .route("/_matrix/client/v3/pushers",
+            get(push_api::get_pushers::<AppState>))
+        .route("/_matrix/client/v3/pushers/set",
+            post(push_api::set_pusher::<AppState>))
+        .route("/_matrix/client/v3/pushrules/",
+            get(push_api::get_all_push_rules::<AppState>))
+        .route("/_matrix/client/v3/pushrules/:scope/:kind/:ruleId",
+            get(push_api::get_push_rule::<AppState>)
+            .put(push_api::put_push_rule::<AppState>)
+            .delete(push_api::delete_push_rule::<AppState>))
+        .route("/_matrix/client/v3/pushrules/:scope/:kind/:ruleId/enabled",
+            get(push_api::get_push_rule_enabled::<AppState>)
+            .put(push_api::put_push_rule_enabled::<AppState>))
+        .route("/_matrix/client/v3/pushrules/:scope/:kind/:ruleId/actions",
+            get(push_api::get_push_rule_actions::<AppState>)
+            .put(push_api::put_push_rule_actions::<AppState>))
+        .route("/_matrix/client/v3/notifications",
+            get(push_api::get_notifications::<AppState>))
+        // Admin API (E11 AD1–AD6)
+        .route("/_matrix/conduit/admin/v1/users",
+            get(admin_api::list_users::<AppState>))
+        .route("/_matrix/conduit/admin/v1/users/:userId",
+            get(admin_api::get_user::<AppState>))
+        .route("/_matrix/conduit/admin/v1/users/:userId/deactivate",
+            post(admin_api::deactivate_user::<AppState>))
+        .route("/_matrix/conduit/admin/v1/users/:userId/reset_password",
+            post(admin_api::reset_password::<AppState>))
+        .route("/_matrix/conduit/admin/v1/users/:userId/admin",
+            post(admin_api::set_admin::<AppState>))
+        .route("/_matrix/conduit/admin/v1/rooms",
+            get(admin_api::list_rooms::<AppState>))
+        .route("/_matrix/conduit/admin/v1/rooms/:roomId/purge",
+            post(admin_api::purge_room::<AppState>))
+        .route("/_matrix/conduit/admin/v1/rooms/:roomId/leave_user",
+            post(admin_api::leave_user::<AppState>))
+        .route("/_matrix/conduit/admin/v1/media",
+            get(admin_api::list_media::<AppState>))
+        .route("/_matrix/conduit/admin/v1/media/:mediaId",
+            axum::routing::delete(admin_api::delete_media::<AppState>))
+        .route("/_matrix/conduit/admin/v1/federation/peers",
+            get(admin_api::list_federation_peers::<AppState>))
+        .route("/_matrix/conduit/admin/v1/federation/disable",
+            post(admin_api::disable_federation::<AppState>))
+        .route("/_matrix/conduit/admin/v1/audit",
+            get(admin_api::get_audit_log::<AppState>))
         // Federation inbound (E09)
         .nest("/_matrix/federation/v1", fed_router)
         .with_state(state.clone())

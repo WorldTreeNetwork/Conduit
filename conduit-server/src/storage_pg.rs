@@ -17,8 +17,8 @@ use conduit::{
     Error, Result,
     event::Event,
     storage::{
-        Account, Device, MediaMetadata, RoomKeyVersion, SigningKey, Storage, ThumbnailMetadata,
-        ToDeviceMessage, TokenOwner,
+        Account, AuditEntry, Device, MediaMetadata, Pusher, PushRule, RoomKeyVersion,
+        SigningKey, Storage, ThumbnailMetadata, ToDeviceMessage, TokenOwner,
     },
 };
 
@@ -1818,5 +1818,377 @@ impl Storage for PostgresStorage {
             file_size: r.file_size,
             storage_path: r.storage_path,
         }))
+    }
+
+    // -----------------------------------------------------------------------
+    // Push (E11 P1–P6)
+    // -----------------------------------------------------------------------
+
+    async fn upsert_pusher(&self, p: &Pusher) -> Result<()> {
+        sqlx::query!(
+            r#"
+            INSERT INTO pushers
+                (user_id, pushkey, app_id, app_display_name, device_display_name,
+                 kind, lang, profile_tag, url, format, data)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+            ON CONFLICT (user_id, pushkey, app_id) DO UPDATE SET
+                app_display_name    = EXCLUDED.app_display_name,
+                device_display_name = EXCLUDED.device_display_name,
+                kind                = EXCLUDED.kind,
+                lang                = EXCLUDED.lang,
+                profile_tag         = EXCLUDED.profile_tag,
+                url                 = EXCLUDED.url,
+                format              = EXCLUDED.format,
+                data                = EXCLUDED.data
+            "#,
+            p.user_id,
+            p.pushkey,
+            p.app_id,
+            p.app_display_name,
+            p.device_display_name,
+            p.kind,
+            p.lang,
+            p.profile_tag,
+            p.url,
+            p.format,
+            p.data,
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(())
+    }
+
+    async fn delete_pusher(&self, user_id: &str, pushkey: &str, app_id: &str) -> Result<()> {
+        sqlx::query!(
+            "DELETE FROM pushers WHERE user_id = $1 AND pushkey = $2 AND app_id = $3",
+            user_id, pushkey, app_id
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(())
+    }
+
+    async fn list_pushers(&self, user_id: &str) -> Result<Vec<Pusher>> {
+        let rows = sqlx::query!(
+            r#"
+            SELECT user_id, pushkey, app_id, app_display_name, device_display_name,
+                   kind, lang, profile_tag, url, format, data
+            FROM pushers
+            WHERE user_id = $1
+            ORDER BY created_at
+            "#,
+            user_id
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+
+        Ok(rows.into_iter().map(|r| Pusher {
+            user_id: r.user_id,
+            pushkey: r.pushkey,
+            app_id: r.app_id,
+            app_display_name: r.app_display_name,
+            device_display_name: r.device_display_name,
+            kind: r.kind,
+            lang: r.lang,
+            profile_tag: r.profile_tag,
+            url: r.url,
+            format: r.format,
+            data: r.data,
+        }).collect())
+    }
+
+    async fn upsert_push_rule(&self, rule: &PushRule) -> Result<()> {
+        sqlx::query!(
+            r#"
+            INSERT INTO push_rules
+                (user_id, scope, kind, rule_id, priority, enabled, conditions, actions, pattern, is_default)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            ON CONFLICT (user_id, scope, kind, rule_id) DO UPDATE SET
+                priority   = EXCLUDED.priority,
+                enabled    = EXCLUDED.enabled,
+                conditions = EXCLUDED.conditions,
+                actions    = EXCLUDED.actions,
+                pattern    = EXCLUDED.pattern,
+                is_default = EXCLUDED.is_default
+            "#,
+            rule.user_id,
+            rule.scope,
+            rule.kind,
+            rule.rule_id,
+            rule.priority,
+            rule.enabled,
+            rule.conditions,
+            rule.actions,
+            rule.pattern,
+            rule.is_default,
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(())
+    }
+
+    async fn delete_push_rule(
+        &self,
+        user_id: &str,
+        scope: &str,
+        kind: &str,
+        rule_id: &str,
+    ) -> Result<()> {
+        sqlx::query!(
+            "DELETE FROM push_rules WHERE user_id = $1 AND scope = $2 AND kind = $3 AND rule_id = $4",
+            user_id, scope, kind, rule_id
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(())
+    }
+
+    async fn list_push_rules(&self, user_id: &str) -> Result<Vec<PushRule>> {
+        let rows = sqlx::query!(
+            r#"
+            SELECT user_id, scope, kind, rule_id, priority, enabled,
+                   conditions, actions, pattern, is_default
+            FROM push_rules
+            WHERE user_id = $1
+            ORDER BY priority
+            "#,
+            user_id
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+
+        Ok(rows.into_iter().map(|r| PushRule {
+            user_id: r.user_id,
+            scope: r.scope,
+            kind: r.kind,
+            rule_id: r.rule_id,
+            priority: r.priority,
+            enabled: r.enabled,
+            conditions: r.conditions,
+            actions: r.actions,
+            pattern: r.pattern,
+            is_default: r.is_default,
+        }).collect())
+    }
+
+    async fn set_push_rule_enabled(
+        &self,
+        user_id: &str,
+        scope: &str,
+        kind: &str,
+        rule_id: &str,
+        enabled: bool,
+    ) -> Result<()> {
+        sqlx::query!(
+            "UPDATE push_rules SET enabled = $5 WHERE user_id = $1 AND scope = $2 AND kind = $3 AND rule_id = $4",
+            user_id, scope, kind, rule_id, enabled
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(())
+    }
+
+    async fn set_push_rule_actions(
+        &self,
+        user_id: &str,
+        scope: &str,
+        kind: &str,
+        rule_id: &str,
+        actions: Value,
+    ) -> Result<()> {
+        sqlx::query!(
+            "UPDATE push_rules SET actions = $5 WHERE user_id = $1 AND scope = $2 AND kind = $3 AND rule_id = $4",
+            user_id, scope, kind, rule_id, actions
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(())
+    }
+
+    async fn get_push_rule(
+        &self,
+        user_id: &str,
+        scope: &str,
+        kind: &str,
+        rule_id: &str,
+    ) -> Result<Option<PushRule>> {
+        let row = sqlx::query!(
+            r#"
+            SELECT user_id, scope, kind, rule_id, priority, enabled,
+                   conditions, actions, pattern, is_default
+            FROM push_rules
+            WHERE user_id = $1 AND scope = $2 AND kind = $3 AND rule_id = $4
+            "#,
+            user_id, scope, kind, rule_id
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+
+        let Some(r) = row else { return Ok(None) };
+        Ok(Some(PushRule {
+            user_id: r.user_id,
+            scope: r.scope,
+            kind: r.kind,
+            rule_id: r.rule_id,
+            priority: r.priority,
+            enabled: r.enabled,
+            conditions: r.conditions,
+            actions: r.actions,
+            pattern: r.pattern,
+            is_default: r.is_default,
+        }))
+    }
+
+    // -----------------------------------------------------------------------
+    // Admin (E11 AD1–AD6)
+    // -----------------------------------------------------------------------
+
+    async fn list_accounts(&self, from: i64, limit: i64) -> Result<Vec<Account>> {
+        let rows = sqlx::query!(
+            r#"
+            SELECT user_id, password_hash, is_admin, created_at, deactivated_at, displayname, avatar_url
+            FROM accounts
+            ORDER BY user_id
+            LIMIT $2 OFFSET $1
+            "#,
+            from,
+            limit,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+
+        Ok(rows.into_iter().map(|r| Account {
+            user_id: r.user_id,
+            password_hash: r.password_hash,
+            is_admin: r.is_admin,
+            created_at: r.created_at,
+            deactivated_at: r.deactivated_at,
+            displayname: r.displayname,
+            avatar_url: r.avatar_url,
+        }).collect())
+    }
+
+    async fn set_password_hash(&self, user_id: &str, password_hash: &str) -> Result<()> {
+        sqlx::query!(
+            "UPDATE accounts SET password_hash = $2 WHERE user_id = $1",
+            user_id, password_hash
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(())
+    }
+
+    async fn append_audit_log(
+        &self,
+        admin_user: &str,
+        action: &str,
+        target: Option<&str>,
+        detail: &Value,
+    ) -> Result<()> {
+        sqlx::query!(
+            "INSERT INTO admin_audit (admin_user, action, target, detail) VALUES ($1, $2, $3, $4)",
+            admin_user, action, target, detail
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(())
+    }
+
+    async fn list_audit_log(&self, from: i64, limit: i64) -> Result<Vec<AuditEntry>> {
+        let rows = sqlx::query!(
+            r#"
+            SELECT id, admin_user, action, target, detail, ts
+            FROM admin_audit
+            ORDER BY ts DESC
+            LIMIT $2 OFFSET $1
+            "#,
+            from,
+            limit,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+
+        Ok(rows.into_iter().map(|r| AuditEntry {
+            id: r.id,
+            admin_user: r.admin_user,
+            action: r.action,
+            target: r.target,
+            detail: r.detail,
+            ts: r.ts,
+        }).collect())
+    }
+
+    async fn purge_room(&self, room_id: &str) -> Result<()> {
+        // Delete state first (FK to events).
+        sqlx::query!("DELETE FROM room_current_state WHERE room_id = $1", room_id)
+            .execute(&self.pool)
+            .await
+            .map_err(map_sqlx)?;
+        // Delete events.
+        sqlx::query!("DELETE FROM events WHERE room_id = $1", room_id)
+            .execute(&self.pool)
+            .await
+            .map_err(map_sqlx)?;
+        Ok(())
+    }
+
+    async fn list_rooms(&self, from: i64, limit: i64) -> Result<Vec<String>> {
+        let rows = sqlx::query!(
+            r#"
+            SELECT DISTINCT room_id FROM events
+            ORDER BY room_id
+            LIMIT $2 OFFSET $1
+            "#,
+            from,
+            limit,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+
+        Ok(rows.into_iter().map(|r| r.room_id).collect())
+    }
+
+    async fn list_media(&self, from: i64, limit: i64) -> Result<Vec<MediaMetadata>> {
+        let rows = sqlx::query!(
+            r#"
+            SELECT media_id, origin_server, uploader, content_type, upload_name,
+                   file_size, sha256, storage_path, uploaded_at, last_accessed
+            FROM media
+            ORDER BY uploaded_at DESC
+            LIMIT $2 OFFSET $1
+            "#,
+            from,
+            limit,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+
+        Ok(rows.into_iter().map(|r| MediaMetadata {
+            media_id: r.media_id,
+            origin_server: r.origin_server,
+            uploader: r.uploader,
+            content_type: r.content_type,
+            upload_name: r.upload_name,
+            file_size: r.file_size,
+            sha256: r.sha256,
+            storage_path: r.storage_path,
+            uploaded_at: r.uploaded_at,
+            last_accessed: r.last_accessed,
+        }).collect())
     }
 }

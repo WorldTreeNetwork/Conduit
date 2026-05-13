@@ -8,6 +8,7 @@ use std::collections::HashMap;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::RwLock;
 
@@ -118,6 +119,56 @@ pub struct SigningKey {
     /// signing new events.  `None` means no expiry declared.
     pub valid_until_ts: Option<i64>,
     pub created_at: DateTime<Utc>,
+}
+
+// ---------------------------------------------------------------------------
+// Push domain types (E11 P1–P6)
+// ---------------------------------------------------------------------------
+
+/// A registered push notification destination for a user.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Pusher {
+    pub user_id: String,
+    pub pushkey: String,
+    pub app_id: String,
+    pub app_display_name: Option<String>,
+    pub device_display_name: Option<String>,
+    pub kind: String,
+    pub lang: String,
+    pub profile_tag: Option<String>,
+    pub url: Option<String>,
+    pub format: Option<String>,
+    pub data: Value,
+}
+
+/// A push rule stored for a user.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PushRule {
+    pub user_id: String,
+    pub scope: String,
+    pub kind: String,
+    pub rule_id: String,
+    pub priority: i32,
+    pub enabled: bool,
+    pub conditions: Value,
+    pub actions: Value,
+    pub pattern: Option<String>,
+    pub is_default: bool,
+}
+
+// ---------------------------------------------------------------------------
+// Admin domain types (E11 AD6)
+// ---------------------------------------------------------------------------
+
+/// An admin audit log entry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuditEntry {
+    pub id: i64,
+    pub admin_user: String,
+    pub action: String,
+    pub target: Option<String>,
+    pub detail: Value,
+    pub ts: DateTime<Utc>,
 }
 
 // ---------------------------------------------------------------------------
@@ -503,6 +554,83 @@ pub trait Storage: Send + Sync + 'static {
         &self,
         since_pos: i64,
     ) -> Result<Vec<(String, String, String, String, i64)>>;
+
+    // --- Push (E11 P1–P6) -----------------------------------------------------
+
+    /// Upsert a pusher.
+    async fn upsert_pusher(&self, pusher: &Pusher) -> Result<()>;
+    /// Delete a pusher by (user_id, pushkey, app_id).
+    async fn delete_pusher(&self, user_id: &str, pushkey: &str, app_id: &str) -> Result<()>;
+    /// List all pushers for a user.
+    async fn list_pushers(&self, user_id: &str) -> Result<Vec<Pusher>>;
+
+    /// Upsert a push rule.
+    async fn upsert_push_rule(&self, rule: &PushRule) -> Result<()>;
+    /// Delete a push rule.
+    async fn delete_push_rule(
+        &self,
+        user_id: &str,
+        scope: &str,
+        kind: &str,
+        rule_id: &str,
+    ) -> Result<()>;
+    /// List all push rules for a user (across all scopes/kinds).
+    async fn list_push_rules(&self, user_id: &str) -> Result<Vec<PushRule>>;
+    /// Enable/disable a push rule.
+    async fn set_push_rule_enabled(
+        &self,
+        user_id: &str,
+        scope: &str,
+        kind: &str,
+        rule_id: &str,
+        enabled: bool,
+    ) -> Result<()>;
+    /// Update a push rule's actions.
+    async fn set_push_rule_actions(
+        &self,
+        user_id: &str,
+        scope: &str,
+        kind: &str,
+        rule_id: &str,
+        actions: Value,
+    ) -> Result<()>;
+    /// Get a single push rule.
+    async fn get_push_rule(
+        &self,
+        user_id: &str,
+        scope: &str,
+        kind: &str,
+        rule_id: &str,
+    ) -> Result<Option<PushRule>>;
+
+    // --- Admin (E11 AD1–AD6) -------------------------------------------------
+
+    /// List all accounts, paginated. Returns (user_id, is_admin, deactivated_at, created_at).
+    async fn list_accounts(&self, from: i64, limit: i64) -> Result<Vec<Account>>;
+
+    /// Set password hash for an account.
+    async fn set_password_hash(&self, user_id: &str, password_hash: &str) -> Result<()>;
+
+    /// Append an admin audit log entry.
+    async fn append_audit_log(
+        &self,
+        admin_user: &str,
+        action: &str,
+        target: Option<&str>,
+        detail: &Value,
+    ) -> Result<()>;
+
+    /// Paginated audit log. Returns entries ordered by ts desc.
+    async fn list_audit_log(&self, from: i64, limit: i64) -> Result<Vec<AuditEntry>>;
+
+    /// Purge all events and state for a room (admin destructive op).
+    async fn purge_room(&self, room_id: &str) -> Result<()>;
+
+    /// List all rooms (distinct room_ids from events).
+    async fn list_rooms(&self, from: i64, limit: i64) -> Result<Vec<String>>;
+
+    /// List all local media (paginated).
+    async fn list_media(&self, from: i64, limit: i64) -> Result<Vec<MediaMetadata>>;
 }
 
 // ---------------------------------------------------------------------------
@@ -558,6 +686,12 @@ struct MemoryInner {
     // Media (E07)
     media: HashMap<(String, String), MediaMetadata>,
     thumbnails: HashMap<(String, String, i32, i32, String), ThumbnailMetadata>,
+    // Push (E11)
+    pushers: HashMap<(String, String, String), Pusher>,
+    push_rules: HashMap<(String, String, String, String), PushRule>,
+    // Admin audit log (E11)
+    audit_log: Vec<AuditEntry>,
+    audit_log_next_id: i64,
 }
 
 #[async_trait]
@@ -1511,6 +1645,184 @@ impl Storage for MemoryStorage {
             method.to_owned(),
         );
         Ok(self.inner.read().await.thumbnails.get(&key).cloned())
+    }
+
+    // --- Push (E11) ----------------------------------------------------------
+
+    async fn upsert_pusher(&self, pusher: &Pusher) -> Result<()> {
+        let key = (pusher.user_id.clone(), pusher.pushkey.clone(), pusher.app_id.clone());
+        self.inner.write().await.pushers.insert(key, pusher.clone());
+        Ok(())
+    }
+
+    async fn delete_pusher(&self, user_id: &str, pushkey: &str, app_id: &str) -> Result<()> {
+        let key = (user_id.to_owned(), pushkey.to_owned(), app_id.to_owned());
+        self.inner.write().await.pushers.remove(&key);
+        Ok(())
+    }
+
+    async fn list_pushers(&self, user_id: &str) -> Result<Vec<Pusher>> {
+        let inner = self.inner.read().await;
+        Ok(inner
+            .pushers
+            .iter()
+            .filter(|((u, _, _), _)| u == user_id)
+            .map(|(_, p)| p.clone())
+            .collect())
+    }
+
+    async fn upsert_push_rule(&self, rule: &PushRule) -> Result<()> {
+        let key = (
+            rule.user_id.clone(),
+            rule.scope.clone(),
+            rule.kind.clone(),
+            rule.rule_id.clone(),
+        );
+        self.inner.write().await.push_rules.insert(key, rule.clone());
+        Ok(())
+    }
+
+    async fn delete_push_rule(
+        &self,
+        user_id: &str,
+        scope: &str,
+        kind: &str,
+        rule_id: &str,
+    ) -> Result<()> {
+        let key = (user_id.to_owned(), scope.to_owned(), kind.to_owned(), rule_id.to_owned());
+        self.inner.write().await.push_rules.remove(&key);
+        Ok(())
+    }
+
+    async fn list_push_rules(&self, user_id: &str) -> Result<Vec<PushRule>> {
+        let inner = self.inner.read().await;
+        let mut rules: Vec<PushRule> = inner
+            .push_rules
+            .iter()
+            .filter(|((u, _, _, _), _)| u == user_id)
+            .map(|(_, r)| r.clone())
+            .collect();
+        rules.sort_by_key(|r| r.priority);
+        Ok(rules)
+    }
+
+    async fn set_push_rule_enabled(
+        &self,
+        user_id: &str,
+        scope: &str,
+        kind: &str,
+        rule_id: &str,
+        enabled: bool,
+    ) -> Result<()> {
+        let key = (user_id.to_owned(), scope.to_owned(), kind.to_owned(), rule_id.to_owned());
+        let mut inner = self.inner.write().await;
+        if let Some(rule) = inner.push_rules.get_mut(&key) {
+            rule.enabled = enabled;
+        }
+        Ok(())
+    }
+
+    async fn set_push_rule_actions(
+        &self,
+        user_id: &str,
+        scope: &str,
+        kind: &str,
+        rule_id: &str,
+        actions: Value,
+    ) -> Result<()> {
+        let key = (user_id.to_owned(), scope.to_owned(), kind.to_owned(), rule_id.to_owned());
+        let mut inner = self.inner.write().await;
+        if let Some(rule) = inner.push_rules.get_mut(&key) {
+            rule.actions = actions;
+        }
+        Ok(())
+    }
+
+    async fn get_push_rule(
+        &self,
+        user_id: &str,
+        scope: &str,
+        kind: &str,
+        rule_id: &str,
+    ) -> Result<Option<PushRule>> {
+        let key = (user_id.to_owned(), scope.to_owned(), kind.to_owned(), rule_id.to_owned());
+        Ok(self.inner.read().await.push_rules.get(&key).cloned())
+    }
+
+    // --- Admin (E11) ---------------------------------------------------------
+
+    async fn list_accounts(&self, from: i64, limit: i64) -> Result<Vec<Account>> {
+        let inner = self.inner.read().await;
+        let mut accounts: Vec<Account> = inner.accounts.values().cloned().collect();
+        accounts.sort_by(|a, b| a.user_id.cmp(&b.user_id));
+        let start = from.max(0) as usize;
+        Ok(accounts.into_iter().skip(start).take(limit as usize).collect())
+    }
+
+    async fn set_password_hash(&self, user_id: &str, password_hash: &str) -> Result<()> {
+        let mut inner = self.inner.write().await;
+        if let Some(acct) = inner.accounts.get_mut(user_id) {
+            acct.password_hash = Some(password_hash.to_owned());
+        }
+        Ok(())
+    }
+
+    async fn append_audit_log(
+        &self,
+        admin_user: &str,
+        action: &str,
+        target: Option<&str>,
+        detail: &Value,
+    ) -> Result<()> {
+        let mut inner = self.inner.write().await;
+        inner.audit_log_next_id += 1;
+        let id = inner.audit_log_next_id;
+        inner.audit_log.push(AuditEntry {
+            id,
+            admin_user: admin_user.to_owned(),
+            action: action.to_owned(),
+            target: target.map(|s| s.to_owned()),
+            detail: detail.clone(),
+            ts: Utc::now(),
+        });
+        Ok(())
+    }
+
+    async fn list_audit_log(&self, from: i64, limit: i64) -> Result<Vec<AuditEntry>> {
+        let inner = self.inner.read().await;
+        let mut entries = inner.audit_log.clone();
+        entries.sort_by(|a, b| b.ts.cmp(&a.ts));
+        let start = from.max(0) as usize;
+        Ok(entries.into_iter().skip(start).take(limit as usize).collect())
+    }
+
+    async fn purge_room(&self, room_id: &str) -> Result<()> {
+        let mut inner = self.inner.write().await;
+        inner.events.retain(|_, e| e.room_id != room_id);
+        inner.room_state.retain(|(r, _, _), _| r != room_id);
+        Ok(())
+    }
+
+    async fn list_rooms(&self, from: i64, limit: i64) -> Result<Vec<String>> {
+        let inner = self.inner.read().await;
+        let mut rooms: Vec<String> = inner
+            .events
+            .values()
+            .map(|e| e.room_id.clone())
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+        rooms.sort();
+        let start = from.max(0) as usize;
+        Ok(rooms.into_iter().skip(start).take(limit as usize).collect())
+    }
+
+    async fn list_media(&self, from: i64, limit: i64) -> Result<Vec<MediaMetadata>> {
+        let inner = self.inner.read().await;
+        let mut items: Vec<MediaMetadata> = inner.media.values().cloned().collect();
+        items.sort_by(|a, b| a.media_id.cmp(&b.media_id));
+        let start = from.max(0) as usize;
+        Ok(items.into_iter().skip(start).take(limit as usize).collect())
     }
 }
 

@@ -34,3 +34,5 @@ uuid = { version = "1", features = ["v4"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
 infer = "0.16"
 tempfile = "3"
+serde_yaml = "0.9"
+regex = "1"

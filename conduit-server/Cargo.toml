@@ -35,6 +35,8 @@ hickory-resolver = { workspace = true }
 uuid = { workspace = true }
 image = { workspace = true }
 infer = { workspace = true }
+serde_yaml = { workspace = true }
+regex = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
