@@ -18,7 +18,7 @@ use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
 
 use conduit::{keys::ServerKey, storage::Storage};
-use conduit_server::{keys, PostgresStorage};
+use conduit_server::{keys, PostgresStorage, RemoteKeyCache};
 
 /// Shared application state threaded through axum.
 #[derive(Clone)]
@@ -26,6 +26,8 @@ struct AppState {
     storage: Arc<dyn Storage>,
     server_key: Arc<ServerKey>,
     server_name: Arc<str>,
+    http: reqwest::Client,
+    remote_keys: Arc<RemoteKeyCache>,
 }
 
 #[tokio::main]
@@ -58,10 +60,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let server_key = Arc::new(keys::load_or_generate(&*storage).await?);
     tracing::info!(key_id = %server_key.key_id, "server signing key ready");
 
+    let http = reqwest::Client::new();
+
+    let remote_keys = {
+        let cache = RemoteKeyCache::new();
+        let cache = match env::var("CONDUIT_REMOTE_KEYS_OVERRIDE") {
+            Ok(url) => {
+                tracing::info!(url = %url, "remote key fetch override active");
+                cache.with_test_base_url(url)
+            }
+            Err(_) => cache,
+        };
+        Arc::new(cache)
+    };
+
     let state = AppState {
         storage,
         server_key,
         server_name,
+        http,
+        remote_keys,
     };
 
     let app = Router::new()
