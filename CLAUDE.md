@@ -66,4 +66,13 @@ _Add a brief overview of your project architecture_
 
 ## Conventions & Patterns
 
-_Add your project-specific conventions here_
+See [AGENTS.md](AGENTS.md). Shared rules for all agents (Claude or
+otherwise) live there:
+
+- Database conventions (Postgres + sqlx, migration rules, schema
+  taste, storage layout)
+- Non-interactive shell command forms
+- Beads workflow + session-completion protocol
+
+For implementation guidance on Matrix features, see
+[docs/](docs/) — one focused doc per feature module.
