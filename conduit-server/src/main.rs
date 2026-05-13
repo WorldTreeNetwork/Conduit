@@ -24,13 +24,14 @@ use hickory_resolver::TokioAsyncResolver;
 use conduit::{keys::ServerKey, storage::Storage};
 use conduit_server::{
     api::client::{AuthState, TxnCacheKey, TypingStore, PresenceStore},
+    api::client::media::{MediaState, cleanup_remote_media},
     federation,
     federation::{
         FedState, XMatrixMiddlewareState, RateLimiter, federation_router,
         middleware::verify_xmatrix,
         rate_limit::rate_limit,
     },
-    keys, PostgresStorage, RemoteKeyCache,
+    keys, BlobStore, PostgresStorage, RemoteKeyCache,
 };
 
 /// Shared application state threaded through axum.
@@ -55,6 +56,8 @@ struct AppState {
     typing_tx: broadcast::Sender<String>,
     /// Ephemeral in-memory presence store (E06 1mo.7).
     presence_store: Arc<PresenceStore>,
+    /// Blob storage for uploaded / cached media (E07).
+    blob_store: BlobStore,
 }
 
 impl AuthState for AppState {
@@ -81,6 +84,21 @@ impl AuthState for AppState {
     }
     fn presence_store(&self) -> &Arc<PresenceStore> {
         &self.presence_store
+    }
+}
+
+impl MediaState for AppState {
+    fn storage(&self) -> &Arc<dyn Storage> {
+        &self.storage
+    }
+    fn server_name(&self) -> &str {
+        &self.server_name
+    }
+    fn blob_store(&self) -> &BlobStore {
+        &self.blob_store
+    }
+    fn federation_client(&self) -> &Arc<federation::Client> {
+        &self.federation
     }
 }
 
@@ -151,6 +169,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ));
     let federation_queue = Arc::new(federation::Queue::new(Arc::clone(&federation_client)));
 
+    // Blob storage for media.
+    let blob_store = BlobStore::from_env()
+        .map_err(|e| format!("failed to initialise media blob store: {e}"))?;
+    tracing::info!(root = ?std::env::var("CONDUIT_MEDIA_ROOT").unwrap_or_else(|_| "./media-data".to_owned()), "media blob store ready");
+
     let state = AppState {
         storage,
         server_key,
@@ -164,11 +187,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         typing_store,
         typing_tx,
         presence_store,
+        blob_store,
     };
 
     use conduit_server::api::client as auth;
     use conduit_server::api::client::account_data as account_data_api;
     use conduit_server::api::client::keys as keys_api;
+    use conduit_server::api::client::media as media_api;
     use conduit_server::api::client::presence as presence_api;
     use conduit_server::api::client::profile as profile_api;
     use conduit_server::api::client::receipts as receipts_api;
@@ -195,6 +220,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         http: state.http.clone(),
         events_tx: state.events_tx.clone(),
         fed_client: Arc::clone(&state.federation),
+        blob_store: state.blob_store.clone(),
     };
 
     // Federation inbound subrouter: X-Matrix auth → rate limit → handlers.
@@ -299,10 +325,52 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/_matrix/client/v3/presence/:userId/status",
             get(presence_api::get_presence::<AppState>)
             .put(presence_api::put_presence::<AppState>))
+        // Media (E07) — legacy unauthenticated endpoints
+        .route("/_matrix/media/v3/upload",
+            post(media_api::upload::<AppState>))
+        .route("/_matrix/media/v3/config",
+            get(media_api::media_config::<AppState>))
+        .route("/_matrix/media/v3/download/:serverName/:mediaId",
+            get(media_api::download_legacy::<AppState>))
+        .route("/_matrix/media/v3/download/:serverName/:mediaId/:fileName",
+            get(media_api::download_legacy_filename::<AppState>))
+        .route("/_matrix/media/v3/thumbnail/:serverName/:mediaId",
+            get(media_api::thumbnail_legacy::<AppState>))
+        // Media (E07) — authenticated v1 endpoints
+        .route("/_matrix/client/v1/media/download/:serverName/:mediaId",
+            get(media_api::download_authed::<AppState>))
+        .route("/_matrix/client/v1/media/download/:serverName/:mediaId/:fileName",
+            get(media_api::download_authed_filename::<AppState>))
+        .route("/_matrix/client/v1/media/thumbnail/:serverName/:mediaId",
+            get(media_api::thumbnail_authed::<AppState>))
+        .route("/_matrix/client/v1/media/config",
+            get(media_api::media_config::<AppState>))
         // Federation inbound (E09)
         .nest("/_matrix/federation/v1", fed_router)
-        .with_state(state)
+        .with_state(state.clone())
         .layer(TraceLayer::new_for_http());
+
+    // Background task: clean up stale remote-cached media (h9n.11).
+    {
+        let retention_days: u64 = env::var("CONDUIT_MEDIA_REMOTE_RETENTION_DAYS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(30);
+        let storage_clone = Arc::clone(&state.storage);
+        let blob_clone = state.blob_store.clone();
+        tokio::spawn(async move {
+            let interval = std::time::Duration::from_secs(60 * 60); // hourly
+            let max_age = std::time::Duration::from_secs(retention_days * 24 * 60 * 60);
+            loop {
+                tokio::time::sleep(interval).await;
+                match cleanup_remote_media(&*storage_clone, &blob_clone, max_age).await {
+                    Ok(n) if n > 0 => tracing::info!(deleted = n, "remote media retention cleanup"),
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!(error = %e, "remote media retention cleanup failed"),
+                }
+            }
+        });
+    }
 
     let addr: SocketAddr = "0.0.0.0:8008".parse()?;
     tracing::info!(%addr, "conduit-server listening");

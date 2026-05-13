@@ -15,6 +15,38 @@ use crate::event::Event;
 use crate::Result;
 
 // ---------------------------------------------------------------------------
+// Media domain types (E07)
+// ---------------------------------------------------------------------------
+
+/// Metadata for a locally-uploaded or remotely-cached media item.
+#[derive(Debug, Clone)]
+pub struct MediaMetadata {
+    pub media_id: String,
+    pub origin_server: String,
+    pub uploader: Option<String>,
+    pub content_type: Option<String>,
+    pub upload_name: Option<String>,
+    pub file_size: i64,
+    pub sha256: String,
+    pub storage_path: String,
+    pub uploaded_at: DateTime<Utc>,
+    pub last_accessed: DateTime<Utc>,
+}
+
+/// Metadata for a cached thumbnail.
+#[derive(Debug, Clone)]
+pub struct ThumbnailMetadata {
+    pub media_id: String,
+    pub origin_server: String,
+    pub width: i32,
+    pub height: i32,
+    pub method: String,
+    pub content_type: String,
+    pub file_size: i64,
+    pub storage_path: String,
+}
+
+// ---------------------------------------------------------------------------
 // E2EE domain types
 // ---------------------------------------------------------------------------
 
@@ -428,6 +460,24 @@ pub trait Storage: Send + Sync + 'static {
         since_pos: i64,
     ) -> Result<Vec<(Option<String>, String, Value)>>;
 
+    // --- Media (E07) ---------------------------------------------------------
+
+    async fn insert_media(&self, m: &MediaMetadata) -> Result<()>;
+    async fn get_media(&self, media_id: &str, origin_server: &str) -> Result<Option<MediaMetadata>>;
+    async fn touch_media_access(&self, media_id: &str, origin_server: &str) -> Result<()>;
+    async fn delete_media(&self, media_id: &str, origin_server: &str) -> Result<()>;
+    async fn list_remote_media_older_than(&self, ts: DateTime<Utc>) -> Result<Vec<MediaMetadata>>;
+
+    async fn insert_thumbnail(&self, t: &ThumbnailMetadata) -> Result<()>;
+    async fn get_thumbnail(
+        &self,
+        media_id: &str,
+        origin_server: &str,
+        width: i32,
+        height: i32,
+        method: &str,
+    ) -> Result<Option<ThumbnailMetadata>>;
+
     // --- Receipts (1mo.6) ----------------------------------------------------
 
     /// Upsert a read receipt. Returns the new stream_pos.
@@ -505,6 +555,9 @@ struct MemoryInner {
     /// (room_id, user_id, receipt_type) → (event_id, ts, stream_pos)
     receipts: HashMap<(String, String, String), (String, i64, i64)>,
     receipts_next_pos: i64,
+    // Media (E07)
+    media: HashMap<(String, String), MediaMetadata>,
+    thumbnails: HashMap<(String, String, i32, i32, String), ThumbnailMetadata>,
 }
 
 #[async_trait]
@@ -1379,6 +1432,85 @@ impl Storage for MemoryStorage {
             .collect();
         results.sort_by_key(|(_, _, _, _, _, pos)| *pos);
         Ok(results.into_iter().map(|(r, u, t, e, ts, _)| (r, u, t, e, ts)).collect())
+    }
+
+    // --- Media (E07) ----------------------------------------------------------
+
+    async fn insert_media(&self, m: &MediaMetadata) -> Result<()> {
+        self.inner
+            .write()
+            .await
+            .media
+            .insert((m.media_id.clone(), m.origin_server.clone()), m.clone());
+        Ok(())
+    }
+
+    async fn get_media(&self, media_id: &str, origin_server: &str) -> Result<Option<MediaMetadata>> {
+        Ok(self
+            .inner
+            .read()
+            .await
+            .media
+            .get(&(media_id.to_owned(), origin_server.to_owned()))
+            .cloned())
+    }
+
+    async fn touch_media_access(&self, media_id: &str, origin_server: &str) -> Result<()> {
+        let mut inner = self.inner.write().await;
+        if let Some(m) = inner.media.get_mut(&(media_id.to_owned(), origin_server.to_owned())) {
+            m.last_accessed = Utc::now();
+        }
+        Ok(())
+    }
+
+    async fn delete_media(&self, media_id: &str, origin_server: &str) -> Result<()> {
+        let mut inner = self.inner.write().await;
+        inner.media.remove(&(media_id.to_owned(), origin_server.to_owned()));
+        // Cascade: remove thumbnails too.
+        inner.thumbnails.retain(|(mid, orig, _, _, _), _| {
+            !(mid == media_id && orig == origin_server)
+        });
+        Ok(())
+    }
+
+    async fn list_remote_media_older_than(&self, ts: DateTime<Utc>) -> Result<Vec<MediaMetadata>> {
+        let inner = self.inner.read().await;
+        Ok(inner
+            .media
+            .values()
+            .filter(|m| m.uploader.is_none() && m.last_accessed < ts)
+            .cloned()
+            .collect())
+    }
+
+    async fn insert_thumbnail(&self, t: &ThumbnailMetadata) -> Result<()> {
+        let key = (
+            t.media_id.clone(),
+            t.origin_server.clone(),
+            t.width,
+            t.height,
+            t.method.clone(),
+        );
+        self.inner.write().await.thumbnails.insert(key, t.clone());
+        Ok(())
+    }
+
+    async fn get_thumbnail(
+        &self,
+        media_id: &str,
+        origin_server: &str,
+        width: i32,
+        height: i32,
+        method: &str,
+    ) -> Result<Option<ThumbnailMetadata>> {
+        let key = (
+            media_id.to_owned(),
+            origin_server.to_owned(),
+            width,
+            height,
+            method.to_owned(),
+        );
+        Ok(self.inner.read().await.thumbnails.get(&key).cloned())
     }
 }
 

@@ -10,6 +10,7 @@
 pub mod account_data;
 pub mod event_pipeline;
 pub mod keys;
+pub mod media;
 pub mod presence;
 pub mod profile;
 pub mod receipts;

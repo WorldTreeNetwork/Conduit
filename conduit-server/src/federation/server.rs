@@ -37,6 +37,8 @@ use conduit::storage::Storage;
 
 use crate::RemoteKeyCache;
 use crate::federation::Client as FedClient;
+use crate::media_storage::BlobStore;
+use crate::api::client::media::MediaState;
 
 use super::middleware::FederationOrigin;
 use super::pipeline::process_incoming_pdu;
@@ -55,6 +57,23 @@ pub struct FedState {
     pub http: reqwest::Client,
     pub events_tx: broadcast::Sender<i64>,
     pub fed_client: Arc<FedClient>,
+    /// Blob store for federation media download/thumbnail (E07 h9n.8).
+    pub blob_store: BlobStore,
+}
+
+impl MediaState for FedState {
+    fn storage(&self) -> &Arc<dyn Storage> {
+        &self.storage
+    }
+    fn server_name(&self) -> &str {
+        &self.server_name
+    }
+    fn blob_store(&self) -> &BlobStore {
+        &self.blob_store
+    }
+    fn federation_client(&self) -> &Arc<FedClient> {
+        &self.fed_client
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -929,6 +948,7 @@ pub(crate) async fn handle_edu(state: &FedState, edu: &serde_json::Value) {
 /// call `.with_state(fed_state)` to convert it to `Router<()>` for nesting.
 pub fn federation_router() -> axum::Router<FedState> {
     use axum::routing::{get, post, put};
+    use crate::api::client::media::{federation_download, federation_thumbnail};
 
     axum::Router::new()
         .route("/send/:txnId", put(send_transaction))
@@ -943,4 +963,7 @@ pub fn federation_router() -> axum::Router<FedState> {
         .route("/get_missing_events/:roomId", post(get_missing_events))
         .route("/query/profile", get(query_profile))
         .route("/query/directory", get(query_directory))
+        // Media (E07 h9n.8): federation download + thumbnail
+        .route("/media/download/:mediaId", get(federation_download::<FedState>))
+        .route("/media/thumbnail/:mediaId", get(federation_thumbnail::<FedState>))
 }

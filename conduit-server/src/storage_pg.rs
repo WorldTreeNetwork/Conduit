@@ -16,7 +16,10 @@ use serde_json::Value;
 use conduit::{
     Error, Result,
     event::Event,
-    storage::{Account, Device, RoomKeyVersion, SigningKey, Storage, ToDeviceMessage, TokenOwner},
+    storage::{
+        Account, Device, MediaMetadata, RoomKeyVersion, SigningKey, Storage, ThumbnailMetadata,
+        ToDeviceMessage, TokenOwner,
+    },
 };
 
 // ---------------------------------------------------------------------------
@@ -1635,5 +1638,185 @@ impl Storage for PostgresStorage {
             .into_iter()
             .map(|r| (r.room_id, r.user_id, r.receipt_type, r.event_id, r.ts))
             .collect())
+    }
+
+    // -----------------------------------------------------------------------
+    // Media (E07)
+    // -----------------------------------------------------------------------
+
+    async fn insert_media(&self, m: &MediaMetadata) -> Result<()> {
+        sqlx::query!(
+            r#"
+            INSERT INTO media
+                (media_id, origin_server, uploader, content_type, upload_name,
+                 file_size, sha256, storage_path, uploaded_at, last_accessed)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            ON CONFLICT (media_id, origin_server) DO NOTHING
+            "#,
+            m.media_id,
+            m.origin_server,
+            m.uploader,
+            m.content_type,
+            m.upload_name,
+            m.file_size,
+            m.sha256,
+            m.storage_path,
+            m.uploaded_at,
+            m.last_accessed,
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(())
+    }
+
+    async fn get_media(&self, media_id: &str, origin_server: &str) -> Result<Option<MediaMetadata>> {
+        let row = sqlx::query!(
+            r#"
+            SELECT media_id, origin_server, uploader, content_type, upload_name,
+                   file_size, sha256, storage_path, uploaded_at, last_accessed
+            FROM media
+            WHERE media_id = $1 AND origin_server = $2
+            "#,
+            media_id,
+            origin_server
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+
+        let Some(r) = row else { return Ok(None) };
+        Ok(Some(MediaMetadata {
+            media_id: r.media_id,
+            origin_server: r.origin_server,
+            uploader: r.uploader,
+            content_type: r.content_type,
+            upload_name: r.upload_name,
+            file_size: r.file_size,
+            sha256: r.sha256,
+            storage_path: r.storage_path,
+            uploaded_at: r.uploaded_at,
+            last_accessed: r.last_accessed,
+        }))
+    }
+
+    async fn touch_media_access(&self, media_id: &str, origin_server: &str) -> Result<()> {
+        sqlx::query!(
+            r#"
+            UPDATE media SET last_accessed = now()
+            WHERE media_id = $1 AND origin_server = $2
+            "#,
+            media_id,
+            origin_server
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(())
+    }
+
+    async fn delete_media(&self, media_id: &str, origin_server: &str) -> Result<()> {
+        sqlx::query!(
+            r#"DELETE FROM media WHERE media_id = $1 AND origin_server = $2"#,
+            media_id,
+            origin_server
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(())
+    }
+
+    async fn list_remote_media_older_than(&self, ts: DateTime<Utc>) -> Result<Vec<MediaMetadata>> {
+        let rows = sqlx::query!(
+            r#"
+            SELECT media_id, origin_server, uploader, content_type, upload_name,
+                   file_size, sha256, storage_path, uploaded_at, last_accessed
+            FROM media
+            WHERE uploader IS NULL AND last_accessed < $1
+            "#,
+            ts
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| MediaMetadata {
+                media_id: r.media_id,
+                origin_server: r.origin_server,
+                uploader: r.uploader,
+                content_type: r.content_type,
+                upload_name: r.upload_name,
+                file_size: r.file_size,
+                sha256: r.sha256,
+                storage_path: r.storage_path,
+                uploaded_at: r.uploaded_at,
+                last_accessed: r.last_accessed,
+            })
+            .collect())
+    }
+
+    async fn insert_thumbnail(&self, t: &ThumbnailMetadata) -> Result<()> {
+        sqlx::query!(
+            r#"
+            INSERT INTO media_thumbnails
+                (media_id, origin_server, width, height, method, content_type, file_size, storage_path)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            ON CONFLICT (media_id, origin_server, width, height, method) DO NOTHING
+            "#,
+            t.media_id,
+            t.origin_server,
+            t.width,
+            t.height,
+            t.method,
+            t.content_type,
+            t.file_size,
+            t.storage_path,
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(())
+    }
+
+    async fn get_thumbnail(
+        &self,
+        media_id: &str,
+        origin_server: &str,
+        width: i32,
+        height: i32,
+        method: &str,
+    ) -> Result<Option<ThumbnailMetadata>> {
+        let row = sqlx::query!(
+            r#"
+            SELECT media_id, origin_server, width, height, method,
+                   content_type, file_size, storage_path
+            FROM media_thumbnails
+            WHERE media_id = $1 AND origin_server = $2
+              AND width = $3 AND height = $4 AND method = $5
+            "#,
+            media_id,
+            origin_server,
+            width,
+            height,
+            method,
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+
+        let Some(r) = row else { return Ok(None) };
+        Ok(Some(ThumbnailMetadata {
+            media_id: r.media_id,
+            origin_server: r.origin_server,
+            width: r.width,
+            height: r.height,
+            method: r.method,
+            content_type: r.content_type,
+            file_size: r.file_size,
+            storage_path: r.storage_path,
+        }))
     }
 }

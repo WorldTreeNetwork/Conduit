@@ -33,6 +33,8 @@ sha2 = { workspace = true }
 hex = { workspace = true }
 hickory-resolver = { workspace = true }
 uuid = { workspace = true }
+image = { workspace = true }
+infer = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
@@ -42,3 +44,5 @@ chrono = { workspace = true }
 reqwest = { workspace = true }
 axum = { workspace = true }
 tower = { workspace = true }
+tempfile = { workspace = true }
+image = { workspace = true }

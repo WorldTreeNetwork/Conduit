@@ -223,6 +223,45 @@ impl Client {
         resp.json::<T>().await.map_err(|e| FederationError::Parse(e.to_string()))
     }
 
+    /// Issue a signed `GET` request and return the raw `reqwest::Response`.
+    /// Used for media download where we want to stream bytes rather than
+    /// deserialize JSON.
+    pub async fn get_raw(
+        &self,
+        dest: &str,
+        path: &str,
+    ) -> Result<reqwest::Response, FederationError> {
+        let (url, resolved) = self.resolve_url(dest, path).await?;
+
+        let auth = sign_request::<()>(
+            "GET",
+            path,
+            &self.server_name,
+            dest,
+            None,
+            &self.server_key,
+        );
+
+        let resp = self
+            .http
+            .get(&url)
+            .header("Host", &resolved.host_header)
+            .header("Authorization", &auth)
+            .send()
+            .await?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(FederationError::RemoteError {
+                status: status.as_u16(),
+                body,
+            });
+        }
+
+        Ok(resp)
+    }
+
     /// Issue a signed `PUT` request and return the response body as `T`.
     async fn signed_put<B: Serialize, T: for<'de> Deserialize<'de>>(
         &self,

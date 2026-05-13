@@ -23,7 +23,7 @@ use conduit_server::federation::middleware::{XMatrixMiddlewareState, verify_xmat
 use conduit_server::federation::rate_limit::{RateLimiter, rate_limit};
 use conduit_server::federation::server::{FedState, federation_router};
 use conduit_server::federation::auth::sign_request;
-use conduit_server::RemoteKeyCache;
+use conduit_server::{BlobStore, RemoteKeyCache};
 
 // ---------------------------------------------------------------------------
 // Test infrastructure
@@ -72,6 +72,7 @@ async fn spawn_test_server(
         http: http.clone(),
         events_tx: events_tx.clone(),
         fed_client,
+        blob_store: BlobStore::new(std::env::temp_dir().join(format!("conduit_test_blob_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().subsec_nanos()))).unwrap(),
     };
 
     let xmatrix_state = XMatrixMiddlewareState {
@@ -583,6 +584,7 @@ async fn rate_limit_kicks_in_after_burst() {
         http: http.clone(),
         events_tx,
         fed_client,
+        blob_store: BlobStore::new(std::env::temp_dir().join(format!("conduit_test_blob_rl_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().subsec_nanos()))).unwrap(),
     };
 
     let xmatrix_state = XMatrixMiddlewareState {
