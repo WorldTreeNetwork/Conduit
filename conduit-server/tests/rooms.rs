@@ -22,7 +22,7 @@ use axum::{
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, broadcast};
 use tower::util::ServiceExt as _;
 
 use conduit::keys::ServerKey;
@@ -122,15 +122,18 @@ struct TestState {
     server_name: Arc<str>,
     server_key: Arc<ServerKey>,
     txn_cache: Arc<RwLock<HashMap<TxnCacheKey, String>>>,
+    events_tx: broadcast::Sender<i64>,
 }
 
 impl TestState {
     fn new(storage: Arc<dyn Storage>) -> Self {
+        let (events_tx, _) = broadcast::channel(256);
         Self {
             storage,
             server_name: "localhost".into(),
             server_key: Arc::new(conduit::keys::generate_server_key()),
             txn_cache: Arc::new(RwLock::new(HashMap::new())),
+            events_tx,
         }
     }
 }
@@ -147,6 +150,9 @@ impl AuthState for TestState {
     }
     fn txn_cache(&self) -> &Arc<RwLock<HashMap<TxnCacheKey, String>>> {
         &self.txn_cache
+    }
+    fn events_tx(&self) -> &broadcast::Sender<i64> {
+        &self.events_tx
     }
 }
 

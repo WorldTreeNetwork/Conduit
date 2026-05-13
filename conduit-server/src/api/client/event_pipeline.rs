@@ -151,5 +151,13 @@ pub async fn build_sign_and_persist<S: AuthState>(
             .map_err(|e| MatrixError::unknown(format!("state update error: {e}")))?;
     }
 
+    // ------------------------------------------------------------------
+    // Step 11 — notify /sync long-pollers of the new stream position
+    // ------------------------------------------------------------------
+    if let Ok(pos) = storage.global_max_stream_position().await {
+        // Ignore send errors: no subscribers is fine.
+        let _ = state.events_tx().send(pos);
+    }
+
     Ok(eid)
 }

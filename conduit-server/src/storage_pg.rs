@@ -744,4 +744,58 @@ impl Storage for PostgresStorage {
 
         Ok(row.max_pos)
     }
+
+    async fn events_since(&self, since: i64, limit: i64) -> Result<Vec<Event>> {
+        let rows = sqlx::query!(
+            r#"
+            SELECT event_id, room_id, sender, type AS event_type, state_key,
+                   content, auth_events, prev_events, hashes, signatures,
+                   unsigned, origin_server_ts, depth
+            FROM events
+            WHERE stream_position > $1
+            ORDER BY stream_position ASC
+            LIMIT $2
+            "#,
+            since,
+            limit
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+
+        let events = rows
+            .into_iter()
+            .map(|r| Event {
+                event_id: r.event_id,
+                room_id: r.room_id,
+                sender: r.sender,
+                event_type: r.event_type,
+                state_key: r.state_key,
+                content: r.content,
+                origin_server_ts: r.origin_server_ts as u64,
+                auth_events: r.auth_events,
+                prev_events: r.prev_events,
+                hashes: r.hashes,
+                signatures: r.signatures,
+                depth: r.depth,
+                unsigned: r.unsigned,
+            })
+            .collect();
+
+        Ok(events)
+    }
+
+    async fn global_max_stream_position(&self) -> Result<i64> {
+        let row = sqlx::query!(
+            r#"
+            SELECT COALESCE(MAX(stream_position), 0) AS max_pos
+            FROM events
+            "#
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+
+        Ok(row.max_pos.unwrap_or(0))
+    }
 }

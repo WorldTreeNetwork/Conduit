@@ -15,7 +15,7 @@ use chrono::Utc;
 use ed25519_dalek::Signer as _;
 use serde_json::json;
 use sqlx::postgres::PgPoolOptions;
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, broadcast};
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
 
@@ -31,6 +31,9 @@ struct AppState {
     http: reqwest::Client,
     remote_keys: Arc<RemoteKeyCache>,
     txn_cache: Arc<RwLock<HashMap<TxnCacheKey, String>>>,
+    /// Broadcast channel: sends the new global stream_position after each
+    /// persisted event so `/sync` long-pollers can wake up.
+    events_tx: broadcast::Sender<i64>,
 }
 
 impl AuthState for AppState {
@@ -45,6 +48,9 @@ impl AuthState for AppState {
     }
     fn txn_cache(&self) -> &Arc<RwLock<HashMap<TxnCacheKey, String>>> {
         &self.txn_cache
+    }
+    fn events_tx(&self) -> &broadcast::Sender<i64> {
+        &self.events_tx
     }
 }
 
@@ -92,6 +98,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Arc::new(cache)
     };
 
+    // Broadcast channel for /sync long-poll wake-ups.
+    // Capacity 256: drops lagged receivers, which is fine — they'll just
+    // re-poll once the sleep expires.
+    let (events_tx, _) = broadcast::channel::<i64>(256);
+
     let state = AppState {
         storage,
         server_key,
@@ -99,10 +110,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         http,
         remote_keys,
         txn_cache: Arc::new(RwLock::new(HashMap::new())),
+        events_tx,
     };
 
     use conduit_server::api::client as auth;
     use conduit_server::api::client::rooms as rooms;
+    use conduit_server::api::client::sync as sync_api;
 
     let app = Router::new()
         .route("/health", get(health))
@@ -136,6 +149,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             get(rooms::joined_members::<AppState>))
         .route("/_matrix/client/v3/rooms/:roomId/messages",
             get(rooms::get_messages::<AppState>))
+        // Client-Server API: sync
+        .route("/_matrix/client/v3/sync",
+            get(sync_api::sync::<AppState>))
         .with_state(state)
         .layer(TraceLayer::new_for_http());
 

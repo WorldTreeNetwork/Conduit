@@ -184,6 +184,15 @@ pub trait Storage: Send + Sync + 'static {
     /// The highest stream_position for events in `room_id`, or `None` if the
     /// room has no events yet.
     async fn room_latest_stream_position(&self, room_id: &str) -> Result<Option<i64>>;
+
+    /// All events across all rooms whose stream_position is strictly greater
+    /// than `since`, ordered by stream_position ascending, up to `limit`.
+    ///
+    /// Used by the `/sync` incremental path.
+    async fn events_since(&self, since: i64, limit: i64) -> Result<Vec<Event>>;
+
+    /// The maximum stream_position across all rooms, or 0 if there are no events.
+    async fn global_max_stream_position(&self) -> Result<i64>;
 }
 
 // ---------------------------------------------------------------------------
@@ -517,6 +526,25 @@ impl Storage for MemoryStorage {
             .max();
         // In MemoryStorage depth serves as stream_position proxy.
         Ok(max_depth)
+    }
+
+    async fn events_since(&self, since: i64, limit: i64) -> Result<Vec<Event>> {
+        let inner = self.inner.read().await;
+        // In MemoryStorage, depth is used as stream_position proxy.
+        let mut evs: Vec<Event> = inner
+            .events
+            .values()
+            .filter(|e| e.depth > since)
+            .cloned()
+            .collect();
+        evs.sort_by_key(|e| e.depth);
+        evs.truncate(limit as usize);
+        Ok(evs)
+    }
+
+    async fn global_max_stream_position(&self) -> Result<i64> {
+        let inner = self.inner.read().await;
+        Ok(inner.events.values().map(|e| e.depth).max().unwrap_or(0))
     }
 }
 

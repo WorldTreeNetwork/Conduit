@@ -9,12 +9,13 @@
 
 pub mod event_pipeline;
 pub mod rooms;
+pub mod sync;
 pub mod uia;
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, broadcast};
 
 use argon2::{
     Argon2,
@@ -54,6 +55,9 @@ pub trait AuthState: Clone + Send + Sync + 'static {
     fn server_key(&self) -> Arc<ServerKey>;
     /// Shared in-memory idempotency cache for `PUT /send/.../:txnId`.
     fn txn_cache(&self) -> &Arc<RwLock<HashMap<TxnCacheKey, String>>>;
+    /// Broadcast sender for new stream positions.  `/sync` long-poll
+    /// subscribes to this to wake up when new events arrive.
+    fn events_tx(&self) -> &broadcast::Sender<i64>;
 }
 
 // ---------------------------------------------------------------------------
