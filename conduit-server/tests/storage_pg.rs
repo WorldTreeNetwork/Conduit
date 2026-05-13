@@ -153,6 +153,12 @@ fn make_event(event_id: &str, room_id: &str, event_type: &str, state_key: Option
         state_key: state_key.map(|s| s.to_owned()),
         content: json!({ "test": true }),
         origin_server_ts: 1_700_000_000_000,
+        auth_events: vec!["$auth1:localhost".to_owned()],
+        prev_events: vec!["$prev1:localhost".to_owned()],
+        hashes: json!({ "sha256": "47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU" }),
+        signatures: json!({ "localhost": { "ed25519:key1": "sig_placeholder" } }),
+        depth: 1,
+        unsigned: None,
     }
 }
 
@@ -337,6 +343,12 @@ async fn events_round_trip() {
     assert_eq!(got.room_id, "!room1:localhost");
     assert_eq!(got.event_type, "m.room.message");
     assert_eq!(got.origin_server_ts, 1_700_000_000_000);
+    assert_eq!(got.auth_events, vec!["$auth1:localhost"]);
+    assert_eq!(got.prev_events, vec!["$prev1:localhost"]);
+    assert_eq!(got.hashes, json!({ "sha256": "47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU" }));
+    assert_eq!(got.signatures, json!({ "localhost": { "ed25519:key1": "sig_placeholder" } }));
+    assert_eq!(got.depth, 1);
+    assert!(got.unsigned.is_none());
 
     // get_event — miss
     let none = s.get_event("$missing:localhost").await.unwrap();
@@ -475,6 +487,10 @@ async fn persists_across_pool_restart() {
     let evt = s2.get_event("$restart_evt:localhost").await.unwrap()
         .expect("event must survive restart");
     assert_eq!(evt.room_id, "!restart_room:localhost");
+    assert_eq!(evt.auth_events, vec!["$auth1:localhost"]);
+    assert_eq!(evt.prev_events, vec!["$prev1:localhost"]);
+    assert_eq!(evt.hashes, json!({ "sha256": "47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU" }));
+    assert_eq!(evt.depth, 1);
 
     // Room state persisted.
     let state_evt = s2.get_state_entry("!restart_room:localhost", "m.room.create", "").await.unwrap()

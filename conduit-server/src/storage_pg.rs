@@ -56,7 +56,8 @@ impl Storage for PostgresStorage {
         let row = sqlx::query!(
             r#"
             SELECT event_id, room_id, sender, type AS event_type, state_key,
-                   content, origin_server_ts
+                   content, auth_events, prev_events, hashes, signatures,
+                   unsigned, origin_server_ts, depth
             FROM events
             WHERE event_id = $1
             "#,
@@ -76,26 +77,24 @@ impl Storage for PostgresStorage {
             state_key: r.state_key,
             content: r.content,
             origin_server_ts: r.origin_server_ts as u64,
+            auth_events: r.auth_events,
+            prev_events: r.prev_events,
+            hashes: r.hashes,
+            signatures: r.signatures,
+            depth: r.depth,
+            unsigned: r.unsigned,
         };
         Ok(Some(event))
     }
 
     async fn put_event(&self, event: &Event) -> Result<()> {
-        // auth_events and prev_events are stored as TEXT[] but not part of the
-        // Event struct yet — store empty arrays until the struct is expanded.
-        let auth_events: Vec<String> = vec![];
-        let prev_events: Vec<String> = vec![];
-        let signatures = serde_json::json!({});
-        let hashes = serde_json::json!({});
-        let depth: i64 = 0;
-
         sqlx::query!(
             r#"
             INSERT INTO events
                 (event_id, room_id, sender, type, state_key, content,
-                 auth_events, prev_events, signatures, hashes,
+                 auth_events, prev_events, signatures, hashes, unsigned,
                  origin_server_ts, depth)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
             ON CONFLICT (event_id) DO NOTHING
             "#,
             event.event_id,
@@ -104,12 +103,13 @@ impl Storage for PostgresStorage {
             event.event_type,
             event.state_key,
             event.content,
-            &auth_events,
-            &prev_events,
-            signatures,
-            hashes,
+            &event.auth_events,
+            &event.prev_events,
+            event.signatures,
+            event.hashes,
+            event.unsigned,
             event.origin_server_ts as i64,
-            depth
+            event.depth
         )
         .execute(&self.pool)
         .await
@@ -122,7 +122,8 @@ impl Storage for PostgresStorage {
         let rows = sqlx::query!(
             r#"
             SELECT event_id, room_id, sender, type AS event_type, state_key,
-                   content, origin_server_ts
+                   content, auth_events, prev_events, hashes, signatures,
+                   unsigned, origin_server_ts, depth
             FROM events
             WHERE room_id = $1
             ORDER BY stream_position
@@ -143,6 +144,12 @@ impl Storage for PostgresStorage {
                 state_key: r.state_key,
                 content: r.content,
                 origin_server_ts: r.origin_server_ts as u64,
+                auth_events: r.auth_events,
+                prev_events: r.prev_events,
+                hashes: r.hashes,
+                signatures: r.signatures,
+                depth: r.depth,
+                unsigned: r.unsigned,
             })
             .collect();
 
@@ -496,7 +503,8 @@ impl Storage for PostgresStorage {
         let row = sqlx::query!(
             r#"
             SELECT e.event_id, e.room_id, e.sender, e.type AS event_type,
-                   e.state_key, e.content, e.origin_server_ts
+                   e.state_key, e.content, e.auth_events, e.prev_events,
+                   e.hashes, e.signatures, e.unsigned, e.origin_server_ts, e.depth
             FROM room_current_state rcs
             JOIN events e ON e.event_id = rcs.event_id
             WHERE rcs.room_id = $1 AND rcs.type = $2 AND rcs.state_key = $3
@@ -519,6 +527,12 @@ impl Storage for PostgresStorage {
             state_key: r.state_key,
             content: r.content,
             origin_server_ts: r.origin_server_ts as u64,
+            auth_events: r.auth_events,
+            prev_events: r.prev_events,
+            hashes: r.hashes,
+            signatures: r.signatures,
+            depth: r.depth,
+            unsigned: r.unsigned,
         }))
     }
 
@@ -526,7 +540,8 @@ impl Storage for PostgresStorage {
         let rows = sqlx::query!(
             r#"
             SELECT e.event_id, e.room_id, e.sender, e.type AS event_type,
-                   e.state_key, e.content, e.origin_server_ts
+                   e.state_key, e.content, e.auth_events, e.prev_events,
+                   e.hashes, e.signatures, e.unsigned, e.origin_server_ts, e.depth
             FROM room_current_state rcs
             JOIN events e ON e.event_id = rcs.event_id
             WHERE rcs.room_id = $1
@@ -548,6 +563,12 @@ impl Storage for PostgresStorage {
                 state_key: r.state_key,
                 content: r.content,
                 origin_server_ts: r.origin_server_ts as u64,
+                auth_events: r.auth_events,
+                prev_events: r.prev_events,
+                hashes: r.hashes,
+                signatures: r.signatures,
+                depth: r.depth,
+                unsigned: r.unsigned,
             })
             .collect();
 
