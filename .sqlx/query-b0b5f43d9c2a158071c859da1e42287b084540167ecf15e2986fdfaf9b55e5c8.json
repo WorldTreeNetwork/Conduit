@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT MIN(next_attempt_at) AS eta\n            FROM fed_outbound_queue\n            WHERE status = 'pending' AND destination = $1\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "eta",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "b0b5f43d9c2a158071c859da1e42287b084540167ecf15e2986fdfaf9b55e5c8"
+}

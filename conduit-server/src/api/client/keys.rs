@@ -433,34 +433,26 @@ pub async fn send_to_device<S: AuthState>(
         }
     }
 
+    // Persist remote deliveries on the durable outbound queue (conduit-5n3 /
+    // US-006). The queue's per-destination worker drains, retries with
+    // exponential backoff, and dead-letters after MAX_ATTEMPTS — replacing
+    // the previous fire-and-forget tokio::spawn.
     if !remote_by_server.is_empty() {
-        if let Some(client) = state.federation_client().cloned() {
-            let event_type = event_type.clone();
-            let txn_id = txn_id.clone();
-            // Fire-and-forget per-server delivery. Federation errors are
-            // logged but not surfaced — to-device is best-effort and the
-            // remote may retry via /sync after device-list churn.
-            // Follow-up: replace tokio::spawn with the durable PG-backed
-            // outbound queue (conduit-5n3) so messages survive restart and
-            // get retry-with-DLQ semantics.
-            tokio::spawn(async move {
-                for (dest, messages_for_server) in remote_by_server {
-                    let messages_json = serde_json::to_value(&messages_for_server)
-                        .unwrap_or_else(|_| json!({}));
-                    if let Err(e) = client
-                        .send_to_device(&dest, &txn_id, &event_type, messages_json)
-                        .await
-                    {
-                        tracing::warn!(dest, error = %e, "federation /sendToDevice failed");
-                    }
-                }
-            });
+        if let Some(queue) = state.federation_queue().cloned() {
+            for (dest, messages_for_server) in remote_by_server {
+                let messages_json = serde_json::to_value(&messages_for_server)
+                    .unwrap_or_else(|_| json!({}));
+                queue
+                    .enqueue_to_device(&dest, &event_type, messages_json)
+                    .await;
+            }
         } else {
-            tracing::debug!(
-                "remote sendToDevice requested but no federation client available"
-            );
+            tracing::debug!("remote sendToDevice requested but no federation queue available");
         }
     }
+    // txn_id is the CS-API idempotency key; the federation txn_id is generated
+    // by the queue per row.
+    let _ = txn_id;
 
     (StatusCode::OK, Json(json!({}))).into_response()
 }

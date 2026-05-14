@@ -215,7 +215,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         federation_client = federation_client.with_iroh_endpoint(Arc::clone(ep));
     }
     let federation_client = Arc::new(federation_client);
-    let federation_queue = Arc::new(federation::Queue::new(Arc::clone(&federation_client)));
+    let federation_queue = Arc::new(federation::Queue::new(
+        Arc::clone(&federation_client),
+        Arc::clone(&storage),
+    ));
+    // Recover any pending outbound work persisted across restart.
+    federation_queue.start().await;
 
     // Blob storage for media.
     let blob_store = BlobStore::from_env()

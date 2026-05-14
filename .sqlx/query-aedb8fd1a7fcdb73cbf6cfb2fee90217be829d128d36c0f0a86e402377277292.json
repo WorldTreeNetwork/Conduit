@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE fed_outbound_queue\n            SET status = 'dead', last_error = $2\n            WHERE id = $1\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "aedb8fd1a7fcdb73cbf6cfb2fee90217be829d128d36c0f0a86e402377277292"
+}

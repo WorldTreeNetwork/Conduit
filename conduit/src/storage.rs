@@ -60,6 +60,19 @@ pub struct ToDeviceMessage {
     pub content: Value,
 }
 
+/// One entry in the durable outbound federation queue (conduit-5n3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutboundEntry {
+    pub id: i64,
+    pub destination: String,
+    /// `"transaction"` for a PDU+EDU batch, `"to_device"` for federated
+    /// to-device delivery.
+    pub kind: String,
+    pub txn_id: String,
+    pub payload: Value,
+    pub attempts: i32,
+}
+
 /// A room key backup version record.
 #[derive(Debug, Clone)]
 pub struct RoomKeyVersion {
@@ -637,6 +650,54 @@ pub trait Storage: Send + Sync + 'static {
 
     /// List all local media (paginated).
     async fn list_media(&self, from: i64, limit: i64) -> Result<Vec<MediaMetadata>>;
+
+    // --- Outbound federation queue (conduit-5n3) -----------------------------
+
+    /// Insert a new pending entry. Returns the assigned id.
+    async fn enqueue_outbound(
+        &self,
+        destination: &str,
+        kind: &str,
+        txn_id: &str,
+        payload: &Value,
+    ) -> Result<i64>;
+
+    /// Distinct destinations that have at least one pending entry — used
+    /// on boot to know which per-destination workers to spawn.
+    async fn outbound_destinations_with_pending(&self) -> Result<Vec<String>>;
+
+    /// The next pending entries for `destination` whose `next_attempt_at`
+    /// is in the past (i.e., ready to send now), oldest first. Caller is
+    /// the single worker for the destination — no row-level locking
+    /// required since per-destination workers don't compete.
+    async fn next_pending_outbound(
+        &self,
+        destination: &str,
+        limit: i64,
+    ) -> Result<Vec<OutboundEntry>>;
+
+    async fn mark_outbound_sent(&self, id: i64) -> Result<()>;
+
+    /// Record a failed attempt. `attempts` and `next_attempt_at_ms` are
+    /// computed by the caller (worker) using its own backoff policy so
+    /// the Storage trait remains backoff-policy-agnostic.
+    async fn mark_outbound_failed(
+        &self,
+        id: i64,
+        attempts: i32,
+        next_attempt_at_ms: i64,
+        last_error: &str,
+    ) -> Result<()>;
+
+    async fn mark_outbound_dead(&self, id: i64, last_error: &str) -> Result<()>;
+
+    /// Smallest `next_attempt_at` (as ms since epoch) among pending rows for
+    /// `destination`, including rows scheduled in the future. Workers use
+    /// this to sleep precisely until the next retry instead of polling.
+    async fn outbound_next_eta_ms(
+        &self,
+        destination: &str,
+    ) -> Result<Option<i64>>;
 }
 
 // ---------------------------------------------------------------------------
@@ -649,7 +710,20 @@ pub struct MemoryStorage {
     inner: RwLock<MemoryInner>,
 }
 
+#[derive(Debug, Clone)]
+struct OutboundRow {
+    entry: OutboundEntry,
+    status: String,
+    next_attempt_at_ms: i64,
+    last_error: Option<String>,
+}
+
 #[derive(Default)]
+struct MemoryOutbound {
+    rows: Vec<OutboundRow>,
+    next_id: i64,
+}
+
 struct MemoryInner {
     events: HashMap<String, Event>,
     accounts: HashMap<String, Account>,
@@ -698,6 +772,43 @@ struct MemoryInner {
     // Admin audit log (E11)
     audit_log: Vec<AuditEntry>,
     audit_log_next_id: i64,
+    // Outbound federation queue (conduit-5n3)
+    outbound_queue: MemoryOutbound,
+}
+
+impl Default for MemoryInner {
+    fn default() -> Self {
+        Self {
+            events: HashMap::new(),
+            accounts: HashMap::new(),
+            devices: HashMap::new(),
+            tokens: HashMap::new(),
+            signing_keys: Vec::new(),
+            room_state: HashMap::new(),
+            device_keys: HashMap::new(),
+            one_time_keys: HashMap::new(),
+            fallback_keys: HashMap::new(),
+            cross_signing_keys: HashMap::new(),
+            cross_signing_sigs: HashMap::new(),
+            to_device_queue: Vec::new(),
+            to_device_next_id: 0,
+            device_list_changes: Vec::new(),
+            device_list_next_id: 0,
+            room_key_versions: HashMap::new(),
+            room_keys: HashMap::new(),
+            account_data: HashMap::new(),
+            account_data_next_pos: 0,
+            receipts: HashMap::new(),
+            receipts_next_pos: 0,
+            media: HashMap::new(),
+            thumbnails: HashMap::new(),
+            pushers: HashMap::new(),
+            push_rules: HashMap::new(),
+            audit_log: Vec::new(),
+            audit_log_next_id: 0,
+            outbound_queue: MemoryOutbound::default(),
+        }
+    }
 }
 
 #[async_trait]
@@ -1838,6 +1949,132 @@ impl Storage for MemoryStorage {
         let start = from.max(0) as usize;
         Ok(items.into_iter().skip(start).take(limit as usize).collect())
     }
+
+    // --- Outbound federation queue ------------------------------------------
+
+    async fn enqueue_outbound(
+        &self,
+        destination: &str,
+        kind: &str,
+        txn_id: &str,
+        payload: &Value,
+    ) -> Result<i64> {
+        let mut inner = self.inner.write().await;
+        inner.outbound_queue.next_id += 1;
+        let id = inner.outbound_queue.next_id;
+        inner.outbound_queue.rows.push(OutboundRow {
+            entry: OutboundEntry {
+                id,
+                destination: destination.to_owned(),
+                kind: kind.to_owned(),
+                txn_id: txn_id.to_owned(),
+                payload: payload.clone(),
+                attempts: 0,
+            },
+            status: "pending".to_owned(),
+            next_attempt_at_ms: Utc::now().timestamp_millis(),
+            last_error: None,
+        });
+        Ok(id)
+    }
+
+    async fn outbound_destinations_with_pending(&self) -> Result<Vec<String>> {
+        let inner = self.inner.read().await;
+        let mut set: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for row in &inner.outbound_queue.rows {
+            if row.status == "pending" {
+                set.insert(row.entry.destination.clone());
+            }
+        }
+        Ok(set.into_iter().collect())
+    }
+
+    async fn next_pending_outbound(
+        &self,
+        destination: &str,
+        limit: i64,
+    ) -> Result<Vec<OutboundEntry>> {
+        let inner = self.inner.read().await;
+        let now_ms = Utc::now().timestamp_millis();
+        let mut rows: Vec<&OutboundRow> = inner
+            .outbound_queue
+            .rows
+            .iter()
+            .filter(|r| {
+                r.status == "pending"
+                    && r.entry.destination == destination
+                    && r.next_attempt_at_ms <= now_ms
+            })
+            .collect();
+        rows.sort_by_key(|r| (r.next_attempt_at_ms, r.entry.id));
+        Ok(rows
+            .into_iter()
+            .take(limit as usize)
+            .map(|r| r.entry.clone())
+            .collect())
+    }
+
+    async fn mark_outbound_sent(&self, id: i64) -> Result<()> {
+        let mut inner = self.inner.write().await;
+        if let Some(row) = inner
+            .outbound_queue
+            .rows
+            .iter_mut()
+            .find(|r| r.entry.id == id)
+        {
+            row.status = "sent".to_owned();
+        }
+        Ok(())
+    }
+
+    async fn mark_outbound_failed(
+        &self,
+        id: i64,
+        attempts: i32,
+        next_attempt_at_ms: i64,
+        last_error: &str,
+    ) -> Result<()> {
+        let mut inner = self.inner.write().await;
+        if let Some(row) = inner
+            .outbound_queue
+            .rows
+            .iter_mut()
+            .find(|r| r.entry.id == id)
+        {
+            row.entry.attempts = attempts;
+            row.next_attempt_at_ms = next_attempt_at_ms;
+            row.last_error = Some(last_error.to_owned());
+        }
+        Ok(())
+    }
+
+    async fn mark_outbound_dead(&self, id: i64, last_error: &str) -> Result<()> {
+        let mut inner = self.inner.write().await;
+        if let Some(row) = inner
+            .outbound_queue
+            .rows
+            .iter_mut()
+            .find(|r| r.entry.id == id)
+        {
+            row.status = "dead".to_owned();
+            row.last_error = Some(last_error.to_owned());
+        }
+        Ok(())
+    }
+
+    async fn outbound_next_eta_ms(
+        &self,
+        destination: &str,
+    ) -> Result<Option<i64>> {
+        let inner = self.inner.read().await;
+        Ok(inner
+            .outbound_queue
+            .rows
+            .iter()
+            .filter(|r| r.status == "pending" && r.entry.destination == destination)
+            .map(|r| r.next_attempt_at_ms)
+            .min())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1848,6 +2085,64 @@ impl Storage for MemoryStorage {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn outbound_queue_lifecycle() {
+        let store = MemoryStorage::default();
+        // enqueue two destinations.
+        let id_a = store
+            .enqueue_outbound("a.example", "to_device", "t1", &json!({"x": 1}))
+            .await
+            .unwrap();
+        let id_b = store
+            .enqueue_outbound("b.example", "transaction", "t2", &json!({"y": 2}))
+            .await
+            .unwrap();
+        assert!(id_a < id_b);
+
+        let dests = store.outbound_destinations_with_pending().await.unwrap();
+        assert_eq!(dests.len(), 2);
+        assert!(dests.contains(&"a.example".to_owned()));
+        assert!(dests.contains(&"b.example".to_owned()));
+
+        // next_pending returns ready rows for the dest.
+        let ready = store.next_pending_outbound("a.example", 10).await.unwrap();
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].id, id_a);
+        assert_eq!(ready[0].destination, "a.example");
+        assert_eq!(ready[0].kind, "to_device");
+        assert_eq!(ready[0].attempts, 0);
+
+        // mark sent — vanishes from pending.
+        store.mark_outbound_sent(id_a).await.unwrap();
+        let ready = store.next_pending_outbound("a.example", 10).await.unwrap();
+        assert!(ready.is_empty());
+        let dests = store.outbound_destinations_with_pending().await.unwrap();
+        assert_eq!(dests, vec!["b.example".to_owned()]);
+
+        // mark failed with future eta — vanishes from ready, but eta query sees it.
+        let future = chrono::Utc::now().timestamp_millis() + 60_000;
+        store
+            .mark_outbound_failed(id_b, 1, future, "boom")
+            .await
+            .unwrap();
+        let ready = store.next_pending_outbound("b.example", 10).await.unwrap();
+        assert!(ready.is_empty());
+        let eta = store.outbound_next_eta_ms("b.example").await.unwrap();
+        assert_eq!(eta, Some(future));
+
+        // mark dead — vanishes from pending entirely.
+        store.mark_outbound_dead(id_b, "exhausted").await.unwrap();
+        assert!(store
+            .outbound_destinations_with_pending()
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            store.outbound_next_eta_ms("b.example").await.unwrap(),
+            None
+        );
+    }
 
     #[tokio::test]
     async fn delete_device_keys_tombstones_device() {

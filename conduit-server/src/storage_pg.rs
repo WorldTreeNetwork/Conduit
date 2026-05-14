@@ -17,8 +17,8 @@ use conduit::{
     Error, Result,
     event::Event,
     storage::{
-        Account, AuditEntry, Device, MediaMetadata, Pusher, PushRule, RoomKeyVersion,
-        SigningKey, Storage, ThumbnailMetadata, ToDeviceMessage, TokenOwner,
+        Account, AuditEntry, Device, MediaMetadata, OutboundEntry, Pusher, PushRule,
+        RoomKeyVersion, SigningKey, Storage, ThumbnailMetadata, ToDeviceMessage, TokenOwner,
     },
 };
 
@@ -2202,5 +2202,158 @@ impl Storage for PostgresStorage {
             uploaded_at: r.uploaded_at,
             last_accessed: r.last_accessed,
         }).collect())
+    }
+
+    // -----------------------------------------------------------------------
+    // Outbound federation queue (conduit-5n3)
+    // -----------------------------------------------------------------------
+
+    async fn enqueue_outbound(
+        &self,
+        destination: &str,
+        kind: &str,
+        txn_id: &str,
+        payload: &Value,
+    ) -> Result<i64> {
+        let row = sqlx::query!(
+            r#"
+            INSERT INTO fed_outbound_queue (destination, kind, txn_id, payload)
+            VALUES ($1, $2, $3, $4)
+            RETURNING id
+            "#,
+            destination,
+            kind,
+            txn_id,
+            payload,
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(row.id)
+    }
+
+    async fn outbound_destinations_with_pending(&self) -> Result<Vec<String>> {
+        let rows = sqlx::query!(
+            r#"
+            SELECT DISTINCT destination
+            FROM fed_outbound_queue
+            WHERE status = 'pending'
+            "#
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(rows.into_iter().map(|r| r.destination).collect())
+    }
+
+    async fn next_pending_outbound(
+        &self,
+        destination: &str,
+        limit: i64,
+    ) -> Result<Vec<OutboundEntry>> {
+        let rows = sqlx::query!(
+            r#"
+            SELECT id, destination, kind, txn_id, payload, attempts
+            FROM fed_outbound_queue
+            WHERE status = 'pending'
+              AND destination = $1
+              AND next_attempt_at <= now()
+            ORDER BY next_attempt_at, id
+            LIMIT $2
+            "#,
+            destination,
+            limit,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(rows
+            .into_iter()
+            .map(|r| OutboundEntry {
+                id: r.id,
+                destination: r.destination,
+                kind: r.kind,
+                txn_id: r.txn_id,
+                payload: r.payload,
+                attempts: r.attempts,
+            })
+            .collect())
+    }
+
+    async fn mark_outbound_sent(&self, id: i64) -> Result<()> {
+        sqlx::query!(
+            r#"
+            UPDATE fed_outbound_queue
+            SET status = 'sent', sent_at = now()
+            WHERE id = $1
+            "#,
+            id,
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(())
+    }
+
+    async fn mark_outbound_failed(
+        &self,
+        id: i64,
+        attempts: i32,
+        next_attempt_at_ms: i64,
+        last_error: &str,
+    ) -> Result<()> {
+        let next_attempt = DateTime::<Utc>::from_timestamp_millis(next_attempt_at_ms)
+            .unwrap_or_else(Utc::now);
+        sqlx::query!(
+            r#"
+            UPDATE fed_outbound_queue
+            SET attempts = $2,
+                next_attempt_at = $3,
+                last_error = $4
+            WHERE id = $1
+            "#,
+            id,
+            attempts,
+            next_attempt,
+            last_error,
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(())
+    }
+
+    async fn mark_outbound_dead(&self, id: i64, last_error: &str) -> Result<()> {
+        sqlx::query!(
+            r#"
+            UPDATE fed_outbound_queue
+            SET status = 'dead', last_error = $2
+            WHERE id = $1
+            "#,
+            id,
+            last_error,
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(())
+    }
+
+    async fn outbound_next_eta_ms(
+        &self,
+        destination: &str,
+    ) -> Result<Option<i64>> {
+        let row = sqlx::query!(
+            r#"
+            SELECT MIN(next_attempt_at) AS eta
+            FROM fed_outbound_queue
+            WHERE status = 'pending' AND destination = $1
+            "#,
+            destination,
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(row.eta.map(|ts| ts.timestamp_millis()))
     }
 }

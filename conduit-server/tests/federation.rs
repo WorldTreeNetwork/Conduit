@@ -513,15 +513,16 @@ async fn queue_retries_on_failure() {
             .expect("load key"),
     );
 
+    let storage_arc: Arc<dyn conduit::storage::Storage> = storage.into_arc();
     let fed_client = Arc::new(
         make_test_client(Arc::clone(&server_key), "my.server", base_url).await
     );
-    let queue = Arc::new(Queue::new(Arc::clone(&fed_client)));
+    let queue = Arc::new(Queue::new(Arc::clone(&fed_client), Arc::clone(&storage_arc)));
 
     queue.enqueue("remote.server", vec![], vec![]).await;
 
-    // Give the queue worker time to fail, back off (1 s), and retry.
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    // Give the queue worker time to fail, back off (2 s for attempt 1), and retry.
+    tokio::time::sleep(Duration::from_secs(4)).await;
 
     let calls = call_count.load(std::sync::atomic::Ordering::SeqCst);
     assert!(
