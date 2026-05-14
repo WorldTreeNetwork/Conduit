@@ -24,6 +24,7 @@ use conduit::storage::Storage;
 
 use crate::RemoteKeyCache;
 use crate::federation::Client as FedClient;
+use crate::federation::recent::RecentEventCache;
 
 // ---------------------------------------------------------------------------
 // Error
@@ -75,11 +76,21 @@ pub async fn process_incoming_pdu(
     http: &reqwest::Client,
     events_tx: &broadcast::Sender<i64>,
     fed_client: Option<&Arc<FedClient>>,
+    recent: Option<&Arc<RecentEventCache>>,
     pdu: Event,
     _origin: &str,
 ) -> Result<(), PipelineError> {
     // --- Step 1: Dedup — skip if we already have this event -----------------
+    // Fast path: in-memory cache of recently-processed event_ids (conduit-3qj).
+    if let Some(cache) = recent {
+        if cache.contains(&pdu.event_id).await {
+            return Ok(());
+        }
+    }
     if let Ok(Some(_)) = storage.get_event(&pdu.event_id).await {
+        if let Some(cache) = recent {
+            cache.insert(&pdu.event_id).await;
+        }
         return Ok(()); // already processed
     }
 
@@ -140,6 +151,9 @@ pub async fn process_incoming_pdu(
                         .await
                         .map_err(|e| PipelineError::Storage(e.to_string()))?;
                     notify_sync(storage, events_tx).await;
+                    if let Some(cache) = recent {
+                        cache.insert(&pdu.event_id).await;
+                    }
                     return Ok(());
                 }
             }
@@ -162,6 +176,11 @@ pub async fn process_incoming_pdu(
 
     // --- Step 7: Notify local /sync -----------------------------------------
     notify_sync(storage, events_tx).await;
+
+    // Mark this event as recently-processed for the fast-path dedup cache.
+    if let Some(cache) = recent {
+        cache.insert(&pdu.event_id).await;
+    }
 
     Ok(())
 }

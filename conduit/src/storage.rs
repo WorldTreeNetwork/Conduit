@@ -315,6 +315,12 @@ pub trait Storage: Send + Sync + 'static {
     /// All devices for a user: device_id → keys JSON.
     async fn get_device_keys_for_user(&self, user_id: &str) -> Result<HashMap<String, Value>>;
 
+    /// Remove the device-keys entry for a (user_id, device_id) tuple.
+    /// Idempotent: a missing row is a no-op (returns Ok).
+    /// Used when a remote `m.device_list_update` EDU carries `deleted=true`
+    /// (E10 follow-up conduit-ub5).
+    async fn delete_device_keys(&self, user_id: &str, device_id: &str) -> Result<()>;
+
     // --- One-time keys (mrm.1, mrm.3) ----------------------------------------
 
     /// Insert a batch of OTKs. Each tuple is (key_id, algorithm, key_json).
@@ -1054,6 +1060,14 @@ impl Storage for MemoryStorage {
             .map(|((_, d), v)| (d.clone(), v.clone()))
             .collect();
         Ok(map)
+    }
+
+    async fn delete_device_keys(&self, user_id: &str, device_id: &str) -> Result<()> {
+        let mut inner = self.inner.write().await;
+        inner
+            .device_keys
+            .remove(&(user_id.to_owned(), device_id.to_owned()));
+        Ok(())
     }
 
     // --- One-time keys --------------------------------------------------------
@@ -1833,6 +1847,49 @@ impl Storage for MemoryStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn delete_device_keys_tombstones_device() {
+        let store = MemoryStorage::default();
+        store
+            .upsert_device_keys("@alice:srv", "DEV1", &json!({"keys": {"x": "y"}}))
+            .await
+            .unwrap();
+        store
+            .upsert_device_keys("@alice:srv", "DEV2", &json!({"keys": {"a": "b"}}))
+            .await
+            .unwrap();
+
+        // Both present.
+        let all = store.get_device_keys_for_user("@alice:srv").await.unwrap();
+        assert_eq!(all.len(), 2);
+
+        // Tombstone DEV1.
+        store
+            .delete_device_keys("@alice:srv", "DEV1")
+            .await
+            .unwrap();
+        assert!(store
+            .get_device_keys("@alice:srv", "DEV1")
+            .await
+            .unwrap()
+            .is_none());
+        // DEV2 still present.
+        assert!(store
+            .get_device_keys("@alice:srv", "DEV2")
+            .await
+            .unwrap()
+            .is_some());
+        let all = store.get_device_keys_for_user("@alice:srv").await.unwrap();
+        assert_eq!(all.len(), 1);
+
+        // Deleting absent device is a no-op.
+        store
+            .delete_device_keys("@alice:srv", "NOPE")
+            .await
+            .unwrap();
+    }
 
     #[tokio::test]
     async fn set_signing_key_expiry_updates_existing() {

@@ -73,6 +73,8 @@ async fn spawn_test_server(
         events_tx: events_tx.clone(),
         fed_client,
         blob_store: BlobStore::new(std::env::temp_dir().join(format!("conduit_test_blob_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().subsec_nanos()))).unwrap(),
+        recent: Arc::new(conduit_server::federation::RecentEventCache::new()),
+        app_services: Arc::new(Vec::new()),
     };
 
     let xmatrix_state = XMatrixMiddlewareState {
@@ -585,6 +587,8 @@ async fn rate_limit_kicks_in_after_burst() {
         events_tx,
         fed_client,
         blob_store: BlobStore::new(std::env::temp_dir().join(format!("conduit_test_blob_rl_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().subsec_nanos()))).unwrap(),
+        recent: Arc::new(conduit_server::federation::RecentEventCache::new()),
+        app_services: Arc::new(Vec::new()),
     };
 
     let xmatrix_state = XMatrixMiddlewareState {

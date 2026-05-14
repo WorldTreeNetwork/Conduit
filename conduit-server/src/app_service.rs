@@ -195,6 +195,100 @@ pub fn user_in_as_namespace(user_id: &str, svc: &AppService) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// Existence queries (AS6, conduit-dhd)
+// ---------------------------------------------------------------------------
+
+/// Return the AS whose user namespace matches `user_id`, exclusive or not.
+pub fn as_for_user<'a>(user_id: &str, services: &'a [AppService]) -> Option<&'a AppService> {
+    services
+        .iter()
+        .find(|s| s.user_namespaces.iter().any(|(_, re)| re.is_match(user_id)))
+}
+
+/// Return the AS whose alias namespace matches `alias`, exclusive or not.
+pub fn as_for_alias<'a>(alias: &str, services: &'a [AppService]) -> Option<&'a AppService> {
+    services
+        .iter()
+        .find(|s| s.alias_namespaces.iter().any(|(_, re)| re.is_match(alias)))
+}
+
+/// Ask the matching AS whether it owns `user_id` by calling
+/// `GET {as.url}/_matrix/app/v1/users/{userId}?access_token={hs_token}`.
+/// Returns true on 2xx; false on 4xx/5xx, network error, or no matching AS.
+///
+/// The AS is expected to call back to the HS to create the user account if
+/// needed, so callers should re-check storage after this returns true.
+pub async fn query_as_user(
+    http: &reqwest::Client,
+    services: &[AppService],
+    user_id: &str,
+) -> bool {
+    let Some(svc) = as_for_user(user_id, services) else {
+        return false;
+    };
+    let url = format!(
+        "{}/_matrix/app/v1/users/{}?access_token={}",
+        svc.url.trim_end_matches('/'),
+        urlencode_path(user_id),
+        svc.hs_token,
+    );
+    match http.get(&url).send().await {
+        Ok(r) if r.status().is_success() => true,
+        Ok(r) => {
+            tracing::debug!(as_id = svc.id, status = r.status().as_u16(), user_id, "AS user query miss");
+            false
+        }
+        Err(e) => {
+            warn!(as_id = svc.id, error = %e, user_id, "AS user query failed");
+            false
+        }
+    }
+}
+
+/// Ask the matching AS whether it owns `alias`.
+pub async fn query_as_alias(
+    http: &reqwest::Client,
+    services: &[AppService],
+    alias: &str,
+) -> bool {
+    let Some(svc) = as_for_alias(alias, services) else {
+        return false;
+    };
+    let url = format!(
+        "{}/_matrix/app/v1/rooms/{}?access_token={}",
+        svc.url.trim_end_matches('/'),
+        urlencode_path(alias),
+        svc.hs_token,
+    );
+    match http.get(&url).send().await {
+        Ok(r) if r.status().is_success() => true,
+        Ok(r) => {
+            tracing::debug!(as_id = svc.id, status = r.status().as_u16(), alias, "AS alias query miss");
+            false
+        }
+        Err(e) => {
+            warn!(as_id = svc.id, error = %e, alias, "AS alias query failed");
+            false
+        }
+    }
+}
+
+/// Percent-encode a path segment for URL safety.
+fn urlencode_path(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+            other => {
+                out.push('%');
+                out.push_str(&format!("{other:02X}"));
+            }
+        }
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
 // AS authentication extractor (AS3)
 // ---------------------------------------------------------------------------
 
@@ -211,6 +305,26 @@ pub struct AsAuthed {
 pub trait AsState: Clone + Send + Sync + 'static {
     fn app_services(&self) -> &Arc<Vec<AppService>>;
     fn storage(&self) -> &Arc<dyn Storage>;
+}
+
+/// Ensure a ghost account exists for a user the AS is acting-as (conduit-5vr).
+///
+/// If `get_account` returns None, this calls `create_account(user_id, None)`
+/// — a minimal, password-less account owned by the AS via its namespace
+/// regex.  Idempotent: a race that loses the create is silently ignored.
+pub async fn ensure_ghost_account(storage: &Arc<dyn Storage>, user_id: &str) {
+    match storage.get_account(user_id).await {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            if let Err(e) = storage.create_account(user_id, None).await {
+                // Race or duplicate — log and move on.
+                tracing::debug!(user_id, error = %e, "AS ghost create_account skipped");
+            } else {
+                tracing::info!(user_id, "AS ghost user auto-created");
+            }
+        }
+        Err(e) => tracing::warn!(user_id, error = %e, "AS ghost lookup failed"),
+    }
 }
 
 #[async_trait]
@@ -258,6 +372,8 @@ impl<S: AsState> FromRequestParts<S> for AsAuthed {
                     "error": "user_id is outside the AS's user namespace"
                 }))).into_response());
             }
+            // Auto-create ghost account on first use (conduit-5vr / AS4).
+            ensure_ghost_account(state.storage(), uid).await;
         }
 
         Ok(AsAuthed {
@@ -423,3 +539,111 @@ pub fn spawn_as_workers(
         });
     }
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn build_svc(url: &str, ns: &str) -> AppService {
+        AppService {
+            id: "test".to_owned(),
+            url: url.to_owned(),
+            as_token: "ast".to_owned(),
+            hs_token: "hst".to_owned(),
+            sender_localpart: "bot".to_owned(),
+            rate_limited: false,
+            user_namespaces: vec![(true, Regex::new(ns).unwrap())],
+            alias_namespaces: vec![(true, Regex::new(ns).unwrap())],
+            room_namespaces: vec![],
+        }
+    }
+
+    /// Mock AS that returns the given status for `GET /_matrix/app/v1/users/:userId`.
+    async fn mock_as(status: u16) -> (String, tokio::task::JoinHandle<()>) {
+        use axum::{routing::get, Router};
+        let app = Router::new().route(
+            "/_matrix/app/v1/users/:user_id",
+            get(move || async move {
+                axum::http::StatusCode::from_u16(status).unwrap()
+            }),
+        )
+        .route(
+            "/_matrix/app/v1/rooms/:alias",
+            get(move || async move {
+                axum::http::StatusCode::from_u16(status).unwrap()
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("http://{}", addr);
+        let handle = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (url, handle)
+    }
+
+    #[tokio::test]
+    async fn query_as_user_returns_true_on_200() {
+        let (url, _h) = mock_as(200).await;
+        let svc = build_svc(&url, r"^@bot_.*:localhost$");
+        let http = reqwest::Client::new();
+        let services = vec![svc];
+        assert!(query_as_user(&http, &services, "@bot_alice:localhost").await);
+    }
+
+    #[tokio::test]
+    async fn query_as_user_returns_false_on_404() {
+        let (url, _h) = mock_as(404).await;
+        let svc = build_svc(&url, r"^@bot_.*:localhost$");
+        let http = reqwest::Client::new();
+        let services = vec![svc];
+        assert!(!query_as_user(&http, &services, "@bot_alice:localhost").await);
+    }
+
+    #[tokio::test]
+    async fn query_as_user_returns_false_when_no_namespace_match() {
+        let (url, _h) = mock_as(200).await;
+        // Namespace doesn't cover @human:localhost.
+        let svc = build_svc(&url, r"^@bot_.*:localhost$");
+        let http = reqwest::Client::new();
+        let services = vec![svc];
+        assert!(!query_as_user(&http, &services, "@human:localhost").await);
+    }
+
+    #[tokio::test]
+    async fn query_as_alias_returns_true_on_200() {
+        let (url, _h) = mock_as(200).await;
+        let svc = build_svc(&url, r"^#bridge_.*:localhost$");
+        let http = reqwest::Client::new();
+        let services = vec![svc];
+        assert!(query_as_alias(&http, &services, "#bridge_irc:localhost").await);
+    }
+
+    #[tokio::test]
+    async fn ensure_ghost_account_creates_when_absent() {
+        use conduit::storage::MemoryStorage;
+        let storage: Arc<dyn Storage> = Arc::new(MemoryStorage::default());
+        assert!(storage.get_account("@ghost:localhost").await.unwrap().is_none());
+        ensure_ghost_account(&storage, "@ghost:localhost").await;
+        let acct = storage.get_account("@ghost:localhost").await.unwrap().unwrap();
+        assert_eq!(acct.user_id, "@ghost:localhost");
+        assert!(acct.password_hash.is_none());
+        assert!(!acct.is_admin);
+    }
+
+    #[tokio::test]
+    async fn ensure_ghost_account_is_idempotent() {
+        use conduit::storage::MemoryStorage;
+        let storage: Arc<dyn Storage> = Arc::new(MemoryStorage::default());
+        ensure_ghost_account(&storage, "@ghost:localhost").await;
+        // Second call must not panic or duplicate.
+        ensure_ghost_account(&storage, "@ghost:localhost").await;
+        let acct = storage.get_account("@ghost:localhost").await.unwrap().unwrap();
+        assert_eq!(acct.user_id, "@ghost:localhost");
+    }
+}
+

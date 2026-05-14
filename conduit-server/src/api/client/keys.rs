@@ -11,7 +11,8 @@
 //!   GET/POST/PUT/DELETE /_matrix/client/v3/room_keys/version[/:version]
 //!   GET/PUT/DELETE /_matrix/client/v3/room_keys/keys[/:roomId[/:sessionId]]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use axum::{
     extract::{Path, Query, State},
@@ -21,6 +22,8 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
+
+use conduit::storage::Storage;
 
 use super::{AuthState, AuthedUser, MatrixError};
 
@@ -57,7 +60,11 @@ pub async fn keys_upload<S: AuthState>(
             return MatrixError::unknown(e.to_string()).into_response();
         }
         // Record device list change so other users' /sync sees the update.
-        let _ = storage.record_device_list_change(user_id).await;
+        let stream_id = storage.record_device_list_change(user_id).await.unwrap_or(0);
+        // Federate an m.device_list_update EDU to remote servers sharing a
+        // room with this user (conduit-6r1).
+        broadcast_device_list_update(&state, user_id, device_id, stream_id, Some(dk.clone()))
+            .await;
     }
 
     // Store one-time keys.
@@ -102,6 +109,110 @@ pub async fn keys_upload<S: AuthState>(
         Json(json!({ "one_time_key_counts": counts_json })),
     )
         .into_response()
+}
+
+/// Collect distinct remote server names that share a room with `user_id`
+/// (conduit-6r1).
+///
+/// Walks all rooms, checks membership state, returns the set of remote server
+/// parts seen for joined members. Excludes our own server.
+pub(crate) async fn remote_servers_sharing_room_with(
+    storage: &Arc<dyn Storage>,
+    server_name: &str,
+    user_id: &str,
+) -> HashSet<String> {
+    let mut servers: HashSet<String> = HashSet::new();
+    let rooms = match storage.list_rooms(0, 10_000).await {
+        Ok(r) => r,
+        Err(_) => return servers,
+    };
+    for room_id in rooms {
+        // Is `user_id` joined in this room?
+        let in_room = match storage
+            .get_state_entry(&room_id, "m.room.member", user_id)
+            .await
+        {
+            Ok(Some(ev)) => ev
+                .content
+                .get("membership")
+                .and_then(|v| v.as_str())
+                .map(|m| m == "join")
+                .unwrap_or(false),
+            _ => false,
+        };
+        if !in_room {
+            continue;
+        }
+        // Collect remote servers from other joined members.
+        let state = match storage.get_current_state(&room_id).await {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        for ev in state {
+            if ev.event_type != "m.room.member" {
+                continue;
+            }
+            let membership = ev
+                .content
+                .get("membership")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if membership != "join" {
+                continue;
+            }
+            let other = ev.state_key.as_deref().unwrap_or("");
+            let srv = other.split(':').nth(1).unwrap_or("");
+            if !srv.is_empty() && srv != server_name {
+                servers.insert(srv.to_owned());
+            }
+        }
+    }
+    servers
+}
+
+/// Broadcast an `m.device_list_update` EDU to every remote server that shares
+/// a room with `user_id` (conduit-6r1).
+///
+/// Best-effort and fire-and-forget — failures are logged. Triggered after
+/// `keys_upload` and `device_signing_upload`.
+pub(crate) async fn broadcast_device_list_update<S: AuthState>(
+    state: &S,
+    user_id: &str,
+    device_id: &str,
+    stream_id: i64,
+    keys: Option<Value>,
+) {
+    let Some(queue) = state.federation_queue().cloned() else {
+        return; // No federation wiring (tests / stub state) — silently skip.
+    };
+    let storage = state.storage().clone();
+    let server_name = state.server_name().to_owned();
+    let user_id = user_id.to_owned();
+    let device_id = device_id.to_owned();
+
+    tokio::spawn(async move {
+        let servers =
+            remote_servers_sharing_room_with(&storage, &server_name, &user_id).await;
+        if servers.is_empty() {
+            return;
+        }
+        let mut content = json!({
+            "user_id": user_id,
+            "device_id": device_id,
+            "stream_id": stream_id,
+            "prev_id": [],
+        });
+        if let Some(k) = keys {
+            content["keys"] = k;
+        }
+        let edu = json!({
+            "edu_type": "m.device_list_update",
+            "content": content,
+        });
+        for dest in servers {
+            queue.enqueue(&dest, vec![], vec![edu.clone()]).await;
+        }
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -283,16 +394,21 @@ pub struct SendToDeviceBody {
 pub async fn send_to_device<S: AuthState>(
     State(state): State<S>,
     authed: AuthedUser,
-    Path((event_type, _txn_id)): Path<(String, String)>,
+    Path((event_type, txn_id)): Path<(String, String)>,
     Json(body): Json<SendToDeviceBody>,
 ) -> Response {
     let storage = state.storage();
     let sender = &authed.user_id;
 
+    // Bucket targets by server: local goes straight to the to-device queue;
+    // remote dests are aggregated and dispatched through the federation
+    // /sendToDevice endpoint (conduit-0t6).
+    let mut remote_by_server: HashMap<String, HashMap<String, HashMap<String, Value>>> =
+        HashMap::new();
+
     for (target_user, devices) in &body.messages {
         let target_server = target_user.split(':').nth(1).unwrap_or("");
         if target_server == state.server_name() {
-            // Local delivery.
             for (target_device, content) in devices {
                 if let Err(e) = storage
                     .enqueue_to_device(target_user, target_device, sender, &event_type, content)
@@ -302,11 +418,38 @@ pub async fn send_to_device<S: AuthState>(
                 }
             }
         } else {
-            // Remote delivery: enqueue via federation. Best-effort for now.
-            // TODO: route through federation queue (mrm.10 outbound path).
+            let per_server = remote_by_server
+                .entry(target_server.to_owned())
+                .or_default();
+            per_server
+                .entry(target_user.clone())
+                .or_default()
+                .extend(devices.iter().map(|(d, c)| (d.clone(), c.clone())));
+        }
+    }
+
+    if !remote_by_server.is_empty() {
+        if let Some(client) = state.federation_client().cloned() {
+            let event_type = event_type.clone();
+            let txn_id = txn_id.clone();
+            // Fire-and-forget per-server delivery. Federation errors are
+            // logged but not surfaced — to-device is best-effort and the
+            // remote may retry via /sync after device-list churn.
+            tokio::spawn(async move {
+                for (dest, messages_for_server) in remote_by_server {
+                    let messages_json = serde_json::to_value(&messages_for_server)
+                        .unwrap_or_else(|_| json!({}));
+                    if let Err(e) = client
+                        .send_to_device(&dest, &txn_id, &event_type, messages_json)
+                        .await
+                    {
+                        tracing::warn!(dest, error = %e, "federation /sendToDevice failed");
+                    }
+                }
+            });
+        } else {
             tracing::debug!(
-                target_user = %target_user,
-                "to-device for remote user — federation outbound not yet wired"
+                "remote sendToDevice requested but no federation client available"
             );
         }
     }
@@ -353,7 +496,11 @@ pub async fn device_signing_upload<S: AuthState>(
     }
 
     // Record device list change so peers see updated cross-signing keys.
-    let _ = storage.record_device_list_change(user_id).await;
+    let stream_id = storage.record_device_list_change(user_id).await.unwrap_or(0);
+    // Federate an m.device_list_update EDU. Cross-signing key changes
+    // surface as a device-less device_list_update (the EDU carries no
+    // device_id-specific keys field — remotes re-query). (conduit-6r1)
+    broadcast_device_list_update(&state, user_id, "", stream_id, None).await;
 
     (StatusCode::OK, Json(json!({}))).into_response()
 }
@@ -446,6 +593,24 @@ pub async fn room_keys_version_create<S: AuthState>(
     let storage = state.storage();
     let user_id = &authed.user_id;
 
+    // Verify auth_data signatures (conduit-aee). If a master cross-signing
+    // key has been uploaded for the user, any signatures present in
+    // auth_data must verify against it; otherwise we 400.
+    if let Ok(xsk) = storage.get_cross_signing_keys(user_id).await {
+        if let Some(master) = xsk.get("master") {
+            if let Err(e) = verify_backup_auth_data(&body.auth_data, master) {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "errcode": "M_INVALID_SIGNATURE",
+                        "error": format!("backup auth_data signature invalid: {e}")
+                    })),
+                )
+                    .into_response();
+            }
+        }
+    }
+
     // Version = monotonic timestamp string.
     let version = chrono::Utc::now().timestamp_millis().to_string();
 
@@ -455,6 +620,88 @@ pub async fn room_keys_version_create<S: AuthState>(
     {
         Ok(_etag) => (StatusCode::OK, Json(json!({ "version": version }))).into_response(),
         Err(e) => MatrixError::unknown(e.to_string()).into_response(),
+    }
+}
+
+/// Verify the signatures on a room-keys backup `auth_data` against the user's
+/// master cross-signing key (conduit-aee).
+///
+/// Returns:
+/// - `Ok(())` if no signatures are present (nothing to verify), or if at least
+///   one signature in `auth_data["signatures"]` verifies against a key in
+///   `master_key_json["keys"]`.
+/// - `Err(reason)` if signatures are present but none verify against the
+///   master key.
+pub(crate) fn verify_backup_auth_data(
+    auth_data: &Value,
+    master_key_json: &Value,
+) -> Result<(), String> {
+    use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine as _};
+
+    let Some(sigs) = auth_data
+        .get("signatures")
+        .and_then(|s| s.as_object())
+        .filter(|m| !m.is_empty())
+    else {
+        return Ok(()); // No signatures to verify.
+    };
+
+    let mut stripped = auth_data.clone();
+    if let Some(obj) = stripped.as_object_mut() {
+        obj.remove("signatures");
+        obj.remove("unsigned");
+    }
+    let bytes = conduit::canonical_json::to_canonical_bytes(&stripped)
+        .map_err(|e| format!("canonicalize auth_data: {e}"))?;
+
+    let master_keys = master_key_json
+        .get("keys")
+        .and_then(|k| k.as_object())
+        .ok_or_else(|| "master cross-signing key missing 'keys' field".to_owned())?;
+
+    let mut tried_any = false;
+    for (_signing_user, sig_map) in sigs {
+        let Some(sig_map) = sig_map.as_object() else {
+            continue;
+        };
+        for (key_id, sig_val) in sig_map {
+            let Some(sig_b64) = sig_val.as_str() else {
+                continue;
+            };
+            let Some(pub_b64) = master_keys.get(key_id).and_then(|v| v.as_str()) else {
+                continue; // Signature uses a different key than the master — skip.
+            };
+            tried_any = true;
+            let pub_bytes = STANDARD_NO_PAD
+                .decode(pub_b64)
+                .map_err(|e| format!("public key base64: {e}"))?;
+            let sig_bytes = STANDARD_NO_PAD
+                .decode(sig_b64)
+                .map_err(|e| format!("signature base64: {e}"))?;
+            let pub_arr: [u8; 32] = pub_bytes
+                .as_slice()
+                .try_into()
+                .map_err(|_| "master public key is not 32 bytes".to_owned())?;
+            let sig_arr: [u8; 64] = sig_bytes
+                .as_slice()
+                .try_into()
+                .map_err(|_| "signature is not 64 bytes".to_owned())?;
+            let vk = ed25519_dalek::VerifyingKey::from_bytes(&pub_arr)
+                .map_err(|e| format!("master key invalid: {e}"))?;
+            let sig = ed25519_dalek::Signature::from_bytes(&sig_arr);
+            if vk.verify_strict(&bytes, &sig).is_ok() {
+                return Ok(());
+            }
+        }
+    }
+
+    if tried_any {
+        Err("no signature verified against master key".to_owned())
+    } else {
+        // Signatures were present but used keys not in the master key. Per
+        // spec, accept — these may be signed by other identity keys we don't
+        // hold; the client will re-validate on restore.
+        Ok(())
     }
 }
 
@@ -750,6 +997,178 @@ async fn room_keys_count_response(
 // ---------------------------------------------------------------------------
 // Token helpers
 // ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod fanout_tests {
+    use super::*;
+    use conduit::event::Event;
+    use conduit::storage::MemoryStorage;
+
+    fn member_event(room: &str, user: &str, membership: &str) -> Event {
+        Event {
+            event_id: format!("$mem-{room}-{user}"),
+            room_id: room.to_owned(),
+            sender: user.to_owned(),
+            event_type: "m.room.member".to_owned(),
+            content: json!({ "membership": membership }),
+            state_key: Some(user.to_owned()),
+            origin_server_ts: 0,
+            auth_events: vec![],
+            prev_events: vec![],
+            hashes: json!({}),
+            signatures: json!({}),
+            depth: 1,
+            unsigned: None,
+        }
+    }
+
+    async fn seed_member(storage: &Arc<dyn Storage>, room: &str, user: &str, membership: &str) {
+        let ev = member_event(room, user, membership);
+        storage.put_event(&ev).await.unwrap();
+        storage
+            .set_state_entry(room, "m.room.member", user, &ev.event_id)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn remote_servers_collects_distinct_remotes() {
+        let storage: Arc<dyn Storage> = Arc::new(MemoryStorage::default());
+        // Room 1: @alice:local + @bob:remote-a + @carol:remote-b (all joined)
+        seed_member(&storage, "!r1:local", "@alice:local", "join").await;
+        seed_member(&storage, "!r1:local", "@bob:remote-a", "join").await;
+        seed_member(&storage, "!r1:local", "@carol:remote-b", "join").await;
+        // Room 2: @alice:local + @bob:remote-a + @dave:remote-c (dave is invited, not joined)
+        seed_member(&storage, "!r2:local", "@alice:local", "join").await;
+        seed_member(&storage, "!r2:local", "@bob:remote-a", "join").await;
+        seed_member(&storage, "!r2:local", "@dave:remote-c", "invite").await;
+        // Room 3: alice is invited, not joined. eve:remote-d is joined.
+        seed_member(&storage, "!r3:local", "@alice:local", "invite").await;
+        seed_member(&storage, "!r3:local", "@eve:remote-d", "join").await;
+
+        let s = remote_servers_sharing_room_with(&storage, "local", "@alice:local").await;
+        assert!(s.contains("remote-a"));
+        assert!(s.contains("remote-b"));
+        // dave:remote-c is invited-only → still a remote member; included.
+        // But our filter requires membership=join → so remote-c should NOT be included.
+        assert!(!s.contains("remote-c"));
+        // alice isn't joined in r3 → eve:remote-d not collected.
+        assert!(!s.contains("remote-d"));
+        // Our own server is excluded.
+        assert!(!s.contains("local"));
+        assert_eq!(s.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn sas_verification_to_device_round_trip() {
+        // Confirms m.key.verification.start is carried by the to-device queue
+        // (the same path is used for any opaque event_type) (conduit-c52).
+        let storage = MemoryStorage::default();
+        let content = json!({
+            "method": "m.sas.v1",
+            "transaction_id": "abc",
+            "from_device": "DEV_A",
+        });
+        let id = storage
+            .enqueue_to_device(
+                "@bob:local",
+                "DEV_B",
+                "@alice:local",
+                "m.key.verification.start",
+                &content,
+            )
+            .await
+            .unwrap();
+        assert!(id > 0);
+        let msgs = storage
+            .drain_to_device("@bob:local", "DEV_B", 0, 10)
+            .await
+            .unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].sender, "@alice:local");
+        assert_eq!(msgs[0].event_type, "m.key.verification.start");
+        assert_eq!(msgs[0].content, content);
+    }
+}
+
+#[cfg(test)]
+mod backup_sig_tests {
+    use super::*;
+    use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine as _};
+    use ed25519_dalek::{Signer, SigningKey};
+    use rand::rngs::OsRng;
+
+    fn build_master(key_id: &str, vk: &ed25519_dalek::VerifyingKey) -> Value {
+        let pub_b64 = STANDARD_NO_PAD.encode(vk.to_bytes());
+        json!({
+            "user_id": "@a:srv",
+            "usage": ["master"],
+            "keys": { key_id: pub_b64 },
+        })
+    }
+
+    fn signed_auth_data(sk: &SigningKey, key_id: &str) -> Value {
+        let mut auth_data = json!({
+            "public_key": "AAAAAAAAAA",
+            "extra": "data",
+        });
+        let bytes = conduit::canonical_json::to_canonical_bytes(&auth_data).unwrap();
+        let sig = sk.sign(&bytes);
+        let sig_b64 = STANDARD_NO_PAD.encode(sig.to_bytes());
+        auth_data["signatures"] = json!({
+            "@a:srv": { key_id: sig_b64 }
+        });
+        auth_data
+    }
+
+    #[test]
+    fn verify_no_signatures_is_ok() {
+        let auth_data = json!({"public_key": "abc"});
+        let master = json!({"keys": {"ed25519:M": "AAAA"}});
+        assert!(verify_backup_auth_data(&auth_data, &master).is_ok());
+    }
+
+    #[test]
+    fn verify_valid_signature_against_master_is_ok() {
+        let sk = SigningKey::generate(&mut OsRng);
+        let vk = sk.verifying_key();
+        let key_id = "ed25519:MASTER";
+        let auth_data = signed_auth_data(&sk, key_id);
+        let master = build_master(key_id, &vk);
+        verify_backup_auth_data(&auth_data, &master).expect("valid sig must verify");
+    }
+
+    #[test]
+    fn verify_corrupted_signature_rejects() {
+        let sk = SigningKey::generate(&mut OsRng);
+        let vk = sk.verifying_key();
+        let key_id = "ed25519:MASTER";
+        let mut auth_data = signed_auth_data(&sk, key_id);
+        // Flip a byte in the signature.
+        let sig_b64 = auth_data["signatures"]["@a:srv"][key_id]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let mut sig_bytes = STANDARD_NO_PAD.decode(&sig_b64).unwrap();
+        sig_bytes[0] ^= 0xFF;
+        let new_sig = STANDARD_NO_PAD.encode(&sig_bytes);
+        auth_data["signatures"]["@a:srv"][key_id] = json!(new_sig);
+        let master = build_master(key_id, &vk);
+        assert!(verify_backup_auth_data(&auth_data, &master).is_err());
+    }
+
+    #[test]
+    fn verify_signature_with_unknown_key_id_is_accepted() {
+        // Spec note: signatures using keys we don't hold are tolerated; the
+        // client will re-validate at restore time.
+        let sk = SigningKey::generate(&mut OsRng);
+        let auth_data = signed_auth_data(&sk, "ed25519:OTHER");
+        // Master key uses a different key_id.
+        let other = SigningKey::generate(&mut OsRng);
+        let master = build_master("ed25519:MASTER", &other.verifying_key());
+        assert!(verify_backup_auth_data(&auth_data, &master).is_ok());
+    }
+}
 
 /// Extract device-list stream position from a combined sync token "s{events}_d{device}"
 /// or a plain device-list token "d{device}".

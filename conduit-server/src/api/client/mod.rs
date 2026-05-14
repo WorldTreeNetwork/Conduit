@@ -75,6 +75,16 @@ pub trait AuthState: Clone + Send + Sync + 'static {
     fn typing_tx(&self) -> &broadcast::Sender<String>;
     /// Ephemeral in-memory presence store.
     fn presence_store(&self) -> &Arc<PresenceStore>;
+    /// Optional outbound federation client (for cross-server CS-API paths
+    /// like /sendToDevice and outbound device_list_update EDUs).
+    /// Default `None` keeps tests that use a stub state working.
+    fn federation_client(&self) -> Option<&Arc<crate::federation::Client>> {
+        None
+    }
+    /// Optional outbound federation send queue.
+    fn federation_queue(&self) -> Option<&Arc<crate::federation::Queue>> {
+        None
+    }
 }
 
 // ---------------------------------------------------------------------------

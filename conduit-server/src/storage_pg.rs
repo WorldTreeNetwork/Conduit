@@ -854,6 +854,18 @@ impl Storage for PostgresStorage {
         Ok(rows.into_iter().map(|r| (r.device_id, r.keys)).collect())
     }
 
+    async fn delete_device_keys(&self, user_id: &str, device_id: &str) -> Result<()> {
+        sqlx::query!(
+            r#"DELETE FROM device_keys WHERE user_id = $1 AND device_id = $2"#,
+            user_id,
+            device_id,
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(())
+    }
+
     // -----------------------------------------------------------------------
     // One-time keys (mrm.1, mrm.3)
     // -----------------------------------------------------------------------

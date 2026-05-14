@@ -37,6 +37,7 @@ use conduit::storage::Storage;
 
 use crate::RemoteKeyCache;
 use crate::federation::Client as FedClient;
+use crate::federation::recent::RecentEventCache;
 use crate::media_storage::BlobStore;
 use crate::api::client::media::MediaState;
 
@@ -59,6 +60,11 @@ pub struct FedState {
     pub fed_client: Arc<FedClient>,
     /// Blob store for federation media download/thumbnail (E07 h9n.8).
     pub blob_store: BlobStore,
+    /// In-memory dedup cache for inbound PDUs (conduit-3qj).
+    pub recent: Arc<RecentEventCache>,
+    /// Application Service registrations — used to query unknown users/aliases
+    /// that fall in an AS namespace (conduit-dhd).
+    pub app_services: Arc<Vec<crate::app_service::AppService>>,
 }
 
 impl MediaState for FedState {
@@ -162,6 +168,7 @@ pub async fn send_transaction(
             &state.http,
             &state.events_tx,
             Some(&state.fed_client),
+            Some(&state.recent),
             pdu,
             &origin,
         )
@@ -357,6 +364,7 @@ pub async fn send_join(
         &state.http,
         &state.events_tx,
         Some(&state.fed_client),
+        Some(&state.recent),
         pdu.clone(),
         &origin,
     )
@@ -709,11 +717,22 @@ pub async fn query_profile(
         return not_found("User is not on this server");
     }
 
-    // Check account exists.
-    match state.storage.get_account(&user_id).await {
-        Ok(Some(_)) => {}
-        Ok(None) => return not_found("User not found"),
-        Err(e) => return internal(&e.to_string()),
+    // Check account exists. If absent, give the matching AS (if any) a chance
+    // to bring the user into existence (conduit-dhd / AS6).
+    let mut have_account = matches!(
+        state.storage.get_account(&user_id).await,
+        Ok(Some(_))
+    );
+    if !have_account
+        && crate::app_service::query_as_user(&state.http, &state.app_services, &user_id).await
+    {
+        have_account = matches!(
+            state.storage.get_account(&user_id).await,
+            Ok(Some(_))
+        );
+    }
+    if !have_account {
+        return not_found("User not found");
     }
 
     // Profile data: look up from account_data / profile state.
@@ -747,7 +766,7 @@ pub async fn query_profile(
 
 /// `GET /_matrix/federation/v1/query/directory?room_alias=...`
 pub async fn query_directory(
-    State(_state): State<FedState>,
+    State(state): State<FedState>,
     origin_ext: Option<axum::extract::Extension<FederationOrigin>>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
@@ -755,10 +774,16 @@ pub async fn query_directory(
         return unauthorized("Not authenticated");
     }
 
-    let _alias = match params.get("room_alias") {
+    let alias = match params.get("room_alias") {
         Some(a) => a.clone(),
         None => return bad_json("Missing room_alias parameter"),
     };
+
+    // Give the matching AS (if any) a chance to register the alias
+    // (conduit-dhd / AS6). Even on AS confirmation, alias storage isn't yet
+    // implemented locally, so we still 404 below — but the AS will have been
+    // pinged for side-effects (e.g. provisioning ghost rooms).
+    let _ = crate::app_service::query_as_alias(&state.http, &state.app_services, &alias).await;
 
     // bd remember: Room alias storage is not yet implemented (tracked as
     // follow-up). Return 404 here until alias storage lands.
@@ -928,9 +953,12 @@ pub(crate) async fn handle_edu(state: &FedState, edu: &serde_json::Value) {
         if let Some(keys) = content.get("keys") {
             if !deleted && !device_id.is_empty() {
                 let _ = state.storage.upsert_device_keys(&user_id, device_id, keys).await;
-            } else if deleted && !device_id.is_empty() {
-                // Deletion: we could remove device keys, but for now we just record the change.
             }
+        }
+
+        // Tombstone the device when the EDU signals deletion (conduit-ub5).
+        if deleted && !device_id.is_empty() {
+            let _ = state.storage.delete_device_keys(&user_id, device_id).await;
         }
 
         // Record device list change so local /sync picks it up.

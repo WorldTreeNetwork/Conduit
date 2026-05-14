@@ -86,6 +86,8 @@ async fn spawn_server(server_name: &str) -> TestServer {
         events_tx: events_tx.clone(),
         fed_client: Arc::clone(&fed_client),
         blob_store: BlobStore::new(std::env::temp_dir().join(format!("conduit_test_blob_rt_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().subsec_nanos()))).unwrap(),
+        recent: Arc::new(conduit_server::federation::RecentEventCache::new()),
+        app_services: Arc::new(Vec::new()),
     };
 
     let xmatrix_state = XMatrixMiddlewareState {

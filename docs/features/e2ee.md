@@ -57,6 +57,25 @@ That's still a lot of work, but it's much less than "implement crypto".
 4. Key backup (`/room_keys`) is essentially blob storage keyed by
    `(user, version, room, session)`. Implement late.
 
+## SAS / `m.key.verification.*`
+
+Emoji / decimal SAS verification is a pure client-side ceremony. Both
+clients exchange `m.key.verification.start` → `accept` → `key` → `mac` →
+`done` events over the to-device queue. The server's only job is to
+deliver those opaque blobs to the right device.
+
+Local: `PUT /sendToDevice` writes straight into the to-device queue
+(mrm.6) and `/sync` drains it.
+
+Remote: the same `PUT /sendToDevice` handler groups any
+remote-targeted user IDs by destination server and dispatches each
+batch via the outbound federation client's
+`PUT /_matrix/federation/v1/send_to_device/{txnId}` (conduit-0t6).
+Outbound device list churn (`keys/upload`,
+`keys/device_signing/upload`) is similarly broadcast as
+`m.device_list_update` EDUs to every remote server sharing a room
+with the affected local user (conduit-6r1).
+
 ## Gotchas
 
 - One-time keys are **consumed**. Atomically check-and-decrement;

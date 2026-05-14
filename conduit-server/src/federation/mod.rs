@@ -29,6 +29,7 @@ pub mod middleware;
 pub mod pipeline;
 pub mod queue;
 pub mod rate_limit;
+pub mod recent;
 pub mod server;
 #[cfg(feature = "iroh")]
 pub mod iroh_client;
@@ -40,6 +41,7 @@ pub use client::{
     StateIdsResponse, StateResponse, TransactionResponse,
 };
 pub use queue::Queue;
+pub use recent::RecentEventCache;
 pub use middleware::XMatrixMiddlewareState;
 pub use rate_limit::RateLimiter;
 pub use server::FedState;

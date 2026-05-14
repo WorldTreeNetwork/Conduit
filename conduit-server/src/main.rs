@@ -61,6 +61,8 @@ struct AppState {
     blob_store: BlobStore,
     /// Loaded Application Service registrations (E11 AS1).
     app_services: Arc<Vec<AppService>>,
+    /// In-memory dedup cache for inbound federation PDUs (conduit-3qj).
+    recent_events: Arc<federation::RecentEventCache>,
     /// iroh endpoint for P2P federation (E12, feature `iroh`).
     #[cfg(feature = "iroh")]
     iroh_endpoint: Option<Arc<iroh::Endpoint>>,
@@ -90,6 +92,12 @@ impl AuthState for AppState {
     }
     fn presence_store(&self) -> &Arc<PresenceStore> {
         &self.presence_store
+    }
+    fn federation_client(&self) -> Option<&Arc<federation::Client>> {
+        Some(&self.federation)
+    }
+    fn federation_queue(&self) -> Option<&Arc<federation::Queue>> {
+        Some(&self.federation_queue)
     }
 }
 
@@ -220,6 +228,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app_services: Arc<Vec<AppService>> = Arc::new(app_service::load_app_services(&as_dir));
     tracing::info!(count = app_services.len(), "application services loaded");
 
+    let recent_events: Arc<federation::RecentEventCache> =
+        Arc::new(federation::RecentEventCache::new());
+
     let state = AppState {
         storage,
         server_key,
@@ -235,6 +246,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         presence_store,
         blob_store,
         app_services,
+        recent_events,
         #[cfg(feature = "iroh")]
         iroh_endpoint,
     };
@@ -297,6 +309,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         events_tx: state.events_tx.clone(),
         fed_client: Arc::clone(&state.federation),
         blob_store: state.blob_store.clone(),
+        recent: Arc::clone(&state.recent_events),
+        app_services: Arc::clone(&state.app_services),
     };
 
     // Federation inbound subrouter: X-Matrix auth → rate limit → handlers.
