@@ -9,6 +9,8 @@ use std::env;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use conduit_server::api::client::rate_limit::{cs_rate_limit, CsRateLimiter};
+
 use axum::{extract::State, middleware, routing::{get, post, put}, Json, Router};
 use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine as _};
 use chrono::Utc;
@@ -506,6 +508,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             axum::routing::delete(admin_api::purge_federation_dlq::<AppState>))
         .route("/_matrix/conduit/admin/v1/audit",
             get(admin_api::get_audit_log::<AppState>))
+        // Apply CS-API rate limiter to everything above (conduit-9m4).
+        // Federation routes are nested below and use their own per-origin
+        // limiter, so they bypass this one.
+        .route_layer(middleware::from_fn_with_state(
+            CsRateLimiter::default_cs(),
+            cs_rate_limit,
+        ))
         // Federation inbound (E09)
         .nest("/_matrix/federation/v1", fed_router)
         .with_state(state.clone())
@@ -572,7 +581,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!(%addr, "conduit-server listening");
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }
 

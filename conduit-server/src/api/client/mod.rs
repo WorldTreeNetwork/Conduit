@@ -14,6 +14,7 @@ pub mod keys;
 pub mod media;
 pub mod presence;
 pub mod probe;
+pub mod rate_limit;
 pub mod profile;
 pub mod push;
 pub mod receipts;
