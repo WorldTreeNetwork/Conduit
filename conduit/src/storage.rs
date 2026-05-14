@@ -73,6 +73,19 @@ pub struct OutboundEntry {
     pub attempts: i32,
 }
 
+/// A row that hit `status='dead'` — exposed to admin for inspection / replay
+/// (conduit-4l9).
+#[derive(Debug, Clone)]
+pub struct DlqEntry {
+    pub id: i64,
+    pub destination: String,
+    pub kind: String,
+    pub txn_id: String,
+    pub attempts: i32,
+    pub last_error: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
 /// A room key backup version record.
 #[derive(Debug, Clone)]
 pub struct RoomKeyVersion {
@@ -698,6 +711,25 @@ pub trait Storage: Send + Sync + 'static {
         &self,
         destination: &str,
     ) -> Result<Option<i64>>;
+
+    /// Delete sent rows older than `sent_cutoff_ms` and (optionally) dead
+    /// rows older than `dead_cutoff_ms`. Returns the total number of rows
+    /// removed (conduit-cgl).
+    async fn gc_outbound_queue(
+        &self,
+        sent_cutoff_ms: i64,
+        dead_cutoff_ms: Option<i64>,
+    ) -> Result<i64>;
+
+    /// List dead-lettered rows, paginated by created_at desc (conduit-4l9).
+    async fn list_outbound_dlq(&self, from: i64, limit: i64) -> Result<Vec<DlqEntry>>;
+
+    /// Reset a dead row back to pending with attempts=0 and
+    /// next_attempt_at=now. Returns true if a matching row was found.
+    async fn replay_outbound_dlq(&self, id: i64) -> Result<bool>;
+
+    /// Permanently delete a dead row. Returns true if it existed.
+    async fn purge_outbound_dlq(&self, id: i64) -> Result<bool>;
 
     // --- Room aliases (conduit-v0y) -----------------------------------------
 
@@ -2093,6 +2125,78 @@ impl Storage for MemoryStorage {
             .filter(|r| r.status == "pending" && r.entry.destination == destination)
             .map(|r| r.next_attempt_at_ms)
             .min())
+    }
+
+    async fn gc_outbound_queue(
+        &self,
+        sent_cutoff_ms: i64,
+        dead_cutoff_ms: Option<i64>,
+    ) -> Result<i64> {
+        let mut inner = self.inner.write().await;
+        let before = inner.outbound_queue.rows.len();
+        inner.outbound_queue.rows.retain(|row| {
+            let too_old_sent =
+                row.status == "sent" && row.next_attempt_at_ms < sent_cutoff_ms;
+            let too_old_dead = match dead_cutoff_ms {
+                Some(cut) => row.status == "dead" && row.next_attempt_at_ms < cut,
+                None => false,
+            };
+            !(too_old_sent || too_old_dead)
+        });
+        Ok((before - inner.outbound_queue.rows.len()) as i64)
+    }
+
+    async fn list_outbound_dlq(&self, from: i64, limit: i64) -> Result<Vec<DlqEntry>> {
+        let inner = self.inner.read().await;
+        let mut rows: Vec<&OutboundRow> = inner
+            .outbound_queue
+            .rows
+            .iter()
+            .filter(|r| r.status == "dead")
+            .collect();
+        rows.sort_by_key(|r| std::cmp::Reverse(r.entry.id));
+        Ok(rows
+            .into_iter()
+            .skip(from.max(0) as usize)
+            .take(limit as usize)
+            .map(|r| DlqEntry {
+                id: r.entry.id,
+                destination: r.entry.destination.clone(),
+                kind: r.entry.kind.clone(),
+                txn_id: r.entry.txn_id.clone(),
+                attempts: r.entry.attempts,
+                last_error: r.last_error.clone(),
+                created_at: Utc::now(),
+            })
+            .collect())
+    }
+
+    async fn replay_outbound_dlq(&self, id: i64) -> Result<bool> {
+        let mut inner = self.inner.write().await;
+        if let Some(row) = inner
+            .outbound_queue
+            .rows
+            .iter_mut()
+            .find(|r| r.entry.id == id && r.status == "dead")
+        {
+            row.status = "pending".to_owned();
+            row.entry.attempts = 0;
+            row.next_attempt_at_ms = Utc::now().timestamp_millis();
+            row.last_error = None;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    async fn purge_outbound_dlq(&self, id: i64) -> Result<bool> {
+        let mut inner = self.inner.write().await;
+        let before = inner.outbound_queue.rows.len();
+        inner
+            .outbound_queue
+            .rows
+            .retain(|r| !(r.entry.id == id && r.status == "dead"));
+        Ok(before != inner.outbound_queue.rows.len())
     }
 
     // --- Room aliases -------------------------------------------------------

@@ -28,6 +28,7 @@ use std::time::Duration;
 use chrono::Utc;
 use serde_json::{json, Value};
 use tokio::sync::{Mutex, Notify};
+use tokio::task::JoinHandle;
 use tracing::{debug, error, warn};
 use uuid::Uuid;
 
@@ -51,13 +52,19 @@ const DRAIN_BATCH_SIZE: i64 = 32;
 // Queue
 // ---------------------------------------------------------------------------
 
+/// Per-destination Notify + the worker JoinHandle that consumes it.
+/// Storing the handle lets `ensure_worker` detect dead tasks (panic or
+/// normal exit) and respawn (conduit-5l9).
+struct WorkerSlot {
+    notify: Arc<Notify>,
+    handle: JoinHandle<()>,
+}
+
 /// Per-destination workers + their wake signals.
 pub struct Queue {
     client: Arc<Client>,
     storage: Arc<dyn Storage>,
-    /// Per-destination Notify handle. Workers `.notified().await` on these;
-    /// `enqueue_*` rings the matching one after persisting.
-    notifiers: Mutex<HashMap<String, Arc<Notify>>>,
+    workers: Mutex<HashMap<String, WorkerSlot>>,
 }
 
 impl Queue {
@@ -68,7 +75,7 @@ impl Queue {
         Self {
             client,
             storage,
-            notifiers: Mutex::new(HashMap::new()),
+            workers: Mutex::new(HashMap::new()),
         }
     }
 
@@ -128,22 +135,33 @@ impl Queue {
     }
 
     /// Get or create the Notify handle for `dest`, spawning the worker if
-    /// it isn't already running. Workers own clones of the Arc'd client +
-    /// storage, so Queue itself doesn't need to be inside an Arc.
+    /// it isn't already running OR if the previous one died (panic, normal
+    /// exit, or runtime shutdown). conduit-5l9.
     async fn ensure_worker(&self, dest: &str) -> Arc<Notify> {
-        let mut guard = self.notifiers.lock().await;
-        if let Some(n) = guard.get(dest) {
-            return Arc::clone(n);
+        let mut guard = self.workers.lock().await;
+        // Live worker? Reuse.
+        if let Some(slot) = guard.get(dest) {
+            if !slot.handle.is_finished() {
+                return Arc::clone(&slot.notify);
+            }
+            // Stale entry — fall through to respawn.
+            warn!(dest, "outbound worker had exited; respawning");
         }
         let notify = Arc::new(Notify::new());
-        guard.insert(dest.to_owned(), Arc::clone(&notify));
         let client = Arc::clone(&self.client);
         let storage = Arc::clone(&self.storage);
         let notify_for_worker = Arc::clone(&notify);
         let dest_owned = dest.to_owned();
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             worker_loop(client, storage, dest_owned, notify_for_worker).await;
         });
+        guard.insert(
+            dest.to_owned(),
+            WorkerSlot {
+                notify: Arc::clone(&notify),
+                handle,
+            },
+        );
         notify
     }
 }

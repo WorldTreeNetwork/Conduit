@@ -17,7 +17,7 @@ use conduit::{
     Error, Result,
     event::Event,
     storage::{
-        Account, AuditEntry, Device, MediaMetadata, OutboundEntry, Pusher, PushRule,
+        Account, AuditEntry, Device, DlqEntry, MediaMetadata, OutboundEntry, Pusher, PushRule,
         RoomKeyVersion, SigningKey, Storage, ThumbnailMetadata, ToDeviceMessage, TokenOwner,
     },
 };
@@ -2355,6 +2355,112 @@ impl Storage for PostgresStorage {
         .await
         .map_err(map_sqlx)?;
         Ok(row.eta.map(|ts| ts.timestamp_millis()))
+    }
+
+    async fn gc_outbound_queue(
+        &self,
+        sent_cutoff_ms: i64,
+        dead_cutoff_ms: Option<i64>,
+    ) -> Result<i64> {
+        let sent_cut = DateTime::<Utc>::from_timestamp_millis(sent_cutoff_ms)
+            .unwrap_or_else(Utc::now);
+        let mut total = 0_i64;
+        // Sent rows: prune those whose sent_at is older than the cutoff.
+        let n = sqlx::query!(
+            r#"
+            DELETE FROM fed_outbound_queue
+            WHERE status = 'sent' AND sent_at IS NOT NULL AND sent_at < $1
+            "#,
+            sent_cut,
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?
+        .rows_affected();
+        total += n as i64;
+
+        if let Some(dead_ms) = dead_cutoff_ms {
+            let dead_cut = DateTime::<Utc>::from_timestamp_millis(dead_ms)
+                .unwrap_or_else(Utc::now);
+            let n = sqlx::query!(
+                r#"
+                DELETE FROM fed_outbound_queue
+                WHERE status = 'dead' AND created_at < $1
+                "#,
+                dead_cut,
+            )
+            .execute(&self.pool)
+            .await
+            .map_err(map_sqlx)?
+            .rows_affected();
+            total += n as i64;
+        }
+        Ok(total)
+    }
+
+    async fn list_outbound_dlq(
+        &self,
+        from: i64,
+        limit: i64,
+    ) -> Result<Vec<DlqEntry>> {
+        let rows = sqlx::query!(
+            r#"
+            SELECT id, destination, kind, txn_id, attempts, last_error, created_at
+            FROM fed_outbound_queue
+            WHERE status = 'dead'
+            ORDER BY id DESC
+            LIMIT $2 OFFSET $1
+            "#,
+            from,
+            limit,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(rows
+            .into_iter()
+            .map(|r| DlqEntry {
+                id: r.id,
+                destination: r.destination,
+                kind: r.kind,
+                txn_id: r.txn_id,
+                attempts: r.attempts,
+                last_error: r.last_error,
+                created_at: r.created_at,
+            })
+            .collect())
+    }
+
+    async fn replay_outbound_dlq(&self, id: i64) -> Result<bool> {
+        let result = sqlx::query!(
+            r#"
+            UPDATE fed_outbound_queue
+            SET status = 'pending',
+                attempts = 0,
+                next_attempt_at = now(),
+                last_error = NULL
+            WHERE id = $1 AND status = 'dead'
+            "#,
+            id,
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn purge_outbound_dlq(&self, id: i64) -> Result<bool> {
+        let result = sqlx::query!(
+            r#"
+            DELETE FROM fed_outbound_queue
+            WHERE id = $1 AND status = 'dead'
+            "#,
+            id,
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(result.rows_affected() > 0)
     }
 
     // -----------------------------------------------------------------------

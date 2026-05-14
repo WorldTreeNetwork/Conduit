@@ -356,3 +356,95 @@ pub async fn get_audit_log<S: AuthState>(
         Err(e) => MatrixError::unknown(e.to_string()).into_response(),
     }
 }
+
+// ---------------------------------------------------------------------------
+// Federation DLQ (conduit-4l9)
+// ---------------------------------------------------------------------------
+
+/// `GET /_matrix/conduit/admin/v1/federation/dlq?from=&limit=`
+pub async fn list_federation_dlq<S: AuthState>(
+    State(state): State<S>,
+    _admin: AdminAuthed,
+    Query(q): Query<PaginationQuery>,
+) -> Response {
+    let from = q.from.unwrap_or(0);
+    let limit = q.limit.unwrap_or(50).min(500);
+    match state.storage().list_outbound_dlq(from, limit).await {
+        Ok(rows) => {
+            let items: Vec<Value> = rows.iter().map(|r| json!({
+                "id": r.id,
+                "destination": r.destination,
+                "kind": r.kind,
+                "txn_id": r.txn_id,
+                "attempts": r.attempts,
+                "last_error": r.last_error,
+                "created_at": r.created_at.timestamp_millis(),
+            })).collect();
+            let count = items.len() as i64;
+            Json(json!({ "entries": items, "next_token": from + count })).into_response()
+        }
+        Err(e) => MatrixError::unknown(e.to_string()).into_response(),
+    }
+}
+
+/// `POST /_matrix/conduit/admin/v1/federation/dlq/:id/replay`
+pub async fn replay_federation_dlq<S: AuthState>(
+    State(state): State<S>,
+    admin: AdminAuthed,
+    Path(id): Path<i64>,
+) -> Response {
+    match state.storage().replay_outbound_dlq(id).await {
+        Ok(true) => {
+            let _ = state
+                .storage()
+                .append_audit_log(
+                    &admin.user_id,
+                    "federation.dlq.replay",
+                    Some(&id.to_string()),
+                    &json!({}),
+                )
+                .await;
+            (StatusCode::OK, Json(json!({ "replayed": true }))).into_response()
+        }
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "errcode": "M_NOT_FOUND",
+                "error": "No dead-letter row with that id",
+            })),
+        )
+            .into_response(),
+        Err(e) => MatrixError::unknown(e.to_string()).into_response(),
+    }
+}
+
+/// `DELETE /_matrix/conduit/admin/v1/federation/dlq/:id`
+pub async fn purge_federation_dlq<S: AuthState>(
+    State(state): State<S>,
+    admin: AdminAuthed,
+    Path(id): Path<i64>,
+) -> Response {
+    match state.storage().purge_outbound_dlq(id).await {
+        Ok(true) => {
+            let _ = state
+                .storage()
+                .append_audit_log(
+                    &admin.user_id,
+                    "federation.dlq.purge",
+                    Some(&id.to_string()),
+                    &json!({}),
+                )
+                .await;
+            (StatusCode::OK, Json(json!({ "purged": true }))).into_response()
+        }
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "errcode": "M_NOT_FOUND",
+                "error": "No dead-letter row with that id",
+            })),
+        )
+            .into_response(),
+        Err(e) => MatrixError::unknown(e.to_string()).into_response(),
+    }
+}

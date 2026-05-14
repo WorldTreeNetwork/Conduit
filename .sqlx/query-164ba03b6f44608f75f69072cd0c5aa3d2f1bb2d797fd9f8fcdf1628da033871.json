@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            DELETE FROM fed_outbound_queue\n            WHERE id = $1 AND status = 'dead'\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "164ba03b6f44608f75f69072cd0c5aa3d2f1bb2d797fd9f8fcdf1628da033871"
+}

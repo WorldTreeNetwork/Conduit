@@ -498,12 +498,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             get(admin_api::list_federation_peers::<AppState>))
         .route("/_matrix/conduit/admin/v1/federation/disable",
             post(admin_api::disable_federation::<AppState>))
+        .route("/_matrix/conduit/admin/v1/federation/dlq",
+            get(admin_api::list_federation_dlq::<AppState>))
+        .route("/_matrix/conduit/admin/v1/federation/dlq/:id/replay",
+            post(admin_api::replay_federation_dlq::<AppState>))
+        .route("/_matrix/conduit/admin/v1/federation/dlq/:id",
+            axum::routing::delete(admin_api::purge_federation_dlq::<AppState>))
         .route("/_matrix/conduit/admin/v1/audit",
             get(admin_api::get_audit_log::<AppState>))
         // Federation inbound (E09)
         .nest("/_matrix/federation/v1", fed_router)
         .with_state(state.clone())
         .layer(TraceLayer::new_for_http());
+
+    // Background task: GC the outbound federation queue (conduit-cgl).
+    // Hourly: drop sent rows >7 days old, dead rows >30 days old.
+    {
+        let storage_clone = Arc::clone(&state.storage);
+        tokio::spawn(async move {
+            let tick = std::time::Duration::from_secs(60 * 60);
+            let week_ms: i64 = 7 * 24 * 60 * 60 * 1000;
+            let month_ms: i64 = 30 * 24 * 60 * 60 * 1000;
+            loop {
+                tokio::time::sleep(tick).await;
+                let now_ms = chrono::Utc::now().timestamp_millis();
+                match storage_clone
+                    .gc_outbound_queue(now_ms - week_ms, Some(now_ms - month_ms))
+                    .await
+                {
+                    Ok(n) if n > 0 => tracing::info!(deleted = n, "fed_outbound_queue GC"),
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!(error = %e, "fed_outbound_queue GC failed"),
+                }
+            }
+        });
+    }
 
     // Background task: clean up stale remote-cached media (h9n.11).
     {
