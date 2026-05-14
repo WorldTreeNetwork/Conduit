@@ -218,6 +218,10 @@ pub fn as_for_alias<'a>(alias: &str, services: &'a [AppService]) -> Option<&'a A
 ///
 /// The AS is expected to call back to the HS to create the user account if
 /// needed, so callers should re-check storage after this returns true.
+///
+/// **Perf / abuse follow-up (conduit-c3u):** no negative cache today, so
+/// repeated misses amplify into AS HTTP traffic. Add a short-TTL LRU keyed
+/// on `(svc.id, user_id)` to absorb that.
 pub async fn query_as_user(
     http: &reqwest::Client,
     services: &[AppService],

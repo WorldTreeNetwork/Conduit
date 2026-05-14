@@ -116,6 +116,11 @@ pub async fn keys_upload<S: AuthState>(
 ///
 /// Walks all rooms, checks membership state, returns the set of remote server
 /// parts seen for joined members. Excludes our own server.
+///
+/// **Perf follow-up (conduit-e0e):** this is O(rooms × members) per call and
+/// runs on every device-key upload. Add a `(user_id → Set<remote_server>)`
+/// cache invalidated on `m.room.member` changes, or push the propagation
+/// into the membership-change pipeline.
 pub(crate) async fn remote_servers_sharing_room_with(
     storage: &Arc<dyn Storage>,
     server_name: &str,
@@ -435,6 +440,9 @@ pub async fn send_to_device<S: AuthState>(
             // Fire-and-forget per-server delivery. Federation errors are
             // logged but not surfaced — to-device is best-effort and the
             // remote may retry via /sync after device-list churn.
+            // Follow-up: replace tokio::spawn with the durable PG-backed
+            // outbound queue (conduit-5n3) so messages survive restart and
+            // get retry-with-DLQ semantics.
             tokio::spawn(async move {
                 for (dest, messages_for_server) in remote_by_server {
                     let messages_json = serde_json::to_value(&messages_for_server)
