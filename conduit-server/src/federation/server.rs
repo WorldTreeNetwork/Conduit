@@ -779,15 +779,34 @@ pub async fn query_directory(
         None => return bad_json("Missing room_alias parameter"),
     };
 
-    // Give the matching AS (if any) a chance to register the alias
-    // (conduit-dhd / AS6). Even on AS confirmation, alias storage isn't yet
-    // implemented locally, so we still 404 below — but the AS will have been
-    // pinged for side-effects (e.g. provisioning ghost rooms).
-    let _ = crate::app_service::query_as_alias(&state.http, &state.app_services, &alias).await;
+    // Try the local directory first (conduit-v0y).
+    if let Ok(Some(room_id)) = state.storage.get_room_for_alias(&alias).await {
+        return (
+            StatusCode::OK,
+            Json(json!({
+                "room_id": room_id,
+                "servers": [&*state.server_name],
+            })),
+        )
+            .into_response();
+    }
 
-    // bd remember: Room alias storage is not yet implemented (tracked as
-    // follow-up). Return 404 here until alias storage lands.
-    not_found("Room alias directory not yet implemented on this server")
+    // Otherwise give the matching AS (if any) a chance to register the alias
+    // (conduit-dhd / AS6); on confirmation, re-check the directory.
+    if crate::app_service::query_as_alias(&state.http, &state.app_services, &alias).await {
+        if let Ok(Some(room_id)) = state.storage.get_room_for_alias(&alias).await {
+            return (
+                StatusCode::OK,
+                Json(json!({
+                    "room_id": room_id,
+                    "servers": [&*state.server_name],
+                })),
+            )
+                .into_response();
+        }
+    }
+
+    not_found("Room alias not found")
 }
 
 // ---------------------------------------------------------------------------

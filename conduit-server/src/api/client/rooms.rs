@@ -229,6 +229,28 @@ pub async fn create_room<S: AuthState>(
         }
     }
 
+    // -----------------------------------------------------------------------
+    // 9. Bind alias if `room_alias_name` was supplied (conduit-v0y)
+    // -----------------------------------------------------------------------
+    if let Some(alias_name) = body.room_alias_name.as_deref() {
+        let alias = format!("#{alias_name}:{}", state.server_name());
+        if let Err(e) = state
+            .storage()
+            .upsert_alias(&alias, &room_id, sender)
+            .await
+        {
+            // Alias collision is non-fatal for room creation per spec — the
+            // room still exists, just without the requested alias. Log and
+            // continue so the caller still gets their room_id.
+            tracing::warn!(
+                room_id,
+                alias,
+                error = %e,
+                "createRoom: room_alias_name binding failed"
+            );
+        }
+    }
+
     (StatusCode::OK, Json(CreateRoomResponse { room_id })).into_response()
 }
 
@@ -261,8 +283,28 @@ pub async fn join_room<S: AuthState>(
     Json(_body): Json<JoinRequest>,
 ) -> Response {
     let sender = &authed.user_id;
-    // v0: local rooms only — treat the path param as a room_id directly.
-    let room_id = room_id_or_alias;
+
+    // Resolve aliases starting with '#' against the local directory
+    // (conduit-v0y). Cross-server alias resolution via federation
+    // /query/directory is tracked as a separate follow-up.
+    let room_id = if room_id_or_alias.starts_with('#') {
+        match state.storage().get_room_for_alias(&room_id_or_alias).await {
+            Ok(Some(rid)) => rid,
+            Ok(None) => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(json!({
+                        "errcode": "M_NOT_FOUND",
+                        "error": "Room alias not found",
+                    })),
+                )
+                    .into_response();
+            }
+            Err(e) => return MatrixError::unknown(e.to_string()).into_response(),
+        }
+    } else {
+        room_id_or_alias
+    };
 
     let join_content = json!({ "membership": "join" });
     match build_sign_and_persist(

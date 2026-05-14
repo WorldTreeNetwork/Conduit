@@ -8,10 +8,12 @@
 //!   GET  /_matrix/client/v3/account/whoami
 
 pub mod account_data;
+pub mod directory;
 pub mod event_pipeline;
 pub mod keys;
 pub mod media;
 pub mod presence;
+pub mod probe;
 pub mod profile;
 pub mod push;
 pub mod receipts;

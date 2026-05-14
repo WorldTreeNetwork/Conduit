@@ -2356,4 +2356,72 @@ impl Storage for PostgresStorage {
         .map_err(map_sqlx)?;
         Ok(row.eta.map(|ts| ts.timestamp_millis()))
     }
+
+    // -----------------------------------------------------------------------
+    // Room aliases (conduit-v0y)
+    // -----------------------------------------------------------------------
+
+    async fn upsert_alias(
+        &self,
+        alias: &str,
+        room_id: &str,
+        creator: &str,
+    ) -> Result<()> {
+        // No ON CONFLICT — we want the unique violation so callers get
+        // a clear "already in use" error.
+        let result = sqlx::query!(
+            r#"
+            INSERT INTO room_aliases (alias, room_id, creator)
+            VALUES ($1, $2, $3)
+            "#,
+            alias,
+            room_id,
+            creator,
+        )
+        .execute(&self.pool)
+        .await;
+
+        match result {
+            Ok(_) => Ok(()),
+            Err(sqlx::Error::Database(db_err))
+                if db_err.constraint() == Some("room_aliases_pkey") =>
+            {
+                Err(Error::Storage(format!("alias already in use: {alias}")))
+            }
+            Err(e) => Err(map_sqlx(e)),
+        }
+    }
+
+    async fn get_room_for_alias(&self, alias: &str) -> Result<Option<String>> {
+        let row = sqlx::query!(
+            r#"SELECT room_id FROM room_aliases WHERE alias = $1"#,
+            alias,
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(row.map(|r| r.room_id))
+    }
+
+    async fn delete_alias(&self, alias: &str) -> Result<()> {
+        sqlx::query!(
+            r#"DELETE FROM room_aliases WHERE alias = $1"#,
+            alias,
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(())
+    }
+
+    async fn list_aliases_for_room(&self, room_id: &str) -> Result<Vec<String>> {
+        let rows = sqlx::query!(
+            r#"SELECT alias FROM room_aliases WHERE room_id = $1 ORDER BY alias"#,
+            room_id,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(rows.into_iter().map(|r| r.alias).collect())
+    }
 }

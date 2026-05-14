@@ -698,6 +698,22 @@ pub trait Storage: Send + Sync + 'static {
         &self,
         destination: &str,
     ) -> Result<Option<i64>>;
+
+    // --- Room aliases (conduit-v0y) -----------------------------------------
+
+    /// Create an alias pointing at `room_id`. Fails if the alias already
+    /// exists (regardless of which room it points at).
+    async fn upsert_alias(&self, alias: &str, room_id: &str, creator: &str)
+        -> Result<()>;
+
+    /// Resolve an alias → room_id.
+    async fn get_room_for_alias(&self, alias: &str) -> Result<Option<String>>;
+
+    /// Remove an alias (idempotent — missing alias is Ok).
+    async fn delete_alias(&self, alias: &str) -> Result<()>;
+
+    /// List every alias that currently points at `room_id`.
+    async fn list_aliases_for_room(&self, room_id: &str) -> Result<Vec<String>>;
 }
 
 // ---------------------------------------------------------------------------
@@ -774,6 +790,8 @@ struct MemoryInner {
     audit_log_next_id: i64,
     // Outbound federation queue (conduit-5n3)
     outbound_queue: MemoryOutbound,
+    // Room aliases (conduit-v0y): alias → (room_id, creator, created_at)
+    aliases: HashMap<String, (String, String, DateTime<Utc>)>,
 }
 
 impl Default for MemoryInner {
@@ -807,6 +825,7 @@ impl Default for MemoryInner {
             audit_log: Vec::new(),
             audit_log_next_id: 0,
             outbound_queue: MemoryOutbound::default(),
+            aliases: HashMap::new(),
         }
     }
 }
@@ -2075,6 +2094,49 @@ impl Storage for MemoryStorage {
             .map(|r| r.next_attempt_at_ms)
             .min())
     }
+
+    // --- Room aliases -------------------------------------------------------
+
+    async fn upsert_alias(
+        &self,
+        alias: &str,
+        room_id: &str,
+        creator: &str,
+    ) -> Result<()> {
+        let mut inner = self.inner.write().await;
+        if inner.aliases.contains_key(alias) {
+            return Err(crate::Error::Storage(format!(
+                "alias already in use: {alias}"
+            )));
+        }
+        inner.aliases.insert(
+            alias.to_owned(),
+            (room_id.to_owned(), creator.to_owned(), Utc::now()),
+        );
+        Ok(())
+    }
+
+    async fn get_room_for_alias(&self, alias: &str) -> Result<Option<String>> {
+        let inner = self.inner.read().await;
+        Ok(inner.aliases.get(alias).map(|(rid, _, _)| rid.clone()))
+    }
+
+    async fn delete_alias(&self, alias: &str) -> Result<()> {
+        self.inner.write().await.aliases.remove(alias);
+        Ok(())
+    }
+
+    async fn list_aliases_for_room(&self, room_id: &str) -> Result<Vec<String>> {
+        let inner = self.inner.read().await;
+        let mut out: Vec<String> = inner
+            .aliases
+            .iter()
+            .filter(|(_, (rid, _, _))| rid == room_id)
+            .map(|(a, _)| a.clone())
+            .collect();
+        out.sort();
+        Ok(out)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2085,6 +2147,44 @@ impl Storage for MemoryStorage {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn aliases_round_trip() {
+        let store = MemoryStorage::default();
+        // upsert + resolve.
+        store
+            .upsert_alias("#dev:local", "!abc:local", "@a:local")
+            .await
+            .unwrap();
+        assert_eq!(
+            store.get_room_for_alias("#dev:local").await.unwrap(),
+            Some("!abc:local".to_owned())
+        );
+        // duplicate fails.
+        let dup = store
+            .upsert_alias("#dev:local", "!xyz:local", "@b:local")
+            .await;
+        assert!(dup.is_err());
+        // reverse lookup.
+        store
+            .upsert_alias("#dev2:local", "!abc:local", "@a:local")
+            .await
+            .unwrap();
+        let mut aliases = store
+            .list_aliases_for_room("!abc:local")
+            .await
+            .unwrap();
+        aliases.sort();
+        assert_eq!(aliases, vec!["#dev2:local".to_owned(), "#dev:local".to_owned()]);
+        // delete is idempotent.
+        store.delete_alias("#dev:local").await.unwrap();
+        store.delete_alias("#dev:local").await.unwrap();
+        assert!(store
+            .get_room_for_alias("#dev:local")
+            .await
+            .unwrap()
+            .is_none());
+    }
 
     #[tokio::test]
     async fn outbound_queue_lifecycle() {

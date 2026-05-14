@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT alias FROM room_aliases WHERE room_id = $1 ORDER BY alias",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "alias",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "ee5dce068a3ae73487129ab239608d1267f9ce9259c7f2a34d2972e25bb9a438"
+}

@@ -258,9 +258,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     use conduit_server::api::client as auth;
     use conduit_server::api::client::account_data as account_data_api;
+    use conduit_server::api::client::directory as directory_api;
     use conduit_server::api::client::keys as keys_api;
     use conduit_server::api::client::media as media_api;
     use conduit_server::api::client::presence as presence_api;
+    use conduit_server::api::client::probe as probe_api;
     use conduit_server::api::client::profile as profile_api;
     use conduit_server::api::client::push as push_api;
     use conduit_server::api::client::receipts as receipts_api;
@@ -336,6 +338,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/_matrix/client/v3/login", get(auth::get_login_flows).post(auth::login::<AppState>))
         .route("/_matrix/client/v3/logout", post(auth::logout::<AppState>))
         .route("/_matrix/client/v3/account/whoami", get(auth::whoami))
+        // Client probe endpoints (conduit-eck)
+        .route("/_matrix/client/v3/capabilities", get(probe_api::capabilities::<AppState>))
+        .route("/_matrix/client/v3/voip/turnServer", get(probe_api::turn_server::<AppState>))
+        .route("/_matrix/client/v3/user/:userId/openid/request_token",
+            post(probe_api::openid_request_token::<AppState>))
         // Client-Server API: rooms
         .route("/_matrix/client/v3/createRoom", post(rooms::create_room::<AppState>))
         .route("/_matrix/client/v3/join/:roomIdOrAlias", post(rooms::join_room::<AppState>))
@@ -356,6 +363,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             get(rooms::get_room_state::<AppState>))
         .route("/_matrix/client/v3/rooms/:roomId/joined_members",
             get(rooms::joined_members::<AppState>))
+        .route("/_matrix/client/v3/rooms/:roomId/aliases",
+            get(directory_api::list_room_aliases::<AppState>))
+        // Directory (conduit-v0y)
+        .route("/_matrix/client/v3/directory/room/:alias",
+            put(directory_api::put_alias::<AppState>)
+            .get(directory_api::get_alias::<AppState>)
+            .delete(directory_api::delete_alias::<AppState>))
         .route("/_matrix/client/v3/rooms/:roomId/messages",
             get(rooms::get_messages::<AppState>))
         // Client-Server API: sync
