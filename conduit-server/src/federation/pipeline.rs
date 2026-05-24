@@ -6,12 +6,15 @@
 //! 1. **Verify event signatures** — at minimum the originating server's sig.
 //! 2. **Dedup** — skip events we already have.
 //! 3. **Auth-event fetch** — resolve missing auth events from the network.
-//! 4. **Auth check** — run `check_auth` against the auth-event state.
-//! 5. **State resolution** — if state conflicts arise, run `state_res::resolve`.
-//! 6. **Persist** — `storage.put_event` + `set_state_entry` for state events.
-//! 7. **Fanout** — notify local `/sync` via `events_tx`.
+//! 4. **Build auth chain** — recursively collect all auth events reachable from
+//!    the PDU into a complete `HashMap<String, Event>`.
+//! 5. **Full state resolution** — run `state_res::resolve` to compute the
+//!    canonical room state from the current state and the incoming event.
+//! 6. **Auth check** — run `check_auth` against the full resolved state.
+//! 7. **Persist** — `storage.put_event` + `set_state_entry` for state events.
+//! 8. **Fanout** — notify local `/sync` via `events_tx`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use thiserror::Error;
@@ -19,6 +22,7 @@ use tokio::sync::broadcast;
 
 use conduit::auth::{StateMap, auth_event_keys, check_auth};
 use conduit::event::Event;
+use conduit::room::state_res;
 use conduit::signing::{verify_event, VerifyError};
 use conduit::storage::Storage;
 
@@ -46,6 +50,9 @@ pub enum PipelineError {
 
     #[error("auth event fetch failed: {0}")]
     AuthEventFetch(String),
+
+    #[error("missing auth event: {event_id} — cannot build auth chain")]
+    MissingAuthEvent { event_id: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -101,66 +108,75 @@ pub async fn process_incoming_pdu(
     let lookup = make_key_lookup(key_cache);
     verify_event(&pdu, lookup).map_err(PipelineError::SignatureError)?;
 
-    // --- Step 3: Resolve auth events ----------------------------------------
-    // Ensure all auth_events are in storage; fetch missing ones.
+    // --- Step 3: Resolve auth events (immediate) ----------------------------
+    // Ensure all direct auth_events are in storage; fetch missing ones.
     fetch_missing_auth_events(storage, remote_keys, http, fed_client, &pdu, _origin).await?;
 
-    // --- Step 4: Build auth state and run auth check ------------------------
-    // Skip auth check for events in rooms we don't have state for yet.
-    // This can happen when receiving events via /send before we've joined
-    // the room. The check is still run when we have the room's create event.
-    let auth_state = build_auth_state(storage, &pdu).await?;
-    let have_room_create = auth_state.contains_key(&("m.room.create".to_owned(), String::new()))
+    // --- Step 4: Build full auth chain --------------------------------------
+    // Recursively traverse auth_events from the PDU and build a complete
+    // HashMap<String, Event> for the state resolution algorithm.
+    let auth_chain = build_auth_chain(storage, &pdu).await?;
+
+    // --- Step 5: Full state resolution --------------------------------------
+    // Build two state sets:
+    //   A: current room state before this event
+    //   B: current room state + this event (if it's a state event)
+    // Then run state_res::resolve to compute canonical state.
+    let current_state_events = storage
+        .get_current_state(&pdu.room_id)
+        .await
+        .map_err(|e| PipelineError::Storage(e.to_string()))?;
+
+    let current_state_map: StateMap<Event> = current_state_events
+        .into_iter()
+        .filter_map(|ev| {
+            ev.state_key
+                .as_ref()
+                .map(|sk| ((ev.event_type.clone(), sk.clone()), ev.clone()))
+        })
+        .collect();
+
+    let resolved_state = if current_state_map.is_empty() {
+        // No existing state — this might be the first event in the room
+        // (e.g. an m.room.create). In that case, state_res is trivial:
+        // the resolved state is just the PDU itself if it's a state event,
+        // or empty.
+        if let Some(state_key) = &pdu.state_key {
+            let mut m = StateMap::new();
+            m.insert((pdu.event_type.clone(), state_key.clone()), pdu.clone());
+            m
+        } else {
+            current_state_map
+        }
+    } else {
+        // Build state set B: current state with the incoming PDU applied
+        // (if it's a state event, it replaces the existing entry).
+        let mut incoming_state = current_state_map.clone();
+        if let Some(state_key) = &pdu.state_key {
+            incoming_state.insert((pdu.event_type.clone(), state_key.clone()), pdu.clone());
+        }
+
+        let state_sets = vec![
+            current_state_map.clone(),
+            incoming_state,
+        ];
+
+        state_res::resolve(state_sets, auth_chain)
+            .map_err(|e| PipelineError::StateRes(e.to_string()))?
+    };
+
+    // --- Step 6: Auth check against resolved state --------------------------
+    // Only run auth if we have the room's create event.
+    let have_room_create = resolved_state.contains_key(&("m.room.create".to_owned(), String::new()))
         || pdu.event_type == "m.room.create";
     if have_room_create {
+        // Build the auth state slice from the resolved state.
+        let auth_state = build_auth_state_from_resolved(&pdu, &resolved_state);
         check_auth(&pdu, &auth_state)
             .map_err(|e| PipelineError::AuthFailed(e.to_string()))?;
     }
 
-    // --- Step 5: State resolution (for state events with conflicts) ---------
-    // For now, if this is a state event, we check for conflicts and run
-    // state_res if needed.
-    // bd remember: Full state-res on inbound join requires fetching all current
-    // state and both branch tips. For v0 we apply the event if auth passes and
-    // note that conflict resolution is simplified.
-    if let Some(state_key) = &pdu.state_key {
-        // Check if there's an existing state entry.
-        let existing = storage
-            .get_state_entry(&pdu.room_id, &pdu.event_type, state_key)
-            .await
-            .map_err(|e| PipelineError::Storage(e.to_string()))?;
-
-        if let Some(existing_ev) = existing {
-            if existing_ev.event_id != pdu.event_id {
-                // Conflict detected — run state resolution.
-                // TODO(x2r.4): Full state-res with proper auth chains.
-                // For v0: apply the new event if it has higher depth or later ts.
-                // bd remember: Simplified conflict handling — full state-res
-                // requires collecting both branch state sets and auth chains.
-                let new_wins = pdu.depth > existing_ev.depth
-                    || (pdu.depth == existing_ev.depth
-                        && pdu.origin_server_ts > existing_ev.origin_server_ts)
-                    || (pdu.depth == existing_ev.depth
-                        && pdu.origin_server_ts == existing_ev.origin_server_ts
-                        && pdu.event_id > existing_ev.event_id);
-                if !new_wins {
-                    // Existing event wins — still persist the PDU for history,
-                    // but don't update current state.
-                    storage
-                        .put_event(&pdu)
-                        .await
-                        .map_err(|e| PipelineError::Storage(e.to_string()))?;
-                    notify_sync(storage, events_tx).await;
-                    if let Some(cache) = recent {
-                        cache.insert(&pdu.event_id).await;
-                    }
-                    return Ok(());
-                }
-            }
-        }
-    }
-
-    // --- Step 6: Persist ----------------------------------------------------
+    // --- Step 7: Persist ----------------------------------------------------
     storage
         .put_event(&pdu)
         .await
@@ -174,7 +190,7 @@ pub async fn process_incoming_pdu(
             .map_err(|e| PipelineError::Storage(e.to_string()))?;
     }
 
-    // --- Step 7: Notify local /sync -----------------------------------------
+    // --- Step 8: Notify local /sync -----------------------------------------
     notify_sync(storage, events_tx).await;
 
     // Mark this event as recently-processed for the fast-path dedup cache.
@@ -216,19 +232,68 @@ async fn build_key_cache(
     cache
 }
 
-/// Build the auth state needed by `check_auth` for this event.
-async fn build_auth_state(
-    storage: &Arc<dyn Storage>,
+/// Build a `StateMap` suitable for `check_auth` by extracting the auth-event
+/// keys from the resolved room state.
+fn build_auth_state_from_resolved(
     event: &Event,
-) -> Result<StateMap<Event>, PipelineError> {
+    resolved_state: &StateMap<Event>,
+) -> StateMap<Event> {
     let keys = auth_event_keys(event);
     let mut auth_state: StateMap<Event> = HashMap::new();
-    for (ev_type, sk) in &keys {
-        if let Ok(Some(state_ev)) = storage.get_state_entry(&event.room_id, ev_type, sk).await {
-            auth_state.insert((ev_type.clone(), sk.clone()), state_ev);
+    for key in keys {
+        if let Some(ev) = resolved_state.get(&key) {
+            auth_state.insert(key, ev.clone());
         }
     }
-    Ok(auth_state)
+    auth_state
+}
+
+/// Recursively build the full auth chain reachable from `event` via
+/// `auth_events` references.
+///
+/// Returns a `HashMap<String, Event>` keyed by event_id containing all events
+/// in the auth chain. Returns `Err(MissingAuthEvent)` if any referenced auth
+/// event is not in storage and cannot be fetched.
+async fn build_auth_chain(
+    storage: &Arc<dyn Storage>,
+    event: &Event,
+) -> Result<HashMap<String, Event>, PipelineError> {
+    let mut chain: HashMap<String, Event> = HashMap::new();
+    let mut stack: Vec<String> = event.auth_events.clone();
+    let mut visited: HashSet<String> = HashSet::new();
+
+    // Include the event itself if it's already persisted (so the state_res
+    // algorithm can reference it).
+    if let Ok(Some(existing)) = storage.get_event(&event.event_id).await {
+        chain.insert(event.event_id.clone(), existing);
+    }
+
+    while let Some(eid) = stack.pop() {
+        if !visited.insert(eid.clone()) {
+            continue;
+        }
+        match storage.get_event(&eid).await {
+            Ok(Some(ev)) => {
+                // Add to the chain and push its own auth_events for traversal.
+                chain.insert(eid, ev.clone());
+                for auth_eid in &ev.auth_events {
+                    if !visited.contains(auth_eid.as_str()) {
+                        stack.push(auth_eid.clone());
+                    }
+                }
+            }
+            Ok(None) => {
+                // Auth event is missing from storage — this is fatal for
+                // state resolution per spec.
+                return Err(PipelineError::MissingAuthEvent { event_id: eid });
+            }
+            Err(e) => {
+                return Err(PipelineError::Storage(e.to_string()));
+            }
+        }
+    }
+
+    Ok(chain)
 }
 
 /// Ensure all auth_events for `pdu` are in storage.

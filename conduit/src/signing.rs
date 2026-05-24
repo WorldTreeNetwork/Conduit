@@ -20,6 +20,7 @@ use crate::canonical_json::{CanonicalJsonError, to_canonical_bytes};
 use crate::event::Event;
 use crate::hashing::{HashingError, content_hash};
 use crate::keys::ServerKey;
+use crate::redaction::redact_event;
 
 // ---------------------------------------------------------------------------
 // Error types
@@ -101,10 +102,12 @@ pub enum VerifyError {
 
 /// Build the canonical JSON bytes that are signed / verified.
 ///
-/// This is a clone of the event with `signatures` set to `{}` and
-/// `unsigned` removed — identical to what [`crate::hashing::event_id`] uses.
+/// Per the v11 spec, the event is first redacted (stripping per-event-type
+/// content fields and `unsigned.content`), then `signatures` is set to `{}`
+/// and `unsigned` is removed — matching [`crate::hashing::event_id`].
 fn signing_bytes(event: &Event) -> Result<Vec<u8>, SigningError> {
-    let mut value = serde_json::to_value(event)?;
+    let redacted = redact_event(event);
+    let mut value = serde_json::to_value(&redacted)?;
     if let Some(map) = value.as_object_mut() {
         map.insert("signatures".to_owned(), serde_json::json!({}));
         map.remove("unsigned");
@@ -114,7 +117,8 @@ fn signing_bytes(event: &Event) -> Result<Vec<u8>, SigningError> {
 
 /// Same as `signing_bytes` but returns a `VerifyError`.
 fn signing_bytes_for_verify(event: &Event) -> Result<Vec<u8>, VerifyError> {
-    let mut value = serde_json::to_value(event)?;
+    let redacted = redact_event(event);
+    let mut value = serde_json::to_value(&redacted)?;
     if let Some(map) = value.as_object_mut() {
         map.insert("signatures".to_owned(), serde_json::json!({}));
         map.remove("unsigned");
@@ -395,16 +399,28 @@ mod tests {
     }
 
     /// Mutating event content after signing must break verification.
+    /// Uses m.room.member (whose content fields survive redaction) so
+    /// that tampering after signing changes the signing bytes.
     #[test]
     fn tamper_content_breaks_verify() {
         let server_key = generate_server_key();
         let pub_bytes = crate::keys::public_bytes(&server_key);
-        let mut event = make_event();
+        let mut event = Event {
+            event_type: "m.room.member".to_string(),
+            content: json!({
+                "membership": "join",
+                "displayname": "Alice",
+            }),
+            ..make_event()
+        };
 
         sign_event(&mut event, &server_key, "example.org").expect("sign_event failed");
 
-        // Tamper with content.
-        event.content = json!({ "msgtype": "m.text", "body": "TAMPERED" });
+        // Tamper with content — change a redaction-preserved field.
+        event.content = json!({
+            "membership": "join",
+            "displayname": "TAMPERED",
+        });
 
         let result = verify_event_signature(&event, "example.org", &server_key.key_id, &pub_bytes);
         assert!(

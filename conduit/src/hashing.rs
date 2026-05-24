@@ -19,6 +19,7 @@ use thiserror::Error;
 
 use crate::canonical_json::{CanonicalJsonError, to_canonical_bytes};
 use crate::event::Event;
+use crate::redaction::redact_event;
 
 /// Errors from the hashing operations.
 #[derive(Debug, Error)]
@@ -49,7 +50,8 @@ fn strip_fields(value: &mut serde_json::Value, fields: &[&str]) {
 /// serializes to canonical JSON, and returns the SHA-256 digest encoded as
 /// **standard base64 without padding**.
 pub fn content_hash(event: &Event) -> Result<String, HashingError> {
-    let mut value = serde_json::to_value(event)?;
+    let redacted = redact_event(event);
+    let mut value = serde_json::to_value(&redacted)?;
     strip_fields(&mut value, &["hashes", "signatures", "unsigned"]);
     let canonical = to_canonical_bytes(&value)?;
     let digest = Sha256::digest(&canonical);
@@ -62,7 +64,8 @@ pub fn content_hash(event: &Event) -> Result<String, HashingError> {
 /// serializes to canonical JSON, and returns `$` followed by the SHA-256
 /// digest encoded as **URL-safe base64 without padding**.
 pub fn event_id(event: &Event) -> Result<String, HashingError> {
-    let mut value = serde_json::to_value(event)?;
+    let redacted = redact_event(event);
+    let mut value = serde_json::to_value(&redacted)?;
     strip_fields(&mut value, &["signatures", "unsigned"]);
     let canonical = to_canonical_bytes(&value)?;
     let digest = Sha256::digest(&canonical);

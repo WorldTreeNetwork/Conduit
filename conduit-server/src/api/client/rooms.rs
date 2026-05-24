@@ -24,23 +24,24 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use base64::Engine as _;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use conduit::room::{CreateRoomInitialState, CreateRoomParams, Room};
 use conduit::state_events::{Membership, parse_member};
 
 use super::{AuthState, AuthedUser, MatrixError};
-use super::event_pipeline::build_sign_and_persist;
+use super::event_pipeline::RoomEventSenderWrapper;
 
 // ---------------------------------------------------------------------------
 // Room ID generation
 // ---------------------------------------------------------------------------
 
-/// Generate a new random room ID: `!{18 url-safe-base64 chars}:{server_name}`.
-fn generate_room_id(server_name: &str) -> String {
+/// Generate a new random room ID: `!{18 url-safe base64 chars}:{server_name}`.
+pub fn generate_room_id(server_name: &str) -> String {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use rand::RngCore;
     let mut bytes = [0u8; 14]; // 14 bytes → 18 base64 chars (ceil(14*8/6))
     rand::thread_rng().fill_bytes(&mut bytes);
     let random = URL_SAFE_NO_PAD.encode(bytes);
@@ -101,137 +102,36 @@ pub async fn create_room<S: AuthState>(
     // Determine join_rule and history_visibility from preset / visibility.
     let (join_rule, history_visibility) = resolve_preset(&body);
 
-    // -----------------------------------------------------------------------
-    // 1. m.room.create
-    // -----------------------------------------------------------------------
-    let create_content = json!({
-        "room_version": room_version,
-        "creator": sender,
-    });
-    if let Err(e) = build_sign_and_persist(
-        &state, sender, &room_id, "m.room.create", Some(""), create_content,
-    ).await {
-        return e.into_response();
-    }
-
-    // -----------------------------------------------------------------------
-    // 2. m.room.member — creator joins
-    // -----------------------------------------------------------------------
-    let join_content = json!({ "membership": "join" });
-    if let Err(e) = build_sign_and_persist(
-        &state, sender, &room_id, "m.room.member", Some(sender.as_str()), join_content,
-    ).await {
-        return e.into_response();
-    }
-
-    // -----------------------------------------------------------------------
-    // 3. m.room.power_levels
-    // -----------------------------------------------------------------------
-    let mut pl_users = serde_json::Map::new();
-    pl_users.insert(sender.clone(), json!(100));
-
-    let default_pl_content = json!({
-        "ban": 50,
-        "kick": 50,
-        "redact": 50,
-        "invite": 50,
-        "events_default": 0,
-        "state_default": 50,
-        "users_default": 0,
-        "users": pl_users,
-        "events": {}
-    });
-    let pl_content = if let Some(override_pl) = body.power_level_content_override.clone() {
-        // Merge override on top of defaults.
-        let mut base = default_pl_content.clone();
-        if let (Some(b), Some(o)) = (base.as_object_mut(), override_pl.as_object()) {
-            for (k, v) in o {
-                b.insert(k.clone(), v.clone());
-            }
-        }
-        base
-    } else {
-        default_pl_content
+    // Build create-room parameters.
+    let params = CreateRoomParams {
+        name: body.name.as_deref(),
+        topic: body.topic.as_deref(),
+        initial_state: body.initial_state.into_iter().map(|ev| CreateRoomInitialState {
+            event_type: ev.event_type,
+            state_key: ev.state_key,
+            content: ev.content,
+        }).collect(),
+        power_level_content_override: body.power_level_content_override.clone(),
     };
 
-    if let Err(e) = build_sign_and_persist(
-        &state, sender, &room_id, "m.room.power_levels", Some(""), pl_content,
+    // Delegate room creation to the Room struct.
+    if let Err(e) = Room::create(
+        sender, &room_id, &room_version, join_rule, history_visibility, &params,
+        &RoomEventSenderWrapper(&state),
     ).await {
-        return e.into_response();
+        return MatrixError::unknown(e.to_string()).into_response();
     }
 
-    // -----------------------------------------------------------------------
-    // 4. m.room.join_rules
-    // -----------------------------------------------------------------------
-    let jr_content = json!({ "join_rule": join_rule });
-    if let Err(e) = build_sign_and_persist(
-        &state, sender, &room_id, "m.room.join_rules", Some(""), jr_content,
-    ).await {
-        return e.into_response();
-    }
-
-    // -----------------------------------------------------------------------
-    // 5. m.room.history_visibility
-    // -----------------------------------------------------------------------
-    let hv_content = json!({ "history_visibility": history_visibility });
-    if let Err(e) = build_sign_and_persist(
-        &state, sender, &room_id, "m.room.history_visibility", Some(""), hv_content,
-    ).await {
-        return e.into_response();
-    }
-
-    // -----------------------------------------------------------------------
-    // 6. Optional name / topic
-    // -----------------------------------------------------------------------
-    if let Some(name) = &body.name {
-        let content = json!({ "name": name });
-        if let Err(e) = build_sign_and_persist(
-            &state, sender, &room_id, "m.room.name", Some(""), content,
-        ).await {
-            return e.into_response();
-        }
-    }
-    if let Some(topic) = &body.topic {
-        let content = json!({ "topic": topic });
-        if let Err(e) = build_sign_and_persist(
-            &state, sender, &room_id, "m.room.topic", Some(""), content,
-        ).await {
-            return e.into_response();
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // 7. initial_state entries supplied by client
-    // -----------------------------------------------------------------------
-    for ev in &body.initial_state {
-        let sk = ev.state_key.as_deref().unwrap_or("");
-        if let Err(e) = build_sign_and_persist(
-            &state, sender, &room_id, &ev.event_type, Some(sk), ev.content.clone(),
-        ).await {
-            return e.into_response();
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // 8. Invite users listed in `invite`
-    // -----------------------------------------------------------------------
+    // Invite users listed in `invite`.
     for invitee in &body.invite {
+        let room = Room::new(&room_id);
         let is_direct = body.is_direct.unwrap_or(false);
-        let invite_content = json!({
-            "membership": "invite",
-            "is_direct": is_direct
-        });
-        if let Err(e) = build_sign_and_persist(
-            &state, sender, &room_id, "m.room.member", Some(invitee.as_str()),
-            invite_content,
-        ).await {
-            return e.into_response();
+        if let Err(e) = room.invite(sender, invitee, is_direct, &RoomEventSenderWrapper(&state)).await {
+            return MatrixError::unknown(e.to_string()).into_response();
         }
     }
 
-    // -----------------------------------------------------------------------
-    // 9. Bind alias if `room_alias_name` was supplied (conduit-v0y)
-    // -----------------------------------------------------------------------
+    // Bind alias if `room_alias_name` was supplied.
     if let Some(alias_name) = body.room_alias_name.as_deref() {
         let alias = format!("#{alias_name}:{}", state.server_name());
         if let Err(e) = state
@@ -239,9 +139,7 @@ pub async fn create_room<S: AuthState>(
             .upsert_alias(&alias, &room_id, sender)
             .await
         {
-            // Alias collision is non-fatal for room creation per spec — the
-            // room still exists, just without the requested alias. Log and
-            // continue so the caller still gets their room_id.
+            // Alias collision is non-fatal per spec — log and continue.
             tracing::warn!(
                 room_id,
                 alias,
@@ -255,16 +153,9 @@ pub async fn create_room<S: AuthState>(
 }
 
 /// Return `(join_rule, history_visibility)` based on preset/visibility.
+/// Delegated to `conduit::room::resolve_preset`.
 fn resolve_preset(body: &CreateRoomRequest) -> (&'static str, &'static str) {
-    match body.preset.as_deref() {
-        Some("public_chat") => ("public", "shared"),
-        Some("trusted_private_chat") => ("invite", "shared"),
-        Some("private_chat") => ("invite", "invited"),
-        _ => match body.visibility.as_deref() {
-            Some("public") => ("public", "shared"),
-            _ => ("invite", "invited"),
-        },
-    }
+    conduit::room::resolve_preset(body.preset.as_deref(), body.visibility.as_deref())
 }
 
 // ---------------------------------------------------------------------------
@@ -284,21 +175,15 @@ pub async fn join_room<S: AuthState>(
 ) -> Response {
     let sender = &authed.user_id;
 
-    // Resolve aliases starting with '#' against the local directory
-    // (conduit-v0y). Cross-server alias resolution via federation
-    // /query/directory is tracked as a separate follow-up.
+    // Resolve aliases starting with '#' against the local directory.
     let room_id = if room_id_or_alias.starts_with('#') {
         match state.storage().get_room_for_alias(&room_id_or_alias).await {
             Ok(Some(rid)) => rid,
             Ok(None) => {
-                return (
-                    StatusCode::NOT_FOUND,
-                    Json(json!({
-                        "errcode": "M_NOT_FOUND",
-                        "error": "Room alias not found",
-                    })),
-                )
-                    .into_response();
+                return (StatusCode::NOT_FOUND, Json(json!({
+                    "errcode": "M_NOT_FOUND",
+                    "error": "Room alias not found",
+                }))).into_response();
             }
             Err(e) => return MatrixError::unknown(e.to_string()).into_response(),
         }
@@ -306,12 +191,10 @@ pub async fn join_room<S: AuthState>(
         room_id_or_alias
     };
 
-    let join_content = json!({ "membership": "join" });
-    match build_sign_and_persist(
-        &state, sender, &room_id, "m.room.member", Some(sender.as_str()), join_content,
-    ).await {
+    let room = Room::new(&room_id);
+    match room.join(sender, &RoomEventSenderWrapper(&state)).await {
         Ok(_) => (StatusCode::OK, Json(json!({ "room_id": room_id }))).into_response(),
-        Err(e) => e.into_response(),
+        Err(e) => MatrixError::unknown(e.to_string()).into_response(),
     }
 }
 
@@ -328,15 +211,13 @@ pub async fn leave_room<S: AuthState>(
     State(state): State<S>,
     authed: AuthedUser,
     Path(room_id): Path<String>,
-    Json(_body): Json<LeaveRequest>,
+    Json(body): Json<LeaveRequest>,
 ) -> Response {
     let sender = &authed.user_id;
-    let leave_content = json!({ "membership": "leave" });
-    match build_sign_and_persist(
-        &state, sender, &room_id, "m.room.member", Some(sender.as_str()), leave_content,
-    ).await {
+    let room = Room::new(&room_id);
+    match room.leave(sender, body.reason.as_deref(), &RoomEventSenderWrapper(&state)).await {
         Ok(_) => (StatusCode::OK, Json(json!({}))).into_response(),
-        Err(e) => e.into_response(),
+        Err(e) => MatrixError::unknown(e.to_string()).into_response(),
     }
 }
 
@@ -357,15 +238,10 @@ pub async fn kick_user<S: AuthState>(
     Json(body): Json<KickRequest>,
 ) -> Response {
     let sender = &authed.user_id;
-    let mut content = json!({ "membership": "leave" });
-    if let Some(reason) = &body.reason {
-        content["reason"] = json!(reason);
-    }
-    match build_sign_and_persist(
-        &state, sender, &room_id, "m.room.member", Some(body.user_id.as_str()), content,
-    ).await {
+    let room = Room::new(&room_id);
+    match room.kick(sender, &body.user_id, body.reason.as_deref(), &RoomEventSenderWrapper(&state)).await {
         Ok(_) => (StatusCode::OK, Json(json!({}))).into_response(),
-        Err(e) => e.into_response(),
+        Err(e) => MatrixError::unknown(e.to_string()).into_response(),
     }
 }
 
@@ -386,15 +262,10 @@ pub async fn ban_user<S: AuthState>(
     Json(body): Json<BanRequest>,
 ) -> Response {
     let sender = &authed.user_id;
-    let mut content = json!({ "membership": "ban" });
-    if let Some(reason) = &body.reason {
-        content["reason"] = json!(reason);
-    }
-    match build_sign_and_persist(
-        &state, sender, &room_id, "m.room.member", Some(body.user_id.as_str()), content,
-    ).await {
+    let room = Room::new(&room_id);
+    match room.ban(sender, &body.user_id, body.reason.as_deref(), &RoomEventSenderWrapper(&state)).await {
         Ok(_) => (StatusCode::OK, Json(json!({}))).into_response(),
-        Err(e) => e.into_response(),
+        Err(e) => MatrixError::unknown(e.to_string()).into_response(),
     }
 }
 
@@ -415,13 +286,10 @@ pub async fn unban_user<S: AuthState>(
     Json(body): Json<UnbanRequest>,
 ) -> Response {
     let sender = &authed.user_id;
-    // Unban = set membership back to leave.
-    let content = json!({ "membership": "leave" });
-    match build_sign_and_persist(
-        &state, sender, &room_id, "m.room.member", Some(body.user_id.as_str()), content,
-    ).await {
+    let room = Room::new(&room_id);
+    match room.unban(sender, &body.user_id, &RoomEventSenderWrapper(&state)).await {
         Ok(_) => (StatusCode::OK, Json(json!({}))).into_response(),
-        Err(e) => e.into_response(),
+        Err(e) => MatrixError::unknown(e.to_string()).into_response(),
     }
 }
 
@@ -442,12 +310,10 @@ pub async fn invite_user<S: AuthState>(
     Json(body): Json<InviteRequest>,
 ) -> Response {
     let sender = &authed.user_id;
-    let content = json!({ "membership": "invite" });
-    match build_sign_and_persist(
-        &state, sender, &room_id, "m.room.member", Some(body.user_id.as_str()), content,
-    ).await {
+    let room = Room::new(&room_id);
+    match room.invite(sender, &body.user_id, false, &RoomEventSenderWrapper(&state)).await {
         Ok(_) => (StatusCode::OK, Json(json!({}))).into_response(),
-        Err(e) => e.into_response(),
+        Err(e) => MatrixError::unknown(e.to_string()).into_response(),
     }
 }
 
@@ -455,7 +321,7 @@ pub async fn invite_user<S: AuthState>(
 // PUT /rooms/:roomId/send/:eventType/:txnId
 // ---------------------------------------------------------------------------
 
-pub async fn send_message_event<S: AuthState>(
+pub async fn send_message_event<S: AuthState + conduit::room::RoomEventSender>(
     State(state): State<S>,
     authed: AuthedUser,
     Path((room_id, event_type, txn_id)): Path<(String, String, String)>,
@@ -473,18 +339,15 @@ pub async fn send_message_event<S: AuthState>(
         }
     }
 
-    match build_sign_and_persist(
-        &state, sender, &room_id, &event_type,
-        None, // message events have no state_key
-        content,
-    ).await {
+    let room = Room::new(&room_id);
+    match room.send_event(sender, &event_type, content, &RoomEventSenderWrapper(&state)).await {
         Ok(event_id) => {
             // Store in txn cache.
             let mut cache = state.txn_cache().write().await;
             cache.insert(cache_key, event_id.clone());
             (StatusCode::OK, Json(json!({ "event_id": event_id }))).into_response()
         }
-        Err(e) => e.into_response(),
+        Err(e) => MatrixError::unknown(e.to_string()).into_response(),
     }
 }
 
@@ -493,7 +356,7 @@ pub async fn send_message_event<S: AuthState>(
 // PUT /rooms/:roomId/state/:eventType/:stateKey
 // ---------------------------------------------------------------------------
 
-pub async fn send_state_event<S: AuthState>(
+pub async fn send_state_event<S: AuthState + conduit::room::RoomEventSender>(
     State(state): State<S>,
     authed: AuthedUser,
     Path((room_id, event_type)): Path<(String, String)>,
@@ -502,7 +365,7 @@ pub async fn send_state_event<S: AuthState>(
     send_state_event_inner(&state, &authed.user_id, &room_id, &event_type, "", content).await
 }
 
-pub async fn send_state_event_with_key<S: AuthState>(
+pub async fn send_state_event_with_key<S: AuthState + conduit::room::RoomEventSender>(
     State(state): State<S>,
     authed: AuthedUser,
     Path((room_id, event_type, state_key)): Path<(String, String, String)>,
@@ -511,7 +374,7 @@ pub async fn send_state_event_with_key<S: AuthState>(
     send_state_event_inner(&state, &authed.user_id, &room_id, &event_type, &state_key, content).await
 }
 
-async fn send_state_event_inner<S: AuthState>(
+async fn send_state_event_inner<S: AuthState + conduit::room::RoomEventSender>(
     state: &S,
     sender: &str,
     room_id: &str,
@@ -519,9 +382,10 @@ async fn send_state_event_inner<S: AuthState>(
     state_key: &str,
     content: Value,
 ) -> Response {
-    match build_sign_and_persist(state, sender, room_id, event_type, Some(state_key), content).await {
+    let room = Room::new(room_id);
+    match room.send_state_event(sender, event_type, state_key, content, &RoomEventSenderWrapper(state)).await {
         Ok(event_id) => (StatusCode::OK, Json(json!({ "event_id": event_id }))).into_response(),
-        Err(e) => e.into_response(),
+        Err(e) => MatrixError::unknown(e.to_string()).into_response(),
     }
 }
 
@@ -534,7 +398,8 @@ pub async fn get_room_state<S: AuthState>(
     _authed: AuthedUser,
     Path(room_id): Path<String>,
 ) -> Response {
-    match state.storage().get_current_state(&room_id).await {
+    let room = Room::new(&room_id);
+    match room.current_state_vec(state.storage().as_ref()).await {
         Ok(events) => {
             let values: Vec<Value> = events.into_iter().map(|e| serde_json::to_value(e).unwrap_or(Value::Null)).collect();
             (StatusCode::OK, Json(values)).into_response()
@@ -572,7 +437,8 @@ async fn get_state_event_inner<S: AuthState>(
     event_type: String,
     state_key: String,
 ) -> Response {
-    match state.storage().get_state_entry(&room_id, &event_type, &state_key).await {
+    let room = Room::new(&room_id);
+    match room.get_state_entry(&event_type, &state_key, state.storage().as_ref()).await {
         Ok(Some(ev)) => (StatusCode::OK, Json(ev.content)).into_response(),
         Ok(None) => (
             StatusCode::NOT_FOUND,
@@ -591,8 +457,8 @@ pub async fn joined_members<S: AuthState>(
     _authed: AuthedUser,
     Path(room_id): Path<String>,
 ) -> Response {
-    let storage = state.storage();
-    let state_events = match storage.get_current_state(&room_id).await {
+    let room = Room::new(&room_id);
+    let state_events = match room.current_state_vec(state.storage().as_ref()).await {
         Ok(evs) => evs,
         Err(e) => return MatrixError::unknown(e.to_string()).into_response(),
     };

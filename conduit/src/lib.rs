@@ -26,6 +26,7 @@ pub mod error;
 pub mod event;
 pub mod hashing;
 pub mod keys;
+pub mod redaction;
 pub mod room;
 pub mod signing;
 pub mod state_events;

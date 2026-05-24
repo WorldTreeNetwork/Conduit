@@ -62,7 +62,7 @@ use conduit::storage::Storage;
 /// Key type for the idempotency cache.
 pub type TxnCacheKey = (String, String, String); // (user_id, device_id, txn_id)
 
-pub trait AuthState: Clone + Send + Sync + 'static {
+pub trait AuthState: Clone + Send + Sync + 'static + conduit::room::RoomEventSender {
     fn storage(&self) -> &Arc<dyn Storage>;
     fn server_name(&self) -> &str;
     /// The server's signing key (ed25519).  Used by the event pipeline.

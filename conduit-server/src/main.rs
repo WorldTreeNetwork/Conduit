@@ -15,7 +15,7 @@ use axum::{extract::State, middleware, routing::{get, post, put}, Json, Router};
 use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine as _};
 use chrono::Utc;
 use ed25519_dalek::Signer as _;
-use serde_json::json;
+use serde_json::{Value, json};
 use sqlx::postgres::PgPoolOptions;
 use tokio::sync::{RwLock, broadcast};
 use tower_http::trace::TraceLayer;
@@ -68,6 +68,36 @@ struct AppState {
     /// iroh endpoint for P2P federation (E12, feature `iroh`).
     #[cfg(feature = "iroh")]
     iroh_endpoint: Option<Arc<iroh::Endpoint>>,
+}
+
+#[async_trait::async_trait]
+impl conduit::room::RoomEventSender for AppState {
+    async fn send_event(
+        &self,
+        sender: &str,
+        room_id: &str,
+        event_type: &str,
+        state_key: Option<&str>,
+        content: Value,
+    ) -> conduit::Result<String> {
+        use conduit_server::api::client::event_pipeline::build_sign_and_persist;
+        match build_sign_and_persist(
+            self,
+            sender,
+            room_id,
+            event_type,
+            state_key,
+            content,
+        ).await {
+            Ok(event_id) => {
+                let _ = self.events_tx.send(0);
+                Ok(event_id)
+            }
+            Err((_code, err)) => Err(conduit::Error::InvalidEvent(
+                err.0 .errcode.to_string()
+            )),
+        }
+    }
 }
 
 impl AuthState for AppState {

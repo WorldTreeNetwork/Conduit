@@ -126,53 +126,12 @@ pub(crate) async fn remote_servers_sharing_room_with(
     server_name: &str,
     user_id: &str,
 ) -> HashSet<String> {
-    let mut servers: HashSet<String> = HashSet::new();
-    let rooms = match storage.list_rooms(0, 10_000).await {
-        Ok(r) => r,
-        Err(_) => return servers,
-    };
-    for room_id in rooms {
-        // Is `user_id` joined in this room?
-        let in_room = match storage
-            .get_state_entry(&room_id, "m.room.member", user_id)
-            .await
-        {
-            Ok(Some(ev)) => ev
-                .content
-                .get("membership")
-                .and_then(|v| v.as_str())
-                .map(|m| m == "join")
-                .unwrap_or(false),
-            _ => false,
-        };
-        if !in_room {
-            continue;
-        }
-        // Collect remote servers from other joined members.
-        let state = match storage.get_current_state(&room_id).await {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-        for ev in state {
-            if ev.event_type != "m.room.member" {
-                continue;
-            }
-            let membership = ev
-                .content
-                .get("membership")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            if membership != "join" {
-                continue;
-            }
-            let other = ev.state_key.as_deref().unwrap_or("");
-            let srv = other.split(':').nth(1).unwrap_or("");
-            if !srv.is_empty() && srv != server_name {
-                servers.insert(srv.to_owned());
-            }
-        }
+    // Use the optimized storage method (O(user's rooms × members in those rooms))
+    // instead of walking all rooms.
+    match storage.get_remote_servers_for_user(user_id, server_name).await {
+        Ok(servers) => servers.into_iter().collect(),
+        Err(_) => HashSet::new(),
     }
-    servers
 }
 
 /// Broadcast an `m.device_list_update` EDU to every remote server that shares

@@ -14,7 +14,7 @@ use thiserror::Error;
 use crate::event::Event;
 use crate::state_events::{
     parse_create, parse_join_rules, parse_member, parse_power_levels, HistoryVisibility,
-    JoinRule, Membership, PowerLevelsContent,
+    JoinRule, JoinRulesContent, Membership, PowerLevelsContent,
 };
 
 // ---------------------------------------------------------------------------
@@ -207,6 +207,58 @@ fn get_join_rule(auth_state: &StateMap<Event>) -> JoinRule {
         .and_then(|ev| parse_join_rules(&ev.content).ok())
         .map(|c| c.join_rule)
         .unwrap_or(JoinRule::Invite) // default per spec
+}
+
+/// Check whether `event` satisfies the `allow` conditions of the room's
+/// join_rules (applicable only to `restricted` / `knock_restricted` rules).
+///
+/// Returns `true` if:
+/// - The join rule is NOT restricted/knock_restricted (no extra check needed), OR
+/// - Any `allow` condition is satisfied (the user is a member of the referenced room).
+///
+/// Returns `false` if no `allow` condition matches and the rule IS restricted.
+fn check_allow_conditions(event: &Event, state: &StateMap<Event>) -> bool {
+    let join_rules: Option<JoinRulesContent> = state
+        .get(&("m.room.join_rules".to_owned(), String::new()))
+        .and_then(|ev| parse_join_rules(&ev.content).ok());
+
+    let Some(jr) = join_rules else {
+        // No join_rules event means default (invite) — no allow check needed.
+        return true;
+    };
+
+    // Only restricted/knock_restricted have meaningful allow conditions.
+    if jr.join_rule != JoinRule::Restricted && jr.join_rule != JoinRule::KnockRestricted {
+        return true;
+    }
+
+    // Iterate allow conditions.
+    for condition in &jr.allow {
+        match condition.get("type").and_then(|v| v.as_str()) {
+            Some("m.room_membership") => {
+                // The room_id in the condition is the space/room whose membership we check.
+                let _room_id = match condition.get("room_id").and_then(|v| v.as_str()) {
+                    Some(rid) => rid,
+                    None => continue,
+                };
+                // Check if the event sender is a member of this room.
+                let member_key = ("m.room.member".to_owned(), event.sender.clone());
+                let membership = state
+                    .get(&member_key)
+                    .and_then(|ev| parse_member(&ev.content).ok())
+                    .map(|mc| mc.membership);
+                if membership == Some(Membership::Join) {
+                    return true;
+                }
+            }
+            _ => {
+                // Unknown condition type — skip per spec (not an error).
+                continue;
+            }
+        }
+    }
+
+    false
 }
 
 fn get_membership(auth_state: &StateMap<Event>, user_id: &str) -> Option<Membership> {
@@ -416,14 +468,19 @@ fn check_member(
                         }
                     }
                     JoinRule::Restricted | JoinRule::KnockRestricted => {
-                        // Simplified: require invite (full restricted-room join
-                        // requires checking allow conditions — deferred to follow-up).
-                        match &target_membership {
-                            Some(Membership::Invite) | Some(Membership::Join) => {}
-                            _ => {
-                                return Err(AuthError::JoinRequiresInvite {
-                                    join_rule: join_rule.clone(),
-                                })
+                        // First check allow conditions (e.g. membership in a space).
+                        // If they pass, the join is allowed regardless of invite status.
+                        if check_allow_conditions(event, auth_state) {
+                            // Allow conditions satisfied — join permitted.
+                        } else {
+                            // Allow conditions not satisfied; fall through to invite check.
+                            match &target_membership {
+                                Some(Membership::Invite) | Some(Membership::Join) => {}
+                                _ => {
+                                    return Err(AuthError::JoinRequiresInvite {
+                                        join_rule: join_rule.clone(),
+                                    })
+                                }
                             }
                         }
                     }
@@ -1093,5 +1150,121 @@ mod tests {
             vec![],
         );
         assert!(check_auth(&msg, &state).is_ok());
+    }
+
+    fn make_join_rules_event_with_allow(
+        sender: &str,
+        room_id: &str,
+        rule: &str,
+        allow: serde_json::Value,
+    ) -> Event {
+        make_event(
+            "$join_rules",
+            "m.room.join_rules",
+            sender,
+            room_id,
+            Some(""),
+            json!({ "join_rule": rule, "allow": allow }),
+            vec![],
+        )
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 11: join restricted room with satisfied allow condition passes
+    // -----------------------------------------------------------------------
+    #[test]
+    fn join_restricted_with_satisfied_allow_passes() {
+        let creator = "@alice:example.com";
+        let room_id = "!room:example.com";
+        let mut state: StateMap<Event> = HashMap::new();
+
+        apply_state_event(&mut state, &make_create_event(creator, room_id));
+        apply_state_event(
+            &mut state,
+            &make_member_event("$creator_join", creator, creator, room_id, "join"),
+        );
+        apply_state_event(
+            &mut state,
+            &make_join_rules_event_with_allow(
+                creator,
+                room_id,
+                "restricted",
+                json!([
+                    { "type": "m.room_membership", "room_id": "!other:example.com" }
+                ]),
+            ),
+        );
+        // Bob is a member of the other room — simulate by adding his member event
+        // to the state map (in production this would come from the other room's state).
+        apply_state_event(
+            &mut state,
+            &make_member_event(
+                "$bob_member_other",
+                "@bob:example.com",
+                "@bob:example.com",
+                "!other:example.com",
+                "join",
+            ),
+        );
+
+        let join = make_member_event(
+            "$bob_join", "@bob:example.com", "@bob:example.com", room_id, "join",
+        );
+        assert!(check_auth(&join, &state).is_ok());
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 12: join restricted room with no satisfied allow condition fails
+    // -----------------------------------------------------------------------
+    #[test]
+    fn join_restricted_without_satisfied_allow_fails() {
+        let creator = "@alice:example.com";
+        let room_id = "!room:example.com";
+        let mut state = base_state(creator, room_id, "restricted");
+        // Replace the default join_rules with one that has allow conditions.
+        apply_state_event(
+            &mut state,
+            &make_join_rules_event_with_allow(
+                creator,
+                room_id,
+                "restricted",
+                json!([
+                    { "type": "m.room_membership", "room_id": "!other:example.com" }
+                ]),
+            ),
+        );
+        // Bob is NOT a member of !other:example.com — no member event in state.
+
+        let join = make_member_event(
+            "$bob_join", "@bob:example.com", "@bob:example.com", room_id, "join",
+        );
+        let err = check_auth(&join, &state).unwrap_err();
+        assert!(matches!(err, AuthError::JoinRequiresInvite { .. }));
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 13: join restricted room with empty allow fails
+    // -----------------------------------------------------------------------
+    #[test]
+    fn join_restricted_with_empty_allow_fails() {
+        let creator = "@alice:example.com";
+        let room_id = "!room:example.com";
+        let mut state = base_state(creator, room_id, "restricted");
+        // Replace with join_rules that has an empty allow list.
+        apply_state_event(
+            &mut state,
+            &make_join_rules_event_with_allow(
+                creator,
+                room_id,
+                "restricted",
+                json!([]),
+            ),
+        );
+
+        let join = make_member_event(
+            "$bob_join", "@bob:example.com", "@bob:example.com", room_id, "join",
+        );
+        let err = check_auth(&join, &state).unwrap_err();
+        assert!(matches!(err, AuthError::JoinRequiresInvite { .. }));
     }
 }

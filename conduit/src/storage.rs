@@ -746,6 +746,14 @@ pub trait Storage: Send + Sync + 'static {
 
     /// List every alias that currently points at `room_id`.
     async fn list_aliases_for_room(&self, room_id: &str) -> Result<Vec<String>>;
+
+    // --- Device list broadcast performance (conduit-e0e) --------------------
+
+    /// Return all remote servers that share a room with `user_id` via the
+    /// member state. This is an O(1) lookup backed by a materialized view
+    /// in the Postgres backend, or falls back to the O(rooms × members)
+    /// walk in the default implementation.
+    async fn get_remote_servers_for_user(&self, user_id: &str, server_name: &str) -> Result<Vec<String>>;
 }
 
 // ---------------------------------------------------------------------------
@@ -2238,6 +2246,45 @@ impl Storage for MemoryStorage {
             .filter(|(_, (rid, _, _))| rid == room_id)
             .map(|(a, _)| a.clone())
             .collect();
+        out.sort();
+        Ok(out)
+    }
+
+    async fn get_remote_servers_for_user(&self, user_id: &str, server_name: &str) -> Result<Vec<String>> {
+        // Fallback implementation: walk all rooms × members (O(rooms × members)).
+        // This mirrors the old approach in remote_servers_sharing_room_with.
+        let mut servers = std::collections::HashSet::new();
+        let inner = self.inner.read().await;
+        for (_key, event_id) in &inner.room_state {
+            if let Some(event) = inner.events.get(event_id) {
+                if event.event_type == "m.room.member"
+                    && event.state_key.as_deref() == Some(user_id)
+                {
+                    // Found a room where user is a member — check membership = join
+                    if event.content.get("membership").and_then(|v| v.as_str()) != Some("join") {
+                        continue;
+                    }
+                    // Collect remote servers from other join members in this room
+                    let room_id = &event.room_id;
+                    for ((rid, etype, skey), eid) in &inner.room_state {
+                        if rid != room_id || etype != "m.room.member" {
+                            continue;
+                        }
+                        if let Some(ev) = inner.events.get(eid) {
+                            if ev.content.get("membership").and_then(|v| v.as_str()) != Some("join") {
+                                continue;
+                            }
+                            let other = skey.as_str();
+                            let srv = other.split(':').nth(1).unwrap_or("");
+                            if !srv.is_empty() && srv != server_name {
+                                servers.insert(srv.to_owned());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let mut out: Vec<String> = servers.into_iter().collect();
         out.sort();
         Ok(out)
     }

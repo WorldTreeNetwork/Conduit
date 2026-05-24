@@ -14,18 +14,49 @@
 //! Returns the canonical `event_id` string on success.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::http::StatusCode;
 use axum::Json;
-use serde_json::json;
+use serde_json::{json, Value};
 
 use conduit::auth::{StateMap, auth_event_keys, check_auth};
 use conduit::event::Event;
 use conduit::hashing::event_id;
+use conduit::room::RoomEventSender;
 use conduit::signing::sign_event;
+use conduit::Result as ConduitResult;
 
 use super::{AuthState, MatrixError};
+
+// ---------------------------------------------------------------------------
+// RoomEventSender wrapper for any AuthState
+// ---------------------------------------------------------------------------
+
+/// A wrapper that implements [`RoomEventSender`] for any `S: AuthState`.
+///
+/// This exists solely to work around Rust's orphan rules — we can't
+/// implement a foreign trait (`RoomEventSender` from `conduit`) for a
+/// generic foreign type (`S: AuthState` from this crate). By wrapping
+/// `&S` in a local tuple struct we sidestep the problem.
+pub struct RoomEventSenderWrapper<'a, S>(pub &'a S);
+
+#[async_trait::async_trait]
+impl<S: AuthState + Send + Sync> RoomEventSender for RoomEventSenderWrapper<'_, S> {
+    async fn send_event(
+        &self,
+        sender: &str,
+        room_id: &str,
+        event_type: &str,
+        state_key: Option<&str>,
+        content: Value,
+    ) -> ConduitResult<String> {
+        build_sign_and_persist(self.0, sender, room_id, event_type, state_key, content)
+            .await
+            .map_err(|(_status, json_err)| conduit::Error::Storage(json_err.0.error.clone()))
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Internal helpers

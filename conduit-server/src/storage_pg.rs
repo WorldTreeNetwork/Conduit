@@ -2530,4 +2530,61 @@ impl Storage for PostgresStorage {
         .map_err(map_sqlx)?;
         Ok(rows.into_iter().map(|r| r.alias).collect())
     }
+
+    // -----------------------------------------------------------------------
+    // Device list broadcast performance (conduit-e0e)
+    // -----------------------------------------------------------------------
+
+    async fn get_remote_servers_for_user(&self, user_id: &str, server_name: &str) -> Result<Vec<String>> {
+        // Fast path: query the room_current_state table directly for all
+        // m.room.member entries where the target user is joined, then
+        // collect distinct remote servers from other join members in
+        // the same rooms. This is O(user's rooms × members per room)
+        // but only touches rooms the user is actually in.
+        //
+        // In a future migration this can be further optimized with
+        // a materialized user_room_servers table that tracks the
+        // (user_id -> remote_server) mapping incrementally.
+        let rows = sqlx::query(
+            r#"
+            WITH user_rooms AS (
+                SELECT rcs.room_id
+                FROM room_current_state rcs
+                WHERE rcs.type = 'm.room.member'
+                  AND rcs.state_key = $1
+                  AND (rcs.event_id IN (
+                      SELECT event_id FROM events
+                      WHERE room_id = rcs.room_id
+                        AND type = 'm.room.member'
+                        AND state_key = $1
+                        AND content->>'membership' = 'join'
+                  ))
+            )
+            SELECT DISTINCT SPLIT_PART(rcs.state_key, ':', 2) AS server
+            FROM room_current_state rcs
+            WHERE rcs.type = 'm.room.member'
+              AND rcs.room_id IN (SELECT room_id FROM user_rooms)
+              AND rcs.state_key != $1
+              AND SPLIT_PART(rcs.state_key, ':', 2) != $2
+              AND SPLIT_PART(rcs.state_key, ':', 2) != ''
+              AND (rcs.event_id IN (
+                  SELECT event_id FROM events
+                  WHERE room_id = rcs.room_id
+                    AND type = 'm.room.member'
+                    AND state_key = rcs.state_key
+                    AND content->>'membership' = 'join'
+              ))
+            "#,
+        )
+        .bind(user_id)
+        .bind(server_name)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+
+        Ok(rows.iter().map(|r| {
+            use sqlx::Row;
+            r.get::<Option<String>, _>("server").unwrap_or_default()
+        }).collect())
+    }
 }
