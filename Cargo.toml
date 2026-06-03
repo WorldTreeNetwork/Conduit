@@ -18,7 +18,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 async-trait = "0.1"
 axum = "0.7"
 tower = { version = "0.4", features = ["util"] }
-tower-http = { version = "0.5", features = ["trace"] }
+tower-http = { version = "0.5", features = ["trace", "cors"] }
 sqlx = { version = "0.8", features = ["postgres", "runtime-tokio", "tls-rustls", "macros", "migrate", "chrono"] }
 chrono = { version = "0.4", features = ["serde"] }
 ed25519-dalek = { version = "2", features = ["rand_core"] }

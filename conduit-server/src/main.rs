@@ -19,6 +19,7 @@ use serde_json::{Value, json};
 use sqlx::postgres::PgPoolOptions;
 use tokio::sync::{RwLock, broadcast};
 use tower_http::trace::TraceLayer;
+use tower_http::cors::{Any, CorsLayer};
 use tracing_subscriber::EnvFilter;
 
 use hickory_resolver::TokioAsyncResolver;
@@ -548,7 +549,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Federation inbound (E09)
         .nest("/_matrix/federation/v1", fed_router)
         .with_state(state.clone())
-        .layer(TraceLayer::new_for_http());
+        .layer(TraceLayer::new_for_http())
+        // CORS (conduit-cws): browser Matrix clients (Element) are served from a
+        // different origin and call the CS-API cross-origin. The Matrix spec
+        // requires the homeserver to allow any origin. Clients authenticate via
+        // the Authorization bearer header (no cookies), so credentials mode is
+        // not needed and `Any` origin is correct. This also answers OPTIONS
+        // preflight automatically.
+        .layer(
+            CorsLayer::new()
+                .allow_origin(Any)
+                .allow_methods(Any)
+                .allow_headers(Any),
+        );
 
     // Background task: GC the outbound federation queue (conduit-cgl).
     // Hourly: drop sent rows >7 days old, dead rows >30 days old.
