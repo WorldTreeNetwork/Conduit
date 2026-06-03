@@ -128,6 +128,16 @@ impl MatrixError {
     pub fn new_not_found(msg: impl Into<String>) -> (StatusCode, Json<MatrixError>) {
         (StatusCode::NOT_FOUND, Json(Self::new("M_NOT_FOUND", msg)))
     }
+    /// Map a domain `conduit::Error` to the appropriate Matrix HTTP error.
+    /// Preserves auth rejections as 403 M_FORBIDDEN instead of collapsing
+    /// everything to 500 (conduit-29w / dbb0938 regression).
+    pub fn from_conduit(e: conduit::Error) -> (StatusCode, Json<MatrixError>) {
+        match e {
+            conduit::Error::Forbidden(msg) => Self::forbidden(msg),
+            conduit::Error::NotFound => Self::new_not_found("Not found"),
+            other => Self::unknown(other.to_string()),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -54,7 +54,15 @@ impl<S: AuthState + Send + Sync> RoomEventSender for RoomEventSenderWrapper<'_, 
     ) -> ConduitResult<String> {
         build_sign_and_persist(self.0, sender, room_id, event_type, state_key, content)
             .await
-            .map_err(|(_status, json_err)| conduit::Error::Storage(json_err.0.error.clone()))
+            .map_err(|(status, json_err)| {
+                // Preserve auth rejections (403) so handlers can surface a real
+                // M_FORBIDDEN instead of a generic 500 (conduit-29w).
+                if status == StatusCode::FORBIDDEN {
+                    conduit::Error::Forbidden(json_err.0.error.clone())
+                } else {
+                    conduit::Error::Storage(json_err.0.error.clone())
+                }
+            })
     }
 }
 

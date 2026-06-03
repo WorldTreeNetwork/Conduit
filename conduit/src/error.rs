@@ -15,8 +15,8 @@ pub enum Error {
     #[error("not found")]
     NotFound,
 
-    #[error("forbidden")]
-    Forbidden,
+    #[error("forbidden: {0}")]
+    Forbidden(String),
 
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),

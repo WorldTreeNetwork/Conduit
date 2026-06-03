@@ -524,3 +524,31 @@ async fn notifications_endpoint_returns_empty_list() {
     // The endpoint returns an empty list (v0 stub — full notif history is a follow-up).
     assert_eq!(body["notifications"].as_array().unwrap().len(), 0);
 }
+
+// RoomEventSender for the test harness (conduit-29w). Mirrors the AppState impl
+// in main.rs: delegate to the generic event pipeline, then wake any /sync waiters.
+#[async_trait::async_trait]
+impl conduit::room::RoomEventSender for TestState {
+    async fn send_event(
+        &self,
+        sender: &str,
+        room_id: &str,
+        event_type: &str,
+        state_key: Option<&str>,
+        content: serde_json::Value,
+    ) -> conduit::Result<String> {
+        match conduit_server::api::client::event_pipeline::build_sign_and_persist(
+            self, sender, room_id, event_type, state_key, content,
+        )
+        .await
+        {
+            Ok(event_id) => {
+                let _ = self.events_tx.send(0);
+                Ok(event_id)
+            }
+            Err((_code, err)) => {
+                Err(conduit::Error::InvalidEvent(err.0.errcode.to_string()))
+            }
+        }
+    }
+}

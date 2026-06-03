@@ -194,7 +194,7 @@ pub async fn join_room<S: AuthState>(
     let room = Room::new(&room_id);
     match room.join(sender, &RoomEventSenderWrapper(&state)).await {
         Ok(_) => (StatusCode::OK, Json(json!({ "room_id": room_id }))).into_response(),
-        Err(e) => MatrixError::unknown(e.to_string()).into_response(),
+        Err(e) => MatrixError::from_conduit(e).into_response(),
     }
 }
 
@@ -217,7 +217,7 @@ pub async fn leave_room<S: AuthState>(
     let room = Room::new(&room_id);
     match room.leave(sender, body.reason.as_deref(), &RoomEventSenderWrapper(&state)).await {
         Ok(_) => (StatusCode::OK, Json(json!({}))).into_response(),
-        Err(e) => MatrixError::unknown(e.to_string()).into_response(),
+        Err(e) => MatrixError::from_conduit(e).into_response(),
     }
 }
 
@@ -241,7 +241,7 @@ pub async fn kick_user<S: AuthState>(
     let room = Room::new(&room_id);
     match room.kick(sender, &body.user_id, body.reason.as_deref(), &RoomEventSenderWrapper(&state)).await {
         Ok(_) => (StatusCode::OK, Json(json!({}))).into_response(),
-        Err(e) => MatrixError::unknown(e.to_string()).into_response(),
+        Err(e) => MatrixError::from_conduit(e).into_response(),
     }
 }
 
@@ -265,7 +265,7 @@ pub async fn ban_user<S: AuthState>(
     let room = Room::new(&room_id);
     match room.ban(sender, &body.user_id, body.reason.as_deref(), &RoomEventSenderWrapper(&state)).await {
         Ok(_) => (StatusCode::OK, Json(json!({}))).into_response(),
-        Err(e) => MatrixError::unknown(e.to_string()).into_response(),
+        Err(e) => MatrixError::from_conduit(e).into_response(),
     }
 }
 
@@ -289,7 +289,7 @@ pub async fn unban_user<S: AuthState>(
     let room = Room::new(&room_id);
     match room.unban(sender, &body.user_id, &RoomEventSenderWrapper(&state)).await {
         Ok(_) => (StatusCode::OK, Json(json!({}))).into_response(),
-        Err(e) => MatrixError::unknown(e.to_string()).into_response(),
+        Err(e) => MatrixError::from_conduit(e).into_response(),
     }
 }
 
@@ -313,7 +313,7 @@ pub async fn invite_user<S: AuthState>(
     let room = Room::new(&room_id);
     match room.invite(sender, &body.user_id, false, &RoomEventSenderWrapper(&state)).await {
         Ok(_) => (StatusCode::OK, Json(json!({}))).into_response(),
-        Err(e) => MatrixError::unknown(e.to_string()).into_response(),
+        Err(e) => MatrixError::from_conduit(e).into_response(),
     }
 }
 
@@ -347,7 +347,7 @@ pub async fn send_message_event<S: AuthState + conduit::room::RoomEventSender>(
             cache.insert(cache_key, event_id.clone());
             (StatusCode::OK, Json(json!({ "event_id": event_id }))).into_response()
         }
-        Err(e) => MatrixError::unknown(e.to_string()).into_response(),
+        Err(e) => MatrixError::from_conduit(e).into_response(),
     }
 }
 
@@ -385,7 +385,7 @@ async fn send_state_event_inner<S: AuthState + conduit::room::RoomEventSender>(
     let room = Room::new(room_id);
     match room.send_state_event(sender, event_type, state_key, content, &RoomEventSenderWrapper(state)).await {
         Ok(event_id) => (StatusCode::OK, Json(json!({ "event_id": event_id }))).into_response(),
-        Err(e) => MatrixError::unknown(e.to_string()).into_response(),
+        Err(e) => MatrixError::from_conduit(e).into_response(),
     }
 }
 
@@ -404,7 +404,7 @@ pub async fn get_room_state<S: AuthState>(
             let values: Vec<Value> = events.into_iter().map(|e| serde_json::to_value(e).unwrap_or(Value::Null)).collect();
             (StatusCode::OK, Json(values)).into_response()
         }
-        Err(e) => MatrixError::unknown(e.to_string()).into_response(),
+        Err(e) => MatrixError::from_conduit(e).into_response(),
     }
 }
 
@@ -444,7 +444,7 @@ async fn get_state_event_inner<S: AuthState>(
             StatusCode::NOT_FOUND,
             Json(json!({ "errcode": "M_NOT_FOUND", "error": "State event not found" })),
         ).into_response(),
-        Err(e) => MatrixError::unknown(e.to_string()).into_response(),
+        Err(e) => MatrixError::from_conduit(e).into_response(),
     }
 }
 
@@ -552,6 +552,6 @@ pub async fn get_messages<S: AuthState>(
                 })),
             ).into_response()
         }
-        Err(e) => MatrixError::unknown(e.to_string()).into_response(),
+        Err(e) => MatrixError::from_conduit(e).into_response(),
     }
 }
