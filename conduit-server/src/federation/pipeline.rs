@@ -48,6 +48,9 @@ pub enum PipelineError {
     #[error("state resolution error: {0}")]
     StateRes(String),
 
+    #[error("unsupported room version: {0}")]
+    UnsupportedRoomVersion(String),
+
     #[error("auth event fetch failed: {0}")]
     AuthEventFetch(String),
 
@@ -107,6 +110,32 @@ pub async fn process_incoming_pdu(
     let key_cache = build_key_cache(remote_keys, http, &pdu).await;
     let lookup = make_key_lookup(key_cache);
     verify_event(&pdu, lookup).map_err(PipelineError::SignatureError)?;
+
+    // Room version 11 only (kernel gate — in-process cannot bypass).
+    {
+        let version = if pdu.event_type == "m.room.create" {
+            pdu.content
+                .get("room_version")
+                .and_then(|v| v.as_str())
+                .unwrap_or("1")
+                .to_owned()
+        } else {
+            match storage
+                .get_state_entry(&pdu.room_id, "m.room.create", "")
+                .await
+            {
+                Ok(Some(create)) => create
+                    .content
+                    .get("room_version")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("1")
+                    .to_owned(),
+                _ => "1".to_owned(),
+            }
+        };
+        conduit::require_room_version(&version)
+            .map_err(|e| PipelineError::UnsupportedRoomVersion(e.to_string()))?;
+    }
 
     // --- Step 3: Resolve auth events (immediate) ----------------------------
     // Ensure all direct auth_events are in storage; fetch missing ones.

@@ -119,7 +119,7 @@ pub async fn create_room<S: AuthState>(
         sender, &room_id, &room_version, join_rule, history_visibility, &params,
         &RoomEventSenderWrapper(&state),
     ).await {
-        return MatrixError::unknown(e.to_string()).into_response();
+        return MatrixError::from_conduit(e).into_response();
     }
 
     // Invite users listed in `invite`.

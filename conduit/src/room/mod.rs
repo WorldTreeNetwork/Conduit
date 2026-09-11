@@ -80,6 +80,7 @@ impl Room {
         body: &CreateRoomParams<'_>,
         sender_: &dyn RoomEventSender,
     ) -> Result<Room> {
+        crate::error::require_room_version(room_version)?;
         let sender = sender;
         let room_id = room_id;
 
@@ -449,6 +450,24 @@ mod tests {
 
         let current = storage.get_current_state(room_id).await.expect("get current state");
         assert!(current.len() >= 6, "should have at least 6 state events, got {}", current.len());
+    }
+
+    #[tokio::test]
+    async fn test_create_room_rejects_non_v11() {
+        let storage = test_storage();
+        let sender = TestSender::new(storage);
+        let err = Room::create(
+            "@alice:localhost",
+            "!old:localhost",
+            "10",
+            "public",
+            "shared",
+            &CreateRoomParams::default(),
+            &sender,
+        )
+        .await
+        .expect_err("v10 must fail");
+        assert!(matches!(err, crate::Error::UnsupportedRoomVersion(_)));
     }
 
     #[tokio::test]

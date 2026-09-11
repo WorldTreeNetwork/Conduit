@@ -1,9 +1,9 @@
 //! Conduit — a Matrix homeserver, as a pure library.
 //!
-//! This crate exposes the machinery of a Matrix homeserver — events,
-//! rooms, state, storage abstraction, transports — without imposing a
-//! particular HTTP server or I/O loop. To run it, see the companion
-//! `conduit-server` crate, or embed it in your own host.
+//! This crate is the Matrix **kernel**: events, rooms, v11 auth, storage
+//! trait, agency tokens. It is tokio-hosted. It does not depend on
+//! `axum`. Public API has no HTTP types. See `docs/architecture.md`.
+//! The companion `conduit-server` crate is the HTTP/Postgres host.
 //!
 //! ## Lineage
 //!
@@ -36,4 +36,4 @@ pub mod storage;
 pub mod transport;
 
 pub use config::Config;
-pub use error::{Error, Result};
+pub use error::{require_room_version, Error, Result, ROOM_VERSION};

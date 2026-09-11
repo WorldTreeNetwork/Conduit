@@ -2,63 +2,83 @@
 
 Conduit ships as two crates:
 
-- **`conduit`** — pure library. No HTTP server, no I/O loop, no
-  binary. All Matrix logic lives here: events, rooms, state, auth,
-  storage trait, transport abstractions.
-- **`conduit-server`** — thin host binary. Tokio + axum. Mounts HTTP
-  routes onto an instance of the library and runs the I/O loop.
+- **`conduit`** — Matrix kernel. Events, rooms, v11 auth, state
+  resolution, storage trait, signing, agency tokens, identity
+  on-ramps. Depends on tokio. Embeddable means **tokio-hosted**, not
+  runtime-agnostic. No `axum` in this crate's graph. Public API has
+  no `axum` / `http` / `reqwest` types. The `iroh` feature may pull
+  `http`/`reqwest` transitively through iroh-relay.
+- **`conduit-server`** — host. Tokio + axum + Postgres + workers.
+  Maps HTTP to kernel types. Optional OIDC against a foreign OP
+  (identikey-core is AGPL; do not crate-dep it). Durable Postgres
+  without axum is `conduit-6jr`, not a feature on `conduit`.
 
-The split lets the library be embedded in non-HTTP hosts (tests, P2P
-transports, alternative runtimes) without dragging in a webserver.
+Room version **11 only**, checked in the kernel (create and inbound).
 
-## Data flow (client → server)
+## Target data flow (client → server)
 
 ```
 HTTP request
   → axum route handler                 (conduit-server)
-    → conduit::api::client handler     (conduit)
-      → auth check                     (access token → user, device)
-        → conduit::room operations     (state machine + auth rules)
-          → conduit::storage           (persist event, update state)
+    → conduit typed operation          (conduit)
+      → biscuit verify / identikey-auth
+        → room ops + check_auth
+          → persist (kernel-owned)
 ```
 
-## Data flow (federation in)
+**HEAD debt:** persist still lives in
+`conduit-server` `build_sign_and_persist` (HTTP-typed) behind a
+host `RoomEventSender`. Kernel *owns* that path as of
+`add-library-ops`. Until then the inversion is named, not denied.
+
+## Target data flow (federation in)
 
 ```
-HTTPS request from a remote homeserver
-  → axum route handler                 (conduit-server)
-    → X-Matrix signature verification
-      → conduit::api::federation       (conduit)
-        → conduit::room::state_res     (resolve incoming state)
-          → conduit::storage           (persist + reindex)
+HTTPS from a remote homeserver
+  → axum + X-Matrix                    (conduit-server)
+    → conduit ingest                   (conduit)
+        → state_res + check_auth
+          → persist (kernel-owned)
 ```
+
+## Homeserver split
+
+| Kernel (`Homeserver`) | Host-only |
+|---|---|
+| `Storage` | OIDC issuer / JWKS |
+| server signing key + biscuit minter | media blob disk |
+| server name | CS/federation rate limit |
+| stream broadcast | push worker process |
+| txn cache | axum / TLS / bind |
+| typing + presence | |
+| `Config` (read, including `federation_enabled`) | |
 
 ## Module map
 
-| Module                       | Purpose                                          |
-|------------------------------|--------------------------------------------------|
-| `conduit::event`             | Matrix event types (PDUs)                        |
-| `conduit::room`              | Room representation; applying state events       |
-| `conduit::room::state_res`   | State Resolution v2                              |
-| `conduit::auth` *(planned)*  | Access-token & device auth; auth rule checks     |
-| `conduit::api::client`       | Client-Server API handlers and types             |
-| `conduit::api::federation`   | Server-Server API handlers and types             |
-| `conduit::storage`           | `Storage` trait + in-memory implementation       |
-| `conduit::transport`         | Transport abstraction; HTTP is host-supplied     |
-| `conduit::transport::iroh`   | iroh P2P transport (feature-gated)               |
-| `conduit::config`            | Runtime configuration                            |
-| `conduit::error`             | Top-level error type                             |
+| Module | Purpose |
+|---|---|
+| `conduit::event` | PDU types |
+| `conduit::agency` | Biscuit mint / verify |
+| `conduit::identity` | identikey-auth on-ramp |
+| `conduit::auth` | v11 authorization; `may_read_room`; `can_see` |
+| `conduit::room` | create/join/send; v11 gate |
+| `conduit::room::state_res` | State Resolution v2 (pure) |
+| `conduit::storage` | `Storage` trait + MemoryStorage |
+| `conduit::error` | domain error + Matrix errcode |
+| `conduit::config` | runtime config (used) |
+| `conduit::api` | typed CS/SS ops (`add-library-ops`) |
 
 ## Layering rules
 
-1. **`storage` is a trait, not a concrete backend.** Tests use
-   `MemoryStorage`; production picks SQLite or RocksDB and implements
-   the trait. Nothing in `room` or `api` references a specific DB.
-2. **No HTTP types in the library.** Handlers take typed request
-   structs and return typed response structs. The host translates
-   to/from HTTP.
-3. **Federation is opt-in at runtime.** Disabling it must not crash
-   handlers; they just return an appropriate error when asked to
-   reach a remote.
-4. **State resolution is a pure function.** No I/O, no clock, no
-   randomness. Easy to test, easy to swap.
+1. **`storage` is a trait.** Tests use `MemoryStorage`. Host
+   implements Postgres. Nothing in `room` references sqlx.
+2. **No HTTP types in the kernel public API.** `axum` never in
+   `cargo tree -p conduit`. Kernel returns typed `Result`; host maps
+   `Error::errcode()` to HTTP status.
+3. **Kernel owns build-sign-auth-persist.** Host supplies `Storage`,
+   keys, server name.
+4. **Federation opt-in.** `Config.federation_enabled` is read. Off
+   means typed error, not a crash.
+5. **State resolution is a pure function.** No I/O, no clock.
+6. **Agency is Biscuits; identity is possession proof; data access
+   is membership + Olm/Megolm.** Recrypt is not a kernel dep.

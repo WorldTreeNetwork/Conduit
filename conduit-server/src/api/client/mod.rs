@@ -170,6 +170,13 @@ impl MatrixError {
         match e {
             conduit::Error::Forbidden(msg) => Self::forbidden(msg),
             conduit::Error::NotFound => Self::new_not_found("Not found"),
+            conduit::Error::UnsupportedRoomVersion(v) => (
+                StatusCode::BAD_REQUEST,
+                Json(Self::new(
+                    "M_UNSUPPORTED_ROOM_VERSION",
+                    format!("unsupported room version: {v}"),
+                )),
+            ),
             other => Self::unknown(other.to_string()),
         }
     }

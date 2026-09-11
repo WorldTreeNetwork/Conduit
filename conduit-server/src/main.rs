@@ -181,7 +181,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|_| "localhost".to_owned())
         .into();
 
-    let _config = conduit::Config::new(&*server_name);
+    let mut config = conduit::Config::new(&*server_name);
+    if env::var("CONDUIT_FEDERATION").ok().as_deref() == Some("0") {
+        config.federation_enabled = false;
+    }
+    tracing::info!(federation = config.federation_enabled, "config ready");
 
     let database_url = env::var("DATABASE_URL")
         .map_err(|_| "DATABASE_URL must be set (e.g. postgres://user:pass@host/conduit)")?;
