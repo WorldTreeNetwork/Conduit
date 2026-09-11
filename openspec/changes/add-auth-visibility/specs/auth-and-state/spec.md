@@ -92,20 +92,26 @@ depend on identikey-core crates.
 - WHEN the kernel verifies it
 - THEN login fails and no Biscuit is minted
 
-### Requirement: identikey-core is an external OP, not a crate
+### Requirement: identikey-core is an external OP
 
-When the HTTP host is configured with an OIDC issuer, it MAY validate
-an access token or authorization code against that issuer (including
-an identikey-core OP) and then ask the kernel to mint a Biscuit. The
-OP token SHALL NOT be used as the agency grant. `conduit` and
-`conduit-server` SHALL NOT take a crate dependency on identikey-core.
+When the HTTP host is configured with `CONDUIT_OIDC_ISSUER`, it SHALL
+validate the OP JWT with `identikey-oidc-client` (Apache RP crate) and
+then mint a Conduit Biscuit for the linked MXID. The OP token SHALL
+NOT be used as the agency grant. `conduit` SHALL NOT depend on the
+AGPL `identikey-oidc` provider. Unlinked OIDC subjects SHALL fail
+login.
 
 #### Scenario: Unconfigured host has no OIDC path
 
 - GIVEN no OIDC issuer configured
 - WHEN a client presents an identikey-core JWT as a Matrix access token
-- THEN the kernel does not accept it as a Biscuit and does not link
-  identikey-oidc
+- THEN the kernel does not accept it as a Biscuit
+
+#### Scenario: Configured host mints after JWT verify
+
+- GIVEN `CONDUIT_OIDC_ISSUER` is set and `sub` is linked to an MXID
+- WHEN the client logs in with `io.identikey.oidc` and a valid JWT
+- THEN the host returns a Conduit Biscuit, not the OP token
 
 ### Requirement: Room reads require membership
 

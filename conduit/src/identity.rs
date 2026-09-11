@@ -9,9 +9,9 @@
 //! (`identikey-auth`, Apache-2.0 OR BSD-2-Clause-Patent).  The verifier
 //! issues an audience-bound, nonce-carrying [`Challenge`]; the claimant
 //! signs it with a hardware- or software-held key; the verifier checks
-//! the signature and burns the nonce.  identikey-core is **not** a
-//! crate dependency — a host that wants it speaks OIDC to it as a
-//! foreign OpenID Provider and asks the kernel to mint afterwards.
+//! the signature and burns the nonce.  The AGPL identikey-core *OP* is
+//! not a kernel dependency.  The host may verify an OP JWT with
+//! `identikey-oidc-client` and then call [`login_oidc_subject`].
 //!
 //! ## Linking is not registration
 //!
@@ -160,6 +160,29 @@ impl IdentityVerifier {
             fingerprint,
         })
     }
+}
+
+/// Storage key for an OIDC `sub` from a configured identikey-core OP.
+///
+/// The host verifies the JWT (identikey-oidc-client). The kernel only
+/// ever sees the subject string, so `conduit` does not depend on that
+/// crate — or on the AGPL OP.
+pub fn oidc_identity_key(subject: &str) -> String {
+    format!("oidc:{subject}")
+}
+
+/// Resolve a verified OIDC `sub` to a local MXID. Unlinked fails closed.
+pub async fn login_oidc_subject(storage: &dyn Storage, subject: &str) -> Result<LoggedIn> {
+    let key = oidc_identity_key(subject);
+    let user_id = storage
+        .user_for_identikey(&key)
+        .await
+        .map_err(|e| IdentityError::Storage(e.to_string()))?
+        .ok_or(IdentityError::Unlinked)?;
+    Ok(LoggedIn {
+        user_id,
+        fingerprint: key,
+    })
 }
 
 /// The outcome of a successful identikey-auth login: an identity, not a
@@ -415,5 +438,31 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, IdentityError::AlreadyLinked(_)), "got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn unlinked_oidc_sub_does_not_create_an_account() {
+        let storage = storage_with_alice().await;
+        let err = login_oidc_subject(&storage, "xid-alice")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, IdentityError::Unlinked));
+        assert!(
+            storage
+                .user_for_identikey(&oidc_identity_key("xid-alice"))
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn linked_oidc_sub_logs_in() {
+        let storage = storage_with_alice().await;
+        link_at_registration(&storage, &oidc_identity_key("xid-alice"), ALICE)
+            .await
+            .unwrap();
+        let logged_in = login_oidc_subject(&storage, "xid-alice").await.unwrap();
+        assert_eq!(logged_in.user_id, ALICE);
     }
 }

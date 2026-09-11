@@ -38,6 +38,8 @@ infer = { workspace = true }
 serde_yaml = { workspace = true }
 regex = { workspace = true }
 iroh = { workspace = true, optional = true }
+# Apache RP client (lives in identikey-core repo, not the AGPL OP).
+identikey-oidc-client = { workspace = true }
 
 [dev-dependencies]
 # Test-side claimant for the identikey-auth on-ramp.  The server itself

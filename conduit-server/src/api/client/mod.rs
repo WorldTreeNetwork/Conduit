@@ -52,6 +52,7 @@ use conduit::agency::{self, Minter, RootClaims, VerifyContext, RIGHT_CS};
 use conduit::identity::{IdentityVerifier, VerifyPolicy};
 use conduit::keys::ServerKey;
 use conduit::storage::Storage;
+use identikey_oidc_client::OidcClient;
 
 // ---------------------------------------------------------------------------
 // AppState — imported from main.rs via a trait alias trick.
@@ -121,6 +122,11 @@ pub trait AuthState: Clone + Send + Sync + 'static + conduit::room::RoomEventSen
     }
     /// Optional outbound federation send queue.
     fn federation_queue(&self) -> Option<&Arc<crate::federation::Queue>> {
+        None
+    }
+
+    /// Configured identikey-core (or any OIDC) RP client. Default: none.
+    fn oidc_client(&self) -> Option<Arc<OidcClient>> {
         None
     }
 }
@@ -360,6 +366,9 @@ pub struct RegisterRequest {
     /// account, so a later challenge/response can log in as this user.
     #[serde(rename = "io.identikey.fingerprint")]
     pub identikey_fingerprint: Option<String>,
+    /// Optional OIDC `sub` (already verified by the host at registration).
+    #[serde(rename = "io.identikey.oidc_sub")]
+    pub oidc_sub: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -387,6 +396,8 @@ pub struct LoginRequest {
     /// For `io.identikey.auth`: url-safe base64 of the challenge
     /// response bytes.
     pub response: Option<String>,
+    /// For `io.identikey.oidc`: the OP ID/access token (JWT).
+    pub token: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -479,6 +490,14 @@ pub async fn register<S: AuthState>(
             return MatrixError::forbidden(e.to_string()).into_response();
         }
     }
+    if let Some(sub) = body.oidc_sub.as_deref() {
+        let key = conduit::identity::oidc_identity_key(sub);
+        if let Err(e) =
+            conduit::identity::link_at_registration(state.storage().as_ref(), &key, &user_id).await
+        {
+            return MatrixError::forbidden(e.to_string()).into_response();
+        }
+    }
 
     // Agency: mint the capability token for the new session.
     let raw_token = match mint_access_token(&state, &user_id, &device_id).await {
@@ -502,17 +521,21 @@ pub async fn register<S: AuthState>(
 // GET /_matrix/client/v3/login  (advertise flows)
 // ---------------------------------------------------------------------------
 
-pub async fn get_login_flows() -> Json<serde_json::Value> {
-    Json(json!({
-        "flows": [
-            { "type": "m.login.password" },
-            { "type": IDENTIKEY_LOGIN_TYPE }
-        ]
-    }))
+pub async fn get_login_flows<S: AuthState>(State(state): State<S>) -> Json<serde_json::Value> {
+    let mut flows = vec![
+        json!({ "type": "m.login.password" }),
+        json!({ "type": IDENTIKEY_LOGIN_TYPE }),
+    ];
+    if state.oidc_client().is_some() {
+        flows.push(json!({ "type": OIDC_LOGIN_TYPE }));
+    }
+    Json(json!({ "flows": flows }))
 }
 
 /// The login `type` for identikey-auth challenge/response.
 pub const IDENTIKEY_LOGIN_TYPE: &str = "io.identikey.auth";
+/// The login `type` for a verified identikey-core (OIDC) ID token.
+pub const OIDC_LOGIN_TYPE: &str = "io.identikey.oidc";
 
 // ---------------------------------------------------------------------------
 // POST /_matrix/client/v3/login
@@ -524,6 +547,9 @@ pub async fn login<S: AuthState>(
 ) -> Response {
     if body.login_type == IDENTIKEY_LOGIN_TYPE {
         return identikey_login(state, body).await;
+    }
+    if body.login_type == OIDC_LOGIN_TYPE {
+        return oidc_login(state, body).await;
     }
     if body.login_type != "m.login.password" {
         return MatrixError::forbidden(format!("unsupported login type: {}", body.login_type))
@@ -701,6 +727,72 @@ async fn identikey_login<S: AuthState>(state: S, body: LoginRequest) -> Response
     }
 
     // Agency, minted exactly as the password on-ramp mints it.
+    let raw_token = match mint_access_token(&state, &logged_in.user_id, &device_id).await {
+        Ok(t) => t,
+        Err(e) => return MatrixError::unknown(e).into_response(),
+    };
+
+    (
+        StatusCode::OK,
+        Json(LoginResponse {
+            user_id: logged_in.user_id,
+            access_token: raw_token,
+            device_id,
+        }),
+    )
+        .into_response()
+}
+
+/// The `io.identikey.oidc` branch of `POST /login`.
+///
+/// The host verifies the OP JWT; the kernel only sees `sub`. An
+/// unlinked subject fails closed — same rule as identikey-auth.
+async fn oidc_login<S: AuthState>(state: S, body: LoginRequest) -> Response {
+    let Some(client) = state.oidc_client() else {
+        return MatrixError::forbidden("oidc login is not configured").into_response();
+    };
+    let Some(token) = body.token.as_deref() else {
+        return MatrixError::forbidden("oidc login requires a token").into_response();
+    };
+    let identity = match client
+        .validate(token, now_unix().max(0) as u64)
+        .await
+    {
+        Ok(id) => id,
+        Err(e) => return MatrixError::forbidden(e.to_string()).into_response(),
+    };
+    let logged_in = match conduit::identity::login_oidc_subject(
+        state.storage().as_ref(),
+        &identity.subject,
+    )
+    .await
+    {
+        Ok(l) => l,
+        Err(e) => return MatrixError::forbidden(e.to_string()).into_response(),
+    };
+
+    let account = match state.storage().get_account(&logged_in.user_id).await {
+        Ok(Some(a)) => a,
+        Ok(None) => return MatrixError::forbidden("unknown user").into_response(),
+        Err(e) => return MatrixError::unknown(e.to_string()).into_response(),
+    };
+    if account.deactivated_at.is_some() {
+        return MatrixError::forbidden("account deactivated").into_response();
+    }
+
+    let device_id = body.device_id.clone().unwrap_or_else(generate_device_id);
+    if let Err(e) = state
+        .storage()
+        .upsert_device(
+            &logged_in.user_id,
+            &device_id,
+            body.initial_device_display_name.as_deref(),
+        )
+        .await
+    {
+        return MatrixError::unknown(e.to_string()).into_response();
+    }
+
     let raw_token = match mint_access_token(&state, &logged_in.user_id, &device_id).await {
         Ok(t) => t,
         Err(e) => return MatrixError::unknown(e).into_response(),

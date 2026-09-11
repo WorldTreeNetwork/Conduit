@@ -48,6 +48,8 @@ struct AppState {
     minter: Arc<conduit::agency::Minter>,
     /// identikey-auth challenge issuer / verifier for this server name.
     identity_verifier: Arc<conduit::identity::IdentityVerifier>,
+    /// Optional RP client for an identikey-core (or any OIDC) issuer.
+    oidc_client: Option<Arc<identikey_oidc_client::OidcClient>>,
     server_name: Arc<str>,
     http: reqwest::Client,
     remote_keys: Arc<RemoteKeyCache>,
@@ -121,6 +123,9 @@ impl AuthState for AppState {
     }
     fn identity_verifier(&self) -> Arc<conduit::identity::IdentityVerifier> {
         Arc::clone(&self.identity_verifier)
+    }
+    fn oidc_client(&self) -> Option<Arc<identikey_oidc_client::OidcClient>> {
+        self.oidc_client.clone()
     }
     fn txn_cache(&self) -> &Arc<RwLock<HashMap<TxnCacheKey, String>>> {
         &self.txn_cache
@@ -292,11 +297,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         conduit::identity::VerifyPolicy::PqOptional,
     ));
 
+    let oidc_client = match env::var("CONDUIT_OIDC_ISSUER") {
+        Ok(issuer) if !issuer.is_empty() => {
+            let audience = env::var("CONDUIT_OIDC_AUDIENCE")
+                .unwrap_or_else(|_| server_name.to_string());
+            match identikey_oidc_client::OidcClient::discover(
+                &issuer,
+                &audience,
+                http.clone(),
+            )
+            .await
+            {
+                Ok(c) => {
+                    tracing::info!(issuer = %issuer, audience = %audience, "oidc rp client ready");
+                    Some(Arc::new(c))
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "CONDUIT_OIDC_ISSUER set but discovery failed");
+                    return Err(e.into());
+                }
+            }
+        }
+        _ => None,
+    };
+
     let state = AppState {
         storage,
         server_key,
         minter,
         identity_verifier,
+        oidc_client,
         server_name,
         http,
         remote_keys,
