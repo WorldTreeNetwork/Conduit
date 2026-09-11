@@ -411,18 +411,25 @@ async fn build_sync_response<S: AuthState>(
 
         let block = if since_token.is_none() {
             // Initial sync: state = current state, timeline = recent events.
-            match build_initial_room_block(state, room_id, filter).await {
+            match build_initial_room_block(state, user_id, room_id, filter).await {
                 Ok(b) => b,
                 Err(resp) => return resp,
             }
         } else {
             // Incremental: state = empty, timeline = new events since `since`.
-            build_incremental_room_block(
+            match build_incremental_room_block(
+                state,
+                user_id,
                 room_id,
                 &new_events,
                 since,
                 filter,
             )
+            .await
+            {
+                Ok(b) => b,
+                Err(resp) => return resp,
+            }
         };
 
         // Inject per-room account data.
@@ -578,6 +585,7 @@ async fn build_sync_response<S: AuthState>(
 /// Build a room block for initial sync.
 async fn build_initial_room_block<S: AuthState>(
     state: &S,
+    user_id: &str,
     room_id: &str,
     filter: &SyncFilter,
 ) -> Result<JoinedRoomBlock, Response> {
@@ -606,6 +614,17 @@ async fn build_initial_room_block<S: AuthState>(
 
     // Apply type filter.
     let timeline_events = apply_type_filter(timeline_events, filter);
+
+    // History visibility: a user who joined late does not get the
+    // room's past handed to them by /sync either.
+    let timeline_events = conduit::auth::filter_visible_for_user(
+        storage.as_ref(),
+        room_id,
+        user_id,
+        timeline_events,
+    )
+    .await
+    .map_err(|e| MatrixError::from_conduit(e).into_response())?;
 
     let prev_batch_pos = timeline_events
         .first()
@@ -639,12 +658,14 @@ async fn build_initial_room_block<S: AuthState>(
 }
 
 /// Build a room block for incremental sync from pre-fetched new events.
-fn build_incremental_room_block(
+async fn build_incremental_room_block<S: AuthState>(
+    state: &S,
+    user_id: &str,
     room_id: &str,
     new_events: &[conduit::event::Event],
     since: i64,
     filter: &SyncFilter,
-) -> JoinedRoomBlock {
+) -> Result<JoinedRoomBlock, Response> {
     let mut room_events: Vec<conduit::event::Event> = new_events
         .iter()
         .filter(|e| e.room_id == room_id)
@@ -653,6 +674,17 @@ fn build_incremental_room_block(
 
     // Apply type filter.
     room_events = apply_type_filter(room_events, filter);
+
+    // …then history visibility, the same predicate the initial block
+    // and /messages use.
+    room_events = conduit::auth::filter_visible_for_user(
+        state.storage().as_ref(),
+        room_id,
+        user_id,
+        room_events,
+    )
+    .await
+    .map_err(|e| MatrixError::from_conduit(e).into_response())?;
 
     // Cap to timeline_limit (take most-recent).
     let limited = room_events.len() > filter.timeline_limit as usize;
@@ -668,7 +700,7 @@ fn build_incremental_room_block(
         .map(|e| serde_json::to_value(e).unwrap_or(Value::Null))
         .collect();
 
-    JoinedRoomBlock {
+    Ok(JoinedRoomBlock {
         timeline: TimelineBlock {
             events: timeline_values,
             limited,
@@ -681,7 +713,7 @@ fn build_incremental_room_block(
             highlight_count: 0,
             notification_count: 0,
         },
-    }
+    })
 }
 
 fn apply_type_filter(

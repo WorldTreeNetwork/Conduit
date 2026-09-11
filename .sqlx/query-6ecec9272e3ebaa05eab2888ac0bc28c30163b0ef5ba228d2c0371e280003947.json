@@ -1,0 +1,101 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT stream_position, event_id, room_id, sender, type AS event_type,\n                   state_key, content, auth_events, prev_events, hashes, signatures,\n                   unsigned, origin_server_ts, depth\n            FROM events\n            WHERE room_id = $1 AND type = 'm.room.member' AND state_key LIKE '%' || $2\n            ORDER BY stream_position ASC\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "stream_position",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "event_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "room_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "sender",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "event_type",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "state_key",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "content",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 7,
+        "name": "auth_events",
+        "type_info": "TextArray"
+      },
+      {
+        "ordinal": 8,
+        "name": "prev_events",
+        "type_info": "TextArray"
+      },
+      {
+        "ordinal": 9,
+        "name": "hashes",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 10,
+        "name": "signatures",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 11,
+        "name": "unsigned",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 12,
+        "name": "origin_server_ts",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 13,
+        "name": "depth",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "6ecec9272e3ebaa05eab2888ac0bc28c30163b0ef5ba228d2c0371e280003947"
+}

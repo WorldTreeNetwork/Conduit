@@ -162,6 +162,11 @@ fn build_router(state: TestState) -> Router {
             get(auth::get_login_flows).post(auth::login::<TestState>),
         )
         .route("/_matrix/client/v3/logout", post(auth::logout::<TestState>))
+        .route("/_matrix/client/v3/logout/all", post(auth::logout_all::<TestState>))
+        .route(
+            "/_matrix/client/v3/login/identikey/challenge",
+            post(auth::identikey_challenge::<TestState>),
+        )
         .route("/_matrix/client/v3/account/whoami", get(auth::whoami))
         .with_state(state)
 }
@@ -464,4 +469,275 @@ impl conduit::room::RoomEventSender for TestState {
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Agency: the access token is a capability, not a lookup key
+// ---------------------------------------------------------------------------
+
+/// Build the same TestState the tests above build, and hand back the
+/// minter so a test can inspect the tokens it mints.
+async fn state_and_app(db: &TempDb) -> (TestState, Router) {
+    let (events_tx, _) = broadcast::channel(256);
+    let (typing_store, typing_tx) = TypingStore::new();
+    let presence_store = PresenceStore::new();
+    let state = TestState {
+        storage: db.storage(),
+        server_name: "localhost".into(),
+        server_key: Arc::new(conduit::keys::generate_server_key()),
+        txn_cache: Arc::new(RwLock::new(HashMap::new())),
+        events_tx,
+        typing_store,
+        typing_tx,
+        presence_store,
+    };
+    let app = build_router(state.clone());
+    (state, app)
+}
+
+#[tokio::test]
+async fn access_token_is_a_verifiable_biscuit() {
+    let db = TempDb::new().await;
+    let (state, app) = state_and_app(&db).await;
+
+    let body = json_body(do_register(&app, "alice", "secret123").await).await;
+    let token = body["access_token"].as_str().unwrap();
+    let device_id = body["device_id"].as_str().unwrap();
+
+    let minter = state.minter();
+    let claims = conduit::agency::parse_claims(&minter.public_key(), token)
+        .expect("the wire token is a biscuit signed by the minter");
+    assert_eq!(claims.user_id, "@alice:localhost");
+    assert_eq!(claims.device_id, device_id);
+    assert_eq!(claims.server_name, "localhost");
+
+    // And nothing about it lives in the hashed token table.
+    let hash = auth::hash_token(token);
+    assert!(state.storage.lookup_token(&hash).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn logout_bumps_the_device_epoch() {
+    let db = TempDb::new().await;
+    let (state, app) = state_and_app(&db).await;
+
+    let body = json_body(do_register(&app, "alice", "secret123").await).await;
+    let token = body["access_token"].as_str().unwrap().to_owned();
+    let device_id = body["device_id"].as_str().unwrap().to_owned();
+
+    let before = state
+        .storage
+        .device_epoch("@alice:localhost", &device_id)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(do_logout(&app, &token).await.status(), StatusCode::OK);
+
+    let after = state
+        .storage
+        .device_epoch("@alice:localhost", &device_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(after, before + 1, "logout advances the epoch");
+    assert_eq!(do_whoami(&app, &token).await.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn logout_all_revokes_every_device() {
+    let db = TempDb::new().await;
+    let (_state, app) = state_and_app(&db).await;
+
+    json_body(do_register(&app, "alice", "secret123").await).await;
+    let first = json_body(do_login(&app, "alice", "secret123").await).await;
+    let second = json_body(do_login(&app, "alice", "secret123").await).await;
+
+    let first_token = first["access_token"].as_str().unwrap();
+    let second_token = second["access_token"].as_str().unwrap();
+    assert_eq!(do_whoami(&app, first_token).await.status(), StatusCode::OK);
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/_matrix/client/v3/logout/all")
+        .header("authorization", format!("Bearer {second_token}"))
+        .header("content-type", "application/json")
+        .body(Body::from(b"{}".as_slice()))
+        .unwrap();
+    assert_eq!(app.clone().oneshot(req).await.unwrap().status(), StatusCode::OK);
+
+    assert_eq!(
+        do_whoami(&app, first_token).await.status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        do_whoami(&app, second_token).await.status(),
+        StatusCode::UNAUTHORIZED
+    );
+}
+
+#[tokio::test]
+async fn a_token_from_another_minter_is_refused() {
+    let db = TempDb::new().await;
+    let (_state, app) = state_and_app(&db).await;
+    json_body(do_register(&app, "alice", "secret123").await).await;
+
+    // A well-formed capability token for the right user, signed by a
+    // key this server does not know.
+    let forger = conduit::agency::Minter::generate();
+    let forged = forger
+        .mint_root(&conduit::agency::RootClaims {
+            user_id: "@alice:localhost",
+            device_id: "ANYDEVICE",
+            server_name: "localhost",
+            epoch: 0,
+            rights: &[conduit::agency::RIGHT_CS],
+            expires_at: None,
+        })
+        .unwrap();
+
+    assert_eq!(
+        do_whoami(&app, &forged).await.status(),
+        StatusCode::UNAUTHORIZED
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Identity: the identikey-auth on-ramp
+// ---------------------------------------------------------------------------
+
+/// Answer the server's challenge with `signer`, returning base64 response
+/// bytes ready to post.
+async fn challenge_response(app: &Router, signer: &identikey_auth::SoftwareSigner) -> String {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+    use identikey_auth::Signer as _;
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/_matrix/client/v3/login/identikey/challenge")
+        .header("content-type", "application/json")
+        .body(Body::from(b"{}".as_slice()))
+        .unwrap();
+    let body = json_body(app.clone().oneshot(req).await.unwrap()).await;
+    let challenge_bytes = URL_SAFE_NO_PAD
+        .decode(body["challenge"].as_str().unwrap())
+        .unwrap();
+    let challenge = conduit::identity::parse_challenge(&challenge_bytes).unwrap();
+
+    URL_SAFE_NO_PAD.encode(signer.respond(&challenge).unwrap().to_bytes())
+}
+
+async fn do_identikey_login(app: &Router, response: &str) -> axum::response::Response {
+    let body = json!({ "type": "io.identikey.auth", "response": response });
+    let req = Request::builder()
+        .method("POST")
+        .uri("/_matrix/client/v3/login")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap();
+    app.clone().oneshot(req).await.unwrap()
+}
+
+#[tokio::test]
+async fn unlinked_identikey_response_does_not_create_an_account() {
+    use identikey_auth::Signer as _;
+
+    let db = TempDb::new().await;
+    let (state, app) = state_and_app(&db).await;
+
+    let signer = identikey_auth::SoftwareSigner::generate_ed25519();
+    let response = challenge_response(&app, &signer).await;
+
+    let resp = do_identikey_login(&app, &response).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "a valid proof of an unknown key is not a registration"
+    );
+
+    // Nothing was created.
+    let fingerprint = signer.classical_public_key().fingerprint().to_base58();
+    assert!(state
+        .storage
+        .user_for_identikey(&fingerprint)
+        .await
+        .unwrap()
+        .is_none());
+    assert_eq!(state.storage.list_accounts(0, 10).await.unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn linked_identikey_response_mints_the_same_token() {
+    use identikey_auth::Signer as _;
+
+    let db = TempDb::new().await;
+    let (state, app) = state_and_app(&db).await;
+
+    let signer = identikey_auth::SoftwareSigner::generate_ed25519();
+    let fingerprint = signer.classical_public_key().fingerprint().to_base58();
+
+    // Registration is where the link is made.
+    let body = json!({
+        "username": "alice",
+        "password": "secret123",
+        "auth": { "type": "m.login.dummy" },
+        "io.identikey.fingerprint": fingerprint,
+    });
+    let req = Request::builder()
+        .method("POST")
+        .uri("/_matrix/client/v3/register")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(req).await.unwrap().status(),
+        StatusCode::OK
+    );
+
+    let response = challenge_response(&app, &signer).await;
+    let resp = do_identikey_login(&app, &response).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let body = json_body(resp).await;
+    assert_eq!(body["user_id"], "@alice:localhost");
+
+    let token = body["access_token"].as_str().unwrap();
+    let claims =
+        conduit::agency::parse_claims(&state.minter().public_key(), token).unwrap();
+    assert_eq!(claims.user_id, "@alice:localhost");
+}
+
+#[tokio::test]
+async fn a_replayed_challenge_response_is_refused() {
+    use identikey_auth::Signer as _;
+
+    let db = TempDb::new().await;
+    let (_state, app) = state_and_app(&db).await;
+
+    let signer = identikey_auth::SoftwareSigner::generate_ed25519();
+    let fingerprint = signer.classical_public_key().fingerprint().to_base58();
+    let body = json!({
+        "username": "alice",
+        "password": "secret123",
+        "auth": { "type": "m.login.dummy" },
+        "io.identikey.fingerprint": fingerprint,
+    });
+    let req = Request::builder()
+        .method("POST")
+        .uri("/_matrix/client/v3/register")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap();
+    app.clone().oneshot(req).await.unwrap();
+
+    let response = challenge_response(&app, &signer).await;
+    assert_eq!(
+        do_identikey_login(&app, &response).await.status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        do_identikey_login(&app, &response).await.status(),
+        StatusCode::FORBIDDEN,
+        "the nonce is burned on first use"
+    );
 }

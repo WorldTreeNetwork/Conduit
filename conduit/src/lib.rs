@@ -18,6 +18,7 @@
 //! [continuwuity]: https://forgejo.ellis.link/continuwuation/continuwuity
 //! [Matrix specification]: https://spec.matrix.org/
 
+pub mod agency;
 pub mod api;
 pub mod auth;
 pub mod canonical_json;
@@ -25,6 +26,7 @@ pub mod config;
 pub mod error;
 pub mod event;
 pub mod hashing;
+pub mod identity;
 pub mod keys;
 pub mod redaction;
 pub mod room;

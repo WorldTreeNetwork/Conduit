@@ -395,9 +395,15 @@ async fn send_state_event_inner<S: AuthState + conduit::room::RoomEventSender>(
 
 pub async fn get_room_state<S: AuthState>(
     State(state): State<S>,
-    _authed: AuthedUser,
+    authed: AuthedUser,
     Path(room_id): Path<String>,
 ) -> Response {
+    if let Err(e) =
+        conduit::auth::require_read_access(state.storage().as_ref(), &room_id, &authed.user_id).await
+    {
+        return MatrixError::from_conduit(e).into_response();
+    }
+
     let room = Room::new(&room_id);
     match room.current_state_vec(state.storage().as_ref()).await {
         Ok(events) => {
@@ -416,27 +422,34 @@ pub async fn get_room_state<S: AuthState>(
 /// GET the content of a state event with an empty state_key.
 pub async fn get_state_event_no_key<S: AuthState>(
     State(state): State<S>,
-    _authed: AuthedUser,
+    authed: AuthedUser,
     Path((room_id, event_type)): Path<(String, String)>,
 ) -> Response {
-    get_state_event_inner(state, room_id, event_type, String::new()).await
+    get_state_event_inner(state, &authed.user_id, room_id, event_type, String::new()).await
 }
 
 /// GET the content of a state event with an explicit state_key.
 pub async fn get_state_event<S: AuthState>(
     State(state): State<S>,
-    _authed: AuthedUser,
+    authed: AuthedUser,
     Path((room_id, event_type, state_key)): Path<(String, String, String)>,
 ) -> Response {
-    get_state_event_inner(state, room_id, event_type, state_key).await
+    get_state_event_inner(state, &authed.user_id, room_id, event_type, state_key).await
 }
 
 async fn get_state_event_inner<S: AuthState>(
     state: S,
+    user_id: &str,
     room_id: String,
     event_type: String,
     state_key: String,
 ) -> Response {
+    if let Err(e) =
+        conduit::auth::require_read_access(state.storage().as_ref(), &room_id, user_id).await
+    {
+        return MatrixError::from_conduit(e).into_response();
+    }
+
     let room = Room::new(&room_id);
     match room.get_state_entry(&event_type, &state_key, state.storage().as_ref()).await {
         Ok(Some(ev)) => (StatusCode::OK, Json(ev.content)).into_response(),
@@ -454,9 +467,15 @@ async fn get_state_event_inner<S: AuthState>(
 
 pub async fn joined_members<S: AuthState>(
     State(state): State<S>,
-    _authed: AuthedUser,
+    authed: AuthedUser,
     Path(room_id): Path<String>,
 ) -> Response {
+    if let Err(e) =
+        conduit::auth::require_read_access(state.storage().as_ref(), &room_id, &authed.user_id).await
+    {
+        return MatrixError::from_conduit(e).into_response();
+    }
+
     let room = Room::new(&room_id);
     let state_events = match room.current_state_vec(state.storage().as_ref()).await {
         Ok(evs) => evs,
@@ -508,11 +527,17 @@ pub struct MessagesQuery {
 
 pub async fn get_messages<S: AuthState>(
     State(state): State<S>,
-    _authed: AuthedUser,
+    authed: AuthedUser,
     Path(room_id): Path<String>,
     Query(query): Query<MessagesQuery>,
 ) -> Response {
     let storage = state.storage();
+
+    if let Err(e) =
+        conduit::auth::require_read_access(storage.as_ref(), &room_id, &authed.user_id).await
+    {
+        return MatrixError::from_conduit(e).into_response();
+    }
     let dir = query.dir.as_deref().unwrap_or("b");
     let dir_char = if dir == "f" { 'f' } else { 'b' };
     let limit = query.limit.unwrap_or(10).max(1).min(100);
@@ -538,6 +563,21 @@ pub async fn get_messages<S: AuthState>(
 
     match storage.room_events_paginated(&room_id, dir_char, from, limit).await {
         Ok((events, next_pos)) => {
+            // History visibility: the page is filtered against where
+            // this user stood at each event, not merely whether they
+            // are in the room now.
+            let events = match conduit::auth::filter_visible_for_user(
+                storage.as_ref(),
+                &room_id,
+                &authed.user_id,
+                events,
+            )
+            .await
+            {
+                Ok(evs) => evs,
+                Err(e) => return MatrixError::from_conduit(e).into_response(),
+            };
+
             let chunk: Vec<Value> = events
                 .into_iter()
                 .map(|e| serde_json::to_value(e).unwrap_or(Value::Null))

@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE devices\n            SET epoch = epoch + 1\n            WHERE user_id = $1 AND device_id = $2\n            RETURNING epoch\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "epoch",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "3554b57d608ee3e72c9f5b916ed8db4bfff328122b9f56ad013d14a74f09cd53"
+}

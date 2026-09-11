@@ -37,3 +37,9 @@ infer = "0.16"
 tempfile = "3"
 serde_yaml = "0.9"
 regex = "1"
+# Agency tokens (identikey-capability-v1 format). Apache-2.0.
+biscuit-auth = "6"
+# Identity challenge/response from identikey-protocol.
+# Apache-2.0 OR BSD-2-Clause-Patent.  identikey-core (AGPL) is NOT a
+# dependency and must never become one — the host speaks OIDC to it.
+identikey-auth = { git = "ssh://git@github.com/identikey/identikey-protocol.git", rev = "303dff1819aaba4f7a53f38b0fbc5a785a2743db" }

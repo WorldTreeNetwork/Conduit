@@ -24,3 +24,5 @@ ed25519-dalek = { workspace = true }
 rand_core = { workspace = true }
 base64 = { workspace = true }
 sha2 = { workspace = true }
+biscuit-auth = { workspace = true }
+identikey-auth = { workspace = true }

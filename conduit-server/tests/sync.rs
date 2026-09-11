@@ -533,6 +533,98 @@ async fn invalid_since_token_rejected() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// History visibility in /sync
+// ---------------------------------------------------------------------------
+
+/// Set a room's history_visibility.
+async fn set_history_visibility(app: &Router, token: &str, room_id: &str, value: &str) {
+    let body = json!({ "history_visibility": value });
+    let req = Request::builder()
+        .method("PUT")
+        .uri(format!(
+            "/_matrix/client/v3/rooms/{room_id}/state/m.room.history_visibility"
+        ))
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {token}"))
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "set history_visibility failed");
+}
+
+async fn do_join(app: &Router, token: &str, room_id: &str) {
+    let req = Request::builder()
+        .method("POST")
+        .uri(format!("/_matrix/client/v3/join/{room_id}"))
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {token}"))
+        .body(Body::from(b"{}".as_slice()))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "join failed");
+}
+
+#[tokio::test]
+async fn joined_visibility_hides_pre_join_events_in_sync() {
+    let db = TempDb::new().await;
+    let state = TestState::new(db.storage());
+    let app = build_router(state);
+
+    let alice = do_register(&app, "histalice", "secret").await;
+    let alice_token = alice["access_token"].as_str().unwrap();
+    let bob = do_register(&app, "histbob", "secret").await;
+    let bob_token = bob["access_token"].as_str().unwrap();
+
+    let room_id = do_create_room(&app, alice_token).await;
+    set_history_visibility(&app, alice_token, &room_id, "joined").await;
+    // Make the room joinable without an invite.
+    let body = json!({ "join_rule": "public" });
+    let req = Request::builder()
+        .method("PUT")
+        .uri(format!("/_matrix/client/v3/rooms/{room_id}/state/m.room.join_rules"))
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {alice_token}"))
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(req).await.unwrap().status(),
+        StatusCode::OK
+    );
+
+    // Alice speaks before Bob arrives.
+    do_send_message(&app, alice_token, &room_id, "before").await;
+
+    do_join(&app, bob_token, &room_id).await;
+
+    // …and after.
+    do_send_message(&app, alice_token, &room_id, "after").await;
+
+    let alices_view = do_sync(&app, alice_token, None, None).await;
+    let alices_timeline = alices_view["rooms"]["join"][&room_id]["timeline"]["events"]
+        .as_array()
+        .unwrap()
+        .len();
+
+    let bobs_view = do_sync(&app, bob_token, None, None).await;
+    let bobs_timeline = bobs_view["rooms"]["join"][&room_id]["timeline"]["events"]
+        .as_array()
+        .unwrap()
+        .clone();
+
+    assert!(
+        bobs_timeline.len() < alices_timeline,
+        "Bob's timeline must be shorter than Alice's: {bobs_timeline:?}"
+    );
+    assert!(
+        !bobs_timeline
+            .iter()
+            .any(|e| e["event_id"] == alices_view["rooms"]["join"][&room_id]["timeline"]
+                ["events"][0]["event_id"]),
+        "Bob must not receive the room's first event"
+    );
+}
+
 // RoomEventSender for the test harness (conduit-29w). Mirrors the AppState impl
 // in main.rs: delegate to the generic event pipeline, then wake any /sync waiters.
 #[async_trait::async_trait]

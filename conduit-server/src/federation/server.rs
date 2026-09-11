@@ -573,17 +573,21 @@ pub async fn backfill(
     };
     all_events.sort_by_key(|e| std::cmp::Reverse(e.depth));
 
-    // Determine history visibility setting.
-    let hist_vis = get_history_visibility(&state.storage, &room_id).await;
-
-    // Filter: only include events visible to remote homeservers.
-    // For world_readable: all events visible.
-    // For shared/invited/joined: only if origin server has/had a member.
-    let filtered: Vec<Event> = all_events
-        .into_iter()
-        .filter(|ev| is_event_visible_to_server(&hist_vis, &origin, ev))
-        .take(limit)
-        .collect();
+    // History visibility, against the requesting origin's membership —
+    // the same derivation the client-server read paths use, not a
+    // second one, and not "true for every value".
+    let visible = match conduit::auth::filter_visible_for_server(
+        state.storage.as_ref(),
+        &room_id,
+        &origin,
+        all_events,
+    )
+    .await
+    {
+        Ok(evs) => evs,
+        Err(e) => return internal(&e.to_string()),
+    };
+    let filtered: Vec<Event> = visible.into_iter().take(limit).collect();
 
     (StatusCode::OK, Json(json!({
         "origin": &*state.server_name,
@@ -646,9 +650,10 @@ pub async fn get_missing_events(
     Path(room_id): Path<String>,
     Json(body): Json<GetMissingEventsBody>,
 ) -> Response {
-    if origin_ext.is_none() {
-        return unauthorized("Not authenticated");
-    }
+    let origin = match &origin_ext {
+        Some(axum::extract::Extension(o)) => o.server_name.clone(),
+        None => return unauthorized("Not authenticated"),
+    };
 
     let limit = body.limit.min(20);
     let earliest: HashSet<String> = body.earliest_events.into_iter().collect();
@@ -688,6 +693,20 @@ pub async fn get_missing_events(
             }
         }
     }
+
+    // Same visibility filter as backfill: the walk finds candidates,
+    // the origin's membership decides which of them it may have.
+    let found = match conduit::auth::filter_visible_for_server(
+        state.storage.as_ref(),
+        &room_id,
+        &origin,
+        found,
+    )
+    .await
+    {
+        Ok(evs) => evs,
+        Err(e) => return internal(&e.to_string()),
+    };
 
     (StatusCode::OK, Json(json!({ "events": found }))).into_response()
 }
@@ -843,54 +862,6 @@ async fn build_auth_chain(storage: &Arc<dyn Storage>, state_events: &[Event]) ->
     }
 
     chain
-}
-
-/// Get the history visibility for a room.
-async fn get_history_visibility(storage: &Arc<dyn Storage>, room_id: &str) -> HistoryVisibility {
-    match storage
-        .get_state_entry(room_id, "m.room.history_visibility", "")
-        .await
-    {
-        Ok(Some(ev)) => {
-            let vis_str = ev
-                .content
-                .get("history_visibility")
-                .and_then(|v| v.as_str())
-                .unwrap_or("shared");
-            match vis_str {
-                "world_readable" => HistoryVisibility::WorldReadable,
-                "shared" => HistoryVisibility::Shared,
-                "invited" => HistoryVisibility::Invited,
-                "joined" => HistoryVisibility::Joined,
-                _ => HistoryVisibility::Shared,
-            }
-        }
-        _ => HistoryVisibility::Shared,
-    }
-}
-
-/// Determine if an event is visible to requests from `origin_server`.
-///
-/// - `world_readable`: all events visible.
-/// - `shared`/`invited`/`joined`: events visible only while origin had a member.
-///   For v0: if any user from origin_server is in the room (m.room.member with join),
-///   we allow the event. Full per-event visibility filtering is a TODO.
-fn is_event_visible_to_server(
-    hist_vis: &HistoryVisibility,
-    _origin: &str,
-    _ev: &Event,
-) -> bool {
-    // bd remember: Full per-event backfill history-visibility filtering requires
-    // checking the room state *at the time of each event*. For v0 we use a
-    // conservative approximation: world_readable shows all, others show all
-    // (trusting that the sending server legitimately participates).
-    // TODO: implement proper per-event visibility using room state snapshots.
-    match hist_vis {
-        HistoryVisibility::WorldReadable => true,
-        HistoryVisibility::Shared => true,
-        HistoryVisibility::Invited => true,
-        HistoryVisibility::Joined => true,
-    }
 }
 
 // ---------------------------------------------------------------------------

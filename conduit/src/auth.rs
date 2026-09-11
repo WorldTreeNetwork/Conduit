@@ -13,8 +13,8 @@ use thiserror::Error;
 
 use crate::event::Event;
 use crate::state_events::{
-    parse_create, parse_join_rules, parse_member, parse_power_levels, HistoryVisibility,
-    JoinRule, JoinRulesContent, Membership, PowerLevelsContent,
+    parse_create, parse_history_visibility, parse_join_rules, parse_member, parse_power_levels,
+    HistoryVisibility, JoinRule, JoinRulesContent, Membership, PowerLevelsContent,
 };
 
 // ---------------------------------------------------------------------------
@@ -236,12 +236,28 @@ fn check_allow_conditions(event: &Event, state: &StateMap<Event>) -> bool {
     for condition in &jr.allow {
         match condition.get("type").and_then(|v| v.as_str()) {
             Some("m.room_membership") => {
-                // The room_id in the condition is the space/room whose membership we check.
-                let _room_id = match condition.get("room_id").and_then(|v| v.as_str()) {
-                    Some(rid) => rid,
-                    None => continue,
+                // `room_id` names the room whose membership would satisfy
+                // the condition — in practice a space, i.e. some *other*
+                // room.  We only hold this room's state here, so any
+                // foreign room_id is unevaluable and fails closed.
+                //
+                // Reading this room's member event and calling that proof
+                // of membership in the space is not a weaker check, it is
+                // a different check that happens to be green.
+                //
+                // Where the real thing belongs: for room versions 8+ the
+                // join is authorized by `join_authorised_via_users_server`
+                // plus that server's signature, which event auth verifies;
+                // the other-room membership lookup belongs on the CS
+                // `join_room` originator path, where this server decides
+                // whether to vouch.  Neither one lives in
+                // `check_allow_conditions` (conduit-jt5).
+                let Some(room_id) = condition.get("room_id").and_then(|v| v.as_str()) else {
+                    continue;
                 };
-                // Check if the event sender is a member of this room.
+                if room_id != event.room_id {
+                    continue;
+                }
                 let member_key = ("m.room.member".to_owned(), event.sender.clone());
                 let membership = state
                     .get(&member_key)
@@ -735,6 +751,225 @@ pub fn can_see(
 }
 
 // ---------------------------------------------------------------------------
+// Read access — membership and history visibility
+// ---------------------------------------------------------------------------
+
+/// The room's `history_visibility`, defaulting to `shared` per spec.
+pub fn history_visibility_of(state: &StateMap<Event>) -> HistoryVisibility {
+    state
+        .get(&("m.room.history_visibility".to_owned(), String::new()))
+        .and_then(|ev| parse_history_visibility(&ev.content).ok())
+        .map(|c| c.history_visibility)
+        .unwrap_or(HistoryVisibility::Shared)
+}
+
+/// May `user_id` read this room's state, member list, and timeline?
+///
+/// The one membership predicate.  Every CS read path calls this, rather
+/// than each handler growing its own lookup.
+///
+/// - joined: yes.
+/// - invited: yes — a client must be able to render invite state.
+/// - anyone else: only when the room is `world_readable`.
+///
+/// The `world_readable` case is peeking, and it is **not** a hole in
+/// agency: the caller has already verified a capability grant before it
+/// gets here.  An unauthenticated request never reaches this function.
+pub fn may_read_room(user_id: &str, state: &StateMap<Event>) -> bool {
+    match get_membership(state, user_id) {
+        Some(Membership::Join) | Some(Membership::Invite) => true,
+        _ => history_visibility_of(state) == HistoryVisibility::WorldReadable,
+    }
+}
+
+/// Where a user stood relative to an event, derived from their own
+/// membership events in that room.
+///
+/// `member_events` is every `m.room.member` event whose state_key is
+/// this user, paired with its stream position, ordered ascending —
+/// exactly what [`crate::storage::Storage::member_events_for_user`]
+/// returns.  `event_pos` is the stream position of the event whose
+/// visibility is in question.
+///
+/// There are no state-at-event snapshots in this homeserver and this
+/// derivation does not need any: the user's latest own member event
+/// below `event_pos` *is* their membership at that point.  Do not write
+/// a second derivation — backfill uses this one too.
+pub fn user_event_position(
+    member_events: &[(i64, Event)],
+    event_pos: i64,
+) -> UserEventPosition {
+    let membership_at = |ev: &Event| parse_member(&ev.content).ok().map(|mc| mc.membership);
+
+    let prior = member_events
+        .iter()
+        .filter(|(pos, _)| *pos < event_pos)
+        .next_back()
+        .and_then(|(_, ev)| membership_at(ev));
+
+    match prior {
+        Some(Membership::Join) => UserEventPosition::WasMember,
+        Some(Membership::Invite) => UserEventPosition::WasInvited,
+        // Left, banned, or knocking at the time — and a later join, if
+        // there is one, is what `shared` history visibility keys on.
+        _ => {
+            let joined_later = member_events
+                .iter()
+                .filter(|(pos, _)| *pos >= event_pos)
+                .any(|(_, ev)| membership_at(ev) == Some(Membership::Join));
+            if joined_later {
+                UserEventPosition::JoinedAfter
+            } else {
+                UserEventPosition::NeverMember
+            }
+        }
+    }
+}
+
+/// The same derivation, for a whole origin server rather than one user.
+///
+/// Federation backfill asks whether the requesting server could see an
+/// event.  A server could if *any* of its users could, so this takes
+/// the most permissive position across the origin's members.
+///
+/// `member_events` is every `m.room.member` event in the room whose
+/// state_key belongs to the origin, paired with its stream position.
+pub fn server_event_position(
+    member_events: &[(i64, Event)],
+    event_pos: i64,
+) -> UserEventPosition {
+    let mut by_user: HashMap<&str, Vec<(i64, Event)>> = HashMap::new();
+    for (pos, ev) in member_events {
+        if let Some(state_key) = &ev.state_key {
+            by_user
+                .entry(state_key.as_str())
+                .or_default()
+                .push((*pos, ev.clone()));
+        }
+    }
+
+    let rank = |p: &UserEventPosition| match p {
+        UserEventPosition::WasMember => 3,
+        UserEventPosition::WasInvited => 2,
+        UserEventPosition::JoinedAfter => 1,
+        UserEventPosition::NeverMember => 0,
+    };
+
+    by_user
+        .into_values()
+        .map(|mut evs| {
+            evs.sort_by_key(|(pos, _)| *pos);
+            user_event_position(&evs, event_pos)
+        })
+        .max_by_key(|p| rank(p))
+        .unwrap_or(UserEventPosition::NeverMember)
+}
+
+/// The domain half of a Matrix ID (`@alice:example.com` → `example.com`).
+pub fn server_of(user_id: &str) -> &str {
+    domain_of(user_id)
+}
+
+// ---------------------------------------------------------------------------
+// Storage-backed wrappers
+// ---------------------------------------------------------------------------
+//
+// The predicates above are pure.  These wrappers do the I/O once, so a
+// host handler is a single call rather than its own membership walk.
+
+/// Load a room's current state as a [`StateMap`].
+pub async fn current_state_map(
+    storage: &dyn crate::storage::Storage,
+    room_id: &str,
+) -> crate::Result<StateMap<Event>> {
+    let events = storage.get_current_state(room_id).await?;
+    let mut state: StateMap<Event> = HashMap::new();
+    for ev in events {
+        apply_state_event(&mut state, &ev);
+    }
+    Ok(state)
+}
+
+/// [`may_read_room`], against stored state.
+pub async fn may_read_stored_room(
+    storage: &dyn crate::storage::Storage,
+    room_id: &str,
+    user_id: &str,
+) -> crate::Result<bool> {
+    let state = current_state_map(storage, room_id).await?;
+    Ok(may_read_room(user_id, &state))
+}
+
+/// [`may_read_room`], returning `Forbidden` instead of `false`, so a
+/// handler can `?` it straight into a Matrix error.
+pub async fn require_read_access(
+    storage: &dyn crate::storage::Storage,
+    room_id: &str,
+    user_id: &str,
+) -> crate::Result<()> {
+    if may_read_stored_room(storage, room_id, user_id).await? {
+        Ok(())
+    } else {
+        Err(crate::Error::Forbidden(format!(
+            "{user_id} is not a member of {room_id}"
+        )))
+    }
+}
+
+/// Drop the events in `events` that `user_id` may not see, per the
+/// room's history visibility.
+pub async fn filter_visible_for_user(
+    storage: &dyn crate::storage::Storage,
+    room_id: &str,
+    user_id: &str,
+    events: Vec<Event>,
+) -> crate::Result<Vec<Event>> {
+    let state = current_state_map(storage, room_id).await?;
+    let hist_vis = history_visibility_of(&state);
+    let members = storage.member_events_for_user(room_id, user_id).await?;
+    filter_with(storage, hist_vis, &members, events, user_event_position).await
+}
+
+/// The same filter, for a requesting origin server (federation
+/// backfill and get_missing_events).
+pub async fn filter_visible_for_server(
+    storage: &dyn crate::storage::Storage,
+    room_id: &str,
+    origin: &str,
+    events: Vec<Event>,
+) -> crate::Result<Vec<Event>> {
+    let state = current_state_map(storage, room_id).await?;
+    let hist_vis = history_visibility_of(&state);
+    let members = storage.member_events_for_server(room_id, origin).await?;
+    filter_with(storage, hist_vis, &members, events, server_event_position).await
+}
+
+async fn filter_with(
+    storage: &dyn crate::storage::Storage,
+    hist_vis: HistoryVisibility,
+    members: &[(i64, Event)],
+    events: Vec<Event>,
+    position: fn(&[(i64, Event)], i64) -> UserEventPosition,
+) -> crate::Result<Vec<Event>> {
+    if hist_vis == HistoryVisibility::WorldReadable {
+        return Ok(events);
+    }
+
+    // One lookup for the whole page, not one per event.
+    let ids: Vec<String> = events.iter().map(|e| e.event_id.clone()).collect();
+    let positions = storage.event_stream_positions(&ids).await?;
+
+    Ok(events
+        .into_iter()
+        .filter(|ev| match positions.get(&ev.event_id) {
+            Some(pos) => can_see(&hist_vis, &position(members, *pos)),
+            // An event we cannot place is an event we cannot clear.
+            None => false,
+        })
+        .collect())
+}
+
+// ---------------------------------------------------------------------------
 // dn9.9 — apply_state_event
 // ---------------------------------------------------------------------------
 
@@ -1170,10 +1405,17 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Test 11: join restricted room with satisfied allow condition passes
+    // Test 11: a foreign room_id in `allow` fails closed
+    //
+    // This replaces a test that planted Bob's member event for
+    // `!other:example.com` into *this* room's state map and called the
+    // resulting pass a satisfied allow condition.  It was green for the
+    // wrong reason: this room's state can never prove membership of
+    // another room.  Until that lookup exists (conduit-jt5), the join
+    // is rejected.
     // -----------------------------------------------------------------------
     #[test]
-    fn join_restricted_with_satisfied_allow_passes() {
+    fn join_restricted_with_foreign_allow_room_fails_closed() {
         let creator = "@alice:example.com";
         let room_id = "!room:example.com";
         let mut state: StateMap<Event> = HashMap::new();
@@ -1190,19 +1432,20 @@ mod tests {
                 room_id,
                 "restricted",
                 json!([
-                    { "type": "m.room_membership", "room_id": "!other:example.com" }
+                    { "type": "m.room_membership", "room_id": "!space:example.com" }
                 ]),
             ),
         );
-        // Bob is a member of the other room — simulate by adding his member event
-        // to the state map (in production this would come from the other room's state).
+        // The shape the old test used to plant: a member event whose
+        // `room_id` field names the space, sitting in this room's state
+        // map under Bob's member key.  It says nothing about the space.
         apply_state_event(
             &mut state,
             &make_member_event(
                 "$bob_member_other",
                 "@bob:example.com",
                 "@bob:example.com",
-                "!other:example.com",
+                "!space:example.com",
                 "join",
             ),
         );
@@ -1210,7 +1453,83 @@ mod tests {
         let join = make_member_event(
             "$bob_join", "@bob:example.com", "@bob:example.com", room_id, "join",
         );
-        assert!(check_auth(&join, &state).is_ok());
+        assert!(
+            !check_allow_conditions(&join, &state),
+            "a foreign allow.room_id is unevaluable here and must fail closed"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 11a: an allow condition naming *this* room is still evaluable
+    // -----------------------------------------------------------------------
+    #[test]
+    fn allow_condition_naming_this_room_is_evaluated() {
+        let creator = "@alice:example.com";
+        let room_id = "!room:example.com";
+        let mut state: StateMap<Event> = HashMap::new();
+
+        apply_state_event(&mut state, &make_create_event(creator, room_id));
+        apply_state_event(
+            &mut state,
+            &make_join_rules_event_with_allow(
+                creator,
+                room_id,
+                "restricted",
+                json!([{ "type": "m.room_membership", "room_id": room_id }]),
+            ),
+        );
+        let join = make_member_event(
+            "$bob_join", "@bob:example.com", "@bob:example.com", room_id, "join",
+        );
+        assert!(!check_allow_conditions(&join, &state));
+
+        apply_state_event(
+            &mut state,
+            &make_member_event(
+                "$bob_join_prior", "@bob:example.com", "@bob:example.com", room_id, "join",
+            ),
+        );
+        assert!(check_allow_conditions(&join, &state));
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 11b: the invite path still joins a restricted room
+    // -----------------------------------------------------------------------
+    #[test]
+    fn join_restricted_with_invite_still_passes() {
+        let creator = "@alice:example.com";
+        let room_id = "!room:example.com";
+        let mut state: StateMap<Event> = HashMap::new();
+
+        apply_state_event(&mut state, &make_create_event(creator, room_id));
+        apply_state_event(
+            &mut state,
+            &make_member_event("$creator_join", creator, creator, room_id, "join"),
+        );
+        apply_state_event(
+            &mut state,
+            &make_join_rules_event_with_allow(
+                creator,
+                room_id,
+                "restricted",
+                json!([
+                    { "type": "m.room_membership", "room_id": "!space:example.com" }
+                ]),
+            ),
+        );
+        // Alice invited Bob.
+        apply_state_event(
+            &mut state,
+            &make_member_event("$bob_invite", creator, "@bob:example.com", room_id, "invite"),
+        );
+
+        let join = make_member_event(
+            "$bob_join", "@bob:example.com", "@bob:example.com", room_id, "join",
+        );
+        assert!(
+            check_auth(&join, &state).is_ok(),
+            "an invite authorizes the join, without the stub allow check"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1266,5 +1585,350 @@ mod tests {
         );
         let err = check_auth(&join, &state).unwrap_err();
         assert!(matches!(err, AuthError::JoinRequiresInvite { .. }));
+    }
+
+    // -----------------------------------------------------------------------
+    // Read access: may_read_room
+    // -----------------------------------------------------------------------
+
+    fn room_with_visibility(room_id: &str, visibility: &str) -> StateMap<Event> {
+        let creator = "@alice:example.com";
+        let mut state = base_state(creator, room_id, "invite");
+        apply_state_event(
+            &mut state,
+            &make_event(
+                "$hist_vis",
+                "m.room.history_visibility",
+                creator,
+                room_id,
+                Some(""),
+                json!({ "history_visibility": visibility }),
+                vec![],
+            ),
+        );
+        state
+    }
+
+    #[test]
+    fn joined_user_may_read_and_a_stranger_may_not() {
+        let room_id = "!room:example.com";
+        let state = room_with_visibility(room_id, "shared");
+
+        assert!(may_read_room("@alice:example.com", &state));
+        assert!(!may_read_room("@bob:example.com", &state));
+    }
+
+    #[test]
+    fn invited_user_may_read_invite_state() {
+        let room_id = "!room:example.com";
+        let mut state = room_with_visibility(room_id, "shared");
+        apply_state_event(
+            &mut state,
+            &make_member_event(
+                "$bob_invite",
+                "@alice:example.com",
+                "@bob:example.com",
+                room_id,
+                "invite",
+            ),
+        );
+        assert!(may_read_room("@bob:example.com", &state));
+    }
+
+    #[test]
+    fn left_user_may_not_read() {
+        let room_id = "!room:example.com";
+        let mut state = room_with_visibility(room_id, "shared");
+        apply_state_event(
+            &mut state,
+            &make_member_event(
+                "$bob_leave",
+                "@bob:example.com",
+                "@bob:example.com",
+                room_id,
+                "leave",
+            ),
+        );
+        assert!(!may_read_room("@bob:example.com", &state));
+    }
+
+    #[test]
+    fn world_readable_room_may_be_peeked() {
+        let room_id = "!room:example.com";
+        let state = room_with_visibility(room_id, "world_readable");
+        // The caller has already presented a valid grant to get here;
+        // world_readable relaxes membership, never agency.
+        assert!(may_read_room("@bob:example.com", &state));
+    }
+
+    #[test]
+    fn missing_history_visibility_defaults_to_shared() {
+        let room_id = "!room:example.com";
+        let state = base_state("@alice:example.com", room_id, "invite");
+        assert_eq!(history_visibility_of(&state), HistoryVisibility::Shared);
+        assert!(!may_read_room("@bob:example.com", &state));
+    }
+
+    // -----------------------------------------------------------------------
+    // UserEventPosition derivation
+    // -----------------------------------------------------------------------
+
+    fn member_at(pos: i64, user: &str, membership: &str) -> (i64, Event) {
+        let mut ev = make_member_event(
+            &format!("$m{pos}"),
+            user,
+            user,
+            "!room:example.com",
+            membership,
+        );
+        ev.depth = pos;
+        (pos, ev)
+    }
+
+    #[test]
+    fn position_is_membership_at_the_event() {
+        let members = vec![member_at(10, "@bob:example.com", "join")];
+
+        // Event before Bob's join.
+        assert_eq!(
+            user_event_position(&members, 5),
+            UserEventPosition::JoinedAfter
+        );
+        // Event after Bob's join.
+        assert_eq!(
+            user_event_position(&members, 15),
+            UserEventPosition::WasMember
+        );
+    }
+
+    #[test]
+    fn a_never_member_has_no_position() {
+        assert_eq!(user_event_position(&[], 5), UserEventPosition::NeverMember);
+    }
+
+    #[test]
+    fn an_invite_is_its_own_position() {
+        let members = vec![member_at(10, "@bob:example.com", "invite")];
+        assert_eq!(
+            user_event_position(&members, 15),
+            UserEventPosition::WasInvited
+        );
+    }
+
+    #[test]
+    fn leaving_and_rejoining_reads_the_latest_prior_event() {
+        let members = vec![
+            member_at(10, "@bob:example.com", "join"),
+            member_at(20, "@bob:example.com", "leave"),
+            member_at(30, "@bob:example.com", "join"),
+        ];
+
+        assert_eq!(
+            user_event_position(&members, 15),
+            UserEventPosition::WasMember
+        );
+        // Between the leave and the rejoin Bob was out of the room, but
+        // he did join later — which is what `shared` keys on.
+        assert_eq!(
+            user_event_position(&members, 25),
+            UserEventPosition::JoinedAfter
+        );
+        assert_eq!(
+            user_event_position(&members, 35),
+            UserEventPosition::WasMember
+        );
+    }
+
+    #[test]
+    fn joined_visibility_hides_events_before_the_join() {
+        let members = vec![member_at(10, "@bob:example.com", "join")];
+
+        let before = user_event_position(&members, 5);
+        let after = user_event_position(&members, 15);
+
+        assert!(!can_see(&HistoryVisibility::Joined, &before));
+        assert!(can_see(&HistoryVisibility::Joined, &after));
+        // `shared` shows both to a member.
+        assert!(can_see(&HistoryVisibility::Shared, &before));
+    }
+
+    #[test]
+    fn a_server_sees_what_its_most_present_user_sees() {
+        let members = vec![
+            member_at(10, "@carol:other.example", "invite"),
+            member_at(20, "@dave:other.example", "join"),
+        ];
+
+        assert_eq!(
+            server_event_position(&members, 15),
+            UserEventPosition::WasInvited
+        );
+        assert_eq!(
+            server_event_position(&members, 25),
+            UserEventPosition::WasMember
+        );
+        assert_eq!(
+            server_event_position(&[], 25),
+            UserEventPosition::NeverMember
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Storage-backed wrappers
+    // -----------------------------------------------------------------------
+
+    use crate::storage::{MemoryStorage, Storage as _};
+
+    /// A room where Alice creates, sends `$early`, then Bob joins, then
+    /// Alice sends `$late`.  `history_visibility` is `visibility`.
+    async fn room_fixture(visibility: &str) -> (MemoryStorage, &'static str) {
+        let storage = MemoryStorage::default();
+        let room_id = "!room:example.com";
+        let alice = "@alice:example.com";
+        let bob = "@bob:example.com";
+
+        let mut events = vec![
+            make_create_event(alice, room_id),
+            make_member_event("$alice_join", alice, alice, room_id, "join"),
+            make_event(
+                "$hist_vis",
+                "m.room.history_visibility",
+                alice,
+                room_id,
+                Some(""),
+                json!({ "history_visibility": visibility }),
+                vec![],
+            ),
+            make_event(
+                "$early",
+                "m.room.message",
+                alice,
+                room_id,
+                None,
+                json!({ "body": "before bob" }),
+                vec![],
+            ),
+            make_member_event("$bob_join", bob, bob, room_id, "join"),
+            make_event(
+                "$late",
+                "m.room.message",
+                alice,
+                room_id,
+                None,
+                json!({ "body": "after bob" }),
+                vec![],
+            ),
+        ];
+
+        for (i, ev) in events.iter_mut().enumerate() {
+            // MemoryStorage uses depth as its stream position.
+            ev.depth = i as i64 + 1;
+            storage.put_event(ev).await.unwrap();
+            if let Some(state_key) = ev.state_key.clone() {
+                storage
+                    .set_state_entry(room_id, &ev.event_type, &state_key, &ev.event_id)
+                    .await
+                    .unwrap();
+            }
+        }
+
+        (storage, room_id)
+    }
+
+    async fn timeline(storage: &MemoryStorage, room_id: &str) -> Vec<Event> {
+        let mut evs = storage.room_events(room_id).await.unwrap();
+        evs.retain(|e| e.event_type == "m.room.message");
+        evs.sort_by_key(|e| e.depth);
+        evs
+    }
+
+    #[tokio::test]
+    async fn stored_membership_gates_room_reads() {
+        let (storage, room_id) = room_fixture("shared").await;
+
+        assert!(may_read_stored_room(&storage, room_id, "@alice:example.com")
+            .await
+            .unwrap());
+        assert!(may_read_stored_room(&storage, room_id, "@bob:example.com")
+            .await
+            .unwrap());
+        assert!(
+            !may_read_stored_room(&storage, room_id, "@mallory:example.com")
+                .await
+                .unwrap()
+        );
+
+        let err = require_read_access(&storage, room_id, "@mallory:example.com")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, crate::Error::Forbidden(_)), "got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn joined_visibility_hides_pre_join_events_from_storage() {
+        let (storage, room_id) = room_fixture("joined").await;
+        let events = timeline(&storage, room_id).await;
+        assert_eq!(events.len(), 2);
+
+        let bobs = filter_visible_for_user(&storage, room_id, "@bob:example.com", events.clone())
+            .await
+            .unwrap();
+        let ids: Vec<&str> = bobs.iter().map(|e| e.event_id.as_str()).collect();
+        assert_eq!(ids, vec!["$late"], "Bob must not see events before his join");
+
+        let alices = filter_visible_for_user(&storage, room_id, "@alice:example.com", events)
+            .await
+            .unwrap();
+        assert_eq!(alices.len(), 2, "Alice was there for both");
+    }
+
+    #[tokio::test]
+    async fn shared_visibility_shows_history_to_a_late_joiner() {
+        let (storage, room_id) = room_fixture("shared").await;
+        let events = timeline(&storage, room_id).await;
+
+        let bobs = filter_visible_for_user(&storage, room_id, "@bob:example.com", events.clone())
+            .await
+            .unwrap();
+        assert_eq!(bobs.len(), 2);
+
+        let strangers =
+            filter_visible_for_user(&storage, room_id, "@mallory:example.com", events)
+                .await
+                .unwrap();
+        assert!(strangers.is_empty(), "a non-member sees nothing");
+    }
+
+    #[tokio::test]
+    async fn world_readable_visibility_shows_everything() {
+        let (storage, room_id) = room_fixture("world_readable").await;
+        let events = timeline(&storage, room_id).await;
+
+        let strangers =
+            filter_visible_for_user(&storage, room_id, "@mallory:example.com", events)
+                .await
+                .unwrap();
+        assert_eq!(strangers.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn backfill_filters_against_the_origin_server() {
+        let (storage, room_id) = room_fixture("joined").await;
+        let events = timeline(&storage, room_id).await;
+
+        // No member from other.example has ever been in the room.
+        let none = filter_visible_for_server(&storage, room_id, "other.example", events.clone())
+            .await
+            .unwrap();
+        assert!(
+            none.is_empty(),
+            "backfill must not hand events to a server with no membership"
+        );
+
+        // example.com hosts both Alice and Bob, so it sees both.
+        let ours = filter_visible_for_server(&storage, room_id, "example.com", events)
+            .await
+            .unwrap();
+        assert_eq!(ours.len(), 2);
     }
 }

@@ -8,10 +8,14 @@
 
 use chrono::Utc;
 use conduit::{
+    agency::Minter,
     keys::{generate_server_key, public_bytes, server_key_from_bytes, ServerKey},
     storage::Storage,
     Error,
 };
+
+/// Key id under which the Biscuit minter key is stored.
+const MINTER_KEY_ID: &str = "biscuit-minter:ed25519:1";
 
 /// Load the current signing key from storage, or generate and persist a fresh one.
 ///
@@ -33,6 +37,30 @@ pub async fn load_or_generate(storage: &(impl Storage + ?Sized)) -> Result<Serve
         .await?;
 
     Ok(sk)
+}
+
+/// Load the Biscuit minter key, or generate and persist a fresh one.
+///
+/// This is a second private key living next to the Matrix signing key,
+/// and the two must not be confused: the minter signs capability
+/// tokens, the server key signs events.  It is stored as raw private
+/// bytes, the same way the signing key is — a key we sign with cannot
+/// be kept as a hash.
+///
+/// Losing or rotating it invalidates every outstanding token, which is
+/// the global form of an epoch bump.
+pub async fn load_or_generate_minter(storage: &(impl Storage + ?Sized)) -> Result<Minter, Error> {
+    if let Some(stored) = storage.current_minter_key().await? {
+        return Minter::from_seed(&stored.private_key)
+            .map_err(|e| Error::Storage(format!("failed to rehydrate minter key: {e}")));
+    }
+
+    let minter = Minter::generate();
+    storage
+        .insert_minter_key(MINTER_KEY_ID, minter.seed(), &minter.public_key_bytes())
+        .await?;
+
+    Ok(minter)
 }
 
 /// Rotate the server signing key.
@@ -76,6 +104,22 @@ pub async fn rotate<S: Storage + ?Sized>(
 mod tests {
     use super::*;
     use conduit::storage::MemoryStorage;
+
+    #[tokio::test]
+    async fn minter_key_is_generated_once_and_reloaded() {
+        let store = MemoryStorage::default();
+
+        let first = load_or_generate_minter(&store).await.unwrap();
+        let second = load_or_generate_minter(&store).await.unwrap();
+        assert_eq!(
+            first.public_key_bytes(),
+            second.public_key_bytes(),
+            "a restart must not invalidate outstanding tokens"
+        );
+
+        // And it is not a Matrix signing key.
+        assert!(store.current_signing_key().await.unwrap().is_none());
+    }
 
     #[tokio::test]
     async fn rotate_with_no_prior_key() {

@@ -279,7 +279,7 @@ impl Storage for PostgresStorage {
     async fn get_device(&self, user_id: &str, device_id: &str) -> Result<Option<Device>> {
         let row = sqlx::query!(
             r#"
-            SELECT user_id, device_id, display_name, last_seen_ts,
+            SELECT user_id, device_id, display_name, epoch, last_seen_ts,
                    last_seen_ip::TEXT AS last_seen_ip
             FROM devices
             WHERE user_id = $1 AND device_id = $2
@@ -297,6 +297,7 @@ impl Storage for PostgresStorage {
             user_id: r.user_id,
             device_id: r.device_id,
             display_name: r.display_name,
+            epoch: r.epoch,
             last_seen_ts: r.last_seen_ts,
             last_seen_ip: r.last_seen_ip,
         }))
@@ -305,7 +306,7 @@ impl Storage for PostgresStorage {
     async fn list_devices_for_user(&self, user_id: &str) -> Result<Vec<Device>> {
         let rows = sqlx::query!(
             r#"
-            SELECT user_id, device_id, display_name, last_seen_ts,
+            SELECT user_id, device_id, display_name, epoch, last_seen_ts,
                    last_seen_ip::TEXT AS last_seen_ip
             FROM devices
             WHERE user_id = $1
@@ -323,12 +324,142 @@ impl Storage for PostgresStorage {
                 user_id: r.user_id,
                 device_id: r.device_id,
                 display_name: r.display_name,
+                epoch: r.epoch,
                 last_seen_ts: r.last_seen_ts,
                 last_seen_ip: r.last_seen_ip,
             })
             .collect();
 
         Ok(devices)
+    }
+
+    async fn device_epoch(&self, user_id: &str, device_id: &str) -> Result<Option<i64>> {
+        let row = sqlx::query!(
+            r#"
+            SELECT epoch
+            FROM devices
+            WHERE user_id = $1 AND device_id = $2
+            "#,
+            user_id,
+            device_id
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+
+        Ok(row.map(|r| r.epoch))
+    }
+
+    async fn bump_device_epoch(&self, user_id: &str, device_id: &str) -> Result<i64> {
+        let row = sqlx::query!(
+            r#"
+            UPDATE devices
+            SET epoch = epoch + 1
+            WHERE user_id = $1 AND device_id = $2
+            RETURNING epoch
+            "#,
+            user_id,
+            device_id
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+
+        row.map(|r| r.epoch)
+            .ok_or_else(|| Error::Storage(format!("unknown device {device_id}")))
+    }
+
+    async fn bump_all_device_epochs(&self, user_id: &str) -> Result<()> {
+        sqlx::query!(
+            r#"
+            UPDATE devices
+            SET epoch = epoch + 1
+            WHERE user_id = $1
+            "#,
+            user_id
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+
+        Ok(())
+    }
+
+    async fn link_identikey(&self, fingerprint: &str, user_id: &str) -> Result<()> {
+        sqlx::query!(
+            r#"
+            INSERT INTO identikey_links (fingerprint, user_id)
+            VALUES ($1, $2)
+            ON CONFLICT (fingerprint) DO NOTHING
+            "#,
+            fingerprint,
+            user_id
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+
+        Ok(())
+    }
+
+    async fn user_for_identikey(&self, fingerprint: &str) -> Result<Option<String>> {
+        let row = sqlx::query!(
+            r#"
+            SELECT user_id
+            FROM identikey_links
+            WHERE fingerprint = $1
+            "#,
+            fingerprint
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+
+        Ok(row.map(|r| r.user_id))
+    }
+
+    async fn insert_minter_key(
+        &self,
+        key_id: &str,
+        private_key: &[u8],
+        public_key: &[u8],
+    ) -> Result<()> {
+        sqlx::query!(
+            r#"
+            INSERT INTO biscuit_minter_keys (key_id, private_key, public_key)
+            VALUES ($1, $2, $3)
+            "#,
+            key_id,
+            private_key,
+            public_key
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+
+        Ok(())
+    }
+
+    async fn current_minter_key(&self) -> Result<Option<SigningKey>> {
+        let row = sqlx::query!(
+            r#"
+            SELECT key_id, private_key, public_key, created_at
+            FROM biscuit_minter_keys
+            ORDER BY created_at DESC
+            LIMIT 1
+            "#
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+
+        Ok(row.map(|r| SigningKey {
+            key_id: r.key_id,
+            private_key: r.private_key,
+            public_key: r.public_key,
+            valid_until_ts: None,
+            created_at: r.created_at,
+        }))
     }
 
     // -----------------------------------------------------------------------
@@ -753,6 +884,125 @@ impl Storage for PostgresStorage {
         .map_err(map_sqlx)?;
 
         Ok(row.max_pos)
+    }
+
+    async fn member_events_for_user(
+        &self,
+        room_id: &str,
+        user_id: &str,
+    ) -> Result<Vec<(i64, Event)>> {
+        let rows = sqlx::query!(
+            r#"
+            SELECT stream_position, event_id, room_id, sender, type AS event_type,
+                   state_key, content, auth_events, prev_events, hashes, signatures,
+                   unsigned, origin_server_ts, depth
+            FROM events
+            WHERE room_id = $1 AND type = 'm.room.member' AND state_key = $2
+            ORDER BY stream_position ASC
+            "#,
+            room_id,
+            user_id
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| {
+                (
+                    r.stream_position,
+                    Event {
+                        event_id: r.event_id,
+                        room_id: r.room_id,
+                        sender: r.sender,
+                        event_type: r.event_type,
+                        state_key: r.state_key,
+                        content: r.content,
+                        origin_server_ts: r.origin_server_ts as u64,
+                        auth_events: r.auth_events,
+                        prev_events: r.prev_events,
+                        hashes: r.hashes,
+                        signatures: r.signatures,
+                        depth: r.depth,
+                        unsigned: r.unsigned,
+                    },
+                )
+            })
+            .collect())
+    }
+
+    async fn member_events_for_server(
+        &self,
+        room_id: &str,
+        server_name: &str,
+    ) -> Result<Vec<(i64, Event)>> {
+        let suffix = format!(":{server_name}");
+        let rows = sqlx::query!(
+            r#"
+            SELECT stream_position, event_id, room_id, sender, type AS event_type,
+                   state_key, content, auth_events, prev_events, hashes, signatures,
+                   unsigned, origin_server_ts, depth
+            FROM events
+            WHERE room_id = $1 AND type = 'm.room.member' AND state_key LIKE '%' || $2
+            ORDER BY stream_position ASC
+            "#,
+            room_id,
+            suffix
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| {
+                (
+                    r.stream_position,
+                    Event {
+                        event_id: r.event_id,
+                        room_id: r.room_id,
+                        sender: r.sender,
+                        event_type: r.event_type,
+                        state_key: r.state_key,
+                        content: r.content,
+                        origin_server_ts: r.origin_server_ts as u64,
+                        auth_events: r.auth_events,
+                        prev_events: r.prev_events,
+                        hashes: r.hashes,
+                        signatures: r.signatures,
+                        depth: r.depth,
+                        unsigned: r.unsigned,
+                    },
+                )
+            })
+            .collect())
+    }
+
+    async fn event_stream_positions(
+        &self,
+        event_ids: &[String],
+    ) -> Result<std::collections::HashMap<String, i64>> {
+        if event_ids.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+
+        let rows = sqlx::query!(
+            r#"
+            SELECT event_id, stream_position
+            FROM events
+            WHERE event_id = ANY($1)
+            "#,
+            event_ids
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| (r.event_id, r.stream_position))
+            .collect())
     }
 
     async fn events_since(&self, since: i64, limit: i64) -> Result<Vec<Event>> {

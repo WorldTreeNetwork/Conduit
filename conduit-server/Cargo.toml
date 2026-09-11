@@ -40,6 +40,10 @@ regex = { workspace = true }
 iroh = { workspace = true, optional = true }
 
 [dev-dependencies]
+# Test-side claimant for the identikey-auth on-ramp.  The server itself
+# only ever verifies; signing is the client's job.
+identikey-auth = { workspace = true }
+conduit = { path = "../conduit" }
 tokio = { workspace = true }
 sqlx = { workspace = true }
 serde_json = { workspace = true }

@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO identikey_links (fingerprint, user_id)\n            VALUES ($1, $2)\n            ON CONFLICT (fingerprint) DO NOTHING\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "0f95d1f24f042bcccc459c20118fd6011fef36ca151bc68143cd4f1e6053ecc9"
+}

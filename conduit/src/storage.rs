@@ -13,7 +13,7 @@ use serde_json::Value;
 use tokio::sync::RwLock;
 
 use crate::event::Event;
-use crate::Result;
+use crate::{Error, Result};
 
 // ---------------------------------------------------------------------------
 // Media domain types (E07)
@@ -123,6 +123,10 @@ pub struct Device {
     pub user_id: String,
     pub device_id: String,
     pub display_name: Option<String>,
+    /// Session epoch.  Capability tokens carry the epoch they were
+    /// minted at; bumping this row invalidates every one of them
+    /// without a denylist.  See [`crate::agency`].
+    pub epoch: i64,
     /// Unix-ms timestamp of last activity, if recorded.
     pub last_seen_ts: Option<i64>,
     pub last_seen_ip: Option<String>,
@@ -243,6 +247,44 @@ pub trait Storage: Send + Sync + 'static {
 
     async fn list_devices_for_user(&self, user_id: &str) -> Result<Vec<Device>>;
 
+    /// The device's current session epoch, or `None` when the device
+    /// row does not exist (which fails every token for it).
+    async fn device_epoch(&self, user_id: &str, device_id: &str) -> Result<Option<i64>>;
+
+    /// Advance one device's epoch, returning the new value.  This is
+    /// logout and device revocation: outstanding capability tokens for
+    /// that device stop verifying immediately.
+    async fn bump_device_epoch(&self, user_id: &str, device_id: &str) -> Result<i64>;
+
+    /// Advance every device epoch for a user.  This is `logout_all`.
+    async fn bump_all_device_epochs(&self, user_id: &str) -> Result<()>;
+
+    // --- IdentiKey identity links -------------------------------------------
+
+    /// Link an identikey-auth fingerprint to a local MXID.  Callers go
+    /// through [`crate::identity`], which enforces the policy that an
+    /// unlinked fingerprint never creates an account.
+    async fn link_identikey(&self, fingerprint: &str, user_id: &str) -> Result<()>;
+
+    /// The MXID linked to a fingerprint, if any.
+    async fn user_for_identikey(&self, fingerprint: &str) -> Result<Option<String>>;
+
+    // --- Biscuit minter key -------------------------------------------------
+
+    /// Persist the Biscuit minter key.  Stored the way a signing key is
+    /// stored — raw private bytes — because a key we sign with cannot
+    /// be a digest.  It is deliberately not a Matrix server signing key
+    /// and must never be published as one.
+    async fn insert_minter_key(
+        &self,
+        key_id: &str,
+        private_key: &[u8],
+        public_key: &[u8],
+    ) -> Result<()>;
+
+    /// The newest minter key, or `None` before first boot.
+    async fn current_minter_key(&self) -> Result<Option<SigningKey>>;
+
     // --- Access tokens ------------------------------------------------------
 
     async fn insert_token(
@@ -321,6 +363,32 @@ pub trait Storage: Send + Sync + 'static {
     /// The highest stream_position for events in `room_id`, or `None` if the
     /// room has no events yet.
     async fn room_latest_stream_position(&self, room_id: &str) -> Result<Option<i64>>;
+
+    /// Every `m.room.member` event whose state_key is `user_id` in
+    /// `room_id`, paired with its stream_position, ordered ascending.
+    ///
+    /// This is the one walk history visibility needs: it is how
+    /// [`crate::auth::user_event_position`] decides where a user stood
+    /// relative to an event.  Federation backfill uses the same walk
+    /// over any member of the requesting origin.
+    async fn member_events_for_user(
+        &self,
+        room_id: &str,
+        user_id: &str,
+    ) -> Result<Vec<(i64, Event)>>;
+
+    /// Every `m.room.member` event in `room_id` whose state_key belongs
+    /// to `server_name`, paired with its stream_position, ordered
+    /// ascending.  Federation backfill's half of the same walk.
+    async fn member_events_for_server(
+        &self,
+        room_id: &str,
+        server_name: &str,
+    ) -> Result<Vec<(i64, Event)>>;
+
+    /// Stream positions for a batch of event ids.  One query per page
+    /// of timeline, rather than one per event.
+    async fn event_stream_positions(&self, event_ids: &[String]) -> Result<HashMap<String, i64>>;
 
     /// All events across all rooms whose stream_position is strictly greater
     /// than `since`, ordered by stream_position ascending, up to `limit`.
@@ -789,6 +857,10 @@ struct MemoryInner {
     tokens: HashMap<String, (String, String, Option<DateTime<Utc>>)>,
     /// Ordered list of signing keys (push_back = newest).
     signing_keys: Vec<SigningKey>,
+    /// identikey-auth fingerprint → MXID
+    identikey_links: HashMap<String, String>,
+    /// Biscuit minter keys (push_back = newest).
+    minter_keys: Vec<SigningKey>,
     /// (room_id, type, state_key) → event_id
     room_state: HashMap<(String, String, String), String>,
     // E2EE
@@ -842,6 +914,8 @@ impl Default for MemoryInner {
             devices: HashMap::new(),
             tokens: HashMap::new(),
             signing_keys: Vec::new(),
+            identikey_links: HashMap::new(),
+            minter_keys: Vec::new(),
             room_state: HashMap::new(),
             device_keys: HashMap::new(),
             one_time_keys: HashMap::new(),
@@ -961,6 +1035,7 @@ impl Storage for MemoryStorage {
             user_id: user_id.to_owned(),
             device_id: device_id.to_owned(),
             display_name: None,
+            epoch: 0,
             last_seen_ts: None,
             last_seen_ip: None,
         });
@@ -975,6 +1050,71 @@ impl Storage for MemoryStorage {
     ) -> Result<Option<Device>> {
         let key = (user_id.to_owned(), device_id.to_owned());
         Ok(self.inner.read().await.devices.get(&key).cloned())
+    }
+
+    async fn device_epoch(&self, user_id: &str, device_id: &str) -> Result<Option<i64>> {
+        let key = (user_id.to_owned(), device_id.to_owned());
+        Ok(self.inner.read().await.devices.get(&key).map(|d| d.epoch))
+    }
+
+    async fn bump_device_epoch(&self, user_id: &str, device_id: &str) -> Result<i64> {
+        let mut inner = self.inner.write().await;
+        let key = (user_id.to_owned(), device_id.to_owned());
+        let device = inner
+            .devices
+            .get_mut(&key)
+            .ok_or_else(|| Error::Storage(format!("unknown device {device_id}")))?;
+        device.epoch += 1;
+        Ok(device.epoch)
+    }
+
+    async fn bump_all_device_epochs(&self, user_id: &str) -> Result<()> {
+        let mut inner = self.inner.write().await;
+        for device in inner.devices.values_mut() {
+            if device.user_id == user_id {
+                device.epoch += 1;
+            }
+        }
+        Ok(())
+    }
+
+    async fn insert_minter_key(
+        &self,
+        key_id: &str,
+        private_key: &[u8],
+        public_key: &[u8],
+    ) -> Result<()> {
+        self.inner.write().await.minter_keys.push(SigningKey {
+            key_id: key_id.to_owned(),
+            private_key: private_key.to_vec(),
+            public_key: public_key.to_vec(),
+            valid_until_ts: None,
+            created_at: Utc::now(),
+        });
+        Ok(())
+    }
+
+    async fn current_minter_key(&self) -> Result<Option<SigningKey>> {
+        Ok(self.inner.read().await.minter_keys.last().cloned())
+    }
+
+    async fn link_identikey(&self, fingerprint: &str, user_id: &str) -> Result<()> {
+        self.inner
+            .write()
+            .await
+            .identikey_links
+            .insert(fingerprint.to_owned(), user_id.to_owned());
+        Ok(())
+    }
+
+    async fn user_for_identikey(&self, fingerprint: &str) -> Result<Option<String>> {
+        Ok(self
+            .inner
+            .read()
+            .await
+            .identikey_links
+            .get(fingerprint)
+            .cloned())
     }
 
     async fn list_devices_for_user(&self, user_id: &str) -> Result<Vec<Device>> {
@@ -1179,6 +1319,58 @@ impl Storage for MemoryStorage {
             .max();
         // In MemoryStorage depth serves as stream_position proxy.
         Ok(max_depth)
+    }
+
+    async fn member_events_for_user(
+        &self,
+        room_id: &str,
+        user_id: &str,
+    ) -> Result<Vec<(i64, Event)>> {
+        let inner = self.inner.read().await;
+        // In MemoryStorage depth serves as the stream_position proxy.
+        let mut rows: Vec<(i64, Event)> = inner
+            .events
+            .values()
+            .filter(|e| {
+                e.room_id == room_id
+                    && e.event_type == "m.room.member"
+                    && e.state_key.as_deref() == Some(user_id)
+            })
+            .map(|e| (e.depth, e.clone()))
+            .collect();
+        rows.sort_by_key(|(pos, _)| *pos);
+        Ok(rows)
+    }
+
+    async fn member_events_for_server(
+        &self,
+        room_id: &str,
+        server_name: &str,
+    ) -> Result<Vec<(i64, Event)>> {
+        let inner = self.inner.read().await;
+        let suffix = format!(":{server_name}");
+        let mut rows: Vec<(i64, Event)> = inner
+            .events
+            .values()
+            .filter(|e| {
+                e.room_id == room_id
+                    && e.event_type == "m.room.member"
+                    && e.state_key
+                        .as_deref()
+                        .is_some_and(|sk| sk.ends_with(&suffix))
+            })
+            .map(|e| (e.depth, e.clone()))
+            .collect();
+        rows.sort_by_key(|(pos, _)| *pos);
+        Ok(rows)
+    }
+
+    async fn event_stream_positions(&self, event_ids: &[String]) -> Result<HashMap<String, i64>> {
+        let inner = self.inner.read().await;
+        Ok(event_ids
+            .iter()
+            .filter_map(|id| inner.events.get(id).map(|e| (id.clone(), e.depth)))
+            .collect())
     }
 
     async fn events_since(&self, since: i64, limit: i64) -> Result<Vec<Event>> {

@@ -48,6 +48,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
+use conduit::agency::{self, Minter, RootClaims, VerifyContext, RIGHT_CS};
+use conduit::identity::{IdentityVerifier, VerifyPolicy};
 use conduit::keys::ServerKey;
 use conduit::storage::Storage;
 
@@ -78,6 +80,39 @@ pub trait AuthState: Clone + Send + Sync + 'static + conduit::room::RoomEventSen
     fn typing_tx(&self) -> &broadcast::Sender<String>;
     /// Ephemeral in-memory presence store.
     fn presence_store(&self) -> &Arc<PresenceStore>;
+    /// The Biscuit minter.  Capability tokens are signed with this key,
+    /// which is deliberately not the Matrix server signing key.
+    ///
+    /// The default is an ephemeral, process-wide key: a host that does
+    /// not persist one still works, but every restart invalidates every
+    /// outstanding token.  `main.rs` overrides it with the stored key.
+    fn minter(&self) -> Arc<Minter> {
+        static EPHEMERAL: std::sync::OnceLock<Arc<Minter>> = std::sync::OnceLock::new();
+        Arc::clone(EPHEMERAL.get_or_init(|| Arc::new(Minter::generate())))
+    }
+
+    /// The identikey-auth challenge verifier for this server name.
+    ///
+    /// Challenges are nonce-bound, so issuing and verifying must share
+    /// one store.  The default keeps one per server name for the life
+    /// of the process.
+    fn identity_verifier(&self) -> Arc<IdentityVerifier> {
+        static VERIFIERS: std::sync::OnceLock<
+            std::sync::Mutex<HashMap<String, Arc<IdentityVerifier>>>,
+        > = std::sync::OnceLock::new();
+        let map = VERIFIERS.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+        let mut map = map.lock().expect("verifier registry poisoned");
+        Arc::clone(
+            map.entry(self.server_name().to_owned())
+                .or_insert_with(|| {
+                    Arc::new(IdentityVerifier::new(
+                        self.server_name(),
+                        VerifyPolicy::PqOptional,
+                    ))
+                }),
+        )
+    }
+
     /// Optional outbound federation client (for cross-server CS-API paths
     /// like /sendToDevice and outbound device_list_update EDUs).
     /// Default `None` keeps tests that use a stub state working.
@@ -152,9 +187,56 @@ pub fn generate_token() -> String {
 }
 
 /// SHA-256 hash of a raw token string → hex string stored in the DB.
+///
+/// Still used by the short-lived OpenID credential in `probe.rs`, which
+/// is a bearer secret we compare, not a capability token.  It is no
+/// longer the request-path source of truth for Matrix access tokens.
 pub fn hash_token(raw: &str) -> String {
     let digest = Sha256::digest(raw.as_bytes());
     hex::encode(digest)
+}
+
+/// How long a freshly minted client-server token stays valid.
+///
+/// The capability format requires a time check, so sessions are finite
+/// rather than eternal.  Thirty days matches the common client
+/// expectation of "stays logged in", and logging out early is an epoch
+/// bump, not a wait.
+pub const TOKEN_TTL_SECS: i64 = 30 * 24 * 60 * 60;
+
+/// Mint a root capability token for a freshly authenticated session.
+///
+/// Identity has already been proven by the caller — password, an
+/// identikey-auth response, or a verified foreign OIDC token.  This is
+/// the agency half, and it is the only place a token is created.
+pub async fn mint_access_token<S: AuthState>(
+    state: &S,
+    user_id: &str,
+    device_id: &str,
+) -> Result<String, String> {
+    let epoch = state
+        .storage()
+        .device_epoch(user_id, device_id)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("device {device_id} does not exist"))?;
+
+    state
+        .minter()
+        .mint_root(&RootClaims {
+            user_id,
+            device_id,
+            server_name: state.server_name(),
+            epoch,
+            rights: &[RIGHT_CS],
+            expires_at: Some(now_unix() + TOKEN_TTL_SECS),
+        })
+        .map_err(|e| e.to_string())
+}
+
+/// Current time in Unix seconds.
+pub fn now_unix() -> i64 {
+    chrono::Utc::now().timestamp()
 }
 
 // ---------------------------------------------------------------------------
@@ -187,12 +269,19 @@ pub async fn verify_password(password: String, hash: String) -> Result<bool, Str
 // AuthedUser extractor
 // ---------------------------------------------------------------------------
 
-/// Axum extractor that validates a Bearer token and resolves the owner.
-/// Returns 401 on missing or unknown token.
+/// Axum extractor that verifies a Bearer capability token and resolves
+/// the owner.  Returns 401 on a missing, malformed, expired, or
+/// epoch-stale token.
 #[derive(Debug, Clone)]
 pub struct AuthedUser {
     pub user_id: String,
     pub device_id: String,
+    /// The verified capability token.
+    ///
+    /// Carried so a handler can authorize a narrower operation — a room,
+    /// an op — without re-verifying the signature chain.  The in-process
+    /// client (`add-in-process-client`) is the consumer that attenuates.
+    pub grant: agency::Grant,
 }
 
 /// We cannot implement `FromRequestParts` with a generic `S: AuthState`
@@ -215,15 +304,31 @@ impl<S: AuthState> FromRequestParts<S> for AuthedUser {
         let token = extract_bearer_token(&parts.headers)
             .ok_or_else(|| MatrixError::missing_token().into_response())?;
 
-        let token_hash = hash_token(&token);
-        let owner = state
+        let minter = state.minter();
+
+        // Two steps, because the epoch the Datalog compares against
+        // lives in the device row: read the signed claims first, then
+        // fetch that row, then authorize.
+        let claims = agency::parse_claims(&minter.public_key(), &token)
+            .map_err(|_| MatrixError::unknown_token().into_response())?;
+
+        let epoch = state
             .storage()
-            .lookup_token(&token_hash)
+            .device_epoch(&claims.user_id, &claims.device_id)
             .await
             .map_err(|e| MatrixError::unknown(e.to_string()).into_response())?
+            // No device row means the device was deleted: fail closed.
             .ok_or_else(|| MatrixError::unknown_token().into_response())?;
 
-        Ok(AuthedUser { user_id: owner.user_id, device_id: owner.device_id })
+        let ctx = VerifyContext::cs(state.server_name(), now_unix(), epoch);
+        let grant = agency::verify(&minter.public_key(), &token, &ctx)
+            .map_err(|_| MatrixError::unknown_token().into_response())?;
+
+        Ok(AuthedUser {
+            user_id: grant.user_id.clone(),
+            device_id: grant.device_id.clone(),
+            grant,
+        })
     }
 }
 
@@ -244,6 +349,10 @@ pub struct RegisterRequest {
     pub initial_device_display_name: Option<String>,
     /// UIA auth block
     pub auth: Option<UiaAuthBlock>,
+    /// Optional identikey-auth fingerprint (base58) to link to the new
+    /// account, so a later challenge/response can log in as this user.
+    #[serde(rename = "io.identikey.fingerprint")]
+    pub identikey_fingerprint: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -268,6 +377,9 @@ pub struct LoginRequest {
     pub password: Option<String>,
     pub device_id: Option<String>,
     pub initial_device_display_name: Option<String>,
+    /// For `io.identikey.auth`: url-safe base64 of the challenge
+    /// response bytes.
+    pub response: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -349,12 +461,23 @@ pub async fn register<S: AuthState>(
         return MatrixError::unknown(e.to_string()).into_response();
     }
 
-    // Access token.
-    let raw_token = generate_token();
-    let token_hash = hash_token(&raw_token);
-    if let Err(e) = state.storage().insert_token(&token_hash, &user_id, &device_id, None).await {
-        return MatrixError::unknown(e.to_string()).into_response();
+    // Registration is also where an identikey-auth identity may be
+    // linked: the account is being created here, so this is one of the
+    // only two places a fingerprint may be bound to an MXID.
+    if let Some(fingerprint) = body.identikey_fingerprint.as_deref() {
+        if let Err(e) =
+            conduit::identity::link_at_registration(state.storage().as_ref(), fingerprint, &user_id)
+                .await
+        {
+            return MatrixError::forbidden(e.to_string()).into_response();
+        }
     }
+
+    // Agency: mint the capability token for the new session.
+    let raw_token = match mint_access_token(&state, &user_id, &device_id).await {
+        Ok(t) => t,
+        Err(e) => return MatrixError::unknown(e).into_response(),
+    };
 
     // Mark UIA session used (no-op for dummy, but keeps the pattern).
     if let Some(session) = &auth.session {
@@ -375,10 +498,14 @@ pub async fn register<S: AuthState>(
 pub async fn get_login_flows() -> Json<serde_json::Value> {
     Json(json!({
         "flows": [
-            { "type": "m.login.password" }
+            { "type": "m.login.password" },
+            { "type": IDENTIKEY_LOGIN_TYPE }
         ]
     }))
 }
+
+/// The login `type` for identikey-auth challenge/response.
+pub const IDENTIKEY_LOGIN_TYPE: &str = "io.identikey.auth";
 
 // ---------------------------------------------------------------------------
 // POST /_matrix/client/v3/login
@@ -388,6 +515,9 @@ pub async fn login<S: AuthState>(
     State(state): State<S>,
     Json(body): Json<LoginRequest>,
 ) -> Response {
+    if body.login_type == IDENTIKEY_LOGIN_TYPE {
+        return identikey_login(state, body).await;
+    }
     if body.login_type != "m.login.password" {
         return MatrixError::forbidden(format!("unsupported login type: {}", body.login_type))
             .into_response();
@@ -447,11 +577,10 @@ pub async fn login<S: AuthState>(
         return MatrixError::unknown(e.to_string()).into_response();
     }
 
-    let raw_token = generate_token();
-    let token_hash = hash_token(&raw_token);
-    if let Err(e) = state.storage().insert_token(&token_hash, &user_id, &device_id, None).await {
-        return MatrixError::unknown(e.to_string()).into_response();
-    }
+    let raw_token = match mint_access_token(&state, &user_id, &device_id).await {
+        Ok(t) => t,
+        Err(e) => return MatrixError::unknown(e).into_response(),
+    };
 
     (
         StatusCode::OK,
@@ -464,21 +593,161 @@ pub async fn login<S: AuthState>(
 // POST /_matrix/client/v3/logout
 // ---------------------------------------------------------------------------
 
+/// Logging out advances the device's epoch.  Every capability token
+/// minted for that device stops verifying on the next request, without
+/// a denylist and without the server having stored the token bytes.
 pub async fn logout<S: AuthState>(
     State(state): State<S>,
     authed: AuthedUser,
-    headers: HeaderMap,
 ) -> Response {
-    let token = match extract_bearer_token(&headers) {
-        Some(t) => t,
-        None => return MatrixError::missing_token().into_response(),
-    };
-    let token_hash = hash_token(&token);
-    if let Err(e) = state.storage().revoke_token(&token_hash).await {
+    if let Err(e) = state
+        .storage()
+        .bump_device_epoch(&authed.user_id, &authed.device_id)
+        .await
+    {
         return MatrixError::unknown(e.to_string()).into_response();
     }
-    let _ = authed; // used only to enforce auth
     (StatusCode::OK, Json(json!({}))).into_response()
+}
+
+/// `POST /_matrix/client/v3/logout/all` — every device, one update.
+pub async fn logout_all<S: AuthState>(
+    State(state): State<S>,
+    authed: AuthedUser,
+) -> Response {
+    if let Err(e) = state
+        .storage()
+        .bump_all_device_epochs(&authed.user_id)
+        .await
+    {
+        return MatrixError::unknown(e.to_string()).into_response();
+    }
+    (StatusCode::OK, Json(json!({}))).into_response()
+}
+
+// ---------------------------------------------------------------------------
+// identikey-auth on-ramp
+// ---------------------------------------------------------------------------
+
+/// `POST /_matrix/client/v3/login/identikey/challenge`
+///
+/// Hands out an audience-bound, nonce-carrying challenge.  Issuing one
+/// is not a login and grants nothing: an unlinked identity that answers
+/// it correctly is still refused.
+pub async fn identikey_challenge<S: AuthState>(State(state): State<S>) -> Response {
+    let bytes = state
+        .identity_verifier()
+        .issue_challenge(now_unix().max(0) as u64);
+
+    (
+        StatusCode::OK,
+        Json(json!({
+            "challenge": URL_SAFE_NO_PAD.encode(&bytes),
+            "audience": state.server_name(),
+        })),
+    )
+        .into_response()
+}
+
+/// The `io.identikey.auth` branch of `POST /login`.
+async fn identikey_login<S: AuthState>(state: S, body: LoginRequest) -> Response {
+    let Some(encoded) = body.response.as_deref() else {
+        return MatrixError::forbidden("identikey login requires a challenge response")
+            .into_response();
+    };
+    let Ok(bytes) = URL_SAFE_NO_PAD.decode(encoded) else {
+        return MatrixError::bad_json("response is not url-safe base64").into_response();
+    };
+
+    // Identity.  An unlinked fingerprint fails here rather than
+    // creating an account — the challenge endpoint is not a
+    // registration endpoint.
+    let logged_in = match state
+        .identity_verifier()
+        .login(state.storage().as_ref(), &bytes, now_unix().max(0) as u64)
+        .await
+    {
+        Ok(l) => l,
+        Err(e) => return MatrixError::forbidden(e.to_string()).into_response(),
+    };
+
+    let account = match state.storage().get_account(&logged_in.user_id).await {
+        Ok(Some(a)) => a,
+        Ok(None) => return MatrixError::forbidden("unknown user").into_response(),
+        Err(e) => return MatrixError::unknown(e.to_string()).into_response(),
+    };
+    if account.deactivated_at.is_some() {
+        return MatrixError::forbidden("account deactivated").into_response();
+    }
+
+    let device_id = body.device_id.clone().unwrap_or_else(generate_device_id);
+    if let Err(e) = state
+        .storage()
+        .upsert_device(
+            &logged_in.user_id,
+            &device_id,
+            body.initial_device_display_name.as_deref(),
+        )
+        .await
+    {
+        return MatrixError::unknown(e.to_string()).into_response();
+    }
+
+    // Agency, minted exactly as the password on-ramp mints it.
+    let raw_token = match mint_access_token(&state, &logged_in.user_id, &device_id).await {
+        Ok(t) => t,
+        Err(e) => return MatrixError::unknown(e).into_response(),
+    };
+
+    (
+        StatusCode::OK,
+        Json(LoginResponse {
+            user_id: logged_in.user_id,
+            access_token: raw_token,
+            device_id,
+        }),
+    )
+        .into_response()
+}
+
+/// `POST /_matrix/client/v3/account/identikey/bind`
+///
+/// Links a fingerprint to the *already authenticated* account.  The
+/// grant is the authorization; there is no other way to create a link
+/// after registration.
+#[derive(Debug, Deserialize)]
+pub struct BindRequest {
+    pub response: String,
+}
+
+pub async fn identikey_bind<S: AuthState>(
+    State(state): State<S>,
+    authed: AuthedUser,
+    Json(body): Json<BindRequest>,
+) -> Response {
+    let Ok(bytes) = URL_SAFE_NO_PAD.decode(&body.response) else {
+        return MatrixError::bad_json("response is not url-safe base64").into_response();
+    };
+
+    let fingerprint = match state
+        .identity_verifier()
+        .verify(&bytes, now_unix().max(0) as u64)
+    {
+        Ok(fp) => fp,
+        Err(e) => return MatrixError::forbidden(e.to_string()).into_response(),
+    };
+
+    match conduit::identity::bind_fingerprint(
+        state.storage().as_ref(),
+        &authed.grant,
+        &fingerprint,
+        &authed.user_id,
+    )
+    .await
+    {
+        Ok(()) => (StatusCode::OK, Json(json!({ "fingerprint": fingerprint }))).into_response(),
+        Err(e) => MatrixError::forbidden(e.to_string()).into_response(),
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -507,6 +507,26 @@ async fn backfill_returns_history_visibility_filtered_events() {
 
     let room_id = "!backfill_room:server-a.test";
 
+    // Seed the membership that makes the room visible to the origin at
+    // all.  Backfill filters against the requesting server's membership
+    // now, so a room no user of theirs ever joined yields nothing.
+    let join = Event {
+        event_id: "$alice_join:server-a.test".to_owned(),
+        room_id: room_id.to_owned(),
+        sender: "@alice:server-a.test".to_owned(),
+        event_type: "m.room.member".to_owned(),
+        content: json!({ "membership": "join" }),
+        state_key: Some("@alice:server-a.test".to_owned()),
+        origin_server_ts: 999,
+        auth_events: vec![],
+        prev_events: vec![],
+        hashes: json!({}),
+        signatures: json!({}),
+        depth: 0,
+        unsigned: None,
+    };
+    storage_a.put_event(&join).await.unwrap();
+
     // Seed a few events.
     for i in 1..=5u64 {
         let ev = Event {
@@ -545,6 +565,7 @@ async fn backfill_returns_history_visibility_filtered_events() {
     let body: Value = resp.json().await.unwrap();
     let pdus = body["pdus"].as_array().unwrap();
     assert_eq!(pdus.len(), 3, "backfill should return at most limit events");
+
 }
 
 // ---------------------------------------------------------------------------

@@ -722,6 +722,78 @@ async fn debug_routing2() {
     eprintln!("kick ROOMID status={}", resp4.status());
 }
 
+// ---------------------------------------------------------------------------
+// Read access: membership gates room reads
+// ---------------------------------------------------------------------------
+
+/// GET a room read endpoint and return just the status.
+async fn read_status(app: &Router, token: &str, path: &str) -> StatusCode {
+    let req = Request::builder()
+        .method("GET")
+        .uri(path)
+        .header("authorization", format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap();
+    app.clone().oneshot(req).await.unwrap().status()
+}
+
+#[tokio::test]
+async fn non_member_cannot_read_room() {
+    let db = TempDb::new().await;
+    let state = TestState::new(db.storage());
+    let app = build_router(state);
+
+    let alice = do_register(&app, "alice", "secret").await;
+    let alice_token = alice["access_token"].as_str().unwrap();
+    let bob = do_register(&app, "bob", "secret").await;
+    let bob_token = bob["access_token"].as_str().unwrap();
+
+    let room = json_body(do_create_room(&app, alice_token, json!({})).await).await;
+    let room_id = room["room_id"].as_str().unwrap();
+
+    // Bob holds a perfectly valid token.  It is not a membership.
+    for path in [
+        format!("/_matrix/client/v3/rooms/{room_id}/state"),
+        format!("/_matrix/client/v3/rooms/{room_id}/state/m.room.name"),
+        format!("/_matrix/client/v3/rooms/{room_id}/joined_members"),
+        format!("/_matrix/client/v3/rooms/{room_id}/messages"),
+    ] {
+        assert_eq!(
+            read_status(&app, bob_token, &path).await,
+            StatusCode::FORBIDDEN,
+            "a non-member must not read {path}"
+        );
+    }
+
+    // Alice, who is joined, still reads it.
+    let state_body = do_get_state(&app, alice_token, room_id).await;
+    assert!(state_body.as_array().unwrap().len() > 1);
+}
+
+#[tokio::test]
+async fn joining_grants_read_access() {
+    let db = TempDb::new().await;
+    let state = TestState::new(db.storage());
+    let app = build_router(state);
+
+    let alice = do_register(&app, "alice", "secret").await;
+    let alice_token = alice["access_token"].as_str().unwrap();
+    let bob = do_register(&app, "bob", "secret").await;
+    let bob_token = bob["access_token"].as_str().unwrap();
+
+    let room = json_body(do_create_room(&app, alice_token, json!({"preset": "public_chat"})).await).await;
+    let room_id = room["room_id"].as_str().unwrap();
+
+    let path = format!("/_matrix/client/v3/rooms/{room_id}/state");
+    assert_eq!(
+        read_status(&app, bob_token, &path).await,
+        StatusCode::FORBIDDEN
+    );
+
+    assert_eq!(do_join(&app, bob_token, room_id).await.status(), StatusCode::OK);
+    assert_eq!(read_status(&app, bob_token, &path).await, StatusCode::OK);
+}
+
 // RoomEventSender for the test harness (conduit-29w). Mirrors the AppState impl
 // in main.rs: delegate to the generic event pipeline, then wake any /sync waiters.
 #[async_trait::async_trait]

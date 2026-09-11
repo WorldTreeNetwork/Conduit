@@ -43,6 +43,11 @@ use conduit_server::{
 struct AppState {
     storage: Arc<dyn Storage>,
     server_key: Arc<ServerKey>,
+    /// Biscuit minter key — capability tokens, not events.  Distinct
+    /// from `server_key` on purpose.
+    minter: Arc<conduit::agency::Minter>,
+    /// identikey-auth challenge issuer / verifier for this server name.
+    identity_verifier: Arc<conduit::identity::IdentityVerifier>,
     server_name: Arc<str>,
     http: reqwest::Client,
     remote_keys: Arc<RemoteKeyCache>,
@@ -110,6 +115,12 @@ impl AuthState for AppState {
     }
     fn server_key(&self) -> Arc<conduit::keys::ServerKey> {
         Arc::clone(&self.server_key)
+    }
+    fn minter(&self) -> Arc<conduit::agency::Minter> {
+        Arc::clone(&self.minter)
+    }
+    fn identity_verifier(&self) -> Arc<conduit::identity::IdentityVerifier> {
+        Arc::clone(&self.identity_verifier)
     }
     fn txn_cache(&self) -> &Arc<RwLock<HashMap<TxnCacheKey, String>>> {
         &self.txn_cache
@@ -187,6 +198,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let server_key = Arc::new(keys::load_or_generate(&*storage).await?);
     tracing::info!(key_id = %server_key.key_id, "server signing key ready");
+
+    let minter = Arc::new(keys::load_or_generate_minter(&*storage).await?);
+    tracing::info!("biscuit minter key ready");
 
     let http = reqwest::Client::new();
 
@@ -269,9 +283,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let recent_events: Arc<federation::RecentEventCache> =
         Arc::new(federation::RecentEventCache::new());
 
+    let identity_verifier = Arc::new(conduit::identity::IdentityVerifier::new(
+        server_name.to_string(),
+        conduit::identity::VerifyPolicy::PqOptional,
+    ));
+
     let state = AppState {
         storage,
         server_key,
+        minter,
+        identity_verifier,
         server_name,
         http,
         remote_keys,
@@ -370,6 +391,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/_matrix/client/v3/register", post(auth::register::<AppState>))
         .route("/_matrix/client/v3/login", get(auth::get_login_flows).post(auth::login::<AppState>))
         .route("/_matrix/client/v3/logout", post(auth::logout::<AppState>))
+        .route("/_matrix/client/v3/logout/all", post(auth::logout_all::<AppState>))
+        .route("/_matrix/client/v3/login/identikey/challenge",
+            post(auth::identikey_challenge::<AppState>))
+        .route("/_matrix/client/v3/account/identikey/bind",
+            post(auth::identikey_bind::<AppState>))
         .route("/_matrix/client/v3/account/whoami", get(auth::whoami))
         // Client probe endpoints (conduit-eck)
         .route("/_matrix/client/v3/capabilities", get(probe_api::capabilities::<AppState>))
