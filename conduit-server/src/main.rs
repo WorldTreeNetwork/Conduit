@@ -297,8 +297,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         conduit::identity::VerifyPolicy::PqOptional,
     ));
 
-    let oidc_client = match env::var("CONDUIT_OIDC_ISSUER") {
-        Ok(issuer) if !issuer.is_empty() => {
+    // Default OP is identikey-core hosted at auth.identikey.me (ADR-004).
+    // CONDUIT_OIDC_ISSUER=0 / off / empty disables. A custom issuer that
+    // fails discovery aborts boot; the default only warns so a homeserver
+    // still starts when the public OP is unreachable.
+    let oidc_client = match oidc_issuer_from_env() {
+        None => None,
+        Some((issuer, explicit)) => {
             let audience = env::var("CONDUIT_OIDC_AUDIENCE")
                 .unwrap_or_else(|_| server_name.to_string());
             match identikey_oidc_client::OidcClient::discover(
@@ -312,13 +317,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     tracing::info!(issuer = %issuer, audience = %audience, "oidc rp client ready");
                     Some(Arc::new(c))
                 }
-                Err(e) => {
-                    tracing::error!(error = %e, "CONDUIT_OIDC_ISSUER set but discovery failed");
+                Err(e) if explicit => {
+                    tracing::error!(error = %e, issuer = %issuer, "CONDUIT_OIDC_ISSUER discovery failed");
                     return Err(e.into());
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        issuer = %issuer,
+                        "default OIDC issuer unreachable; io.identikey.oidc login disabled"
+                    );
+                    None
                 }
             }
         }
-        _ => None,
     };
 
     let state = AppState {
@@ -423,7 +435,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/_matrix/key/v2/server/:key_id", get(server_keys))
         // Client-Server API: auth
         .route("/_matrix/client/v3/register", post(auth::register::<AppState>))
-        .route("/_matrix/client/v3/login", get(auth::get_login_flows).post(auth::login::<AppState>))
+        .route("/_matrix/client/v3/login", get(auth::get_login_flows::<AppState>).post(auth::login::<AppState>))
         .route("/_matrix/client/v3/logout", post(auth::logout::<AppState>))
         .route("/_matrix/client/v3/logout/all", post(auth::logout_all::<AppState>))
         .route("/_matrix/client/v3/login/identikey/challenge",
@@ -694,6 +706,56 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 async fn health() -> &'static str {
     "ok"
+}
+
+const DEFAULT_OIDC_ISSUER: &str = "https://auth.identikey.me";
+
+/// `(issuer, explicit)`. `explicit` is false when the identikey.me default
+/// was used. `CONDUIT_OIDC_ISSUER=0` / `off` / empty disables.
+fn oidc_issuer_from_env() -> Option<(String, bool)> {
+    oidc_issuer_from(env::var("CONDUIT_OIDC_ISSUER").ok())
+}
+
+fn oidc_issuer_from(raw: Option<String>) -> Option<(String, bool)> {
+    match raw {
+        None => Some((DEFAULT_OIDC_ISSUER.to_owned(), false)),
+        Some(s) => {
+            let t = s.trim();
+            if t.is_empty() || t == "0" || t.eq_ignore_ascii_case("off") {
+                None
+            } else {
+                Some((t.trim_end_matches('/').to_owned(), true))
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod oidc_issuer_tests {
+    use super::*;
+
+    #[test]
+    fn default_is_auth_identikey_me() {
+        let (iss, explicit) = oidc_issuer_from(None).unwrap();
+        assert_eq!(iss, "https://auth.identikey.me");
+        assert!(!explicit);
+    }
+
+    #[test]
+    fn off_disables() {
+        assert!(oidc_issuer_from(Some("0".into())).is_none());
+        assert!(oidc_issuer_from(Some("off".into())).is_none());
+        assert!(oidc_issuer_from(Some("OFF".into())).is_none());
+        assert!(oidc_issuer_from(Some("".into())).is_none());
+        assert!(oidc_issuer_from(Some("  ".into())).is_none());
+    }
+
+    #[test]
+    fn custom_is_explicit() {
+        let (iss, explicit) = oidc_issuer_from(Some("https://idp.example/".into())).unwrap();
+        assert_eq!(iss, "https://idp.example");
+        assert!(explicit);
+    }
 }
 
 async fn versions() -> Json<serde_json::Value> {

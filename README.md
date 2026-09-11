@@ -29,6 +29,10 @@ DATABASE_URL="postgresql://postgres@localhost/conduit" \
     cargo run -p conduit-server                                    # :8008
 ```
 
+OIDC defaults to IdentiKey's hosted OP (`https://auth.identikey.me`).
+Override with `CONDUIT_OIDC_ISSUER`; set it to `0` or `off` to disable.
+`CONDUIT_OIDC_AUDIENCE` defaults to `CONDUIT_SERVER_NAME`.
+
 Migrations under `conduit-server/migrations/` apply automatically on
 startup. See [docs/element-bringup.md](docs/element-bringup.md) for
 the full Element-web verification flow.

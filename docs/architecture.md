@@ -9,8 +9,9 @@ Conduit ships as two crates:
   no `axum` / `http` / `reqwest` types. The `iroh` feature may pull
   `http`/`reqwest` transitively through iroh-relay.
 - **`conduit-server`** — host. Tokio + axum + Postgres + workers.
-  Maps HTTP to kernel types. Optional OIDC against a foreign OP
-  (identikey-core is AGPL; do not crate-dep it). Durable Postgres
+  Maps HTTP to kernel types. OIDC RP defaults to
+  `https://auth.identikey.me` (identikey-core is AGPL; do not crate-dep
+  the OP). Durable Postgres
   without axum is `conduit-6jr`, not a feature on `conduit`.
 
 Room version **11 only**, checked in the kernel (create and inbound).
