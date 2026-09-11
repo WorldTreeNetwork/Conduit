@@ -1,9 +1,10 @@
 # Tasks
 
 - [x] Amend `docs/architecture.md`: two crates; kernel owns persist; host supplies Storage/keys/name; `RoomEventSender` inversion named as `add-library-ops` debt; errcode on `conduit::Error`; Homeserver split table; tokio-hosted; v11-only in kernel; iroh may pull `http`/`reqwest` transitively, `axum` never.
-- [ ] Add living capability file via fold of this delta (`embeddable-kernel`).
 - [x] CI/check: `cargo tree -p conduit` and `cargo tree -p conduit --features iroh` contain no `axum`. Document that `http`/`reqwest` are iroh-only.
 - [x] Reject non-v11 `room_version` at create **and inbound** with a typed kernel error; host maps it.
+
+Fold writes `openspec/specs/embeddable-kernel/spec.md` (not an act box).
 - [ ] Matrix `errcode` on `conduit::Error` (accessor or variant payload) carrying at least `M_FORBIDDEN`, `M_NOT_FOUND`, `M_UNSUPPORTED_ROOM_VERSION`; host maps errcode → status. The v11 reject in the previous box is the first carrier. (Added by fable-5.1-arch-review advise2: delta requirement had no task.)
 
 Out of scope (bullets): moving the event pipeline (`add-library-ops`); Pdu split; in-process Client body; postgres crate split (`conduit-6jr`).
