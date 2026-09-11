@@ -5,7 +5,7 @@
 - [x] Reject non-v11 `room_version` at create **and inbound** with a typed kernel error; host maps it.
 
 Fold writes `openspec/specs/embeddable-kernel/spec.md` (not an act box).
-- [ ] Matrix `errcode` on `conduit::Error` (accessor or variant payload) carrying at least `M_FORBIDDEN`, `M_NOT_FOUND`, `M_UNSUPPORTED_ROOM_VERSION`; host maps errcode → status. The v11 reject in the previous box is the first carrier. (Added by fable-5.1-arch-review advise2: delta requirement had no task.)
+- [x] Matrix `errcode` on `conduit::Error` (accessor) carrying at least `M_FORBIDDEN`, `M_NOT_FOUND`, `M_UNSUPPORTED_ROOM_VERSION`; host maps errcode → status.
 
 Out of scope (bullets): moving the event pipeline (`add-library-ops`); Pdu split; in-process Client body; postgres crate split (`conduit-6jr`).
 
