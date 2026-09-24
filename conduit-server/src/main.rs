@@ -50,6 +50,10 @@ struct AppState {
     identity_verifier: Arc<conduit::identity::IdentityVerifier>,
     /// Optional RP client for an identikey-core (or any OIDC) issuer.
     oidc_client: Option<Arc<identikey_oidc_client::OidcClient>>,
+    /// Confidential-client config for Matrix SSO. None = no browser redirect.
+    oidc_sso: Option<Arc<conduit_server::api::client::sso::OidcSsoConfig>>,
+    sso_sessions: Arc<conduit_server::api::client::sso::SsoSessionStore>,
+    login_tokens: Arc<conduit_server::api::client::sso::LoginTokenStore>,
     server_name: Arc<str>,
     http: reqwest::Client,
     remote_keys: Arc<RemoteKeyCache>,
@@ -126,6 +130,15 @@ impl AuthState for AppState {
     }
     fn oidc_client(&self) -> Option<Arc<identikey_oidc_client::OidcClient>> {
         self.oidc_client.clone()
+    }
+    fn oidc_sso(&self) -> Option<Arc<conduit_server::api::client::sso::OidcSsoConfig>> {
+        self.oidc_sso.clone()
+    }
+    fn sso_sessions(&self) -> Arc<conduit_server::api::client::sso::SsoSessionStore> {
+        Arc::clone(&self.sso_sessions)
+    }
+    fn login_tokens(&self) -> Arc<conduit_server::api::client::sso::LoginTokenStore> {
+        Arc::clone(&self.login_tokens)
     }
     fn txn_cache(&self) -> &Arc<RwLock<HashMap<TxnCacheKey, String>>> {
         &self.txn_cache
@@ -301,20 +314,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // CONDUIT_OIDC_ISSUER=0 / off / empty disables. A custom issuer that
     // fails discovery aborts boot; the default only warns so a homeserver
     // still starts when the public OP is unreachable.
+    let oidc_client_id = env::var("CONDUIT_OIDC_CLIENT_ID")
+        .ok()
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty());
+    let oidc_audience = env::var("CONDUIT_OIDC_AUDIENCE")
+        .ok()
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+        .or_else(|| oidc_client_id.clone())
+        .unwrap_or_else(|| server_name.to_string());
+
     let oidc_client = match oidc_issuer_from_env() {
         None => None,
         Some((issuer, explicit)) => {
-            let audience = env::var("CONDUIT_OIDC_AUDIENCE")
-                .unwrap_or_else(|_| server_name.to_string());
             match identikey_oidc_client::OidcClient::discover(
                 &issuer,
-                &audience,
+                &oidc_audience,
                 http.clone(),
             )
             .await
             {
                 Ok(c) => {
-                    tracing::info!(issuer = %issuer, audience = %audience, "oidc rp client ready");
+                    tracing::info!(issuer = %issuer, audience = %oidc_audience, "oidc rp client ready");
                     Some(Arc::new(c))
                 }
                 Err(e) if explicit => {
@@ -333,12 +355,64 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
+    let oidc_sso = match (
+        oidc_client.as_ref(),
+        env::var("CONDUIT_OIDC_CLIENT_SECRET")
+            .ok()
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty()),
+    ) {
+        (Some(_), Some(secret)) => {
+            let sso_client_id = oidc_client_id.unwrap_or_else(|| oidc_audience.clone());
+            let redirect_uri = env::var("CONDUIT_OIDC_REDIRECT_URI")
+                .ok()
+                .map(|s| s.trim().to_owned())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| {
+                    "http://127.0.0.1:8008/_matrix/client/v3/login/identikey/callback".into()
+                });
+            let mut allowlist = conduit_server::api::client::sso::default_sso_allowlist();
+            if let Ok(extra) = env::var("CONDUIT_SSO_REDIRECT_ALLOWLIST") {
+                for prefix in extra.split(',') {
+                    let t = prefix.trim();
+                    if !t.is_empty() {
+                        allowlist.push(t.to_owned());
+                    }
+                }
+            }
+            tracing::info!(
+                client_id = %sso_client_id,
+                redirect_uri = %redirect_uri,
+                "oidc sso redirect enabled"
+            );
+            Some(Arc::new(conduit_server::api::client::sso::OidcSsoConfig {
+                client_id: sso_client_id,
+                client_secret: secret,
+                redirect_uri,
+                allowlist,
+            }))
+        }
+        (Some(_), None) => {
+            tracing::warn!(
+                "CONDUIT_OIDC_CLIENT_SECRET unset; Matrix SSO redirect disabled (JWT-in-hand io.identikey.oidc still works)"
+            );
+            None
+        }
+        _ => None,
+    };
+
+    let sso_sessions = Arc::new(conduit_server::api::client::sso::SsoSessionStore::new());
+    let login_tokens = Arc::new(conduit_server::api::client::sso::LoginTokenStore::new());
+
     let state = AppState {
         storage,
         server_key,
         minter,
         identity_verifier,
         oidc_client,
+        oidc_sso,
+        sso_sessions,
+        login_tokens,
         server_name,
         http,
         remote_keys,
@@ -440,6 +514,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/_matrix/client/v3/logout/all", post(auth::logout_all::<AppState>))
         .route("/_matrix/client/v3/login/identikey/challenge",
             post(auth::identikey_challenge::<AppState>))
+        .route("/_matrix/client/v3/login/sso/redirect",
+            get(auth::sso::sso_redirect::<AppState>))
+        .route("/_matrix/client/v3/login/sso/redirect/:idpId",
+            get(auth::sso::sso_redirect_idp::<AppState>))
+        .route("/_matrix/client/v3/login/identikey/callback",
+            get(auth::sso::identikey_callback::<AppState>))
         .route("/_matrix/client/v3/account/identikey/bind",
             post(auth::identikey_bind::<AppState>))
         .route("/_matrix/client/v3/account/whoami", get(auth::whoami))

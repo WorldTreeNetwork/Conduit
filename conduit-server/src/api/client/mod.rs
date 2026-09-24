@@ -19,6 +19,7 @@ pub mod profile;
 pub mod push;
 pub mod receipts;
 pub mod rooms;
+pub mod sso;
 pub mod sync;
 pub mod typing;
 pub mod uia;
@@ -128,6 +129,22 @@ pub trait AuthState: Clone + Send + Sync + 'static + conduit::room::RoomEventSen
     /// Configured identikey-core (or any OIDC) RP client. Default: none.
     fn oidc_client(&self) -> Option<Arc<OidcClient>> {
         None
+    }
+
+    /// Confidential-client knobs for Matrix SSO redirect. Default: none
+    /// (JWT-in-hand `io.identikey.oidc` may still work).
+    fn oidc_sso(&self) -> Option<Arc<sso::OidcSsoConfig>> {
+        None
+    }
+
+    fn sso_sessions(&self) -> Arc<sso::SsoSessionStore> {
+        static STORE: std::sync::OnceLock<Arc<sso::SsoSessionStore>> = std::sync::OnceLock::new();
+        Arc::clone(STORE.get_or_init(|| Arc::new(sso::SsoSessionStore::new())))
+    }
+
+    fn login_tokens(&self) -> Arc<sso::LoginTokenStore> {
+        static STORE: std::sync::OnceLock<Arc<sso::LoginTokenStore>> = std::sync::OnceLock::new();
+        Arc::clone(STORE.get_or_init(|| Arc::new(sso::LoginTokenStore::new())))
     }
 }
 
@@ -366,9 +383,13 @@ pub struct RegisterRequest {
     /// account, so a later challenge/response can log in as this user.
     #[serde(rename = "io.identikey.fingerprint")]
     pub identikey_fingerprint: Option<String>,
-    /// Optional OIDC `sub` (already verified by the host at registration).
+    /// Optional OIDC `sub`. Ignored unless `oidc_token` is also present
+    /// and verifies to this same subject — a bare sub is not accepted.
     #[serde(rename = "io.identikey.oidc_sub")]
     pub oidc_sub: Option<String>,
+    /// OP ID token (JWT). Verified before any account link is written.
+    #[serde(rename = "io.identikey.oidc_token")]
+    pub oidc_token: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -490,8 +511,27 @@ pub async fn register<S: AuthState>(
             return MatrixError::forbidden(e.to_string()).into_response();
         }
     }
-    if let Some(sub) = body.oidc_sub.as_deref() {
-        let key = conduit::identity::oidc_identity_key(sub);
+    if body.oidc_sub.is_some() && body.oidc_token.is_none() {
+        return MatrixError::forbidden(
+            "io.identikey.oidc_sub is not accepted without a verified io.identikey.oidc_token",
+        )
+        .into_response();
+    }
+    if let Some(token) = body.oidc_token.as_deref() {
+        let Some(client) = state.oidc_client() else {
+            return MatrixError::forbidden("oidc is not configured").into_response();
+        };
+        let identity = match client.validate(token, now_unix().max(0) as u64).await {
+            Ok(id) => id,
+            Err(e) => return MatrixError::forbidden(e.to_string()).into_response(),
+        };
+        if let Some(claimed) = body.oidc_sub.as_deref() {
+            if claimed != identity.subject {
+                return MatrixError::forbidden("io.identikey.oidc_sub does not match token")
+                    .into_response();
+            }
+        }
+        let key = conduit::identity::oidc_identity_key(&identity.subject);
         if let Err(e) =
             conduit::identity::link_at_registration(state.storage().as_ref(), &key, &user_id).await
         {
@@ -529,6 +569,17 @@ pub async fn get_login_flows<S: AuthState>(State(state): State<S>) -> Json<serde
     if state.oidc_client().is_some() {
         flows.push(json!({ "type": OIDC_LOGIN_TYPE }));
     }
+    if state.oidc_client().is_some() && state.oidc_sso().is_some() {
+        flows.push(json!({
+            "type": "m.login.sso",
+            "identity_providers": [{
+                "id": sso::IDENTIKEY_IDP_ID,
+                "name": "IdentiKey",
+                "brand": "identikey",
+            }],
+        }));
+        flows.push(json!({ "type": "m.login.token" }));
+    }
     Json(json!({ "flows": flows }))
 }
 
@@ -550,6 +601,12 @@ pub async fn login<S: AuthState>(
     }
     if body.login_type == OIDC_LOGIN_TYPE {
         return oidc_login(state, body).await;
+    }
+    if body.login_type == "m.login.token" {
+        let Some(token) = body.token.as_deref() else {
+            return MatrixError::forbidden("m.login.token requires a token").into_response();
+        };
+        return sso::token_login(state, token).await;
     }
     if body.login_type != "m.login.password" {
         return MatrixError::forbidden(format!("unsupported login type: {}", body.login_type))

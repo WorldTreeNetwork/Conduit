@@ -40,6 +40,7 @@ regex = { workspace = true }
 iroh = { workspace = true, optional = true }
 # Apache RP client (lives in identikey-core repo, not the AGPL OP).
 identikey-oidc-client = { workspace = true }
+url = "2"
 
 [dev-dependencies]
 # Test-side claimant for the identikey-auth on-ramp.  The server itself

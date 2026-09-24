@@ -31,7 +31,14 @@ DATABASE_URL="postgresql://postgres@localhost/conduit" \
 
 OIDC defaults to IdentiKey's hosted OP (`https://auth.identikey.me`).
 Override with `CONDUIT_OIDC_ISSUER`; set it to `0` or `off` to disable.
-`CONDUIT_OIDC_AUDIENCE` defaults to `CONDUIT_SERVER_NAME`.
+`CONDUIT_OIDC_AUDIENCE` defaults to `CONDUIT_OIDC_CLIENT_ID` or
+`CONDUIT_SERVER_NAME` and **must** equal the OP client id.
+
+Browser SSO (Element `m.login.sso`) also needs `CONDUIT_OIDC_CLIENT_SECRET`
+matching a confidential client registered on the OP. Redirect defaults to
+`http://127.0.0.1:8008/_matrix/client/v3/login/identikey/callback`. Without
+the secret, JWT-in-hand `io.identikey.oidc` still works; the SSO button
+does not.
 
 Migrations under `conduit-server/migrations/` apply automatically on
 startup. See [docs/element-bringup.md](docs/element-bringup.md) for

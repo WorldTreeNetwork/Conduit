@@ -589,6 +589,7 @@ dependencies = [
  "tower-http 0.5.2",
  "tracing",
  "tracing-subscriber",
+ "url",
  "uuid",
 ]
 
@@ -2082,14 +2083,18 @@ dependencies = [
 [[package]]
 name = "identikey-oidc-client"
 version = "0.1.0"
-source = "git+ssh://git@github.com/identikey/identikey-core.git?rev=62b4f8050d1133ae356da469b5e9d844338b59f7#62b4f8050d1133ae356da469b5e9d844338b59f7"
+source = "git+ssh://git@github.com/identikey/identikey-core.git?rev=5d5c72eccb22c0630320c1a1c534a1c45d419313#5d5c72eccb22c0630320c1a1c534a1c45d419313"
 dependencies = [
+ "base64 0.22.1",
+ "getrandom 0.2.17",
  "josekit",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "thiserror 2.0.18",
  "tokio",
+ "url",
 ]
 
 [[package]]

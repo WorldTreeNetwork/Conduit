@@ -46,7 +46,7 @@ HTTPS from a remote homeserver
 
 | Kernel (`Homeserver`) | Host-only |
 |---|---|
-| `Storage` | OIDC issuer / JWKS |
+| `Storage` | OIDC issuer / JWKS / SSO callback |
 | server signing key + biscuit minter | media blob disk |
 | server name | CS/federation rate limit |
 | stream broadcast | push worker process |

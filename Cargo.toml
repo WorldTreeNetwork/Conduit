@@ -44,4 +44,4 @@ biscuit-auth = "6"
 # dependency and must never become one — the host speaks OIDC to it.
 identikey-auth = { git = "ssh://git@github.com/identikey/identikey-protocol.git", rev = "303dff1819aaba4f7a53f38b0fbc5a785a2743db" }
 # RP JWT/JWKS client. Apache-2.0 OR BSD-2-Clause-Patent. Not identikey-oidc (the AGPL OP).
-identikey-oidc-client = { git = "ssh://git@github.com/identikey/identikey-core.git", rev = "62b4f8050d1133ae356da469b5e9d844338b59f7" }
+identikey-oidc-client = { git = "ssh://git@github.com/identikey/identikey-core.git", rev = "5d5c72eccb22c0630320c1a1c534a1c45d419313" }

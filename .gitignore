@@ -8,3 +8,5 @@ target/
 .dolt/
 *.db
 .beads-credential-key
+
+.env

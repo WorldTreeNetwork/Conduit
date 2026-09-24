@@ -27,8 +27,47 @@ You should see:
 INFO conduit_server: connected to postgres
 INFO conduit_server: migrations applied
 INFO conduit_server: server signing key ready key_id=ed25519:XXXXXX
+INFO conduit_server: oidc rp client ready issuer=https://auth.identikey.me audience=localhost
 INFO conduit_server: conduit-server listening addr=0.0.0.0:8008
 ```
+
+## IdentiKey SSO (Element)
+
+The OP is `https://auth.identikey.me`. Register a confidential client
+there (`IDENTIKEY_CLIENTS`, no DCR) whose `id` equals
+`CONDUIT_OIDC_AUDIENCE` (default: `CONDUIT_SERVER_NAME`, usually
+`localhost`):
+
+```json
+{
+  "id": "localhost",
+  "redirect": "http://127.0.0.1:8008/_matrix/client/v3/login/identikey/callback",
+  "secret": "<same as CONDUIT_OIDC_CLIENT_SECRET>",
+  "auth": "client_secret_basic"
+}
+```
+
+Then start the homeserver with the secret:
+
+```sh
+DATABASE_URL="postgresql://postgres@localhost/conduit" \
+    CONDUIT_SERVER_NAME="localhost" \
+    CONDUIT_OIDC_CLIENT_SECRET="<secret>" \
+    cargo run -p conduit-server
+```
+
+`GET /_matrix/client/v3/login` should list `m.login.sso` (IdentiKey) and
+`m.login.token`. Element's "Continue with SSO" hits
+`/_matrix/client/v3/login/sso/redirect?redirectUrl=…`, the HS bounces to
+the OP, the callback exchanges the code, and Element finishes with
+`m.login.token`. First login creates `@ik<hex>:localhost` linked to the
+verified `sub`. A bare `io.identikey.oidc_sub` on `/register` is refused;
+present `io.identikey.oidc_token` (a verified JWT) to pick a username.
+
+`CONDUIT_OIDC_REDIRECT_URI` must match the OP registration exactly.
+`CONDUIT_SSO_REDIRECT_ALLOWLIST` is a comma-separated extra prefix list
+for Element's `redirectUrl` (defaults already include loopback,
+`https://app.element.io`, and `element://`).
 
 Quick sanity:
 
