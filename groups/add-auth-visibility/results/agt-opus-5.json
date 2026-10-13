@@ -1,0 +1,30 @@
+{
+  "schema_version": "1.0",
+  "id": "res-add-auth-visibility-act",
+  "node_id": "add-auth-visibility",
+  "change_id": "add-auth-visibility",
+  "disposition": "pass",
+  "summary": "Biscuits replace opaque tokens; identikey-auth on-ramp; may_read_room + can_see wired; restricted fail-closed. OIDC host path not built (task box open). conduit lib tests 111 passed.",
+  "verify_command": "SQLX_OFFLINE=true cargo test -p conduit --lib",
+  "verify_exit": 0,
+  "commit": {
+    "sha": "c7d752f",
+    "paths": [
+      "conduit/src/agency.rs",
+      "conduit/src/identity.rs"
+    ]
+  },
+  "artifacts": [
+    "conduit/src/agency.rs",
+    "conduit/src/identity.rs"
+  ],
+  "blockers": [],
+  "raw_ref": "/Users/dukejones/work/WorldTree/Conduit/.spawns/add-auth-visibility-1789084160-41700-8d3026d7/raw.txt",
+  "distilled": {
+    "summary": "add-auth-visibility implemented except optional OIDC on-ramp. 111 conduit lib tests pass.",
+    "disposition": "pass"
+  },
+  "signature": {
+    "content_hash": "sha256:53ea031dc7ec4f4164876e68356f07caf0b02bd34b30119ef6aa0791bcd9d226"
+  }
+}

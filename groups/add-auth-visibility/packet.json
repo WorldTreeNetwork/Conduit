@@ -1,0 +1,118 @@
+{
+  "schema_version": "1.0",
+  "id": "pkt-add-auth-visibility-act",
+  "node_id": "add-auth-visibility",
+  "capability": "auth-and-state",
+  "change_id": "add-auth-visibility",
+  "requester": {
+    "id": "agt-conductor",
+    "kind": "group",
+    "harness": "grok",
+    "signing": { "mode": "stand-in", "stand_in_id": "agt-conductor" }
+  },
+  "assignee": {
+    "id": "agt-sol",
+    "kind": "model",
+    "harness": "codex",
+    "interface": "gpt-5.6-sol",
+    "effort": "medium",
+    "signing": { "mode": "stand-in", "stand_in_id": "agt-sol" }
+  },
+  "goal": "Implement add-auth-visibility in /Users/dukejones/work/WorldTree/Conduit. Biscuits replace opaque access tokens. identikey-auth is a login on-ramp. Room reads require membership. can_see is wired. Restricted joins fail closed. Recrypt is not a dependency. identikey-core is not a crate dependency.",
+  "non_goals": [
+    "Recrypt / PRE",
+    "identikey-core crate dep",
+    "Holder-bound capability-v1 §7 proofs",
+    "Full other-room restricted join lookup (conduit-jt5)",
+    "add-library-ops / add-in-process-client",
+    "Opaque-token migration"
+  ],
+  "anchors": [
+    {
+      "symbol": "openspec/changes/add-auth-visibility/proposal.md",
+      "invariant": "ACTIVE BUILD. Three layers uncollapsed. Recrypt out. identikey-core is external OP only."
+    },
+    {
+      "symbol": "openspec/changes/add-auth-visibility/design.md",
+      "invariant": "Minter Ed25519 distinct from Matrix server key. Epoch on device row. Matrix CS is possession-of-bytes Bearer."
+    },
+    {
+      "symbol": "openspec/changes/add-auth-visibility/specs/auth-and-state/spec.md",
+      "invariant": "SHALLs and scenarios are the acceptance surface."
+    },
+    {
+      "symbol": "openspec/changes/add-auth-visibility/reviews/2026-09-10-advise.md",
+      "invariant": "Fable accept. Act must honor notes 1-7."
+    },
+    {
+      "symbol": "openspec/changes/add-auth-visibility/tasks.md",
+      "invariant": "Check a box only when that owed work is done in this change."
+    }
+  ],
+  "acceptance": {
+    "kind": "command",
+    "command": "SQLX_OFFLINE=true cargo test -p conduit --lib -- --test-threads=1 agency identity auth 2>/dev/null; SQLX_OFFLINE=true cargo test -p conduit --lib",
+    "criteria": [
+      "Mint/verify/expire/epoch-bump tests pass",
+      "Attenuation cannot add admin",
+      "Unlinked identikey-auth fingerprint does not create an account",
+      "may_read_room denies non-members",
+      "can_see hides pre-join events on joined history_visibility",
+      "Restricted allow of a foreign room_id fails closed; false-green test gone"
+    ]
+  },
+  "out_of_scope": [
+    { "item": "Recrypt", "tracked_as": "none" },
+    { "item": "identikey-core crate", "tracked_as": "none" },
+    { "item": "Full restricted allow lookup", "tracked_as": "conduit-jt5" },
+    { "item": "In-process Client attenuation consumer", "tracked_as": "add-in-process-client" }
+  ],
+  "constraints": {
+    "permission": "write",
+    "paths": [
+      "Cargo.toml",
+      "conduit/Cargo.toml",
+      "conduit/src/lib.rs",
+      "conduit/src/auth.rs",
+      "conduit/src/error.rs",
+      "conduit/src/storage.rs",
+      "conduit/src/agency.rs",
+      "conduit/src/identity.rs",
+      "conduit-server/Cargo.toml",
+      "conduit-server/src/keys.rs",
+      "conduit-server/src/main.rs",
+      "conduit-server/src/lib.rs",
+      "conduit-server/src/storage_pg.rs",
+      "conduit-server/src/api/client/mod.rs",
+      "conduit-server/src/api/client/rooms.rs",
+      "conduit-server/src/api/client/sync.rs",
+      "conduit-server/src/federation/server.rs",
+      "conduit-server/migrations/0008_device_epoch.sql",
+      "conduit-server/tests/auth.rs",
+      "conduit-server/tests/rooms.rs",
+      "conduit-server/tests/sync.rs",
+      "openspec/changes/add-auth-visibility/tasks.md",
+      "openspec/changes/add-auth-visibility/specs/auth-and-state/spec.md"
+    ],
+    "do_not": ["deploy", "push", "fold"]
+  },
+  "load_class": "intention-critical",
+  "rigor": "change",
+  "density": "standard",
+  "surface": "packet-only",
+  "role": "worker",
+  "inherited": [
+    "Repo root is /Users/dukejones/work/WorldTree/Conduit. Edit there. Do not write into .spawns/ as product code.",
+    "identikey-auth from identikey-protocol (git or path /Users/dukejones/work/IdentiKey/identikey-protocol). License Apache-2.0 OR BSD-2-Clause-Patent. biscuit-auth from crates.io.",
+    "Advise note 1: identikey-auth Response with no linked MXID SHALL fail login. Link only via register or a bind that already requires a valid grant. Add that scenario to the delta spec.",
+    "Advise note 2: do not inject epoch(n) as a fact that coexists with authority epoch(m). Authority block has check if epoch($e), device_epoch($e). Verifier injects device_epoch from the device row. Write the epoch-bump test first.",
+    "Advise note 3: UserEventPosition for user U and event E is membership of U's latest own m.room.member in that room with stream position below E. Add storage method if needed. Backfill uses the same walk over any member from the origin server.",
+    "Advise note 4: may_read_room: either document that world_readable still requires membership in v1, or pass when history_visibility is world_readable AND the requester has a valid grant. Pick one and match the delta.",
+    "Advise note 5: fail-closed for foreign allow.room_id stays out of inventing other-room lookup. Leave a comment that event auth (v8+) is join_authorised_via_users_server, not check_allow_conditions as the future home.",
+    "Advise note 6: AuthedUser (or the library equivalent) carries the verified Biscuit/authorizer so later attenuation can inject room/operation without re-verifying.",
+    "Advise note 7: persist minter private key the same way server signing keys are stored, not hashed.",
+    "No HTTP types in conduit. Host maps Bearer to library verify.",
+    "AGENTS.md: no IF NOT EXISTS in migrations; one file one transaction; tokens hashed if still stored; this change prefers verify-not-store for biscuit bytes.",
+    "Check off tasks.md boxes that this landing actually did. Do not check boxes you skipped."
+  ]
+}

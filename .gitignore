@@ -10,3 +10,9 @@ target/
 .beads-credential-key
 
 .env
+
+# Intention scratch (conductor isolate, spawn stage, harness session)
+.worktrees/
+.spawns/
+.omx/
+groups/*/inventory.json
