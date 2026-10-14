@@ -737,3 +737,415 @@ async fn server_notices_room_is_tagged_invite_only_and_reused() {
     let sync = server.request(Method::GET, "/_matrix/client/v3/sync?timeout=0", Some(token(&alice)), None, 200).await;
     assert_eq!(sync["rooms"]["invite"].as_object().unwrap().keys().collect::<Vec<_>>(), vec![&room_id]);
 }
+
+// ---------------------------------------------------------------------------
+// Deprecated legacy endpoints (conduit-y99.42)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn legacy_events_stream_event_lookup_and_initial_sync() {
+    let server = Server::new().await;
+    let (alice, bob, room, first_event) = server.chat_pair().await;
+    let carol = server.register("carol").await;
+
+    // initialSync lists joined rooms with recent messages and state.
+    let full = server
+        .request(Method::GET, "/_matrix/client/v3/initialSync?limit=2", Some(token(&bob)), None, 200)
+        .await;
+    assert!(full["end"].as_str().unwrap().starts_with('s'));
+    assert!(full["presence"].is_array());
+    let rooms = full["rooms"].as_array().unwrap();
+    assert_eq!(rooms.len(), 1);
+    let info = &rooms[0];
+    assert_eq!(info["room_id"], room);
+    assert_eq!(info["membership"], "join");
+    assert_eq!(info["visibility"], "private");
+    let chunk = info["messages"]["chunk"].as_array().unwrap();
+    assert_eq!(chunk.len(), 2);
+    assert_eq!(chunk.last().unwrap()["event_id"], first_event);
+    assert!(info["messages"]["end"].is_string());
+    assert!(info["state"].as_array().unwrap().iter().any(|e| e["type"] == "m.room.create"));
+    // The start token pages backwards with /messages.
+    let start = info["messages"]["start"].as_str().unwrap();
+    let older = server
+        .request(
+            Method::GET,
+            &format!("/_matrix/client/v3/rooms/{}/messages?dir=b&from={start}&limit=1", enc(&room)),
+            Some(token(&bob)),
+            None,
+            200,
+        )
+        .await;
+    assert_eq!(older["chunk"].as_array().unwrap().len(), 1);
+    assert_ne!(older["chunk"][0]["event_id"], chunk[0]["event_id"]);
+
+    // /events streams new events after the initialSync end token.
+    let end = full["end"].as_str().unwrap().to_owned();
+    let empty = server
+        .request(Method::GET, &format!("/_matrix/client/v3/events?from={end}&timeout=0"), Some(token(&bob)), None, 200)
+        .await;
+    assert_eq!(empty["chunk"], json!([]));
+    assert_eq!(empty["start"], end);
+    let sent = server
+        .request(
+            Method::PUT,
+            &format!("/_matrix/client/v3/rooms/{}/send/m.room.message/legacy1", enc(&room)),
+            Some(token(&alice)),
+            Some(json!({"msgtype": "m.text", "body": "streamed"})),
+            200,
+        )
+        .await["event_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let streamed = server
+        .request(Method::GET, &format!("/_matrix/client/v3/events?from={end}&timeout=1000"), Some(token(&bob)), None, 200)
+        .await;
+    let ids: Vec<&str> = streamed["chunk"].as_array().unwrap().iter().map(|e| e["event_id"].as_str().unwrap()).collect();
+    assert_eq!(ids, vec![sent.as_str()]);
+    assert_ne!(streamed["end"], end);
+    // Carol is in no room: the stream shows her nothing.
+    let none = server
+        .request(Method::GET, &format!("/_matrix/client/v3/events?from={end}&timeout=0"), Some(token(&carol)), None, 200)
+        .await;
+    assert_eq!(none["chunk"], json!([]));
+    let bad = server.request(Method::GET, "/_matrix/client/v3/events?from=nonsense", Some(token(&bob)), None, 400).await;
+    assert_eq!(bad["errcode"], "M_INVALID_PARAM");
+
+    // /events/{eventId}: visible to members, 404 otherwise.
+    let one = server
+        .request(Method::GET, &format!("/_matrix/client/v3/events/{}", enc(&sent)), Some(token(&bob)), None, 200)
+        .await;
+    assert_eq!(one["content"]["body"], "streamed");
+    let hidden = server
+        .request(Method::GET, &format!("/_matrix/client/v3/events/{}", enc(&sent)), Some(token(&carol)), None, 404)
+        .await;
+    assert_eq!(hidden["errcode"], "M_NOT_FOUND");
+    server.request(Method::GET, "/_matrix/client/v3/events/%24unknown", Some(token(&bob)), None, 404).await;
+
+    // rooms/{roomId}/initialSync: members yes, strangers 403.
+    let room_info = server
+        .request(Method::GET, &format!("/_matrix/client/v3/rooms/{}/initialSync", enc(&room)), Some(token(&alice)), None, 200)
+        .await;
+    assert_eq!(room_info["room_id"], room);
+    assert_eq!(room_info["membership"], "join");
+    let denied = server
+        .request(Method::GET, &format!("/_matrix/client/v3/rooms/{}/initialSync", enc(&room)), Some(token(&carol)), None, 403)
+        .await;
+    assert_eq!(denied["errcode"], "M_FORBIDDEN");
+
+    // archived=true adds rooms the user left, frozen at departure.
+    server
+        .request(Method::POST, &format!("/_matrix/client/v3/rooms/{}/leave", enc(&room)), Some(token(&bob)), Some(json!({})), 200)
+        .await;
+    server
+        .request(
+            Method::PUT,
+            &format!("/_matrix/client/v3/rooms/{}/send/m.room.message/after-leave", enc(&room)),
+            Some(token(&alice)),
+            Some(json!({"msgtype": "m.text", "body": "after bob left"})),
+            200,
+        )
+        .await;
+    let current = server.request(Method::GET, "/_matrix/client/v3/initialSync", Some(token(&bob)), None, 200).await;
+    assert_eq!(current["rooms"], json!([]));
+    let archived = server
+        .request(Method::GET, "/_matrix/client/v3/initialSync?archived=true", Some(token(&bob)), None, 200)
+        .await;
+    let left = &archived["rooms"][0];
+    assert_eq!(left["membership"], "leave");
+    let bodies: Vec<&str> = left["messages"]["chunk"].as_array().unwrap().iter().filter_map(|e| e["content"]["body"].as_str()).collect();
+    assert!(!bodies.contains(&"after bob left"), "{bodies:?}");
+}
+
+#[tokio::test]
+async fn legacy_room_preview_peeks_only_world_readable_rooms() {
+    let server = Server::new().await;
+    let alice = server.register("alice").await;
+    let lurker = server.register("lurker").await;
+    let private = create_room(&server, token(&alice), json!({"preset": "private_chat"})).await;
+    let open = create_room(
+        &server,
+        token(&alice),
+        json!({"preset": "public_chat", "initial_state": [{
+            "type": "m.room.history_visibility", "state_key": "",
+            "content": {"history_visibility": "world_readable"}
+        }]}),
+    )
+    .await;
+    let peek = server
+        .request(Method::GET, &format!("/_matrix/client/v3/rooms/{}/initialSync", enc(&open)), Some(token(&lurker)), None, 200)
+        .await;
+    assert_eq!(peek["room_id"], open);
+    assert!(peek.get("membership").is_none());
+    assert!(peek["state"].as_array().unwrap().iter().any(|e| e["type"] == "m.room.history_visibility"));
+    let e = server
+        .request(Method::GET, &format!("/_matrix/client/v3/rooms/{}/initialSync", enc(&private)), Some(token(&lurker)), None, 403)
+        .await;
+    assert_eq!(e["errcode"], "M_FORBIDDEN");
+
+    let from = server.request(Method::GET, "/_matrix/client/v3/initialSync", Some(token(&lurker)), None, 200).await["end"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    for (room, txn) in [(&open, "o1"), (&private, "p1")] {
+        server
+            .request(
+                Method::PUT,
+                &format!("/_matrix/client/v3/rooms/{}/send/m.room.message/{txn}", enc(room)),
+                Some(token(&alice)),
+                Some(json!({"msgtype": "m.text", "body": txn})),
+                200,
+            )
+            .await;
+    }
+    let peeked = server
+        .request(
+            Method::GET,
+            &format!("/_matrix/client/v3/events?room_id={}&from={from}&timeout=0", enc(&open)),
+            Some(token(&lurker)),
+            None,
+            200,
+        )
+        .await;
+    let bodies: Vec<&str> = peeked["chunk"].as_array().unwrap().iter().filter_map(|e| e["content"]["body"].as_str()).collect();
+    assert_eq!(bodies, vec!["o1"]);
+    let e = server
+        .request(
+            Method::GET,
+            &format!("/_matrix/client/v3/events?room_id={}&from={from}&timeout=0", enc(&private)),
+            Some(token(&lurker)),
+            None,
+            403,
+        )
+        .await;
+    assert_eq!(e["errcode"], "M_FORBIDDEN");
+}
+
+// ---------------------------------------------------------------------------
+// Guest revocation and deactivation erasure (conduit-y99.18.4, .18.3)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn revoking_guest_access_removes_joined_guests() {
+    let server = Server::with_env(&[("CONDUIT_ALLOW_GUEST_ACCESS", "true")]).await;
+    let alice = server.register("alice").await;
+    let bob = server.register("bob").await;
+    let room = create_room(
+        &server,
+        token(&alice),
+        json!({"preset": "public_chat", "initial_state": [{
+            "type": "m.room.guest_access", "state_key": "", "content": {"guest_access": "can_join"}
+        }]}),
+    )
+    .await;
+    server
+        .request(Method::POST, &format!("/_matrix/client/v3/join/{}", enc(&room)), Some(token(&bob)), Some(json!({})), 200)
+        .await;
+    let guest = server
+        .request(Method::POST, "/_matrix/client/v3/register?kind=guest", None, Some(json!({})), 200)
+        .await;
+    let guest_id = uid(&guest).to_owned();
+    server
+        .request(Method::POST, &format!("/_matrix/client/v3/join/{}", enc(&room)), Some(token(&guest)), Some(json!({})), 200)
+        .await;
+    assert_eq!(member_content(&server, token(&alice), &room, &guest_id).await["membership"], "join");
+
+    server
+        .request(
+            Method::PUT,
+            &format!("/_matrix/client/v3/rooms/{}/state/m.room.guest_access", enc(&room)),
+            Some(token(&alice)),
+            Some(json!({"guest_access": "forbidden"})),
+            200,
+        )
+        .await;
+    assert_eq!(member_content(&server, token(&alice), &room, &guest_id).await["membership"], "leave");
+    // Registered users are untouched.
+    assert_eq!(member_content(&server, token(&alice), &room, uid(&bob)).await["membership"], "join");
+    // And the guest cannot come back.
+    let e = server
+        .request(Method::POST, &format!("/_matrix/client/v3/join/{}", enc(&room)), Some(token(&guest)), Some(json!({})), 403)
+        .await;
+    assert_eq!(e["errcode"], "M_GUEST_ACCESS_FORBIDDEN");
+}
+
+#[tokio::test]
+async fn erased_accounts_are_served_redacted_to_later_joiners_only() {
+    let server = Server::new().await;
+    let (alice, bob, room, _) = server.chat_pair().await;
+    let secret = server
+        .request(
+            Method::PUT,
+            &format!("/_matrix/client/v3/rooms/{}/send/m.room.message/secret", enc(&room)),
+            Some(token(&alice)),
+            Some(json!({"msgtype": "m.text", "body": "my secret"})),
+            200,
+        )
+        .await["event_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let challenge = server
+        .request(Method::POST, "/_matrix/client/v3/account/deactivate", Some(token(&alice)), Some(json!({})), 401)
+        .await;
+    server
+        .request(
+            Method::POST,
+            "/_matrix/client/v3/account/deactivate",
+            Some(token(&alice)),
+            Some(json!({
+                "erase": true,
+                "auth": {
+                    "type": "m.login.password",
+                    "identifier": {"type": "m.id.user", "user": "alice"},
+                    "password": "test-password",
+                    "session": challenge["session"],
+                },
+            })),
+            200,
+        )
+        .await;
+
+    // Bob saw the message before the erasure and keeps it.
+    let event_path = format!("/_matrix/client/v3/rooms/{}/event/{}", enc(&room), enc(&secret));
+    let seen = server.request(Method::GET, &event_path, Some(token(&bob)), None, 200).await;
+    assert_eq!(seen["content"]["body"], "my secret");
+
+    // Carol joins afterwards (shared history) and gets a redacted copy on
+    // every read path, without a redaction event.
+    let carol = server.register("carol").await;
+    server
+        .request(Method::POST, &format!("/_matrix/client/v3/join/{}", enc(&room)), Some(token(&carol)), Some(json!({})), 200)
+        .await;
+    let redacted = server.request(Method::GET, &event_path, Some(token(&carol)), None, 200).await;
+    assert_eq!(redacted["content"], json!({}), "{redacted}");
+    assert!(redacted["unsigned"].get("redacted_because").is_none());
+    let messages = server
+        .request(Method::GET, &format!("/_matrix/client/v3/rooms/{}/messages?dir=b&limit=50", enc(&room)), Some(token(&carol)), None, 200)
+        .await;
+    let copy = messages["chunk"].as_array().unwrap().iter().find(|e| e["event_id"] == secret).expect("event listed");
+    assert_eq!(copy["content"], json!({}));
+    let legacy = server
+        .request(Method::GET, &format!("/_matrix/client/v3/events/{}", enc(&secret)), Some(token(&carol)), None, 200)
+        .await;
+    assert_eq!(legacy["content"], json!({}));
+    let bob_messages = server
+        .request(Method::GET, &format!("/_matrix/client/v3/rooms/{}/messages?dir=b&limit=50", enc(&room)), Some(token(&bob)), None, 200)
+        .await;
+    let original = bob_messages["chunk"].as_array().unwrap().iter().find(|e| e["event_id"] == secret).unwrap();
+    assert_eq!(original["content"]["body"], "my secret");
+}
+
+// ---------------------------------------------------------------------------
+// Previously untested surfaces (conduit-y99.46)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn turn_openid_cors_direct_invites_and_unban() {
+    let server = Server::new().await;
+    let alice = server.register("alice").await;
+    let bob = server.register("bob").await;
+    let me = uid(&alice).to_owned();
+
+    // TURN: authenticated; no TURN configured is a valid, well-formed answer.
+    let e = server.request(Method::GET, "/_matrix/client/v3/voip/turnServer", None, None, 401).await;
+    assert_eq!(e["errcode"], "M_MISSING_TOKEN");
+    let turn = server.request(Method::GET, "/_matrix/client/v3/voip/turnServer", Some(token(&alice)), None, 200).await;
+    assert!(turn["uris"].is_array());
+    assert!(turn["username"].is_string() && turn["password"].is_string());
+    assert!(turn["ttl"].as_u64().unwrap() > 0);
+
+    // OpenID request_token: shape, and only for oneself.
+    let openid = server
+        .request(
+            Method::POST,
+            &format!("/_matrix/client/v3/user/{}/openid/request_token", enc(&me)),
+            Some(token(&alice)),
+            Some(json!({})),
+            200,
+        )
+        .await;
+    assert_eq!(openid["token_type"], "Bearer");
+    assert_eq!(openid["matrix_server_name"], "production.test");
+    assert!(openid["expires_in"].as_u64().unwrap() > 0);
+    assert!(!openid["access_token"].as_str().unwrap().is_empty());
+    let e = server
+        .request(
+            Method::POST,
+            &format!("/_matrix/client/v3/user/{}/openid/request_token", enc(&me)),
+            Some(token(&bob)),
+            Some(json!({})),
+            403,
+        )
+        .await;
+    assert_eq!(e["errcode"], "M_FORBIDDEN");
+
+    // CORS: preflight and simple responses allow any origin.
+    let preflight = raw(
+        &server,
+        Method::OPTIONS,
+        "/_matrix/client/v3/account/whoami",
+        None,
+        None,
+        &[
+            ("origin", "https://app.example"),
+            ("access-control-request-method", "GET"),
+            ("access-control-request-headers", "authorization"),
+        ],
+    )
+    .await;
+    assert!(preflight.status().is_success(), "{}", preflight.status());
+    let h = preflight.headers();
+    assert_eq!(h["access-control-allow-origin"], "*");
+    let methods = h["access-control-allow-methods"].to_str().unwrap().to_ascii_uppercase();
+    assert!(methods == "*" || methods.contains("GET"), "{methods}");
+    let allowed = h["access-control-allow-headers"].to_str().unwrap().to_ascii_lowercase();
+    assert!(allowed == "*" || allowed.contains("authorization"), "{allowed}");
+    let simple = raw(&server, Method::GET, "/_matrix/client/versions", None, None, &[("origin", "https://app.example")]).await;
+    assert_eq!(simple.headers()["access-control-allow-origin"], "*");
+
+    // Direct messaging: createRoom is_direct marks the invite.
+    let dm = create_room(&server, token(&alice), json!({"preset": "trusted_private_chat", "is_direct": true, "invite": [uid(&bob)]})).await;
+    let invite = member_content(&server, token(&alice), &dm, uid(&bob)).await;
+    assert_eq!(invite["membership"], "invite");
+    assert_eq!(invite["is_direct"], true);
+    let sync = server.request(Method::GET, "/_matrix/client/v3/sync?timeout=0", Some(token(&bob)), None, 200).await;
+    let invite_state = sync["rooms"]["invite"][&dm]["invite_state"]["events"].as_array().unwrap();
+    let mine = invite_state.iter().find(|e| e["type"] == "m.room.member" && e["state_key"] == uid(&bob)).unwrap();
+    assert_eq!(mine["content"]["is_direct"], true);
+
+    // Unban: only moderators; the target ends up `leave` and may rejoin.
+    let room = create_room(&server, token(&alice), json!({"preset": "public_chat"})).await;
+    server
+        .request(Method::POST, &format!("/_matrix/client/v3/join/{}", enc(&room)), Some(token(&bob)), Some(json!({})), 200)
+        .await;
+    server
+        .request(Method::POST, &format!("/_matrix/client/v3/rooms/{}/ban", enc(&room)), Some(token(&alice)), Some(json!({"user_id": uid(&bob)})), 200)
+        .await;
+    let e = server
+        .request(Method::POST, &format!("/_matrix/client/v3/join/{}", enc(&room)), Some(token(&bob)), Some(json!({})), 403)
+        .await;
+    assert_eq!(e["errcode"], "M_FORBIDDEN");
+    let e = server
+        .request(Method::POST, &format!("/_matrix/client/v3/rooms/{}/unban", enc(&room)), Some(token(&bob)), Some(json!({"user_id": uid(&bob)})), 403)
+        .await;
+    assert_eq!(e["errcode"], "M_FORBIDDEN");
+    server
+        .request(Method::POST, &format!("/_matrix/client/v3/rooms/{}/unban", enc(&room)), Some(token(&alice)), Some(json!({"user_id": uid(&bob)})), 200)
+        .await;
+    assert_eq!(member_content(&server, token(&alice), &room, uid(&bob)).await["membership"], "leave");
+    server
+        .request(Method::POST, &format!("/_matrix/client/v3/join/{}", enc(&room)), Some(token(&bob)), Some(json!({})), 200)
+        .await;
+
+    // Versions and capabilities shapes.
+    let versions = server.request(Method::GET, "/_matrix/client/versions", None, None, 200).await;
+    assert!(versions["versions"].as_array().unwrap().iter().any(|v| v == "v1.19"));
+    let caps = server.request(Method::GET, "/_matrix/client/v3/capabilities", Some(token(&alice)), None, 200).await;
+    for cap in ["m.change_password", "m.set_displayname", "m.set_avatar_url", "m.3pid_changes", "m.get_login_token", "m.profile_fields"] {
+        assert!(caps["capabilities"][cap]["enabled"].is_boolean(), "{cap}: {caps}");
+    }
+    assert!(caps["capabilities"]["m.room_versions"]["available"].is_object());
+}

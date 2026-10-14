@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT event_id AS \"event_id!\", txn_id FROM (\n                   SELECT COALESCE(result->>'event_id',\n                                   substring(result_text from '\"event_id\":\"([^\"]+)\"')) AS event_id,\n                          txn_id\n                   FROM transactions WHERE scope = 'client' AND owner = $1\n               ) t WHERE event_id = ANY($2)",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "event_id!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "txn_id",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "TextArray"
+      ]
+    },
+    "nullable": [
+      null,
+      false
+    ]
+  },
+  "hash": "5c0eec917218af95a540f6288428a5a9c69bdc05310d1a79185b2783712eab3d"
+}

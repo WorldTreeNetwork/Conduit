@@ -401,3 +401,24 @@ user (`server_notice_rooms`, migration 0072), invites the user, tags it
 `m.server_notice`, and sends `msgtype: m.server_notice`. Rejecting the invite is
 `403 M_CANNOT_LEAVE_SERVER_NOTICE_ROOM`; leaving after joining is allowed and
 the next notice re-invites.
+
+**Legacy endpoints** (`api/client/legacy.rs`, conduit-y99.42). `GET /events`,
+`/events/{eventId}`, `/initialSync` and `/rooms/{roomId}/initialSync` are
+served for old clients and room previews. Tokens are `s{position}` over the
+global event stream (initialSync `end` feeds `/events?from=`); room message
+tokens work with `/messages`. Every event passes history visibility, ignores
+and redactions; `/events?room_id=` peeks members' rooms and world-readable
+rooms only.
+
+**Guest revocation** (`api/client/guest_access.rs`, conduit-y99.18.4). After an
+`m.room.guest_access` state event that is not `can_join` is persisted, each
+joined local guest leaves on its own behalf (via the boxed RoomEventSender,
+which breaks the async recursion into the pipeline). Federated changes are
+conduit-y99.48.
+
+**Erasure** (`room_content/serve.rs::erased_for_viewer`, conduit-y99.18.3).
+Events from an account deactivated with `erase: true` are pruned at serve time
+for viewers whose first join to the room is after the erasure (or who never
+joined); earlier members keep originals. No redaction event is created.
+Federation readers are conduit-y99.49.
+

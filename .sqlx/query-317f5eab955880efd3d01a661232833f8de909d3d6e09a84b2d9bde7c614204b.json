@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT (EXTRACT(EPOCH FROM erased_at) * 1000)::BIGINT AS \"erased_at\" FROM accounts WHERE user_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "erased_at",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "317f5eab955880efd3d01a661232833f8de909d3d6e09a84b2d9bde7c614204b"
+}

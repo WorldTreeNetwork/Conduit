@@ -16,16 +16,16 @@
  "summary": {
   "cs": {
    "endpoint": {
-    "implemented+tested": 122,
-    "implemented-untested": 3,
-    "partial": 31,
-    "missing": 7,
+    "implemented+tested": 129,
+    "implemented-untested": 0,
+    "partial": 32,
+    "missing": 2,
     "not-applicable": 1,
     "total": 164
    },
    "requirement": {
-    "implemented+tested": 39,
-    "implemented-untested": 3,
+    "implemented+tested": 42,
+    "implemented-untested": 0,
     "partial": 30,
     "missing": 5,
     "not-applicable": 9,
@@ -125,10 +125,10 @@
    }
   },
   "all": {
-   "implemented+tested": 210,
-   "implemented-untested": 9,
-   "partial": 97,
-   "missing": 112,
+   "implemented+tested": 220,
+   "implemented-untested": 3,
+   "partial": 98,
+   "missing": 107,
    "not-applicable": 37,
    "total": 465
   }
@@ -753,19 +753,18 @@
    "status": "partial",
    "code": [
     {
-     "loc": "conduit-server/src/api/client/account.rs:44",
-     "handler": "deactivate",
-     "kind": "exact"
+     "loc": "conduit-server/src/api/client/account.rs:44"
     }
    ],
    "tests": [
-    "conduit-server/tests/production_account.rs::production_deactivation_leaves_rooms_and_blocks_login"
+    "conduit-server/tests/production_account.rs::production_deactivation_leaves_rooms_and_blocks_login",
+    "conduit-server/tests/production_modules.rs::erased_accounts_are_served_redacted_to_later_joiners_only"
    ],
-   "tests_total": 1,
+   "tests_total": 2,
    "gap_beads": [
-    "conduit-y99.18.3"
+    "conduit-y99.49"
    ],
-   "notes": "erase does not yet serve redacted copies to later joiners."
+   "notes": "erase: users who join after the erasure get redacted copies (no redacted_because) on every CS read path; earlier members keep originals. Servers joining later still get originals over federation (conduit-y99.49)."
   },
   {
    "id": "cs.ep.get_matrixclientv1auth_metadata",
@@ -1209,14 +1208,18 @@
    "rate_limited": "No",
    "deprecated": true,
    "role": "homeserver",
-   "status": "missing",
-   "code": [],
-   "tests": [],
-   "tests_total": 0,
-   "gap_beads": [
-    "conduit-y99.42"
+   "status": "implemented+tested",
+   "code": [
+    {
+     "loc": "conduit-server/src/api/client/legacy.rs (events)"
+    }
    ],
-   "notes": "Deprecated but present."
+   "tests": [
+    "conduit-server/tests/production_modules.rs::legacy_events_stream_event_lookup_and_initial_sync"
+   ],
+   "tests_total": 1,
+   "gap_beads": [],
+   "notes": "Legacy stream over s{position} tokens (from initialSync end); long-polls up to 30s; history visibility, ignores and redactions applied; 400 M_INVALID_PARAM for a bad from."
   },
   {
    "id": "cs.ep.get_matrixclientv3eventseventid",
@@ -1230,14 +1233,18 @@
    "rate_limited": "No",
    "deprecated": true,
    "role": "homeserver",
-   "status": "missing",
-   "code": [],
-   "tests": [],
-   "tests_total": 0,
-   "gap_beads": [
-    "conduit-y99.42"
+   "status": "implemented+tested",
+   "code": [
+    {
+     "loc": "conduit-server/src/api/client/legacy.rs (event_by_id)"
+    }
    ],
-   "notes": "Deprecated but present."
+   "tests": [
+    "conduit-server/tests/production_modules.rs::legacy_events_stream_event_lookup_and_initial_sync"
+   ],
+   "tests_total": 1,
+   "gap_beads": [],
+   "notes": "404 M_NOT_FOUND for unknown or invisible events."
   },
   {
    "id": "cs.ep.get_matrixclientv3initialsync",
@@ -1251,14 +1258,18 @@
    "rate_limited": "No",
    "deprecated": true,
    "role": "homeserver",
-   "status": "missing",
-   "code": [],
-   "tests": [],
-   "tests_total": 0,
-   "gap_beads": [
-    "conduit-y99.42"
+   "status": "implemented+tested",
+   "code": [
+    {
+     "loc": "conduit-server/src/api/client/legacy.rs (initial_sync)"
+    }
    ],
-   "notes": "Deprecated but present."
+   "tests": [
+    "conduit-server/tests/production_modules.rs::legacy_events_stream_event_lookup_and_initial_sync"
+   ],
+   "tests_total": 1,
+   "gap_beads": [],
+   "notes": "Joined and invited rooms (archived=true adds left rooms frozen at departure): messages with /messages tokens, state, visibility, room account data; presence and global account data."
   },
   {
    "id": "cs.ep.get_matrixclientv3roomsroomideventeventid",
@@ -1490,14 +1501,19 @@
    "rate_limited": "No",
    "deprecated": false,
    "role": "homeserver",
-   "status": "missing",
-   "code": [],
-   "tests": [],
-   "tests_total": 0,
-   "gap_beads": [
-    "conduit-y99.42"
+   "status": "implemented+tested",
+   "code": [
+    {
+     "loc": "conduit-server/src/api/client/legacy.rs (room_initial_sync)"
+    }
    ],
-   "notes": ""
+   "tests": [
+    "conduit-server/tests/production_modules.rs::legacy_events_stream_event_lookup_and_initial_sync",
+    "conduit-server/tests/production_modules.rs::legacy_room_preview_peeks_only_world_readable_rooms"
+   ],
+   "tests_total": 2,
+   "gap_beads": [],
+   "notes": "Members, past members and world_readable peekers; 403 M_FORBIDDEN otherwise."
   },
   {
    "id": "cs.ep.put_matrixclientv3roomsroomidstateeventtypestatekey",
@@ -2109,20 +2125,18 @@
    "rate_limited": "No",
    "deprecated": false,
    "role": "homeserver",
-   "status": "implemented-untested",
+   "status": "implemented+tested",
    "code": [
     {
-     "loc": "conduit-server/src/main.rs:539",
-     "handler": "rooms::unban_user",
-     "kind": "exact"
+     "loc": "conduit-server/src/api/client/rooms.rs (unban_user)"
     }
    ],
-   "tests": [],
-   "tests_total": 0,
-   "gap_beads": [
-    "conduit-y99.46"
+   "tests": [
+    "conduit-server/tests/production_modules.rs::turn_openid_cors_direct_invites_and_unban"
    ],
-   "notes": "Route mounted in test routers but never exercised."
+   "tests_total": 1,
+   "gap_beads": [],
+   "notes": "Moderator-only (403 M_FORBIDDEN otherwise); target becomes leave and may rejoin."
   },
   {
    "id": "cs.ep.get_matrixclientv3directorylistroomroomid",
@@ -2416,20 +2430,18 @@
    "rate_limited": "Yes",
    "deprecated": false,
    "role": "homeserver",
-   "status": "implemented-untested",
+   "status": "implemented+tested",
    "code": [
     {
-     "loc": "conduit-server/src/main.rs:530",
-     "handler": "probe_api::turn_server",
-     "kind": "exact"
+     "loc": "conduit-server/src/api/client/probe.rs (turn_server)"
     }
    ],
-   "tests": [],
-   "tests_total": 0,
-   "gap_beads": [
-    "conduit-y99.46"
+   "tests": [
+    "conduit-server/tests/production_modules.rs::turn_openid_cors_direct_invites_and_unban"
    ],
-   "notes": "Returns empty uris (spec: homeserver MAY provide TURN). No test."
+   "tests_total": 1,
+   "gap_beads": [],
+   "notes": "Authenticated; no TURN configured answers empty uris with username/password/ttl (TURN is MAY)."
   },
   {
    "id": "cs.ep.put_matrixclientv3roomsroomidtypinguserid",
@@ -4093,14 +4105,18 @@
    "rate_limited": "No",
    "deprecated": false,
    "role": "homeserver",
-   "status": "missing",
-   "code": [],
-   "tests": [],
-   "tests_total": 0,
-   "gap_beads": [
-    "conduit-y99.42"
+   "status": "implemented+tested",
+   "code": [
+    {
+     "loc": "conduit-server/src/api/client/legacy.rs (events, room_id)"
+    }
    ],
-   "notes": "Room previews via deprecated /events?room_id=."
+   "tests": [
+    "conduit-server/tests/production_modules.rs::legacy_room_preview_peeks_only_world_readable_rooms"
+   ],
+   "tests_total": 1,
+   "gap_beads": [],
+   "notes": "room_id peeks: members and world_readable rooms only (403 otherwise); each event filtered by visibility at that event."
   },
   {
    "id": "cs.ep.get_matrixclientv3useruseridroomsroomidtags",
@@ -4775,21 +4791,20 @@
    "rate_limited": "Yes",
    "deprecated": false,
    "role": "homeserver",
-   "status": "implemented-untested",
+   "status": "partial",
    "code": [
     {
-     "loc": "conduit-server/src/main.rs:531",
-     "handler": "probe_api::openid_request_token",
-     "kind": "exact"
+     "loc": "conduit-server/src/api/client/probe.rs (openid_request_token)"
     }
    ],
-   "tests": [],
-   "tests_total": 0,
+   "tests": [
+    "conduit-server/tests/production_modules.rs::turn_openid_cors_direct_invites_and_unban"
+   ],
+   "tests_total": 1,
    "gap_beads": [
-    "conduit-y99.46",
     "conduit-y99.22"
    ],
-   "notes": "Token minted; no test, and federation openid/userinfo is missing (y99.22) so the token cannot be redeemed."
+   "notes": "Shape asserted (Bearer, matrix_server_name, expires_in), other user 403. Redemption via federation openid/userinfo is missing (conduit-y99.22)."
   },
   {
    "id": "cs.ep.post_matrixclientv3roomsroomidupgrade",
@@ -6670,18 +6685,18 @@
    "title": "CORS for web browser clients",
    "source": "https://spec.matrix.org/v1.19/client-server-api/#web-browser-clients",
    "role": "homeserver",
-   "status": "implemented-untested",
+   "status": "implemented+tested",
    "code": [
     {
      "loc": "conduit-server/src/main.rs (CorsLayer allow Any)"
     }
    ],
-   "tests": [],
-   "tests_total": 0,
-   "gap_beads": [
-    "conduit-y99.46"
+   "tests": [
+    "conduit-server/tests/production_modules.rs::turn_openid_cors_direct_invites_and_unban"
    ],
-   "notes": "No test asserts CORS headers / OPTIONS preflight."
+   "tests_total": 1,
+   "gap_beads": [],
+   "notes": "OPTIONS preflight and simple responses carry Access-Control-Allow-Origin * with GET and Authorization allowed."
   },
   {
    "id": "cs.discovery.well-known",
@@ -6966,17 +6981,21 @@
    "code": [
     {
      "loc": "conduit-server/src/api/client/account.rs"
+    },
+    {
+     "loc": "conduit-server/src/api/client/room_content/serve.rs (erased_for_viewer)"
     }
    ],
    "tests": [
     "conduit-server/tests/production_account.rs::production_password_change_revokes_other_devices",
-    "conduit-server/tests/production_account.rs::production_deactivation_leaves_rooms_and_blocks_login"
+    "conduit-server/tests/production_account.rs::production_deactivation_leaves_rooms_and_blocks_login",
+    "conduit-server/tests/production_modules.rs::erased_accounts_are_served_redacted_to_later_joiners_only"
    ],
-   "tests_total": 2,
+   "tests_total": 3,
    "gap_beads": [
-    "conduit-y99.18.3"
+    "conduit-y99.49"
    ],
-   "notes": "Deactivation erase does not serve redacted events to later joiners."
+   "notes": "Password change and deactivation incl. erase serving on CS reads; federation reads by later-joining servers are conduit-y99.49."
   },
   {
    "id": "cs.auth.oauth2",
@@ -7539,18 +7558,18 @@
    "title": "Voice over IP (TURN server; call events pass through)",
    "source": "https://spec.matrix.org/v1.19/client-server-api/#voice-over-ip",
    "role": "homeserver",
-   "status": "implemented-untested",
+   "status": "implemented+tested",
    "code": [
     {
      "loc": "conduit-server/src/api/client/probe.rs (turn_server)"
     }
    ],
-   "tests": [],
-   "tests_total": 0,
-   "gap_beads": [
-    "conduit-y99.46"
+   "tests": [
+    "conduit-server/tests/production_modules.rs::turn_openid_cors_direct_invites_and_unban"
    ],
-   "notes": "TURN is MAY; empty uris returned. .m.rule.call is conduit-y99.30."
+   "tests_total": 1,
+   "gap_beads": [],
+   "notes": "TURN is MAY; empty uris returned. .m.rule.call push rule is tracked by conduit-y99.30."
   },
   {
    "id": "cs.mod.typing",
@@ -7866,17 +7885,18 @@
      "loc": "conduit-server/src/api/client/session.rs"
     },
     {
-     "loc": "conduit-server/src/api/client/registration.rs"
+     "loc": "conduit-server/src/api/client/guest_access.rs"
     }
    ],
    "tests": [
-    "conduit-server/tests/production_account.rs::production_guest_access_is_restricted_and_upgradable"
+    "conduit-server/tests/production_account.rs::production_guest_access_is_restricted_and_upgradable",
+    "conduit-server/tests/production_modules.rs::revoking_guest_access_removes_joined_guests"
    ],
-   "tests_total": 1,
+   "tests_total": 2,
    "gap_beads": [
-    "conduit-y99.18.4"
+    "conduit-y99.48"
    ],
-   "notes": "Guests not removed when guest_access stops being can_join."
+   "notes": "Local guest_access changes away from can_join make joined local guests leave; changes received over federation are not yet hooked (conduit-y99.48)."
   },
   {
    "id": "cs.mod.room-previews",
@@ -7889,15 +7909,19 @@
    "code": [
     {
      "loc": "conduit/src/auth.rs (may_read_room)"
+    },
+    {
+     "loc": "conduit-server/src/api/client/legacy.rs"
     }
    ],
-   "tests": [],
-   "tests_total": 0,
+   "tests": [
+    "conduit-server/tests/production_modules.rs::legacy_room_preview_peeks_only_world_readable_rooms"
+   ],
+   "tests_total": 1,
    "gap_beads": [
-    "conduit-y99.42",
     "conduit-embed-auth"
    ],
-   "notes": "Deprecated /events?room_id missing; world_readable non-member reads untested."
+   "notes": "GET /events?room_id and rooms/{roomId}/initialSync peek world_readable rooms; non-world_readable events are filtered per event."
   },
   {
    "id": "cs.mod.tagging",
@@ -8015,7 +8039,7 @@
    "title": "Direct messaging (is_direct on createRoom invites)",
    "source": "https://spec.matrix.org/v1.19/client-server-api/#direct-messaging",
    "role": "homeserver",
-   "status": "implemented-untested",
+   "status": "implemented+tested",
    "code": [
     {
      "loc": "conduit-server/src/api/client/rooms.rs (create_room is_direct)"
@@ -8024,12 +8048,12 @@
      "loc": "conduit/src/room/mod.rs"
     }
    ],
-   "tests": [],
-   "tests_total": 0,
-   "gap_beads": [
-    "conduit-y99.46"
+   "tests": [
+    "conduit-server/tests/production_modules.rs::turn_openid_cors_direct_invites_and_unban"
    ],
-   "notes": "No test asserts is_direct on the invite member event."
+   "tests_total": 1,
+   "gap_beads": [],
+   "notes": "createRoom is_direct sets is_direct on the invite member event, visible in the invitee invite_state."
   },
   {
    "id": "cs.mod.ignoring-users",
@@ -8149,12 +8173,14 @@
      "loc": "conduit-server/src/api/client/probe.rs (openid_request_token)"
     }
    ],
-   "tests": [],
-   "tests_total": 0,
+   "tests": [
+    "conduit-server/tests/production_modules.rs::turn_openid_cors_direct_invites_and_unban"
+   ],
+   "tests_total": 1,
    "gap_beads": [
     "conduit-y99.22"
    ],
-   "notes": "Token minted (untested); userinfo endpoint missing."
+   "notes": "Token minting asserted; federation /openid/userinfo missing (conduit-y99.22)."
   },
   {
    "id": "cs.mod.server-acls",

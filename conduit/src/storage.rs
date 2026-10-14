@@ -1340,6 +1340,9 @@ pub trait Storage: Send + Sync + 'static {
 
     /// Whether `room_id` is some user's server notices room.
     async fn is_server_notice_room(&self, room_id: &str) -> Result<bool>;
+
+    /// When an account asked for erasure on deactivation (Unix ms).
+    async fn account_erased_at(&self, user_id: &str) -> Result<Option<i64>>;
     // --- Application services & identity-server bindings (appservice lane:
     //     conduit-y99.34, conduit-y99.36) -------------------------------------
 
@@ -1529,6 +1532,8 @@ struct MemoryModules {
     moderation: HashMap<String, AccountModeration>,
     /// user_id → room_id
     notice_rooms: HashMap<String, String>,
+    /// user_id → erasure time (Unix ms)
+    erased_at: HashMap<String, i64>,
 }
 
 #[derive(Debug, Clone)]
@@ -3701,6 +3706,12 @@ impl Storage for MemoryStorage {
             acct.avatar_url = None;
         }
         inner.account_lane.erased.insert(user_id.to_owned());
+        drop(inner);
+        self.modules
+            .write()
+            .await
+            .erased_at
+            .insert(user_id.to_owned(), Utc::now().timestamp_millis());
         Ok(())
     }
 
@@ -3806,6 +3817,10 @@ impl Storage for MemoryStorage {
 
     async fn is_server_notice_room(&self, room_id: &str) -> Result<bool> {
         Ok(self.modules.read().await.notice_rooms.values().any(|r| r == room_id))
+    }
+
+    async fn account_erased_at(&self, user_id: &str) -> Result<Option<i64>> {
+        Ok(self.modules.read().await.erased_at.get(user_id).copied())
     }
 
     // --- Application services & identity-server bindings (appservice lane) --

@@ -4427,8 +4427,15 @@ impl Storage for PostgresStorage {
         }
         let owner = conduit::storage::TransactionKey::client(user, device, &[], "").owner;
         let rows = sqlx::query!(
-            r#"SELECT result->>'event_id' AS "event_id!", txn_id FROM transactions
-               WHERE scope = 'client' AND owner = $1 AND result->>'event_id' = ANY($2)"#,
+            // Results moved to lossless `result_text` in 0091; older rows
+            // keep JSONB `result`.  Read both without casting text to JSONB
+            // (a stored U+0000 would make the cast fail).
+            r#"SELECT event_id AS "event_id!", txn_id FROM (
+                   SELECT COALESCE(result->>'event_id',
+                                   substring(result_text from '"event_id":"([^"]+)"')) AS event_id,
+                          txn_id
+                   FROM transactions WHERE scope = 'client' AND owner = $1
+               ) t WHERE event_id = ANY($2)"#,
             owner,
             event_ids
         )
@@ -4610,6 +4617,17 @@ impl Storage for PostgresStorage {
         .await
         .map_err(map_sqlx)?;
         Ok(row.found)
+    }
+
+    async fn account_erased_at(&self, user_id: &str) -> Result<Option<i64>> {
+        let row = sqlx::query!(
+            r#"SELECT (EXTRACT(EPOCH FROM erased_at) * 1000)::BIGINT AS "erased_at" FROM accounts WHERE user_id = $1"#,
+            user_id
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(row.and_then(|r| r.erased_at))
     }
 }
 

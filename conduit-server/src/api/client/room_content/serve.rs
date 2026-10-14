@@ -11,6 +11,10 @@
 //!   children only.
 //! - **Ignored users** (`m.ignored_user_list`): their non-state events are
 //!   dropped; state events are always served.
+//! - **Erased accounts** (deactivation with `erase: true`,
+//!   conduit-y99.18.3): users who first joined the room after the erasure
+//!   (or never joined) get redacted copies of the erased user's events,
+//!   without `redacted_because`; earlier members keep unredacted copies.
 //!
 //! `/sync` and `/messages` keep their PDU-shaped values and call
 //! [`Viewer::decorate_values`]; this module's endpoints use the client
@@ -95,6 +99,43 @@ impl<'a> Viewer<'a> {
         Ok(applied)
     }
 
+    /// Events the viewer must see redacted because their sender asked for
+    /// erasure before the viewer first joined the room (spec: users who
+    /// join after the erasure request are served redacted copies; users
+    /// with earlier visibility keep unredacted ones).
+    pub async fn erased_for_viewer(&self, events: &[Event]) -> conduit::Result<HashSet<String>> {
+        let mut erased_at: HashMap<&str, Option<i64>> = HashMap::new();
+        let mut first_join: HashMap<&str, Option<u64>> = HashMap::new();
+        let mut out = HashSet::new();
+        for event in events {
+            if event.sender == self.user_id {
+                continue;
+            }
+            if !erased_at.contains_key(event.sender.as_str()) {
+                let at = self.storage.account_erased_at(&event.sender).await?;
+                erased_at.insert(event.sender.as_str(), at);
+            }
+            let Some(erased) = erased_at[event.sender.as_str()] else { continue };
+            if !first_join.contains_key(event.room_id.as_str()) {
+                let joined = self
+                    .storage
+                    .member_events_for_user(&event.room_id, self.user_id)
+                    .await?
+                    .into_iter()
+                    .find(|(_, member)| {
+                        member.content.get("membership").and_then(Value::as_str) == Some("join")
+                    })
+                    .map(|(_, member)| member.origin_server_ts);
+                first_join.insert(event.room_id.as_str(), joined);
+            }
+            let saw_before = first_join[event.room_id.as_str()].is_some_and(|ts| (ts as i64) < erased);
+            if !saw_before {
+                out.insert(event.event_id.clone());
+            }
+        }
+        Ok(out)
+    }
+
     /// Serve events in the client format, applying redactions and, when
     /// `bundle`, attaching `unsigned.m.relations`.
     pub async fn serve(&self, events: &[Event], bundle: bool) -> conduit::Result<Vec<Value>> {
@@ -104,6 +145,7 @@ impl<'a> Viewer<'a> {
         } else {
             HashMap::new()
         };
+        let erased = self.erased_for_viewer(events).await?;
         let now = now_ms();
         Ok(events
             .iter()
@@ -113,6 +155,9 @@ impl<'a> Viewer<'a> {
                         let mut value = client_event(&conduit::redaction::redact_event(event), now);
                         value["unsigned"]["redacted_because"] = client_event(redaction, now);
                         value
+                    }
+                    None if erased.contains(&event.event_id) => {
+                        client_event(&conduit::redaction::redact_event(event), now)
                     }
                     None => client_event(event, now),
                 };
@@ -145,9 +190,13 @@ impl<'a> Viewer<'a> {
         } else {
             HashMap::new()
         };
+        let erased = self.erased_for_viewer(&events).await?;
         let now = now_ms();
         for value in values.iter_mut() {
             let Ok(event) = serde_json::from_value::<Event>(value.clone()) else { continue };
+            if erased.contains(&event.event_id) && !redactions.contains_key(&event.event_id) {
+                value["content"] = conduit::redaction::redact_event(&event).pdu.content;
+            }
             if event.event_type == "m.room.redaction" && value.get("redacts").is_none() {
                 if let Some(target) = redaction_target(&event) {
                     value["redacts"] = json!(target);

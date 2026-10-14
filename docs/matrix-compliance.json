@@ -2374,6 +2374,107 @@
         "conduit-server/tests/production_appservice.rs::appservice_requests_are_exempt_from_rate_limits"
       ],
       "limitations": []
+    },
+    {
+      "id": "cs-legacy-events-and-initial-sync",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#get_matrixclientv3initialsync",
+      "status": "covered_assertions_only",
+      "assertions": [
+        "GET /initialSync returns joined rooms with messages (start/end tokens usable with /messages), state, visibility; archived=true adds left rooms frozen at departure",
+        "GET /events streams events after the initialSync end token, long-polls, shows non-members nothing, and rejects a bad from with 400 M_INVALID_PARAM",
+        "GET /events/{eventId} returns visible events and 404 M_NOT_FOUND for unknown or invisible ones",
+        "GET /rooms/{roomId}/initialSync serves members and 403 M_FORBIDDEN to strangers"
+      ],
+      "implementation": [
+        "conduit-server/src/api/client/legacy.rs"
+      ],
+      "tests": [
+        "conduit-server/tests/production_modules.rs::legacy_events_stream_event_lookup_and_initial_sync"
+      ],
+      "limitations": [
+        "Deprecated endpoints; presence in initialSync covers only the requesting user"
+      ]
+    },
+    {
+      "id": "cs-room-previews",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#room-previews",
+      "status": "covered_assertions_only",
+      "assertions": [
+        "A non-member peeks a world_readable room through rooms/{roomId}/initialSync and GET /events?room_id=",
+        "Peeking events of a non-world_readable room is 403 M_FORBIDDEN, and the peek stream contains only the peeked room's events"
+      ],
+      "implementation": [
+        "conduit-server/src/api/client/legacy.rs",
+        "conduit/src/auth.rs (filter_visible_for_user)"
+      ],
+      "tests": [
+        "conduit-server/tests/production_modules.rs::legacy_room_preview_peeks_only_world_readable_rooms"
+      ],
+      "limitations": []
+    },
+    {
+      "id": "cs-guest-access-revocation",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#guest-access",
+      "status": "covered_assertions_only",
+      "assertions": [
+        "Changing m.room.guest_access away from can_join sets joined local guests' membership to leave, leaves registered users joined, and the guest cannot rejoin"
+      ],
+      "implementation": [
+        "conduit-server/src/api/client/guest_access.rs",
+        "conduit-server/src/api/client/event_pipeline.rs"
+      ],
+      "tests": [
+        "conduit-server/tests/production_modules.rs::revoking_guest_access_removes_joined_guests"
+      ],
+      "limitations": [
+        "guest_access changes received over federation are not yet hooked (conduit-y99.48)"
+      ]
+    },
+    {
+      "id": "cs-deactivation-erasure-serving",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#post_matrixclientv3accountdeactivate",
+      "status": "covered_assertions_only",
+      "assertions": [
+        "After deactivation with erase=true, a user who joins later gets redacted copies (empty content, no redacted_because) via /event, /messages and the legacy /events/{eventId}",
+        "A member who could see the event before the erasure still gets the original"
+      ],
+      "implementation": [
+        "conduit-server/src/api/client/room_content/serve.rs (erased_for_viewer)"
+      ],
+      "tests": [
+        "conduit-server/tests/production_modules.rs::erased_accounts_are_served_redacted_to_later_joiners_only"
+      ],
+      "limitations": [
+        "Servers that join after the erasure still receive originals over federation (conduit-y99.49)"
+      ]
+    },
+    {
+      "id": "cs-turn-openid-cors-direct-unban",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#voice-over-ip",
+      "status": "covered_assertions_only",
+      "assertions": [
+        "GET /voip/turnServer requires a token and answers uris/username/password/ttl",
+        "POST /user/{userId}/openid/request_token answers Bearer, matrix_server_name and expires_in, and is 403 for another user",
+        "CORS preflight and simple responses carry Access-Control-Allow-Origin *",
+        "createRoom is_direct sets is_direct on the invite member event and the invitee's invite_state",
+        "Unban is moderator-only (403 M_FORBIDDEN otherwise) and leaves the target at leave, able to rejoin"
+      ],
+      "implementation": [
+        "conduit-server/src/api/client/probe.rs",
+        "conduit-server/src/main.rs (CorsLayer)",
+        "conduit-server/src/api/client/rooms.rs"
+      ],
+      "tests": [
+        "conduit-server/tests/production_modules.rs::turn_openid_cors_direct_invites_and_unban"
+      ],
+      "limitations": [
+        "No TURN server is configurable yet (TURN is MAY); OpenID tokens cannot be redeemed until federation /openid/userinfo exists (conduit-y99.22)"
+      ]
     }
   ]
 }

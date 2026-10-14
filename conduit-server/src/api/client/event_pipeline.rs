@@ -225,5 +225,10 @@ async fn build_sign_and_persist_inner<S: AuthState>(
         let _ = state.events_tx().send(pos);
     }
 
+    // Revoking guest access removes local guests (conduit-y99.18.4).
+    if state_key == Some("") {
+        super::guest_access::after_state_event(state, room_id, type_, &event.content).await;
+    }
+
     Ok(eid)
 }
