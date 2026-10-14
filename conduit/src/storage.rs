@@ -3682,6 +3682,39 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    #[tokio::test]
+    async fn receipt_scopes_coexist_and_replace_only_themselves() {
+        let store = MemoryStorage::default();
+        store.set_receipt("!r:t", "@a:t", "m.read", "$one", 1).await.unwrap();
+        store.set_threaded_receipt("!r:t", "@a:t", "m.read", Some("main"), "$one", 2).await.unwrap();
+        store.set_threaded_receipt("!r:t", "@a:t", "m.read", Some("$root"), "$reply", 3).await.unwrap();
+        let replaced = store.set_receipt("!r:t", "@a:t", "m.read", "$two", 4).await.unwrap();
+        let rows = store.user_receipts_in_room("!r:t", "@a:t").await.unwrap();
+        assert_eq!(rows.len(), 3);
+        let unthreaded = rows.iter().find(|row| row.thread_id.is_none()).unwrap();
+        assert_eq!((unthreaded.event_id.as_str(), unthreaded.stream_pos), ("$two", replaced));
+        let since = store.threaded_receipts_since(replaced - 1).await.unwrap();
+        assert_eq!(since.len(), 1);
+        // The legacy unthreaded views ignore threaded scopes.
+        assert_eq!(store.receipts_for_room("!r:t").await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn key_inventory_reports_counts_and_unused_fallbacks_together() {
+        let store = MemoryStorage::default();
+        store.insert_one_time_keys("@a:t", "D", vec![
+            ("signed_curve25519:1".into(), "signed_curve25519".into(), json!({})),
+            ("signed_curve25519:2".into(), "signed_curve25519".into(), json!({})),
+        ]).await.unwrap();
+        store.upsert_fallback_key("@a:t", "D", "signed_curve25519", "signed_curve25519:F", &json!({})).await.unwrap();
+        let (counts, fallback) = store.device_key_inventory("@a:t", "D").await.unwrap();
+        assert_eq!(counts["signed_curve25519"], 2);
+        assert_eq!(fallback, vec!["signed_curve25519".to_owned()]);
+        store.claim_fallback_key("@a:t", "D", "signed_curve25519").await.unwrap();
+        let (_, fallback) = store.device_key_inventory("@a:t", "D").await.unwrap();
+        assert!(fallback.is_empty());
+    }
+
     fn stream_event(id: &str, room: &str, depth: i64) -> Event {
         Event { event_id: id.into(), room_id: room.into(), sender: "@a:test".into(),
             event_type: "m.room.message".into(), content: json!({"body": id}), state_key: None,

@@ -734,3 +734,270 @@ async fn typing_requires_membership_and_validates_timeouts() {
     let users = &ephemeral(&after, &room, "m.typing")[0]["content"]["user_ids"];
     assert_eq!(list(users), vec![user(&alice).to_owned()], "{after}");
 }
+
+// ---------------------------------------------------------------------------
+// conduit-y99.16: commit-ordered stream cursors
+// ---------------------------------------------------------------------------
+
+use conduit_server::storage_pg::Stream;
+
+/// Wait until some session is blocked on an advisory lock in this database,
+/// or the writer has already finished (which the caller then rejects). A
+/// barrier on observable state, not a timing guess.
+async fn until_writer_waits(pool: &sqlx::PgPool, writer: &tokio::task::JoinHandle<()>) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        if writer.is_finished() {
+            return;
+        }
+        let waiting: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND NOT granted
+             AND database = (SELECT oid FROM pg_database WHERE datname = current_database())",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        if waiting > 0 {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the concurrent writer never queued behind the stream lock"
+        );
+        tokio::task::yield_now().await;
+    }
+}
+
+#[tokio::test]
+async fn postgres_sequences_can_commit_out_of_order_without_the_stream_lock() {
+    // The hazard the stream locks exist for: a later position can become
+    // visible while an earlier one is still in flight.
+    let server = Server::new().await;
+    let pool = sqlx::PgPool::connect(&server.database_url).await.unwrap();
+    let mut early = pool.begin().await.unwrap();
+    let first: i64 =
+        sqlx::query_scalar("INSERT INTO device_list_changes (user_id) VALUES ('@early:x') RETURNING id")
+            .fetch_one(&mut *early)
+            .await
+            .unwrap();
+    let second: i64 =
+        sqlx::query_scalar("INSERT INTO device_list_changes (user_id) VALUES ('@late:x') RETURNING id")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(second > first);
+    let visible: Vec<i64> = sqlx::query_scalar("SELECT id FROM device_list_changes ORDER BY id")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(visible, vec![second], "a reader advancing to {second} would skip {first} forever");
+    early.commit().await.unwrap();
+}
+
+/// Hold `stream`'s lock with an uncommitted row at a lower position, start a
+/// real writer of the same stream, prove it queues behind the lock and that a
+/// sync in between does not advance past the in-flight row, then commit and
+/// require later syncs to deliver both rows.
+#[allow(clippy::too_many_arguments)]
+async fn prove_commit_order<F, Fut>(
+    server: &Server,
+    observer: &Value,
+    stream: Stream,
+    raw_insert: &str,
+    binds: Vec<String>,
+    writer: F,
+    delivered: impl Fn(&Value) -> bool,
+) where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    let pool = sqlx::PgPool::connect(&server.database_url).await.unwrap();
+    let since = next_batch(&sync(server, observer, None).await);
+    let mut held = pool.begin().await.unwrap();
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(stream.lock_key())
+        .execute(&mut *held)
+        .await
+        .unwrap();
+    let mut insert = sqlx::query(raw_insert);
+    for bind in &binds {
+        insert = insert.bind(bind);
+    }
+    insert.execute(&mut *held).await.unwrap();
+
+    let write = tokio::spawn(writer());
+    until_writer_waits(&pool, &write).await;
+    assert!(!write.is_finished(), "{stream:?}: writer must not commit past an in-flight lower position");
+    let between = sync(server, observer, Some(&since)).await;
+    assert!(
+        !delivered(&between),
+        "{stream:?}: nothing may be delivered before the lower position commits: {between}"
+    );
+
+    held.commit().await.unwrap();
+    write.await.unwrap();
+    // Every update committed below the returned cursor is delivered from the
+    // original token...
+    let after = sync(server, observer, Some(&since)).await;
+    assert!(delivered(&after), "{stream:?}: both commits must be delivered: {after}");
+    // ...and the cursor returned while the writer was queued skips nothing.
+    let resumed = sync(server, observer, Some(&next_batch(&between))).await;
+    assert!(delivered(&resumed), "{stream:?}: the intermediate cursor skipped a commit: {resumed}");
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn sync_never_skips_events_committed_out_of_order() {
+    let server = Server::new().await;
+    let (alice, bob, room, _) = server.chat_pair().await;
+    let base = server.base_url.clone();
+    let http = server.http.clone();
+    let alice_token = token(&alice).to_owned();
+    let send_room = room.clone();
+    prove_commit_order(
+        &server,
+        &bob,
+        Stream::Events,
+        "INSERT INTO events (event_id, room_id, sender, type, content, auth_events, prev_events,
+             signatures, hashes, origin_server_ts, depth)
+         VALUES ($1, $2, $3, 'm.room.message', '{\"msgtype\":\"m.text\",\"body\":\"in flight\"}',
+             '{}', '{}', '{}', '{}', 1, 1000)",
+        vec!["$inflight:production.test".into(), room.clone(), user(&alice).to_owned()],
+        move || async move {
+            let response = http
+                .put(format!("{base}/_matrix/client/v3/rooms/{send_room}/send/m.room.message/concurrent"))
+                .bearer_auth(alice_token)
+                .json(&json!({"msgtype": "m.text", "body": "committed later"}))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status().as_u16(), 200);
+        },
+        |sync| {
+            let bodies: Vec<_> = sync["rooms"]["join"][&room]["timeline"]["events"]
+                .as_array()
+                .map(|events| events.iter().filter_map(|event| event["content"]["body"].as_str()).collect())
+                .unwrap_or_default();
+            let first = bodies.iter().position(|body| *body == "in flight");
+            let second = bodies.iter().position(|body| *body == "committed later");
+            matches!((first, second), (Some(first), Some(second)) if first < second)
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn sync_never_skips_non_room_streams_committed_out_of_order() {
+    let server = Server::new().await;
+    let (alice, bob, room, event) = server.chat_pair().await;
+    let base = server.base_url.clone();
+    let bob_id = user(&bob).to_owned();
+    let bob_device = bob["device_id"].as_str().unwrap().to_owned();
+
+    // Account data.
+    let (http, bearer) = (server.http.clone(), token(&bob).to_owned());
+    let path = format!("{base}/_matrix/client/v3/user/{bob_id}/account_data/m.test.later");
+    prove_commit_order(
+        &server,
+        &bob,
+        Stream::AccountData,
+        "INSERT INTO account_data (user_id, room_id, event_type, content, updated_at)
+         VALUES ($1, NULL, 'm.test.inflight', '{\"v\":1}', now())",
+        vec![bob_id.clone()],
+        move || async move {
+            let response = http.put(path).bearer_auth(bearer).json(&json!({"v": 2})).send().await.unwrap();
+            assert_eq!(response.status().as_u16(), 200);
+        },
+        |sync| {
+            let types: Vec<_> = sync["account_data"]["events"]
+                .as_array()
+                .map(|events| events.iter().filter_map(|event| event["type"].as_str()).collect())
+                .unwrap_or_default();
+            types.contains(&"m.test.inflight") && types.contains(&"m.test.later")
+        },
+    )
+    .await;
+
+    // Receipts: Alice's in flight, Bob's committed later.
+    let (http, bearer) = (server.http.clone(), token(&bob).to_owned());
+    let path = format!("{base}/_matrix/client/v3/rooms/{room}/receipt/m.read/{event}");
+    let alice_id = user(&alice).to_owned();
+    prove_commit_order(
+        &server,
+        &bob,
+        Stream::Receipts,
+        "INSERT INTO receipts (room_id, user_id, receipt_type, thread_id, event_id, ts)
+         VALUES ($1, $2, 'm.read', '', $3, 1)",
+        vec![room.clone(), alice_id.clone(), event.clone()],
+        move || async move {
+            let response = http.post(path).bearer_auth(bearer).json(&json!({})).send().await.unwrap();
+            assert_eq!(response.status().as_u16(), 200);
+        },
+        |sync| {
+            let mut seen = std::collections::HashSet::new();
+            for receipt in ephemeral(sync, &room, "m.receipt") {
+                if let Some(users) = receipt["content"][&event]["m.read"].as_object() {
+                    seen.extend(users.keys().cloned());
+                }
+            }
+            seen.contains(&alice_id) && seen.contains("@bob:production.test")
+        },
+    )
+    .await;
+
+    // Device lists: Alice's change in flight, Bob's own upload later.
+    let (http, bearer) = (server.http.clone(), token(&bob).to_owned());
+    let upload = json!({"device_keys": Device::from_login(&bob).keys});
+    let path = format!("{base}/_matrix/client/v3/keys/upload");
+    prove_commit_order(
+        &server,
+        &bob,
+        Stream::DeviceLists,
+        "INSERT INTO device_list_changes (user_id) VALUES ($1)",
+        vec![user(&alice).to_owned()],
+        move || async move {
+            let response = http.post(path).bearer_auth(bearer).json(&upload).send().await.unwrap();
+            assert_eq!(response.status().as_u16(), 200);
+        },
+        |sync| {
+            sync.get("device_lists").is_some()
+                && list(&sync["device_lists"]["changed"])
+                    == vec!["@alice:production.test".to_owned(), "@bob:production.test".to_owned()]
+        },
+    )
+    .await;
+
+    // To-device: one message in flight, another sent later.
+    let (http, bearer) = (server.http.clone(), token(&alice).to_owned());
+    let mut devices = serde_json::Map::new();
+    devices.insert(bob_device.clone(), json!({"order": "later"}));
+    let mut messages = serde_json::Map::new();
+    messages.insert(bob_id.clone(), Value::Object(devices));
+    let path = format!("{base}/_matrix/client/v3/sendToDevice/m.test/ordered");
+    prove_commit_order(
+        &server,
+        &bob,
+        Stream::ToDevice,
+        "INSERT INTO to_device_queue (target_user, target_device, sender, event_type, content)
+         VALUES ($1, $2, '@alice:production.test', 'm.test', '{\"order\":\"in flight\"}')",
+        vec![bob_id.clone(), bob_device.clone()],
+        move || async move {
+            let response = http
+                .put(path)
+                .bearer_auth(bearer)
+                .json(&json!({"messages": messages}))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status().as_u16(), 200);
+        },
+        |sync| {
+            let orders: Vec<_> = sync["to_device"]["events"]
+                .as_array()
+                .map(|events| events.iter().filter_map(|event| event["content"]["order"].as_str()).collect())
+                .unwrap_or_default();
+            orders == vec!["in flight", "later"]
+        },
+    )
+    .await;
+}

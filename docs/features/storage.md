@@ -51,3 +51,26 @@ RocksDB, Postgres, or an in-memory map for tests.
   delivers new state.
 - Access tokens are bearer credentials — store hashed if you can.
 - Media bytes outgrow the database. Keep blobs out of the row store.
+
+## Commit-ordered stream positions (conduit-y99.16)
+
+Sync cursors are `BIGSERIAL` positions (`events.stream_position`,
+`account_data.stream_pos`, `receipts.stream_pos`, `device_list_changes.id`,
+`to_device_queue.id`). A sequence value is taken at insert time, not commit
+time: if transaction A takes N and B takes N+1, B can commit first, and a
+reader that advances its cursor to N+1 skips N forever (for to-device, the
+next acknowledgement even deletes it).
+
+Every PostgreSQL writer of these streams therefore takes the stream's
+transaction-scoped advisory lock (`storage_pg::lock_stream`, one key per
+`Stream`) immediately before inserting, and holds it through commit.
+PostgreSQL makes a commit visible before releasing the transaction's locks, so
+positions become visible in allocation order and the highest observed position
+is a safe watermark. Each transaction takes at most one stream lock, so the
+locks cannot deadlock. MemoryStorage allocates and inserts under one write
+lock and is ordered by construction.
+
+`tests/production_sync.rs` holds a stream lock with an uncommitted lower row,
+starts a real HTTP writer, waits on `pg_locks` until it queues, syncs, commits,
+and requires both the original and intermediate cursors to deliver both rows,
+for all five streams. Disabling the lock fails those tests.

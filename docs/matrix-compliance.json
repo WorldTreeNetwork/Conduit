@@ -191,10 +191,24 @@
         "Olm/Megolm client interactions are client-side and tracked by conduit-y99.9, not by homeserver rows"
       ],
       "gap_issues": [
-        "conduit-y99.28", "conduit-y99.29", "conduit-y99.30", "conduit-y99.31", "conduit-y99.32",
-        "conduit-y99.33", "conduit-y99.34", "conduit-y99.35", "conduit-y99.36",
-        "conduit-y99.38", "conduit-y99.39", "conduit-y99.40", "conduit-y99.41", "conduit-y99.42",
-        "conduit-y99.43", "conduit-y99.44", "conduit-y99.45", "conduit-y99.46"
+        "conduit-y99.28",
+        "conduit-y99.29",
+        "conduit-y99.30",
+        "conduit-y99.31",
+        "conduit-y99.32",
+        "conduit-y99.33",
+        "conduit-y99.34",
+        "conduit-y99.35",
+        "conduit-y99.36",
+        "conduit-y99.38",
+        "conduit-y99.39",
+        "conduit-y99.40",
+        "conduit-y99.41",
+        "conduit-y99.42",
+        "conduit-y99.43",
+        "conduit-y99.44",
+        "conduit-y99.45",
+        "conduit-y99.46"
       ]
     },
     {
@@ -467,11 +481,11 @@
         "conduit-server/tests/production_e2e.rs::production_account_data_overwrites_advance_real_cursors_without_replay",
         "conduit-server/tests/production_e2e.rs::production_typing_expiry_and_restart_clear_client_state",
         "conduit/src/storage.rs::tests::device_list_boundary_excludes_later_changes",
-        "conduit-server/src/api/client/sync.rs::token_tests"
+        "conduit-server/src/api/client/sync.rs::token_tests",
+        "conduit-server/tests/production_sync.rs::sync_never_skips_events_committed_out_of_order"
       ],
       "limitations": [
         "Complete membership/state/full_state/filter/pagination semantics remain open",
-        "Commit-order and concurrent snapshot consistency need an independent audit",
         "Durable changes from other processes currently use periodic polling"
       ],
       "gap_issues": [
@@ -1796,6 +1810,34 @@
       ],
       "limitations": [
         "Typing is not federated as m.typing EDUs"
+      ],
+      "gap_issues": []
+    },
+    {
+      "id": "commit-ordered-sync-cursors",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#get_matrixclientv3sync",
+      "status": "covered_assertions_only",
+      "assertions": [
+        "PostgreSQL sequence positions can become visible out of allocation order (hazard witnessed)",
+        "Event, account-data, receipt, device-list and to-device writers allocate positions under a per-stream transaction lock held through commit",
+        "A concurrent writer queues behind an in-flight lower position; a sync in between neither delivers nor advances past it",
+        "After the lower position commits, both the original and the intermediate cursor deliver every update in position order",
+        "OTK counts and unused fallback algorithms are read in one snapshot"
+      ],
+      "implementation": [
+        "conduit-server/src/storage_pg.rs",
+        "conduit/src/storage.rs",
+        "conduit-server/src/api/client/sync.rs"
+      ],
+      "tests": [
+        "conduit-server/tests/production_sync.rs::postgres_sequences_can_commit_out_of_order_without_the_stream_lock",
+        "conduit-server/tests/production_sync.rs::sync_never_skips_events_committed_out_of_order",
+        "conduit-server/tests/production_sync.rs::sync_never_skips_non_room_streams_committed_out_of_order",
+        "conduit/src/storage.rs::tests::key_inventory_reports_counts_and_unused_fallbacks_together"
+      ],
+      "limitations": [
+        "Writers of one stream are serialised from position allocation to commit (throughput trade-off)"
       ],
       "gap_issues": []
     }
