@@ -1449,3 +1449,52 @@ async fn state_paths_accept_an_optional_trailing_slash_for_empty_keys() {
         )
         .await;
 }
+
+
+#[tokio::test]
+async fn joining_preserves_state_across_a_history_visibility_gap() {
+    let server = Server::new().await;
+    let alice = server.register("alice").await;
+    let bob = server.register("bob").await;
+    for visibility in ["invited", "joined", "shared"] {
+        let before_join = next_batch(&sync(&server, &bob, None).await);
+        let room = server.request(
+            Method::POST, "/_matrix/client/v3/createRoom", Some(token(&alice)),
+            Some(json!({"preset": "private_chat", "name": "Planning", "topic": "Current topic",
+                "initial_state": [{"type": "m.room.history_visibility", "state_key": "",
+                    "content": {"history_visibility": visibility}}]})), 200,
+        ).await["room_id"].as_str().unwrap().to_owned();
+        let earlier = send_text(&server, &alice, &room, "earlier", json!({"msgtype": "m.text", "body": "Before invitation"})).await;
+        server.request(Method::POST, &format!("/_matrix/client/v3/rooms/{room}/invite"), Some(token(&alice)),
+            Some(json!({"user_id": user(&bob)})), 200).await;
+        join(&server, &bob, &room).await;
+        let recent = send_text(&server, &alice, &room, "recent", json!({"msgtype": "m.text", "body": "After joining"})).await;
+        for since in [None, Some(before_join.as_str())] {
+            let response = sync_with(&server, &bob, json!({"room": {"timeline": {"limit": 100}}}), since).await;
+            let block = &response["rooms"]["join"][&room];
+            let timeline = block["timeline"]["events"].as_array().unwrap();
+            let mut state = std::collections::HashMap::new();
+            for event in block["state"]["events"].as_array().unwrap().iter().chain(timeline) {
+                if let Some(key) = event["state_key"].as_str() {
+                    state.insert((event["type"].as_str().unwrap(), key), event);
+                }
+            }
+            assert_eq!(state[&("m.room.name", "")]["content"]["name"], "Planning", "{visibility}: {block}");
+            assert_eq!(state[&("m.room.topic", "")]["content"]["topic"], "Current topic", "{visibility}: {block}");
+            assert_eq!(state[&("m.room.member", user(&bob))]["content"]["membership"], "join");
+            assert!(timeline.iter().any(|e| e["event_id"] == recent));
+            assert_eq!(timeline.iter().any(|e| e["event_id"] == earlier), visibility == "shared");
+            if visibility != "shared" {
+                assert_eq!(block["timeline"]["limited"], true, "visibility gap must be explicit: {block}");
+                assert!(block["state"]["events"].as_array().unwrap().iter().any(|e| e["type"] == "m.room.name"));
+                let from = block["timeline"]["prev_batch"].as_str().unwrap();
+                let history = server.request(Method::GET,
+                    &format!("/_matrix/client/v3/rooms/{room}/messages?dir=b&limit=100&from={from}"),
+                    Some(token(&bob)), None, 200).await;
+                let older = history["chunk"].as_array().unwrap();
+                assert!(older.iter().any(|e| e["type"] == "m.room.create"), "older visible history remains pageable: {history}");
+                assert!(!older.iter().any(|e| e["event_id"] == earlier), "hidden messages stay hidden: {history}");
+            }
+        }
+    }
+}

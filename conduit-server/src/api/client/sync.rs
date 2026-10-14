@@ -1188,12 +1188,23 @@ async fn build_initial_room_block<S: AuthState>(
         .await
         .map_err(|error| MatrixError::unknown(error.to_string()).into_response())?;
     events.reverse();
-    let mut events = apply_type_filter(events, filter);
-    events = conduit::auth::filter_visible_for_user(storage.as_ref(), room_id, user_id, events)
+    let visible = conduit::auth::filter_visible_for_user(storage.as_ref(), room_id, user_id, events.clone())
         .await
         .map_err(|error| MatrixError::from_conduit(error).into_response())?;
-    let limited = events.len() > filter.timeline_limit as usize;
-    if limited {
+    let visible_ids: std::collections::HashSet<_> = visible.iter().map(|event| &event.event_id).collect();
+    // Keep the latest continuous visibility window. An earlier shared-history
+    // prefix can be visible across an invited/joined-only gap, but combining
+    // it with the recent window would omit state changes inside that gap.
+    // Starting after the gap lets state_before carry those changes without
+    // exposing them as timeline events. Older visible history remains pageable.
+    let last_hidden = events.iter().rposition(|event| !visible_ids.contains(&event.event_id));
+    let mut events = apply_type_filter(
+        events.into_iter().skip(last_hidden.map_or(0, |index| index + 1)).collect(),
+        filter,
+    );
+    let over_limit = events.len() > filter.timeline_limit as usize;
+    let limited = last_hidden.is_some() || over_limit;
+    if over_limit {
         events = events.split_off(events.len() - filter.timeline_limit as usize);
     }
     let ids: Vec<_> = events.iter().map(|event| event.event_id.clone()).collect();

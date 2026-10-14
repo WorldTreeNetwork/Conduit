@@ -118,10 +118,30 @@ test("a session survives reload and sign-out revokes it", async ({ browser }) =>
 test("display name changes show on the board and in rooms", async ({ browser }) => {
   const { page } = await newUserPage(browser, "dana");
   await createRoomViaUi(page, { name: "Studio" });
+  // React StrictMode starts two profile loads. Resolve the superseded load
+  // only after the current load has made the form editable.
+  let releaseStale!: () => void;
+  const staleReady = new Promise<void>((resolve) => { releaseStale = resolve; });
+  let profileLoads = 0;
+  await page.route("**/_matrix/client/v3/profile/*", async (route) => {
+    if (route.request().method() !== "GET" || ++profileLoads !== 1) {
+      await route.continue();
+      return;
+    }
+    const response = await route.fetch();
+    await staleReady;
+    await route.fulfill({ response });
+  });
   await page.getByTestId("open-settings").click();
   const input = page.getByTestId("displayname-input");
   await expect(input).toBeVisible();
   await input.fill("Dana Scully");
+  const staleResponse = page.waitForResponse((r) => r.request().method() === "GET" && r.url().includes("/v3/profile/"));
+  releaseStale();
+  await (await staleResponse).finished();
+  // Let React commit work caused by the completed response before saving.
+  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+  await expect(input).toHaveValue("Dana Scully");
   await page.getByTestId("displayname-save").click();
   await expect(page.getByTestId("displayname-status")).toHaveText("Display name saved.");
   await expect(page.getByTestId("account-name")).toHaveText("Dana Scully");

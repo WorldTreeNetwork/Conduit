@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { describeError } from "../core";
 import { Field } from "./Field";
 import { useClient } from "./hooks";
@@ -23,26 +23,34 @@ export function Settings({
   const [saveState, setSaveState] = useState<{ ok?: string; error?: string }>({});
   const [theme, setTheme] = useState<ThemeChoice>(loadTheme);
   const [signingOut, setSigningOut] = useState(false);
+  const profileLoad = useRef(0);
 
   useEffect(() => {
     headingRef.current?.focus();
     document.title = "Settings · Conduit";
   }, []);
 
-  const load = () => {
+  const load = useCallback(() => {
+    const request = ++profileLoad.current;
     setLoaded("loading");
     client
       .getProfile(client.userId)
       .then((p) => {
+        if (request !== profileLoad.current) return;
         setName(p.displayname ?? "");
         setLoaded("ready");
       })
       .catch((e) => {
+        if (request !== profileLoad.current) return;
         setLoadError(describeError(e));
         setLoaded("error");
       });
-  };
-  useEffect(load, [client]);
+  }, [client]);
+  useEffect(() => {
+    load();
+    // A superseded fetch must not replace a draft or update an unmounted form.
+    return () => { profileLoad.current += 1; };
+  }, [load]);
 
   async function saveName(event: FormEvent) {
     event.preventDefault();
