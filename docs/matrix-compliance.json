@@ -2170,6 +2170,115 @@
         "Encrypted events are counted with the server-visible rules; clients re-evaluate after decryption"
       ],
       "gap_issues": []
+    },
+    {
+      "id": "cs-profile-extended-fields",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#profiles",
+      "status": "covered_assertions_only",
+      "assertions": [
+        "GET/PUT/DELETE /profile/{userId}/{keyName} accept displayname, avatar_url, m.tz and namespaced custom keys; null custom values are stored, DELETE is idempotent",
+        "Errors: M_INVALID_PARAM (key grammar), M_KEY_TOO_LARGE (>255 bytes), M_MISSING_PARAM, M_BAD_JSON (body/value types), M_PROFILE_TOO_LARGE (64 KiB whole profile), M_FORBIDDEN (other user)",
+        "m.profile_fields capability is advertised (guests: allowed [displayname])",
+        "With CONDUIT_PROFILE_LOOKUP=restricted, lookups succeed for self, shared rooms, public-join-rule and world_readable rooms and are 403 M_FORBIDDEN otherwise, unknown users included"
+      ],
+      "implementation": [
+        "conduit-server/src/api/client/profile.rs",
+        "conduit-server/migrations/0070_profile_fields.sql"
+      ],
+      "tests": [
+        "conduit-server/tests/production_modules.rs::profile_extended_fields_round_trip_and_limits",
+        "conduit-server/tests/production_modules.rs::restricted_profile_lookup_allows_only_the_spec_minimum"
+      ],
+      "limitations": [
+        "Remote profiles are not fetched over federation (conduit-z3r); extended fields are not served over federation query/profile",
+        "m.tz is not validated against the IANA database (spec MAY)"
+      ]
+    },
+    {
+      "id": "cs-profile-change-propagation",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#events-on-change-of-profile-information",
+      "status": "covered_assertions_only",
+      "assertions": [
+        "PUT/DELETE displayname or avatar_url sends an updated m.room.member join event into every joined room",
+        "An m.presence update carrying displayname and avatar_url reaches room peers via /sync",
+        "A local user's own join event carries their display name and avatar URL without the client sending them"
+      ],
+      "implementation": [
+        "conduit-server/src/api/client/profile.rs (propagate, with_join_profile)",
+        "conduit-server/src/api/client/presence.rs (set_profile)"
+      ],
+      "tests": [
+        "conduit-server/tests/production_modules.rs::profile_changes_propagate_to_member_events_and_presence"
+      ],
+      "limitations": [
+        "Presence is in-memory; the profile carried on presence resets on restart"
+      ]
+    },
+    {
+      "id": "cs-server-side-key-backup",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#server-side-key-backups",
+      "status": "covered_assertions_only",
+      "assertions": [
+        "Every key mutation answers etag + count; an ignored upload leaves the etag unchanged",
+        "Keys can only be written to the current version: other versions are 403 M_WRONG_ROOM_KEYS_VERSION with current_version, no backup is 404 M_NOT_FOUND",
+        "Session replacement keeps is_verified keys, then lower first_message_index, then lower forwarded_count",
+        "DELETE /room_keys/keys[/{roomId}[/{sessionId}]] for whole backup, room and session",
+        "Version update rejects algorithm or body version mismatch with M_INVALID_PARAM; version delete removes keys, repeats succeed, unknown versions are 404"
+      ],
+      "implementation": [
+        "conduit-server/src/api/client/keys.rs",
+        "conduit-server/src/storage_pg.rs"
+      ],
+      "tests": [
+        "conduit-server/tests/production_modules.rs::key_backup_versions_keys_etags_and_errors"
+      ],
+      "limitations": []
+    },
+    {
+      "id": "cs-account-locking-and-suspension",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#account-moderation",
+      "status": "covered_assertions_only",
+      "assertions": [
+        "GET/PUT /_matrix/client/v1/admin/lock|suspend/{userId}: non-admin 403 before lookup, remote 400 M_INVALID_PARAM, unknown 404 M_NOT_FOUND, self or other admin 403",
+        "Locked accounts get 401 M_USER_LOCKED with soft_logout on every endpoint but logout; login is refused; unlocking restores the same token",
+        "Suspended accounts get 403 M_USER_SUSPENDED on send, state, join, invite, createRoom, profile changes and redacting others' events, while sync, /messages, own redactions, leave and login keep working"
+      ],
+      "implementation": [
+        "conduit-server/src/api/client/moderation.rs",
+        "conduit-server/migrations/0071_account_moderation.sql"
+      ],
+      "tests": [
+        "conduit-server/tests/production_modules.rs::admin_lock_endpoints_and_locked_account_enforcement",
+        "conduit-server/tests/production_modules.rs::suspended_accounts_keep_reading_but_cannot_add_activity"
+      ],
+      "limitations": [
+        "No admin-capability advertisement exists in /capabilities for moderation (spec defines none in v1.19)"
+      ]
+    },
+    {
+      "id": "cs-server-notices",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#server-notices",
+      "status": "covered_assertions_only",
+      "assertions": [
+        "The first notice creates one notices room per user, invites (does not join) the user and tags it m.server_notice",
+        "Notices are m.room.message with msgtype m.server_notice from the system account",
+        "Rejecting the invite is 403 M_CANNOT_LEAVE_SERVER_NOTICE_ROOM; leaving after joining succeeds and the next notice re-invites into the same room"
+      ],
+      "implementation": [
+        "conduit-server/src/api/client/server_notices.rs",
+        "conduit-server/migrations/0072_server_notices.sql"
+      ],
+      "tests": [
+        "conduit-server/tests/production_modules.rs::server_notices_room_is_tagged_invite_only_and_reused"
+      ],
+      "limitations": [
+        "No resource limits exist, so m.server_notice.usage_limit_reached is only sent manually by an operator"
+      ]
     }
   ]
 }

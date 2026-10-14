@@ -26,6 +26,7 @@ pub mod knock;
 pub mod notification_counts;
 pub mod media;
 pub mod media_preview;
+pub mod moderation;
 pub mod presence;
 pub mod probe;
 pub mod rate_limit;
@@ -40,6 +41,7 @@ pub mod rooms;
 pub mod safe_fetch;
 pub mod sso;
 pub mod standards;
+pub mod server_notices;
 pub mod sync;
 pub mod thirdparty;
 pub mod typing;
@@ -371,6 +373,7 @@ impl<S: AuthState> FromRequestParts<S> for AuthedUser {
         let grant = verify_access_token(state, &token).await?;
 
         session::guest_gate(state, parts, &grant.user_id).await?;
+        moderation::gate(state, parts, &grant.user_id).await?;
         session::touch(state, parts, &grant.user_id, &grant.device_id);
 
         Ok(AuthedUser {

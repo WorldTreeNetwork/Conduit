@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO server_notice_rooms (user_id, room_id) VALUES ($1, $2)\n            ON CONFLICT (user_id) DO UPDATE SET room_id = EXCLUDED.room_id\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "5582cea719c2d0fec705f2bede77c60c86fb09c5e1cc13d35aec8b97d90268c6"
+}

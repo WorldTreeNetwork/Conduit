@@ -347,3 +347,46 @@ only `conduit::ROOM_VERSION`. `PUT` account data of the server-managed types
   before the room is created) answer `403 M_INVITE_BLOCKED`; `/sync` hides the
   user's pending invites while blocked. The federation `/invite` hook is
   conduit-y99.29.1.
+## Profiles, key backup, moderation and server notices (modules lane)
+
+Journeys: `conduit-server/tests/production_modules.rs`.
+
+**Profiles** (`api/client/profile.rs`, conduit-y99.38/.25). `displayname` and
+`avatar_url` stay on `accounts`; `m.tz` and namespaced custom keys live in
+`profile_fields` (migration 0070). `PUT|DELETE /profile/{userId}/{keyName}`
+validates the key grammar (`M_INVALID_PARAM`), key length (`M_KEY_TOO_LARGE`),
+the body property (`M_MISSING_PARAM`), value types (`M_BAD_JSON`) and the 64 KiB
+whole-profile limit (`M_PROFILE_TOO_LARGE`). `null` custom values are stored;
+`null` displayname/avatar clears. A displayname/avatar change sends an updated
+`m.room.member` join into every joined room and an `m.presence` update carrying
+the new values; the event pipeline also fills a local user's own join with
+their profile. Lookups are open by default; `CONDUIT_PROFILE_LOOKUP=restricted`
+answers only self, shared rooms, and users joined to public or world-readable
+rooms, `403 M_FORBIDDEN` otherwise (unknown users too). `m.profile_fields` is
+advertised (guests: `allowed: ["displayname"]`).
+
+**Key backup** (`api/client/keys.rs`, conduit-y99.39). Writes go only to the
+current version (`403 M_WRONG_ROOM_KEYS_VERSION` + `current_version`; no backup
+is 404). Uploads follow the spec replacement order (is_verified, then lower
+first_message_index, then lower forwarded_count) and require all four
+`KeyBackupData` fields. The etag is a counter that moves only when stored keys
+change; auth_data updates keep it. Deleting a version deletes its keys and is
+idempotent; never-existing versions are 404.
+
+**Account moderation** (`api/client/moderation.rs`, conduit-y99.43).
+`GET|PUT /_matrix/client/v1/admin/lock|suspend/{userId}`; state in
+`account_moderation` (migration 0071). Enforcement is one point lookup in the
+`AuthedUser` extractor: locked accounts get `401 M_USER_LOCKED` +
+`soft_logout: true` everywhere except logout; `issue_session` and `/refresh`
+refuse them too. Suspended accounts get `403 M_USER_SUSPENDED` on join, knock,
+invite, send, state, createRoom, upgrade, profile writes and redacting other
+users' events.
+
+**Server notices** (`api/client/server_notices.rs`, conduit-y99.41). Operators
+call `POST /_matrix/conduit/admin/v1/server_notices`
+`{"user_id", "content"}`. The system account
+`@${CONDUIT_SERVER_NOTICES_LOCALPART:-server-notices}:server` creates one room per
+user (`server_notice_rooms`, migration 0072), invites the user, tags it
+`m.server_notice`, and sends `msgtype: m.server_notice`. Rejecting the invite is
+`403 M_CANNOT_LEAVE_SERVER_NOTICE_ROOM`; leaving after joining is allowed and
+the next notice re-invites.

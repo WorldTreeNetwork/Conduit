@@ -592,19 +592,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .delete(keys_api::room_keys_delete_all::<AppState>))
         .route("/_matrix/client/v3/room_keys/keys/:roomId",
             get(keys_api::room_keys_get_room::<AppState>)
-            .put(keys_api::room_keys_put_room::<AppState>))
+            .put(keys_api::room_keys_put_room::<AppState>)
+            .delete(keys_api::room_keys_delete_room::<AppState>))
         .route("/_matrix/client/v3/room_keys/keys/:roomId/:sessionId",
             get(keys_api::room_keys_get_session::<AppState>)
-            .put(keys_api::room_keys_put_session::<AppState>))
-        // Profile (E06 1mo.1, 1mo.2)
-        .route("/_matrix/client/v3/profile/:userId/displayname",
-            get(profile_api::get_displayname::<AppState>)
-            .put(profile_api::put_displayname::<AppState>))
-        .route("/_matrix/client/v3/profile/:userId/avatar_url",
-            get(profile_api::get_avatar_url::<AppState>)
-            .put(profile_api::put_avatar_url::<AppState>))
-        .route("/_matrix/client/v3/profile/:userId",
-            get(profile_api::get_profile::<AppState>))
+            .put(keys_api::room_keys_put_session::<AppState>)
+            .delete(keys_api::room_keys_delete_session::<AppState>))
+        // Profile (E06 1mo.1, 1mo.2; extended fields conduit-y99.38)
+        .merge(profile_api::router::<AppState>())
         // Account data (E06 1mo.3, 1mo.4)
         .route("/_matrix/client/v3/user/:userId/account_data/:type",
             get(account_data_api::get_account_data::<AppState>)
@@ -686,6 +681,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .merge(conduit_server::api::client::account::router::<AppState>())
         .merge(conduit_server::api::client::standards::router::<AppState>())
         .merge(conduit_server::api::client::room_membership::router::<AppState>())
+        .merge(conduit_server::api::client::moderation::router::<AppState>())
+        .merge(conduit_server::api::client::server_notices::router::<AppState>())
         // Apply CS-API rate limiter to everything above (conduit-9m4).
         // Federation routes are nested below and use their own per-origin
         // limiter, so they bypass this one.

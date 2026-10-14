@@ -1262,6 +1262,37 @@ pub trait Storage: Send + Sync + 'static {
 
     /// Revoke every token issued in exchange for `parent_hash`.
     async fn delete_refresh_token_children(&self, parent_hash: &str) -> Result<()>;
+
+    // --- Modules lane (conduit-y99.38/.39/.41/.43) --------------------------
+
+    /// Extended profile fields of a local user: every key except
+    /// `displayname` and `avatar_url`, which live on the account.
+    async fn profile_fields(&self, user_id: &str) -> Result<std::collections::BTreeMap<String, Value>>;
+
+    /// Store (`Some`) or remove (`None`) one extended profile field.
+    async fn set_profile_field(&self, user_id: &str, key: &str, value: Option<&Value>) -> Result<()>;
+
+    /// Lock and suspension state of a local account.
+    async fn account_moderation(&self, user_id: &str) -> Result<AccountModeration>;
+
+    /// Lock or unlock an account (spec account locking).
+    async fn set_account_locked(&self, user_id: &str, locked: bool) -> Result<()>;
+
+    /// Suspend or unsuspend an account (spec account suspension).
+    async fn set_account_suspended(&self, user_id: &str, suspended: bool) -> Result<()>;
+
+    /// Whether a backup version was ever created: `None` never existed,
+    /// `Some(true)` existed and was deleted, `Some(false)` is live.
+    async fn room_keys_version_deleted(&self, user_id: &str, version: &str) -> Result<Option<bool>>;
+
+    /// The user's server notices room, if one was created.
+    async fn server_notice_room(&self, user_id: &str) -> Result<Option<String>>;
+
+    /// Remember the user's server notices room.
+    async fn set_server_notice_room(&self, user_id: &str, room_id: &str) -> Result<()>;
+
+    /// Whether `room_id` is some user's server notices room.
+    async fn is_server_notice_room(&self, room_id: &str) -> Result<bool>;
     // --- Application services & identity-server bindings (appservice lane:
     //     conduit-y99.34, conduit-y99.36) -------------------------------------
 
@@ -1380,6 +1411,13 @@ struct MemoryAppservice {
     bindings: std::collections::BTreeSet<(String, String, String, String)>,
 }
 
+/// Admin moderation state of an account (conduit-y99.43).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AccountModeration {
+    pub locked: bool,
+    pub suspended: bool,
+}
+
 // ---------------------------------------------------------------------------
 // Directory domain types (conduit-y99.20)
 // ---------------------------------------------------------------------------
@@ -1422,7 +1460,19 @@ pub struct MemoryStorage {
     inner: RwLock<MemoryInner>,
     room_content: RwLock<MemoryRoomContent>,
     directory: RwLock<MemoryDirectory>,
+    modules: RwLock<MemoryModules>,
     appservice: RwLock<MemoryAppservice>,
+}
+
+/// MemoryStorage tables for the modules lane (profiles, moderation,
+/// server notices).
+#[derive(Default)]
+struct MemoryModules {
+    /// (user_id, key) → value
+    profile_fields: std::collections::BTreeMap<(String, String), Value>,
+    moderation: HashMap<String, AccountModeration>,
+    /// user_id → room_id
+    notice_rooms: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone)]
@@ -2408,9 +2458,9 @@ impl Storage for MemoryStorage {
     ) -> Result<()> {
         let mut inner = self.inner.write().await;
         let key = (user_id.to_owned(), version.to_owned());
+        // The etag represents stored keys, so an auth_data update keeps it.
         if let Some((rv, _)) = inner.room_key_versions.get_mut(&key) {
             rv.auth_data = auth_data.clone();
-            rv.etag = format!("{}", chrono::Utc::now().timestamp_millis());
         }
         Ok(())
     }
@@ -2418,9 +2468,14 @@ impl Storage for MemoryStorage {
     async fn delete_room_keys_version(&self, user_id: &str, version: &str) -> Result<()> {
         let mut inner = self.inner.write().await;
         let key = (user_id.to_owned(), version.to_owned());
-        if let Some((_, deleted)) = inner.room_key_versions.get_mut(&key) {
+        if let Some((rv, deleted)) = inner.room_key_versions.get_mut(&key) {
             *deleted = true;
+            rv.count = 0;
         }
+        // Deleting a backup deletes its key data too (spec).
+        inner
+            .room_keys
+            .retain(|(u, v, _, _), _| !(u == user_id && v == version));
         Ok(())
     }
 
@@ -2451,6 +2506,7 @@ impl Storage for MemoryStorage {
             .count() as i64;
         if let Some((rv, _)) = inner.room_key_versions.get_mut(&vk) {
             rv.count = count;
+            rv.etag = next_room_keys_etag(&rv.etag);
         }
         Ok(())
     }
@@ -2521,6 +2577,9 @@ impl Storage for MemoryStorage {
             .count() as i64;
         if let Some((rv, _)) = inner.room_key_versions.get_mut(&vk) {
             rv.count = count;
+            if deleted > 0 {
+                rv.etag = next_room_keys_etag(&rv.etag);
+            }
         }
         Ok(deleted)
     }
@@ -3628,6 +3687,71 @@ impl Storage for MemoryStorage {
         Ok(())
     }
 
+    // --- Modules lane (conduit-y99.38/.39/.41/.43) --------------------------
+
+    async fn profile_fields(&self, user_id: &str) -> Result<std::collections::BTreeMap<String, Value>> {
+        Ok(self
+            .modules
+            .read()
+            .await
+            .profile_fields
+            .iter()
+            .filter(|((u, _), _)| u == user_id)
+            .map(|((_, k), v)| (k.clone(), v.clone()))
+            .collect())
+    }
+
+    async fn set_profile_field(&self, user_id: &str, key: &str, value: Option<&Value>) -> Result<()> {
+        let mut m = self.modules.write().await;
+        let k = (user_id.to_owned(), key.to_owned());
+        match value {
+            Some(v) => {
+                m.profile_fields.insert(k, v.clone());
+            }
+            None => {
+                m.profile_fields.remove(&k);
+            }
+        }
+        Ok(())
+    }
+
+    async fn account_moderation(&self, user_id: &str) -> Result<AccountModeration> {
+        Ok(self.modules.read().await.moderation.get(user_id).copied().unwrap_or_default())
+    }
+
+    async fn set_account_locked(&self, user_id: &str, locked: bool) -> Result<()> {
+        self.modules.write().await.moderation.entry(user_id.to_owned()).or_default().locked = locked;
+        Ok(())
+    }
+
+    async fn set_account_suspended(&self, user_id: &str, suspended: bool) -> Result<()> {
+        self.modules.write().await.moderation.entry(user_id.to_owned()).or_default().suspended = suspended;
+        Ok(())
+    }
+
+    async fn room_keys_version_deleted(&self, user_id: &str, version: &str) -> Result<Option<bool>> {
+        Ok(self
+            .inner
+            .read()
+            .await
+            .room_key_versions
+            .get(&(user_id.to_owned(), version.to_owned()))
+            .map(|(_, deleted)| *deleted))
+    }
+
+    async fn server_notice_room(&self, user_id: &str) -> Result<Option<String>> {
+        Ok(self.modules.read().await.notice_rooms.get(user_id).cloned())
+    }
+
+    async fn set_server_notice_room(&self, user_id: &str, room_id: &str) -> Result<()> {
+        self.modules.write().await.notice_rooms.insert(user_id.to_owned(), room_id.to_owned());
+        Ok(())
+    }
+
+    async fn is_server_notice_room(&self, room_id: &str) -> Result<bool> {
+        Ok(self.modules.read().await.notice_rooms.values().any(|r| r == room_id))
+    }
+
     // --- Application services & identity-server bindings (appservice lane) --
 
     async fn appservice_cursor(&self, as_id: &str) -> Result<AppserviceCursor> {
@@ -3826,6 +3950,12 @@ fn memory_receipt(
         ts: *ts,
         stream_pos: *pos,
     }
+}
+
+/// The next opaque backup etag: a counter, so two mutations within the
+/// same millisecond still differ (conduit-y99.39).
+pub fn next_room_keys_etag(current: &str) -> String {
+    current.parse::<i64>().map(|n| n + 1).unwrap_or(1).to_string()
 }
 
 /// MemoryStorage room-content tables (conduit-y99.19).

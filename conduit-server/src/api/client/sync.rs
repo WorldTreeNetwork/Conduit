@@ -902,6 +902,12 @@ async fn build_sync_response<S: AuthState>(
             if let Some(msg) = &entry.status_msg {
                 ev["content"]["status_msg"] = json!(msg);
             }
+            if let Some(name) = &entry.displayname {
+                ev["content"]["displayname"] = json!(name);
+            }
+            if let Some(url) = &entry.avatar_url {
+                ev["content"]["avatar_url"] = json!(url);
+            }
             ev
         })
         .collect();

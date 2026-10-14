@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO account_moderation (user_id, suspended_at)\n            VALUES ($1, CASE WHEN $2 THEN now() END)\n            ON CONFLICT (user_id) DO UPDATE SET suspended_at = CASE\n                WHEN NOT $2 THEN NULL\n                ELSE COALESCE(account_moderation.suspended_at, now())\n            END\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Bool"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "74db0a5d1560b16fc8658b51eb6bd3eff1ef020ef854f29737c8ea94f6477507"
+}

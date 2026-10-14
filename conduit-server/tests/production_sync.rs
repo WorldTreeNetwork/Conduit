@@ -1117,12 +1117,14 @@ async fn unread_counts_follow_push_rules_receipts_and_threads() {
         .await;
     let counts = |sync: &Value| sync["rooms"]["join"][&room]["unread_notifications"].clone();
 
-    // The initial message notifies (one-to-one underride); a mention of the
-    // display name also highlights; notices do not notify.
+    // The display name change was propagated as Bob's own member event
+    // (conduit-y99.25), which reads everything before it, including the
+    // initial message.  A mention of the display name notifies and
+    // highlights; notices do not notify.
     send_text(&server, &alice, &room, "mention", json!({"msgtype": "m.text", "body": "hi Bobby"})).await;
     send_text(&server, &alice, &room, "notice", json!({"msgtype": "m.notice", "body": "bot"})).await;
     let first = sync(&server, &bob, None).await;
-    assert_eq!(counts(&first), json!({"notification_count": 2, "highlight_count": 1}), "{first}");
+    assert_eq!(counts(&first), json!({"notification_count": 1, "highlight_count": 1}), "{first}");
 
     // A receipt clears notifications up to and including its event; a
     // private receipt that is further ahead wins.

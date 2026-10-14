@@ -975,8 +975,23 @@ pub async fn room_keys_version_create<S: AuthState>(
         }
     }
 
-    // Version = monotonic timestamp string.
-    let version = chrono::Utc::now().timestamp_millis().to_string();
+    // Version = millisecond timestamp, advanced past any version that
+    // already exists (live or deleted) so two creates never collide and
+    // the newest backup always sorts last.
+    let mut candidate = chrono::Utc::now().timestamp_millis();
+    if let Ok(Some(latest)) = storage.get_room_keys_version(user_id, None).await {
+        if let Ok(n) = latest.version.parse::<i64>() {
+            candidate = candidate.max(n + 1);
+        }
+    }
+    loop {
+        match storage.room_keys_version_deleted(user_id, &candidate.to_string()).await {
+            Ok(None) => break,
+            Ok(Some(_)) => candidate += 1,
+            Err(e) => return MatrixError::unknown(e.to_string()).into_response(),
+        }
+    }
+    let version = candidate.to_string();
 
     match storage
         .create_room_keys_version(user_id, &version, &body.algorithm, &body.auth_data)
@@ -1069,6 +1084,116 @@ pub(crate) fn verify_backup_auth_data(
     }
 }
 
+// --- Backup version checks (conduit-y99.39) ---
+
+fn backup_not_found() -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        Json(json!({ "errcode": "M_NOT_FOUND", "error": "Unknown backup version" })),
+    )
+        .into_response()
+}
+
+/// A live (not deleted) backup version for reading or deleting keys.
+async fn backup_for_read(
+    storage: &Arc<dyn Storage>,
+    user_id: &str,
+    version: &str,
+) -> Result<conduit::storage::RoomKeyVersion, Response> {
+    match storage.get_room_keys_version(user_id, Some(version)).await {
+        Ok(Some(v)) => Ok(v),
+        Ok(None) => Err(backup_not_found()),
+        Err(e) => Err(MatrixError::unknown(e.to_string()).into_response()),
+    }
+}
+
+/// Keys can only be written to the most recently created backup: any
+/// other version is `403 M_WRONG_ROOM_KEYS_VERSION` with
+/// `current_version`; no backup at all is `404 M_NOT_FOUND`.
+async fn backup_for_write(
+    storage: &Arc<dyn Storage>,
+    user_id: &str,
+    version: &str,
+) -> Result<(), Response> {
+    match storage.get_room_keys_version(user_id, None).await {
+        Ok(Some(current)) if current.version == version => Ok(()),
+        Ok(Some(current)) => Err((
+            StatusCode::FORBIDDEN,
+            Json(json!({
+                "errcode": "M_WRONG_ROOM_KEYS_VERSION",
+                "error": "Wrong backup version.",
+                "current_version": current.version,
+            })),
+        )
+            .into_response()),
+        Ok(None) => Err(backup_not_found()),
+        Err(e) => Err(MatrixError::unknown(e.to_string()).into_response()),
+    }
+}
+
+/// Whether an uploaded key replaces the stored one (spec §Server-side
+/// key backups): prefer `is_verified`, then the lower
+/// `first_message_index`, then the lower `forwarded_count`.  Equal keys
+/// keep the stored copy.
+pub fn backup_key_replaces(existing: &Value, new: &Value) -> bool {
+    let verified = |v: &Value| v.get("is_verified").and_then(Value::as_bool).unwrap_or(false);
+    let index = |v: &Value| v.get("first_message_index").and_then(Value::as_i64).unwrap_or(i64::MAX);
+    let forwarded = |v: &Value| v.get("forwarded_count").and_then(Value::as_i64).unwrap_or(i64::MAX);
+    if verified(existing) != verified(new) {
+        return verified(new);
+    }
+    if index(existing) != index(new) {
+        return index(new) < index(existing);
+    }
+    forwarded(new) < forwarded(existing)
+}
+
+/// Validate `KeyBackupData` (all four fields are required).
+fn valid_key_backup_data(v: &Value) -> bool {
+    v.get("first_message_index").is_some_and(Value::is_u64)
+        && v.get("forwarded_count").is_some_and(Value::is_u64)
+        && v.get("is_verified").is_some_and(Value::is_boolean)
+        && v.get("session_data").is_some_and(Value::is_object)
+}
+
+/// Store a batch of keys, applying the replacement rule per session.
+async fn store_backup_keys(
+    storage: &Arc<dyn Storage>,
+    user_id: &str,
+    version: &str,
+    rooms: &HashMap<String, HashMap<String, Value>>,
+) -> Response {
+    if let Err(r) = backup_for_write(storage, user_id, version).await {
+        return r;
+    }
+    for sessions in rooms.values() {
+        if sessions.values().any(|kd| !valid_key_backup_data(kd)) {
+            return MatrixError::bad_json(
+                "key data needs first_message_index, forwarded_count, is_verified and session_data",
+            )
+            .into_response();
+        }
+    }
+    for (room_id, sessions) in rooms {
+        let existing = match storage.get_room_keys(user_id, version, Some(room_id), None).await {
+            Ok(mut r) => r.remove(room_id).unwrap_or_default(),
+            Err(e) => return MatrixError::unknown(e.to_string()).into_response(),
+        };
+        for (session_id, key_data) in sessions {
+            if existing.get(session_id).is_some_and(|old| !backup_key_replaces(old, key_data)) {
+                continue;
+            }
+            if let Err(e) = storage
+                .upsert_room_key(user_id, version, room_id, session_id, key_data)
+                .await
+            {
+                return MatrixError::unknown(e.to_string()).into_response();
+            }
+        }
+    }
+    room_keys_count_response(storage, user_id, version).await
+}
+
 // --- GET /_matrix/client/v3/room_keys/version ---
 
 pub async fn room_keys_version_get_latest<S: AuthState>(
@@ -1080,7 +1205,7 @@ pub async fn room_keys_version_get_latest<S: AuthState>(
         Ok(Some(v)) => (StatusCode::OK, Json(room_key_version_json(v))).into_response(),
         Ok(None) => (
             StatusCode::NOT_FOUND,
-            Json(json!({ "errcode": "M_NOT_FOUND", "error": "No backup version found" })),
+            Json(json!({ "errcode": "M_NOT_FOUND", "error": "No current backup version" })),
         )
             .into_response(),
         Err(e) => MatrixError::unknown(e.to_string()).into_response(),
@@ -1094,18 +1219,9 @@ pub async fn room_keys_version_get<S: AuthState>(
     authed: AuthedUser,
     Path(version): Path<String>,
 ) -> Response {
-    let storage = state.storage();
-    match storage
-        .get_room_keys_version(&authed.user_id, Some(&version))
-        .await
-    {
-        Ok(Some(v)) => (StatusCode::OK, Json(room_key_version_json(v))).into_response(),
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Json(json!({ "errcode": "M_NOT_FOUND", "error": "Backup version not found" })),
-        )
-            .into_response(),
-        Err(e) => MatrixError::unknown(e.to_string()).into_response(),
+    match backup_for_read(state.storage(), &authed.user_id, &version).await {
+        Ok(v) => (StatusCode::OK, Json(room_key_version_json(v))).into_response(),
+        Err(r) => r,
     }
 }
 
@@ -1114,9 +1230,20 @@ pub async fn room_keys_version_get<S: AuthState>(
 #[derive(Debug, Deserialize)]
 pub struct RoomKeyVersionUpdateRequest {
     pub auth_data: Value,
-    // algorithm must match existing version; we ignore it for update.
+    /// Must equal the backup's current algorithm (only `auth_data` may change).
     #[serde(default)]
     pub algorithm: Option<String>,
+    /// If present, must equal the version in the path.
+    #[serde(default)]
+    pub version: Option<String>,
+}
+
+fn invalid_param(msg: &str) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({ "errcode": "M_INVALID_PARAM", "error": msg })),
+    )
+        .into_response()
 }
 
 pub async fn room_keys_version_update<S: AuthState>(
@@ -1126,6 +1253,30 @@ pub async fn room_keys_version_update<S: AuthState>(
     Json(body): Json<RoomKeyVersionUpdateRequest>,
 ) -> Response {
     let storage = state.storage();
+    let current = match backup_for_read(storage, &authed.user_id, &version).await {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    if body.version.as_deref().is_some_and(|v| v != version) {
+        return invalid_param("version in body does not match the path");
+    }
+    if body.algorithm.as_deref().is_some_and(|a| a != current.algorithm) {
+        return invalid_param("Algorithm does not match");
+    }
+    if let Ok(xsk) = storage.get_cross_signing_keys(&authed.user_id).await {
+        if let Some(master) = xsk.get("master") {
+            if let Err(e) = verify_backup_auth_data(&body.auth_data, master) {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "errcode": "M_INVALID_SIGNATURE",
+                        "error": format!("backup auth_data signature invalid: {e}")
+                    })),
+                )
+                    .into_response();
+            }
+        }
+    }
     match storage
         .update_room_keys_version(&authed.user_id, &version, &body.auth_data)
         .await
@@ -1137,12 +1288,20 @@ pub async fn room_keys_version_update<S: AuthState>(
 
 // --- DELETE /_matrix/client/v3/room_keys/version/:version ---
 
+/// Deletes the version and all its keys.  A previously deleted version
+/// succeeds again; a version that never existed is `404 M_NOT_FOUND`.
 pub async fn room_keys_version_delete<S: AuthState>(
     State(state): State<S>,
     authed: AuthedUser,
     Path(version): Path<String>,
 ) -> Response {
     let storage = state.storage();
+    match storage.room_keys_version_deleted(&authed.user_id, &version).await {
+        Ok(None) => return backup_not_found(),
+        Ok(Some(true)) => return (StatusCode::OK, Json(json!({}))).into_response(),
+        Ok(Some(false)) => {}
+        Err(e) => return MatrixError::unknown(e.to_string()).into_response(),
+    }
     match storage
         .delete_room_keys_version(&authed.user_id, &version)
         .await
@@ -1186,19 +1345,12 @@ pub async fn room_keys_put_all<S: AuthState>(
     Query(q): Query<RoomKeysQuery>,
     Json(body): Json<RoomKeysAllBody>,
 ) -> Response {
-    let storage = state.storage();
-    let user_id = &authed.user_id;
-    for (room_id, room) in &body.rooms {
-        for (session_id, key_data) in &room.sessions {
-            if let Err(e) = storage
-                .upsert_room_key(user_id, &q.version, room_id, session_id, key_data)
-                .await
-            {
-                return MatrixError::unknown(e.to_string()).into_response();
-            }
-        }
-    }
-    room_keys_count_response(storage, user_id, &q.version).await
+    let rooms: HashMap<String, HashMap<String, Value>> = body
+        .rooms
+        .into_iter()
+        .map(|(room_id, room)| (room_id, room.sessions))
+        .collect();
+    store_backup_keys(state.storage(), &authed.user_id, &q.version, &rooms).await
 }
 
 // --- GET /_matrix/client/v3/room_keys/keys ---
@@ -1209,6 +1361,9 @@ pub async fn room_keys_get_all<S: AuthState>(
     Query(q): Query<RoomKeysQuery>,
 ) -> Response {
     let storage = state.storage();
+    if let Err(r) = backup_for_read(storage, &authed.user_id, &q.version).await {
+        return r;
+    }
     match storage
         .get_room_keys(&authed.user_id, &q.version, None, None)
         .await
@@ -1224,21 +1379,55 @@ pub async fn room_keys_get_all<S: AuthState>(
     }
 }
 
-// --- DELETE /_matrix/client/v3/room_keys/keys ---
+// --- DELETE /_matrix/client/v3/room_keys/keys[/:roomId[/:sessionId]] ---
+
+async fn delete_backup_keys(
+    storage: &Arc<dyn Storage>,
+    user_id: &str,
+    version: &str,
+    room_id: Option<&str>,
+    session_id: Option<&str>,
+) -> Response {
+    if let Err(r) = backup_for_read(storage, user_id, version).await {
+        return r;
+    }
+    match storage.delete_room_keys(user_id, version, room_id, session_id).await {
+        Ok(_) => room_keys_count_response(storage, user_id, version).await,
+        Err(e) => MatrixError::unknown(e.to_string()).into_response(),
+    }
+}
 
 pub async fn room_keys_delete_all<S: AuthState>(
     State(state): State<S>,
     authed: AuthedUser,
     Query(q): Query<RoomKeysQuery>,
 ) -> Response {
-    let storage = state.storage();
-    match storage
-        .delete_room_keys(&authed.user_id, &q.version, None, None)
-        .await
-    {
-        Ok(_) => room_keys_count_response(storage, &authed.user_id, &q.version).await,
-        Err(e) => MatrixError::unknown(e.to_string()).into_response(),
-    }
+    delete_backup_keys(state.storage(), &authed.user_id, &q.version, None, None).await
+}
+
+pub async fn room_keys_delete_room<S: AuthState>(
+    State(state): State<S>,
+    authed: AuthedUser,
+    Path(room_id): Path<String>,
+    Query(q): Query<RoomKeysQuery>,
+) -> Response {
+    delete_backup_keys(state.storage(), &authed.user_id, &q.version, Some(&room_id), None).await
+}
+
+pub async fn room_keys_delete_session<S: AuthState>(
+    State(state): State<S>,
+    authed: AuthedUser,
+    Path((room_id, session_id)): Path<(String, String)>,
+    Query(q): Query<RoomKeysQuery>,
+) -> Response {
+    delete_backup_keys(
+        state.storage(),
+        &authed.user_id,
+        &q.version,
+        Some(&room_id),
+        Some(&session_id),
+    )
+    .await
 }
 
 // --- PUT /_matrix/client/v3/room_keys/keys/:roomId ---
@@ -1255,17 +1444,8 @@ pub async fn room_keys_put_room<S: AuthState>(
     Query(q): Query<RoomKeysQuery>,
     Json(body): Json<RoomKeysSingleRoomBody>,
 ) -> Response {
-    let storage = state.storage();
-    let user_id = &authed.user_id;
-    for (session_id, key_data) in &body.sessions {
-        if let Err(e) = storage
-            .upsert_room_key(user_id, &q.version, &room_id, session_id, key_data)
-            .await
-        {
-            return MatrixError::unknown(e.to_string()).into_response();
-        }
-    }
-    room_keys_count_response(storage, user_id, &q.version).await
+    let rooms = HashMap::from([(room_id, body.sessions)]);
+    store_backup_keys(state.storage(), &authed.user_id, &q.version, &rooms).await
 }
 
 // --- GET /_matrix/client/v3/room_keys/keys/:roomId ---
@@ -1277,6 +1457,9 @@ pub async fn room_keys_get_room<S: AuthState>(
     Query(q): Query<RoomKeysQuery>,
 ) -> Response {
     let storage = state.storage();
+    if let Err(r) = backup_for_read(storage, &authed.user_id, &q.version).await {
+        return r;
+    }
     match storage
         .get_room_keys(&authed.user_id, &q.version, Some(&room_id), None)
         .await
@@ -1298,6 +1481,9 @@ pub async fn room_keys_get_session<S: AuthState>(
     Query(q): Query<RoomKeysQuery>,
 ) -> Response {
     let storage = state.storage();
+    if let Err(r) = backup_for_read(storage, &authed.user_id, &q.version).await {
+        return r;
+    }
     match storage
         .get_room_keys(&authed.user_id, &q.version, Some(&room_id), Some(&session_id))
         .await
@@ -1308,7 +1494,7 @@ pub async fn room_keys_get_session<S: AuthState>(
                 Some(kd) => (StatusCode::OK, Json(kd)).into_response(),
                 None => (
                     StatusCode::NOT_FOUND,
-                    Json(json!({ "errcode": "M_NOT_FOUND", "error": "Session not found" })),
+                    Json(json!({ "errcode": "M_NOT_FOUND", "error": "Key not found." })),
                 )
                     .into_response(),
             }
@@ -1326,20 +1512,13 @@ pub async fn room_keys_put_session<S: AuthState>(
     Query(q): Query<RoomKeysQuery>,
     Json(key_data): Json<Value>,
 ) -> Response {
-    let storage = state.storage();
-    let user_id = &authed.user_id;
-    if let Err(e) = storage
-        .upsert_room_key(user_id, &q.version, &room_id, &session_id, &key_data)
-        .await
-    {
-        return MatrixError::unknown(e.to_string()).into_response();
-    }
-    room_keys_count_response(storage, user_id, &q.version).await
+    let rooms = HashMap::from([(room_id, HashMap::from([(session_id, key_data)]))]);
+    store_backup_keys(state.storage(), &authed.user_id, &q.version, &rooms).await
 }
 
 // Helper: return { etag, count } response after a room key mutation.
 async fn room_keys_count_response(
-    storage: &std::sync::Arc<dyn conduit::storage::Storage>,
+    storage: &Arc<dyn Storage>,
     user_id: &str,
     version: &str,
 ) -> Response {
@@ -1349,12 +1528,41 @@ async fn room_keys_count_response(
             Json(json!({ "etag": v.etag, "count": v.count })),
         )
             .into_response(),
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Json(json!({ "errcode": "M_NOT_FOUND", "error": "Version not found" })),
-        )
-            .into_response(),
+        Ok(None) => backup_not_found(),
         Err(e) => MatrixError::unknown(e.to_string()).into_response(),
+    }
+}
+
+#[cfg(test)]
+mod backup_rule_tests {
+    use super::*;
+
+    fn key(verified: bool, index: i64, forwarded: i64) -> Value {
+        json!({
+            "is_verified": verified,
+            "first_message_index": index,
+            "forwarded_count": forwarded,
+            "session_data": {},
+        })
+    }
+
+    #[test]
+    fn replacement_prefers_verified_then_index_then_forwards() {
+        assert!(backup_key_replaces(&key(false, 0, 0), &key(true, 9, 9)));
+        assert!(!backup_key_replaces(&key(true, 9, 9), &key(false, 0, 0)));
+        assert!(backup_key_replaces(&key(false, 5, 0), &key(false, 1, 9)));
+        assert!(!backup_key_replaces(&key(false, 1, 0), &key(false, 5, 0)));
+        assert!(backup_key_replaces(&key(true, 1, 3), &key(true, 1, 2)));
+        assert!(!backup_key_replaces(&key(true, 1, 2), &key(true, 1, 2)));
+    }
+
+    #[test]
+    fn key_backup_data_requires_all_fields() {
+        assert!(valid_key_backup_data(&key(false, 0, 0)));
+        assert!(!valid_key_backup_data(&json!({"session_data": {}})));
+        assert!(!valid_key_backup_data(&json!({
+            "is_verified": "no", "first_message_index": 0, "forwarded_count": 0, "session_data": {}
+        })));
     }
 }
 

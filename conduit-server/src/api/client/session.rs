@@ -94,6 +94,8 @@ pub async fn issue_session<S: AuthState>(
     user_id: &str,
     opts: &LoginOptions,
 ) -> Result<Value, Response> {
+    // A locked account gets no new tokens (spec account locking).
+    super::moderation::refuse_if_locked(state, user_id).await?;
     let storage = state.storage();
     let device_id = opts
         .device_id
@@ -200,6 +202,10 @@ pub async fn refresh<S: AuthState>(State(state): State<S>, body: Option<Json<Val
     if epoch != Some(record.epoch) {
         let _ = storage.delete_refresh_token(&hash).await;
         return unknown_token_response(false, "Refresh token has been revoked");
+    }
+    // Locked accounts cannot obtain a new access token until unlocked.
+    if let Err(r) = super::moderation::refuse_if_locked(&state, &record.user_id).await {
+        return r;
     }
     // Using this token proves the client stored it, so the token it was
     // issued in exchange for is revoked now; tokens previously issued in

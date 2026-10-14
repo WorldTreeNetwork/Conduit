@@ -108,6 +108,8 @@ async fn build_sign_and_persist_inner<S: AuthState>(
 ) -> Result<String, (StatusCode, Json<MatrixError>)> {
     let storage = state.storage();
     let server_name = state.server_name();
+    // Own joins carry the member's profile (spec §Profiles, conduit-y99.38).
+    let content = super::profile::with_join_profile(state, sender, type_, state_key, content).await;
 
     // ------------------------------------------------------------------
     // Step 2 — prev_events and depth

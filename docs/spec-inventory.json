@@ -16,18 +16,18 @@
  "summary": {
   "cs": {
    "endpoint": {
-    "implemented+tested": 99,
-    "implemented-untested": 8,
-    "partial": 42,
-    "missing": 14,
+    "implemented+tested": 120,
+    "implemented-untested": 3,
+    "partial": 33,
+    "missing": 7,
     "not-applicable": 1,
     "total": 164
    },
    "requirement": {
-    "implemented+tested": 35,
+    "implemented+tested": 38,
     "implemented-untested": 3,
-    "partial": 32,
-    "missing": 7,
+    "partial": 31,
+    "missing": 5,
     "not-applicable": 9,
     "total": 86
    }
@@ -125,10 +125,10 @@
    }
   },
   "all": {
-   "implemented+tested": 176,
-   "implemented-untested": 14,
-   "partial": 111,
-   "missing": 127,
+   "implemented+tested": 200,
+   "implemented-untested": 9,
+   "partial": 101,
+   "missing": 118,
    "not-applicable": 37,
    "total": 465
   }
@@ -2308,20 +2308,19 @@
    "status": "partial",
    "code": [
     {
-     "loc": "conduit-server/src/main.rs:607",
-     "handler": "profile_api::get_profile",
-     "kind": "exact"
+     "loc": "conduit-server/src/api/client/profile.rs (get_profile)"
     }
    ],
    "tests": [
-    "conduit-server/tests/production_account.rs::production_deactivation_leaves_rooms_and_blocks_login"
+    "conduit-server/tests/production_modules.rs::profile_extended_fields_round_trip_and_limits",
+    "conduit-server/tests/production_modules.rs::restricted_profile_lookup_allows_only_the_spec_minimum",
+    "conduit-server/tests/production_modules.rs::profile_changes_propagate_to_member_events_and_presence"
    ],
-   "tests_total": 1,
+   "tests_total": 3,
    "gap_beads": [
-    "conduit-y99.38",
     "conduit-z3r"
    ],
-   "notes": "Returns displayname/avatar_url only; no custom fields; remote users not fetched."
+   "notes": "All fields incl. m.tz/custom; optional restricted lookup (CONDUIT_PROFILE_LOOKUP=restricted). Remote users not fetched (conduit-z3r)."
   },
   {
    "id": "cs.ep.get_matrixclientv3profileuseridkeyname",
@@ -2335,31 +2334,20 @@
    "rate_limited": "No",
    "deprecated": false,
    "role": "homeserver",
-   "status": "partial",
+   "status": "implemented+tested",
    "code": [
     {
-     "loc": "conduit-server/src/main.rs:601",
-     "handler": "profile_api::get_displayname",
-     "kind": "partial"
-    },
-    {
-     "loc": "conduit-server/src/main.rs:604",
-     "handler": "profile_api::get_avatar_url",
-     "kind": "partial"
+     "loc": "conduit-server/src/api/client/profile.rs (get_field)"
     }
    ],
    "tests": [
-    "conduit-server/tests/presence.rs::avatar_url_round_trip",
-    "conduit-server/tests/presence.rs::displayname_public_get",
-    "conduit-server/tests/presence.rs::displayname_round_trip",
-    "conduit-server/tests/production_account.rs::production_deactivation_leaves_rooms_and_blocks_login",
-    "conduit-server/tests/production_e2e.rs::production_chat_survives_restart"
+    "conduit-server/tests/production_modules.rs::profile_extended_fields_round_trip_and_limits",
+    "conduit-server/tests/production_modules.rs::restricted_profile_lookup_allows_only_the_spec_minimum",
+    "conduit-server/tests/production_modules.rs::profile_changes_propagate_to_member_events_and_presence"
    ],
-   "tests_total": 5,
-   "gap_beads": [
-    "conduit-y99.38"
-   ],
-   "notes": "Only keyName=displayname|avatar_url routed."
+   "tests_total": 3,
+   "gap_beads": [],
+   "notes": "Any keyName; 404 M_NOT_FOUND for absent field or user."
   },
   {
    "id": "cs.ep.put_matrixclientv3profileuseridkeyname",
@@ -2373,36 +2361,20 @@
    "rate_limited": "Yes",
    "deprecated": false,
    "role": "homeserver",
-   "status": "partial",
+   "status": "implemented+tested",
    "code": [
     {
-     "loc": "conduit-server/src/main.rs:601",
-     "handler": "profile_api::put_displayname",
-     "kind": "partial"
-    },
-    {
-     "loc": "conduit-server/src/main.rs:604",
-     "handler": "profile_api::put_avatar_url",
-     "kind": "partial"
+     "loc": "conduit-server/src/api/client/profile.rs (put_field)"
     }
    ],
    "tests": [
-    "conduit-server/src/api/client/session.rs::guest_allowlist_matches_spec_endpoints",
-    "conduit-server/tests/presence.rs::avatar_url_round_trip",
-    "conduit-server/tests/presence.rs::displayname_other_user_rejected_on_put",
-    "conduit-server/tests/presence.rs::displayname_public_get",
-    "conduit-server/tests/presence.rs::displayname_round_trip",
-    "conduit-server/tests/production_account.rs::production_deactivation_leaves_rooms_and_blocks_login",
-    "conduit-server/tests/production_account.rs::production_guest_access_is_restricted_and_upgradable",
-    "conduit-server/tests/production_directory.rs::user_directory_search_covers_shared_and_public_rooms_only",
-    "conduit-server/tests/production_e2e.rs::production_chat_survives_restart"
+    "conduit-server/tests/production_modules.rs::profile_extended_fields_round_trip_and_limits",
+    "conduit-server/tests/production_modules.rs::restricted_profile_lookup_allows_only_the_spec_minimum",
+    "conduit-server/tests/production_modules.rs::profile_changes_propagate_to_member_events_and_presence"
    ],
-   "tests_total": 9,
-   "gap_beads": [
-    "conduit-y99.38",
-    "conduit-y99.25"
-   ],
-   "notes": "Only displayname|avatar_url; changes not propagated to member events (y99.25)."
+   "tests_total": 3,
+   "gap_beads": [],
+   "notes": "avatar_url/displayname/m.tz/namespaced keys; M_INVALID_PARAM, M_KEY_TOO_LARGE, M_MISSING_PARAM, M_BAD_JSON, M_PROFILE_TOO_LARGE (64 KiB); displayname/avatar changes propagate to member events and presence."
   },
   {
    "id": "cs.ep.delete_matrixclientv3profileuseridkeyname",
@@ -2416,14 +2388,20 @@
    "rate_limited": "Yes",
    "deprecated": false,
    "role": "homeserver",
-   "status": "missing",
-   "code": [],
-   "tests": [],
-   "tests_total": 0,
-   "gap_beads": [
-    "conduit-y99.38"
+   "status": "implemented+tested",
+   "code": [
+    {
+     "loc": "conduit-server/src/api/client/profile.rs (delete_field)"
+    }
    ],
-   "notes": ""
+   "tests": [
+    "conduit-server/tests/production_modules.rs::profile_extended_fields_round_trip_and_limits",
+    "conduit-server/tests/production_modules.rs::restricted_profile_lookup_allows_only_the_spec_minimum",
+    "conduit-server/tests/production_modules.rs::profile_changes_propagate_to_member_events_and_presence"
+   ],
+   "tests_total": 3,
+   "gap_beads": [],
+   "notes": "Idempotent; propagates displayname/avatar removal."
   },
   {
    "id": "cs.ep.get_matrixclientv3voipturnserver",
@@ -3237,20 +3215,18 @@
    "rate_limited": "Yes",
    "deprecated": false,
    "role": "homeserver",
-   "status": "implemented-untested",
+   "status": "implemented+tested",
    "code": [
     {
-     "loc": "conduit-server/src/main.rs:590",
-     "handler": "keys_api::room_keys_get_all",
-     "kind": "exact"
+     "loc": "conduit-server/src/api/client/keys.rs (room key backup)"
     }
    ],
-   "tests": [],
-   "tests_total": 0,
-   "gap_beads": [
-    "conduit-y99.39"
+   "tests": [
+    "conduit-server/tests/production_modules.rs::key_backup_versions_keys_etags_and_errors"
    ],
-   "notes": "Whole-backup route untested; etag/count + version errors per conduit-y99.39."
+   "tests_total": 1,
+   "gap_beads": [],
+   "notes": "etag counter + count on every mutation; writes only to the current version (403 M_WRONG_ROOM_KEYS_VERSION + current_version), 404 for unknown versions; replacement rules (is_verified, first_message_index, forwarded_count); version update keeps algorithm/version (M_INVALID_PARAM); version delete removes keys and is idempotent."
   },
   {
    "id": "cs.ep.put_matrixclientv3room_keyskeys",
@@ -3264,20 +3240,18 @@
    "rate_limited": "Yes",
    "deprecated": false,
    "role": "homeserver",
-   "status": "implemented-untested",
+   "status": "implemented+tested",
    "code": [
     {
-     "loc": "conduit-server/src/main.rs:590",
-     "handler": "keys_api::room_keys_put_all",
-     "kind": "exact"
+     "loc": "conduit-server/src/api/client/keys.rs (room key backup)"
     }
    ],
-   "tests": [],
-   "tests_total": 0,
-   "gap_beads": [
-    "conduit-y99.39"
+   "tests": [
+    "conduit-server/tests/production_modules.rs::key_backup_versions_keys_etags_and_errors"
    ],
-   "notes": "Whole-backup route untested; etag/count + version errors per conduit-y99.39."
+   "tests_total": 1,
+   "gap_beads": [],
+   "notes": "etag counter + count on every mutation; writes only to the current version (403 M_WRONG_ROOM_KEYS_VERSION + current_version), 404 for unknown versions; replacement rules (is_verified, first_message_index, forwarded_count); version update keeps algorithm/version (M_INVALID_PARAM); version delete removes keys and is idempotent."
   },
   {
    "id": "cs.ep.delete_matrixclientv3room_keyskeys",
@@ -3291,20 +3265,18 @@
    "rate_limited": "Yes",
    "deprecated": false,
    "role": "homeserver",
-   "status": "implemented-untested",
+   "status": "implemented+tested",
    "code": [
     {
-     "loc": "conduit-server/src/main.rs:590",
-     "handler": "keys_api::room_keys_delete_all",
-     "kind": "exact"
+     "loc": "conduit-server/src/api/client/keys.rs (room key backup)"
     }
    ],
-   "tests": [],
-   "tests_total": 0,
-   "gap_beads": [
-    "conduit-y99.39"
+   "tests": [
+    "conduit-server/tests/production_modules.rs::key_backup_versions_keys_etags_and_errors"
    ],
-   "notes": "Whole-backup route untested; etag/count + version errors per conduit-y99.39."
+   "tests_total": 1,
+   "gap_beads": [],
+   "notes": "etag counter + count on every mutation; writes only to the current version (403 M_WRONG_ROOM_KEYS_VERSION + current_version), 404 for unknown versions; replacement rules (is_verified, first_message_index, forwarded_count); version update keeps algorithm/version (M_INVALID_PARAM); version delete removes keys and is idempotent."
   },
   {
    "id": "cs.ep.get_matrixclientv3room_keyskeysroomid",
@@ -3318,20 +3290,18 @@
    "rate_limited": "Yes",
    "deprecated": false,
    "role": "homeserver",
-   "status": "implemented-untested",
+   "status": "implemented+tested",
    "code": [
     {
-     "loc": "conduit-server/src/main.rs:594",
-     "handler": "keys_api::room_keys_get_room",
-     "kind": "exact"
+     "loc": "conduit-server/src/api/client/keys.rs (room key backup)"
     }
    ],
-   "tests": [],
-   "tests_total": 0,
-   "gap_beads": [
-    "conduit-y99.39"
+   "tests": [
+    "conduit-server/tests/production_modules.rs::key_backup_versions_keys_etags_and_errors"
    ],
-   "notes": ""
+   "tests_total": 1,
+   "gap_beads": [],
+   "notes": "etag counter + count on every mutation; writes only to the current version (403 M_WRONG_ROOM_KEYS_VERSION + current_version), 404 for unknown versions; replacement rules (is_verified, first_message_index, forwarded_count); version update keeps algorithm/version (M_INVALID_PARAM); version delete removes keys and is idempotent."
   },
   {
    "id": "cs.ep.put_matrixclientv3room_keyskeysroomid",
@@ -3345,20 +3315,18 @@
    "rate_limited": "Yes",
    "deprecated": false,
    "role": "homeserver",
-   "status": "implemented-untested",
+   "status": "implemented+tested",
    "code": [
     {
-     "loc": "conduit-server/src/main.rs:594",
-     "handler": "keys_api::room_keys_put_room",
-     "kind": "exact"
+     "loc": "conduit-server/src/api/client/keys.rs (room key backup)"
     }
    ],
-   "tests": [],
-   "tests_total": 0,
-   "gap_beads": [
-    "conduit-y99.39"
+   "tests": [
+    "conduit-server/tests/production_modules.rs::key_backup_versions_keys_etags_and_errors"
    ],
-   "notes": ""
+   "tests_total": 1,
+   "gap_beads": [],
+   "notes": "etag counter + count on every mutation; writes only to the current version (403 M_WRONG_ROOM_KEYS_VERSION + current_version), 404 for unknown versions; replacement rules (is_verified, first_message_index, forwarded_count); version update keeps algorithm/version (M_INVALID_PARAM); version delete removes keys and is idempotent."
   },
   {
    "id": "cs.ep.delete_matrixclientv3room_keyskeysroomid",
@@ -3372,14 +3340,18 @@
    "rate_limited": "Yes",
    "deprecated": false,
    "role": "homeserver",
-   "status": "missing",
-   "code": [],
-   "tests": [],
-   "tests_total": 0,
-   "gap_beads": [
-    "conduit-y99.39"
+   "status": "implemented+tested",
+   "code": [
+    {
+     "loc": "conduit-server/src/api/client/keys.rs (room key backup)"
+    }
    ],
-   "notes": ""
+   "tests": [
+    "conduit-server/tests/production_modules.rs::key_backup_versions_keys_etags_and_errors"
+   ],
+   "tests_total": 1,
+   "gap_beads": [],
+   "notes": "etag counter + count on every mutation; writes only to the current version (403 M_WRONG_ROOM_KEYS_VERSION + current_version), 404 for unknown versions; replacement rules (is_verified, first_message_index, forwarded_count); version update keeps algorithm/version (M_INVALID_PARAM); version delete removes keys and is idempotent."
   },
   {
    "id": "cs.ep.get_matrixclientv3room_keyskeysroomidsessionid",
@@ -3393,23 +3365,18 @@
    "rate_limited": "Yes",
    "deprecated": false,
    "role": "homeserver",
-   "status": "partial",
+   "status": "implemented+tested",
    "code": [
     {
-     "loc": "conduit-server/src/main.rs:597",
-     "handler": "keys_api::room_keys_get_session",
-     "kind": "exact"
+     "loc": "conduit-server/src/api/client/keys.rs (room key backup)"
     }
    ],
    "tests": [
-    "conduit-server/tests/e2ee.rs::room_keys_upsert_and_get",
-    "conduit-server/tests/e2ee.rs::room_keys_version_create_and_get"
+    "conduit-server/tests/production_modules.rs::key_backup_versions_keys_etags_and_errors"
    ],
-   "tests_total": 2,
-   "gap_beads": [
-    "conduit-y99.39"
-   ],
-   "notes": "Session replacement rules / M_WRONG_ROOM_KEYS_VERSION unverified."
+   "tests_total": 1,
+   "gap_beads": [],
+   "notes": "etag counter + count on every mutation; writes only to the current version (403 M_WRONG_ROOM_KEYS_VERSION + current_version), 404 for unknown versions; replacement rules (is_verified, first_message_index, forwarded_count); version update keeps algorithm/version (M_INVALID_PARAM); version delete removes keys and is idempotent."
   },
   {
    "id": "cs.ep.put_matrixclientv3room_keyskeysroomidsessionid",
@@ -3423,23 +3390,18 @@
    "rate_limited": "Yes",
    "deprecated": false,
    "role": "homeserver",
-   "status": "partial",
+   "status": "implemented+tested",
    "code": [
     {
-     "loc": "conduit-server/src/main.rs:597",
-     "handler": "keys_api::room_keys_put_session",
-     "kind": "exact"
+     "loc": "conduit-server/src/api/client/keys.rs (room key backup)"
     }
    ],
    "tests": [
-    "conduit-server/tests/e2ee.rs::room_keys_upsert_and_get",
-    "conduit-server/tests/e2ee.rs::room_keys_version_create_and_get"
+    "conduit-server/tests/production_modules.rs::key_backup_versions_keys_etags_and_errors"
    ],
-   "tests_total": 2,
-   "gap_beads": [
-    "conduit-y99.39"
-   ],
-   "notes": ""
+   "tests_total": 1,
+   "gap_beads": [],
+   "notes": "etag counter + count on every mutation; writes only to the current version (403 M_WRONG_ROOM_KEYS_VERSION + current_version), 404 for unknown versions; replacement rules (is_verified, first_message_index, forwarded_count); version update keeps algorithm/version (M_INVALID_PARAM); version delete removes keys and is idempotent."
   },
   {
    "id": "cs.ep.delete_matrixclientv3room_keyskeysroomidsessionid",
@@ -3453,14 +3415,18 @@
    "rate_limited": "Yes",
    "deprecated": false,
    "role": "homeserver",
-   "status": "missing",
-   "code": [],
-   "tests": [],
-   "tests_total": 0,
-   "gap_beads": [
-    "conduit-y99.39"
+   "status": "implemented+tested",
+   "code": [
+    {
+     "loc": "conduit-server/src/api/client/keys.rs (room key backup)"
+    }
    ],
-   "notes": ""
+   "tests": [
+    "conduit-server/tests/production_modules.rs::key_backup_versions_keys_etags_and_errors"
+   ],
+   "tests_total": 1,
+   "gap_beads": [],
+   "notes": "etag counter + count on every mutation; writes only to the current version (403 M_WRONG_ROOM_KEYS_VERSION + current_version), 404 for unknown versions; replacement rules (is_verified, first_message_index, forwarded_count); version update keeps algorithm/version (M_INVALID_PARAM); version delete removes keys and is idempotent."
   },
   {
    "id": "cs.ep.get_matrixclientv3room_keysversion",
@@ -3474,24 +3440,18 @@
    "rate_limited": "Yes",
    "deprecated": false,
    "role": "homeserver",
-   "status": "partial",
+   "status": "implemented+tested",
    "code": [
     {
-     "loc": "conduit-server/src/main.rs:583",
-     "handler": "keys_api::room_keys_version_get_latest",
-     "kind": "exact"
+     "loc": "conduit-server/src/api/client/keys.rs (room key backup)"
     }
    ],
    "tests": [
-    "conduit-server/tests/e2ee.rs::device_list_changes_appear_in_sync",
-    "conduit-server/tests/e2ee.rs::room_keys_upsert_and_get",
-    "conduit-server/tests/e2ee.rs::room_keys_version_create_and_get"
+    "conduit-server/tests/production_modules.rs::key_backup_versions_keys_etags_and_errors"
    ],
-   "tests_total": 3,
-   "gap_beads": [
-    "conduit-y99.39"
-   ],
-   "notes": ""
+   "tests_total": 1,
+   "gap_beads": [],
+   "notes": "etag counter + count on every mutation; writes only to the current version (403 M_WRONG_ROOM_KEYS_VERSION + current_version), 404 for unknown versions; replacement rules (is_verified, first_message_index, forwarded_count); version update keeps algorithm/version (M_INVALID_PARAM); version delete removes keys and is idempotent."
   },
   {
    "id": "cs.ep.post_matrixclientv3room_keysversion",
@@ -3505,24 +3465,18 @@
    "rate_limited": "Yes",
    "deprecated": false,
    "role": "homeserver",
-   "status": "partial",
+   "status": "implemented+tested",
    "code": [
     {
-     "loc": "conduit-server/src/main.rs:583",
-     "handler": "keys_api::room_keys_version_create",
-     "kind": "exact"
+     "loc": "conduit-server/src/api/client/keys.rs (room key backup)"
     }
    ],
    "tests": [
-    "conduit-server/tests/e2ee.rs::device_list_changes_appear_in_sync",
-    "conduit-server/tests/e2ee.rs::room_keys_upsert_and_get",
-    "conduit-server/tests/e2ee.rs::room_keys_version_create_and_get"
+    "conduit-server/tests/production_modules.rs::key_backup_versions_keys_etags_and_errors"
    ],
-   "tests_total": 3,
-   "gap_beads": [
-    "conduit-y99.39"
-   ],
-   "notes": ""
+   "tests_total": 1,
+   "gap_beads": [],
+   "notes": "etag counter + count on every mutation; writes only to the current version (403 M_WRONG_ROOM_KEYS_VERSION + current_version), 404 for unknown versions; replacement rules (is_verified, first_message_index, forwarded_count); version update keeps algorithm/version (M_INVALID_PARAM); version delete removes keys and is idempotent."
   },
   {
    "id": "cs.ep.get_matrixclientv3room_keysversionversion",
@@ -3536,23 +3490,18 @@
    "rate_limited": "Yes",
    "deprecated": false,
    "role": "homeserver",
-   "status": "partial",
+   "status": "implemented+tested",
    "code": [
     {
-     "loc": "conduit-server/src/main.rs:586",
-     "handler": "keys_api::room_keys_version_get",
-     "kind": "exact"
+     "loc": "conduit-server/src/api/client/keys.rs (room key backup)"
     }
    ],
    "tests": [
-    "conduit-server/tests/e2ee.rs::device_list_changes_appear_in_sync",
-    "conduit-server/tests/e2ee.rs::room_keys_version_create_and_get"
+    "conduit-server/tests/production_modules.rs::key_backup_versions_keys_etags_and_errors"
    ],
-   "tests_total": 2,
-   "gap_beads": [
-    "conduit-y99.39"
-   ],
-   "notes": ""
+   "tests_total": 1,
+   "gap_beads": [],
+   "notes": "etag counter + count on every mutation; writes only to the current version (403 M_WRONG_ROOM_KEYS_VERSION + current_version), 404 for unknown versions; replacement rules (is_verified, first_message_index, forwarded_count); version update keeps algorithm/version (M_INVALID_PARAM); version delete removes keys and is idempotent."
   },
   {
    "id": "cs.ep.put_matrixclientv3room_keysversionversion",
@@ -3566,23 +3515,18 @@
    "rate_limited": "Yes",
    "deprecated": false,
    "role": "homeserver",
-   "status": "partial",
+   "status": "implemented+tested",
    "code": [
     {
-     "loc": "conduit-server/src/main.rs:586",
-     "handler": "keys_api::room_keys_version_update",
-     "kind": "exact"
+     "loc": "conduit-server/src/api/client/keys.rs (room key backup)"
     }
    ],
    "tests": [
-    "conduit-server/tests/e2ee.rs::device_list_changes_appear_in_sync",
-    "conduit-server/tests/e2ee.rs::room_keys_version_create_and_get"
+    "conduit-server/tests/production_modules.rs::key_backup_versions_keys_etags_and_errors"
    ],
-   "tests_total": 2,
-   "gap_beads": [
-    "conduit-y99.39"
-   ],
-   "notes": ""
+   "tests_total": 1,
+   "gap_beads": [],
+   "notes": "etag counter + count on every mutation; writes only to the current version (403 M_WRONG_ROOM_KEYS_VERSION + current_version), 404 for unknown versions; replacement rules (is_verified, first_message_index, forwarded_count); version update keeps algorithm/version (M_INVALID_PARAM); version delete removes keys and is idempotent."
   },
   {
    "id": "cs.ep.delete_matrixclientv3room_keysversionversion",
@@ -3596,23 +3540,18 @@
    "rate_limited": "Yes",
    "deprecated": false,
    "role": "homeserver",
-   "status": "partial",
+   "status": "implemented+tested",
    "code": [
     {
-     "loc": "conduit-server/src/main.rs:586",
-     "handler": "keys_api::room_keys_version_delete",
-     "kind": "exact"
+     "loc": "conduit-server/src/api/client/keys.rs (room key backup)"
     }
    ],
    "tests": [
-    "conduit-server/tests/e2ee.rs::device_list_changes_appear_in_sync",
-    "conduit-server/tests/e2ee.rs::room_keys_version_create_and_get"
+    "conduit-server/tests/production_modules.rs::key_backup_versions_keys_etags_and_errors"
    ],
-   "tests_total": 2,
-   "gap_beads": [
-    "conduit-y99.39"
-   ],
-   "notes": ""
+   "tests_total": 1,
+   "gap_beads": [],
+   "notes": "etag counter + count on every mutation; writes only to the current version (403 M_WRONG_ROOM_KEYS_VERSION + current_version), 404 for unknown versions; replacement rules (is_verified, first_message_index, forwarded_count); version update keeps algorithm/version (M_INVALID_PARAM); version delete removes keys and is idempotent."
   },
   {
    "id": "cs.ep.get_matrixclientv3keyschanges",
@@ -4377,14 +4316,18 @@
    "rate_limited": "No",
    "deprecated": false,
    "role": "homeserver",
-   "status": "missing",
-   "code": [],
-   "tests": [],
-   "tests_total": 0,
-   "gap_beads": [
-    "conduit-y99.43"
+   "status": "implemented+tested",
+   "code": [
+    {
+     "loc": "conduit-server/src/api/client/moderation.rs"
+    }
    ],
-   "notes": ""
+   "tests": [
+    "conduit-server/tests/production_modules.rs::admin_lock_endpoints_and_locked_account_enforcement"
+   ],
+   "tests_total": 1,
+   "gap_beads": [],
+   "notes": "Admin authorised before lookup; M_INVALID_PARAM remote, M_NOT_FOUND unknown/deactivated, M_FORBIDDEN self/other admin."
   },
   {
    "id": "cs.ep.put_matrixclientv1adminlockuserid",
@@ -4398,14 +4341,18 @@
    "rate_limited": "No",
    "deprecated": false,
    "role": "homeserver",
-   "status": "missing",
-   "code": [],
-   "tests": [],
-   "tests_total": 0,
-   "gap_beads": [
-    "conduit-y99.43"
+   "status": "implemented+tested",
+   "code": [
+    {
+     "loc": "conduit-server/src/api/client/moderation.rs"
+    }
    ],
-   "notes": ""
+   "tests": [
+    "conduit-server/tests/production_modules.rs::admin_lock_endpoints_and_locked_account_enforcement"
+   ],
+   "tests_total": 1,
+   "gap_beads": [],
+   "notes": "Admin authorised before lookup; M_INVALID_PARAM remote, M_NOT_FOUND unknown/deactivated, M_FORBIDDEN self/other admin."
   },
   {
    "id": "cs.ep.get_matrixclientv1adminsuspenduserid",
@@ -4419,14 +4366,18 @@
    "rate_limited": "No",
    "deprecated": false,
    "role": "homeserver",
-   "status": "missing",
-   "code": [],
-   "tests": [],
-   "tests_total": 0,
-   "gap_beads": [
-    "conduit-y99.43"
+   "status": "implemented+tested",
+   "code": [
+    {
+     "loc": "conduit-server/src/api/client/moderation.rs"
+    }
    ],
-   "notes": ""
+   "tests": [
+    "conduit-server/tests/production_modules.rs::suspended_accounts_keep_reading_but_cannot_add_activity"
+   ],
+   "tests_total": 1,
+   "gap_beads": [],
+   "notes": "Admin authorised before lookup; M_INVALID_PARAM remote, M_NOT_FOUND unknown/deactivated, M_FORBIDDEN self/other admin."
   },
   {
    "id": "cs.ep.put_matrixclientv1adminsuspenduserid",
@@ -4440,14 +4391,18 @@
    "rate_limited": "No",
    "deprecated": false,
    "role": "homeserver",
-   "status": "missing",
-   "code": [],
-   "tests": [],
-   "tests_total": 0,
-   "gap_beads": [
-    "conduit-y99.43"
+   "status": "implemented+tested",
+   "code": [
+    {
+     "loc": "conduit-server/src/api/client/moderation.rs"
+    }
    ],
-   "notes": ""
+   "tests": [
+    "conduit-server/tests/production_modules.rs::suspended_accounts_keep_reading_but_cannot_add_activity"
+   ],
+   "tests_total": 1,
+   "gap_beads": [],
+   "notes": "Admin authorised before lookup; M_INVALID_PARAM remote, M_NOT_FOUND unknown/deactivated, M_FORBIDDEN self/other admin."
   },
   {
    "id": "cs.ep.get_matrixclientv3adminwhoisuserid",
@@ -7045,14 +7000,19 @@
    "title": "Account locking and suspension",
    "source": "https://spec.matrix.org/v1.19/client-server-api/#account-moderation",
    "role": "homeserver",
-   "status": "missing",
-   "code": [],
-   "tests": [],
-   "tests_total": 0,
-   "gap_beads": [
-    "conduit-y99.43"
+   "status": "implemented+tested",
+   "code": [
+    {
+     "loc": "conduit-server/src/api/client/moderation.rs (gate in AuthedUser)"
+    }
    ],
-   "notes": ""
+   "tests": [
+    "conduit-server/tests/production_modules.rs::admin_lock_endpoints_and_locked_account_enforcement",
+    "conduit-server/tests/production_modules.rs::suspended_accounts_keep_reading_but_cannot_add_activity"
+   ],
+   "tests_total": 2,
+   "gap_beads": [],
+   "notes": "Locked: 401 M_USER_LOCKED soft_logout on all but logout/logout/all, login and refresh refused, tokens kept. Suspended: 403 M_USER_SUSPENDED on join/knock/invite/send/state/createRoom/upgrade/profile/redacting others; reads, sync, own redactions, leave, login allowed."
   },
   {
    "id": "cs.auth.3pid",
@@ -7533,15 +7493,15 @@
     }
    ],
    "tests": [
-    "conduit-server/tests/presence.rs::displayname_round_trip"
+    "conduit-server/tests/production_modules.rs::profile_extended_fields_round_trip_and_limits",
+    "conduit-server/tests/production_modules.rs::restricted_profile_lookup_allows_only_the_spec_minimum",
+    "conduit-server/tests/production_modules.rs::profile_changes_propagate_to_member_events_and_presence"
    ],
-   "tests_total": 1,
+   "tests_total": 3,
    "gap_beads": [
-    "conduit-y99.38",
-    "conduit-y99.25",
     "conduit-z3r"
    ],
-   "notes": ""
+   "notes": "Lookup MUST cases asserted in restricted mode (shared/public/world_readable, 403 otherwise incl. unknown users); propagation to m.room.member and m.presence; own joins carry profile. Remote profile fetch is conduit-z3r."
   },
   {
    "id": "cs.mod.instant-messaging",
@@ -7768,12 +7728,12 @@
    ],
    "tests": [
     "conduit-server/tests/e2ee.rs::keys_claim_concurrent_no_double_spend",
-    "conduit-server/tests/production_e2e.rs::production_key_inventory_wakes_sync_and_quiets_after_acknowledgement"
+    "conduit-server/tests/production_e2e.rs::production_key_inventory_wakes_sync_and_quiets_after_acknowledgement",
+    "conduit-server/tests/production_modules.rs::key_backup_versions_keys_etags_and_errors"
    ],
-   "tests_total": 2,
+   "tests_total": 3,
    "gap_beads": [
     "conduit-y99.14",
-    "conduit-y99.39",
     "conduit-y99.22",
     "conduit-y99.32",
     "conduit-nq5"
@@ -7989,20 +7949,23 @@
    "title": "Server administration (whois, lock, suspend)",
    "source": "https://spec.matrix.org/v1.19/client-server-api/#server-administration",
    "role": "homeserver",
-   "status": "partial",
+   "status": "implemented+tested",
    "code": [
     {
-     "loc": "conduit-server/src/api/client/session.rs (whois)"
+     "loc": "conduit-server/src/api/client/account.rs (whois)"
+    },
+    {
+     "loc": "conduit-server/src/api/client/moderation.rs"
     }
    ],
    "tests": [
-    "conduit-server/tests/production_account.rs::production_whois_reports_sessions_to_self_and_admins"
+    "conduit-server/tests/production_account.rs::production_whois_reports_sessions_to_self_and_admins",
+    "conduit-server/tests/production_modules.rs::admin_lock_endpoints_and_locked_account_enforcement",
+    "conduit-server/tests/production_modules.rs::suspended_accounts_keep_reading_but_cannot_add_activity"
    ],
-   "tests_total": 1,
-   "gap_beads": [
-    "conduit-y99.43"
-   ],
-   "notes": "whois done; lock/suspend missing. Conduit-specific admin API also exists under /_matrix/conduit/admin/v1 (non-spec)."
+   "tests_total": 3,
+   "gap_beads": [],
+   "notes": "whois, lock, suspend. Conduit admin API also under /_matrix/conduit/admin/v1 (non-spec)."
   },
   {
    "id": "cs.mod.event-context",
@@ -8257,14 +8220,18 @@
    "title": "Server notices",
    "source": "https://spec.matrix.org/v1.19/client-server-api/#server-notices",
    "role": "homeserver",
-   "status": "missing",
-   "code": [],
-   "tests": [],
-   "tests_total": 0,
-   "gap_beads": [
-    "conduit-y99.41"
+   "status": "implemented+tested",
+   "code": [
+    {
+     "loc": "conduit-server/src/api/client/server_notices.rs"
+    }
    ],
-   "notes": ""
+   "tests": [
+    "conduit-server/tests/production_modules.rs::server_notices_room_is_tagged_invite_only_and_reused"
+   ],
+   "tests_total": 1,
+   "gap_beads": [],
+   "notes": "One room per user (tag m.server_notice), invite not auto-join, msgtype m.server_notice, M_CANNOT_LEAVE_SERVER_NOTICE_ROOM on invite rejection, re-invite after leave; admin trigger POST /_matrix/conduit/admin/v1/server_notices. No usage limits exist, so usage_limit_reached notices are only sent manually."
   },
   {
    "id": "cs.mod.policy-lists",

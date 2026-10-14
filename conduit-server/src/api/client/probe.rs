@@ -42,6 +42,12 @@ pub async fn capabilities<S: AuthState>(
         Json(json!({
             "capabilities": {
                 "m.change_password": { "enabled": has_password && !is_guest },
+                // Guests may change only their display name (guest gate).
+                "m.profile_fields": if is_guest {
+                    json!({ "enabled": true, "allowed": ["displayname"] })
+                } else {
+                    json!({ "enabled": true })
+                },
                 "m.set_displayname":  { "enabled": true },
                 "m.set_avatar_url":   { "enabled": !is_guest },
                 "m.3pid_changes":     { "enabled": false },

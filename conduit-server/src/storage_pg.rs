@@ -1799,17 +1799,16 @@ impl Storage for PostgresStorage {
         version: &str,
         auth_data: &Value,
     ) -> Result<()> {
-        let etag = format!("{}", chrono::Utc::now().timestamp_millis());
+        // The etag represents stored keys, so an auth_data update keeps it.
         sqlx::query!(
             r#"
             UPDATE room_keys_versions
-            SET auth_data = $3, etag = $4
+            SET auth_data = $3
             WHERE user_id = $1 AND version = $2 AND deleted = false
             "#,
             user_id,
             version,
-            auth_data,
-            etag
+            auth_data
         )
         .execute(&self.pool)
         .await
@@ -1818,17 +1817,28 @@ impl Storage for PostgresStorage {
     }
 
     async fn delete_room_keys_version(&self, user_id: &str, version: &str) -> Result<()> {
+        // Deleting a backup deletes its key data too (spec).
+        let mut tx = self.pool.begin().await.map_err(map_sqlx)?;
         sqlx::query!(
             r#"
-            UPDATE room_keys_versions SET deleted = true
+            UPDATE room_keys_versions SET deleted = true, count = 0
             WHERE user_id = $1 AND version = $2
             "#,
             user_id,
             version
         )
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(map_sqlx)?;
+        sqlx::query!(
+            "DELETE FROM room_keys_backup WHERE user_id = $1 AND version = $2",
+            user_id,
+            version
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(map_sqlx)?;
+        tx.commit().await.map_err(map_sqlx)?;
         Ok(())
     }
 
@@ -1856,8 +1866,8 @@ impl Storage for PostgresStorage {
         .execute(&self.pool)
         .await
         .map_err(map_sqlx)?;
-        // Update count + etag.
-        let etag = format!("{}", chrono::Utc::now().timestamp_millis());
+        // Update count and advance the etag counter (two writes in one
+        // millisecond must still produce different etags).
         sqlx::query!(
             r#"
             UPDATE room_keys_versions
@@ -1865,12 +1875,11 @@ impl Storage for PostgresStorage {
                 SELECT COUNT(*) FROM room_keys_backup
                 WHERE user_id = $1 AND version = $2
             ),
-            etag = $3
+            etag = (CASE WHEN etag ~ '^[0-9]{1,18}$' THEN etag::BIGINT + 1 ELSE 1 END)::TEXT
             WHERE user_id = $1 AND version = $2
             "#,
             user_id,
-            version,
-            etag
+            version
         )
         .execute(&self.pool)
         .await
@@ -1937,18 +1946,24 @@ impl Storage for PostgresStorage {
         .await
         .map_err(map_sqlx)?;
         let deleted = result.rows_affected() as i64;
-        // Update count.
+        // Update count; the etag moves only when keys were removed.
         sqlx::query!(
             r#"
             UPDATE room_keys_versions
             SET count = (
                 SELECT COUNT(*) FROM room_keys_backup
                 WHERE user_id = $1 AND version = $2
-            )
+            ),
+            etag = CASE
+                WHEN NOT $3 THEN etag
+                WHEN etag ~ '^[0-9]{1,18}$' THEN (etag::BIGINT + 1)::TEXT
+                ELSE '1'
+            END
             WHERE user_id = $1 AND version = $2
             "#,
             user_id,
-            version
+            version,
+            deleted > 0
         )
         .execute(&self.pool)
         .await
@@ -3942,6 +3957,10 @@ impl Storage for PostgresStorage {
             .execute(&mut *tx)
             .await
             .map_err(map_sqlx)?;
+        sqlx::query!("DELETE FROM profile_fields WHERE user_id = $1", user_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx)?;
         sqlx::query!(
             r#"
             UPDATE accounts
@@ -4335,6 +4354,152 @@ impl Storage for PostgresStorage {
                 stream_pos: r.stream_pos,
             })
             .collect())
+    }
+
+    // --- Modules lane (conduit-y99.38/.39/.41/.43) --------------------------
+
+    async fn profile_fields(&self, user_id: &str) -> Result<std::collections::BTreeMap<String, Value>> {
+        let rows = sqlx::query!(
+            "SELECT key, value FROM profile_fields WHERE user_id = $1",
+            user_id
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(rows.into_iter().map(|r| (r.key, r.value)).collect())
+    }
+
+    async fn set_profile_field(&self, user_id: &str, key: &str, value: Option<&Value>) -> Result<()> {
+        match value {
+            Some(value) => {
+                sqlx::query!(
+                    r#"
+                    INSERT INTO profile_fields (user_id, key, value) VALUES ($1, $2, $3)
+                    ON CONFLICT (user_id, key) DO UPDATE SET value = EXCLUDED.value
+                    "#,
+                    user_id,
+                    key,
+                    value
+                )
+                .execute(&self.pool)
+                .await
+                .map_err(map_sqlx)?;
+            }
+            None => {
+                sqlx::query!(
+                    "DELETE FROM profile_fields WHERE user_id = $1 AND key = $2",
+                    user_id,
+                    key
+                )
+                .execute(&self.pool)
+                .await
+                .map_err(map_sqlx)?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn account_moderation(&self, user_id: &str) -> Result<conduit::storage::AccountModeration> {
+        let row = sqlx::query!(
+            r#"
+            SELECT locked_at IS NOT NULL AS "locked!", suspended_at IS NOT NULL AS "suspended!"
+            FROM account_moderation WHERE user_id = $1
+            "#,
+            user_id
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(row
+            .map(|r| conduit::storage::AccountModeration { locked: r.locked, suspended: r.suspended })
+            .unwrap_or_default())
+    }
+
+    async fn set_account_locked(&self, user_id: &str, locked: bool) -> Result<()> {
+        sqlx::query!(
+            r#"
+            INSERT INTO account_moderation (user_id, locked_at)
+            VALUES ($1, CASE WHEN $2 THEN now() END)
+            ON CONFLICT (user_id) DO UPDATE SET locked_at = CASE
+                WHEN NOT $2 THEN NULL
+                ELSE COALESCE(account_moderation.locked_at, now())
+            END
+            "#,
+            user_id,
+            locked
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(())
+    }
+
+    async fn set_account_suspended(&self, user_id: &str, suspended: bool) -> Result<()> {
+        sqlx::query!(
+            r#"
+            INSERT INTO account_moderation (user_id, suspended_at)
+            VALUES ($1, CASE WHEN $2 THEN now() END)
+            ON CONFLICT (user_id) DO UPDATE SET suspended_at = CASE
+                WHEN NOT $2 THEN NULL
+                ELSE COALESCE(account_moderation.suspended_at, now())
+            END
+            "#,
+            user_id,
+            suspended
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(())
+    }
+
+    async fn room_keys_version_deleted(&self, user_id: &str, version: &str) -> Result<Option<bool>> {
+        let row = sqlx::query!(
+            "SELECT deleted FROM room_keys_versions WHERE user_id = $1 AND version = $2",
+            user_id,
+            version
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(row.map(|r| r.deleted))
+    }
+
+    async fn server_notice_room(&self, user_id: &str) -> Result<Option<String>> {
+        let row = sqlx::query!(
+            "SELECT room_id FROM server_notice_rooms WHERE user_id = $1",
+            user_id
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(row.map(|r| r.room_id))
+    }
+
+    async fn set_server_notice_room(&self, user_id: &str, room_id: &str) -> Result<()> {
+        sqlx::query!(
+            r#"
+            INSERT INTO server_notice_rooms (user_id, room_id) VALUES ($1, $2)
+            ON CONFLICT (user_id) DO UPDATE SET room_id = EXCLUDED.room_id
+            "#,
+            user_id,
+            room_id
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(())
+    }
+
+    async fn is_server_notice_room(&self, room_id: &str) -> Result<bool> {
+        let row = sqlx::query!(
+            r#"SELECT EXISTS (SELECT 1 FROM server_notice_rooms WHERE room_id = $1) AS "found!""#,
+            room_id
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(row.found)
     }
 }
 

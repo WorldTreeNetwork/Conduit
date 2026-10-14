@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE room_keys_versions\n            SET count = (\n                SELECT COUNT(*) FROM room_keys_backup\n                WHERE user_id = $1 AND version = $2\n            ),\n            etag = (CASE WHEN etag ~ '^[0-9]{1,18}$' THEN etag::BIGINT + 1 ELSE 1 END)::TEXT\n            WHERE user_id = $1 AND version = $2\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "f682e413be4d4d10f5368746f25b24584f1a5d64ec9a53a9874acefb4622d8ca"
+}

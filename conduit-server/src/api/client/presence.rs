@@ -33,6 +33,10 @@ pub struct PresenceEntry {
     pub status_msg: Option<String>,
     pub last_changed_at: Instant,
     pub stream_position: i64,
+    /// Profile values carried on `m.presence` after a profile change
+    /// (spec "Events on Change of Profile Information", conduit-y99.38).
+    pub displayname: Option<String>,
+    pub avatar_url: Option<String>,
 }
 
 impl PresenceEntry {
@@ -42,6 +46,8 @@ impl PresenceEntry {
             status_msg,
             last_changed_at: Instant::now(),
             stream_position: 0,
+            displayname: None,
+            avatar_url: None,
         }
     }
 
@@ -93,6 +99,28 @@ impl PresenceStore {
         let position = state.position;
         let mut entry = PresenceEntry::new(presence, status_msg);
         entry.stream_position = position;
+        if let Some((_, previous)) = state.entries.get(user_id) {
+            entry.displayname = previous.displayname.clone();
+            entry.avatar_url = previous.avatar_url.clone();
+        }
+        state.entries.insert(user_id.to_owned(), (position, entry));
+        self.changed.send_replace(position);
+    }
+
+    /// Announce a profile change through presence: the user's current
+    /// presence (online if none was recorded) with the new display name
+    /// and avatar URL.
+    pub async fn set_profile(&self, user_id: &str, displayname: Option<String>, avatar_url: Option<String>) {
+        let mut state = self.inner.write().await;
+        state.position += 1;
+        let position = state.position;
+        let mut entry = match state.entries.get(user_id) {
+            Some((_, previous)) => previous.clone(),
+            None => PresenceEntry::new("online".to_owned(), None),
+        };
+        entry.stream_position = position;
+        entry.displayname = displayname;
+        entry.avatar_url = avatar_url;
         state.entries.insert(user_id.to_owned(), (position, entry));
         self.changed.send_replace(position);
     }

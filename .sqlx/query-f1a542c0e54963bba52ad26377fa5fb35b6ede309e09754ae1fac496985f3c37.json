@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT locked_at IS NOT NULL AS \"locked!\", suspended_at IS NOT NULL AS \"suspended!\"\n            FROM account_moderation WHERE user_id = $1\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "locked!",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 1,
+        "name": "suspended!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      null,
+      null
+    ]
+  },
+  "hash": "f1a542c0e54963bba52ad26377fa5fb35b6ede309e09754ae1fac496985f3c37"
+}
