@@ -1614,6 +1614,307 @@ async fn production_interrupted_body_does_not_freeze_a_transaction() {
     connection.write_all(request.as_bytes()).await.unwrap();
     connection.shutdown().await.unwrap();
     let mut reply = Vec::new();
-    tokio::time::timeout(Duration::from_secs(2), connection.read_to_end(&mut reply)).await.unwrap().unwrap();
-    server.request(Method::PUT, path, Some(token), Some(json!({"messages": {}})), 200).await;
+    tokio::time::timeout(Duration::from_secs(2), connection.read_to_end(&mut reply))
+        .await
+        .unwrap()
+        .unwrap();
+    server
+        .request(
+            Method::PUT,
+            path,
+            Some(token),
+            Some(json!({"messages": {}})),
+            200,
+        )
+        .await;
+}
+
+#[tokio::test]
+async fn production_sync_pagination_covers_a_limited_gap_and_full_state() {
+    let server = Server::new().await;
+    let (alice, bob, room, _) = server.chat_pair().await;
+    let token = alice["access_token"].as_str().unwrap();
+    let bob_token = bob["access_token"].as_str().unwrap();
+    let before = server
+        .request(
+            Method::GET,
+            "/_matrix/client/v3/sync",
+            Some(bob_token),
+            None,
+            200,
+        )
+        .await;
+    server
+        .request(
+            Method::PUT,
+            &format!("/_matrix/client/v3/rooms/{room}/state/m.room.topic"),
+            Some(token),
+            Some(json!({"topic": "Before timeline"})),
+            200,
+        )
+        .await;
+    let mut sent = Vec::new();
+    for value in 0..5 {
+        let event = server
+            .request(
+                Method::PUT,
+                &format!("/_matrix/client/v3/rooms/{room}/send/m.room.message/page{value}"),
+                Some(token),
+                Some(json!({"msgtype": "m.text", "body": format!("Message {value}")})),
+                200,
+            )
+            .await;
+        sent.push(event["event_id"].clone());
+    }
+    let filter = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("filter", r#"{"room":{"timeline":{"limit":2}}}"#)
+        .finish();
+    let sync = server
+        .request(
+            Method::GET,
+            &format!(
+                "/_matrix/client/v3/sync?since={}&{filter}",
+                before["next_batch"].as_str().unwrap()
+            ),
+            Some(bob_token),
+            None,
+            200,
+        )
+        .await;
+    let block = &sync["rooms"]["join"][&room];
+    assert_eq!(block["timeline"]["limited"], true);
+    assert!(block["state"]["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|event| event["type"] == "m.room.topic"
+            && event["content"]["topic"] == "Before timeline"));
+    let page = server
+        .request(
+            Method::GET,
+            &format!(
+                "/_matrix/client/v3/rooms/{room}/messages?dir=b&limit=20&from={}",
+                block["timeline"]["prev_batch"].as_str().unwrap()
+            ),
+            Some(bob_token),
+            None,
+            200,
+        )
+        .await;
+    for event in &sent[..3] {
+        assert!(
+            page["chunk"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| &item["event_id"] == event),
+            "gap lost {event}: {page}"
+        );
+    }
+    for event in &sent[3..] {
+        assert!(
+            !page["chunk"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| &item["event_id"] == event),
+            "page overlaps timeline"
+        );
+    }
+    let full = tokio::time::timeout(
+        Duration::from_secs(2),
+        server.request(
+            Method::GET,
+            &format!(
+                "/_matrix/client/v3/sync?since={}&full_state=true&timeout=4000",
+                sync["next_batch"].as_str().unwrap()
+            ),
+            Some(bob_token),
+            None,
+            200,
+        ),
+    )
+    .await
+    .expect("full_state must ignore long-poll timeout");
+    assert!(full["rooms"]["join"][&room]["state"]["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|event| event["type"] == "m.room.create"));
+    let filter = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("filter", r#"{"room":{"timeline":{"limit":0}}}"#)
+        .finish();
+    let state_only = server
+        .request(
+            Method::GET,
+            &format!(
+                "/_matrix/client/v3/sync?since={}&full_state=true&{filter}",
+                full["next_batch"].as_str().unwrap()
+            ),
+            Some(bob_token),
+            None,
+            200,
+        )
+        .await;
+    assert_eq!(
+        state_only["rooms"]["join"][&room]["timeline"]["events"],
+        json!([])
+    );
+    assert!(state_only["rooms"]["join"][&room]["state"]["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|event| event["type"] == "m.room.create"));
+}
+
+#[tokio::test]
+async fn production_invite_accept_and_kick_are_visible_in_sync() {
+    let mut server = Server::new().await;
+    let alice = server.register("alice").await;
+    let bob = server.register("bob").await;
+    let alice_token = alice["access_token"].as_str().unwrap();
+    let token = bob["access_token"].as_str().unwrap();
+    let room = server
+        .request(
+            Method::POST,
+            "/_matrix/client/v3/createRoom",
+            Some(alice_token),
+            Some(json!({"preset": "private_chat", "name": "Private invitation"})),
+            200,
+        )
+        .await;
+    let room = room["room_id"].as_str().unwrap();
+    let before = server
+        .request(
+            Method::GET,
+            "/_matrix/client/v3/sync",
+            Some(token),
+            None,
+            200,
+        )
+        .await;
+    server
+        .request(
+            Method::POST,
+            &format!("/_matrix/client/v3/rooms/{room}/invite"),
+            Some(alice_token),
+            Some(json!({"user_id": bob["user_id"]})),
+            200,
+        )
+        .await;
+    let invite = server
+        .request(
+            Method::GET,
+            &format!(
+                "/_matrix/client/v3/sync?since={}",
+                before["next_batch"].as_str().unwrap()
+            ),
+            Some(token),
+            None,
+            200,
+        )
+        .await;
+    let state = invite["rooms"]["invite"][room]["invite_state"]["events"]
+        .as_array()
+        .expect("invite room preview");
+    assert!(state.iter().any(|event| event["type"] == "m.room.member"
+        && event["state_key"] == bob["user_id"]
+        && event["content"]["membership"] == "invite"));
+    assert!(state
+        .iter()
+        .any(|event| event["type"] == "m.room.name"
+            && event["content"]["name"] == "Private invitation"));
+    assert!(
+        state
+            .iter()
+            .all(|event| event.get("event_id").is_none() && event.get("auth_events").is_none()),
+        "preview must be stripped state"
+    );
+    server.stop();
+    server.start().await;
+    server
+        .request(
+            Method::POST,
+            &format!("/_matrix/client/v3/join/{room}"),
+            Some(token),
+            Some(json!({})),
+            200,
+        )
+        .await;
+    let joined = server
+        .request(
+            Method::GET,
+            &format!(
+                "/_matrix/client/v3/sync?since={}",
+                invite["next_batch"].as_str().unwrap()
+            ),
+            Some(token),
+            None,
+            200,
+        )
+        .await;
+    let mut known = joined["rooms"]["join"][room]["state"]["events"]
+        .as_array()
+        .unwrap()
+        .clone();
+    known.extend(
+        joined["rooms"]["join"][room]["timeline"]["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .cloned(),
+    );
+    assert!(known.iter().any(|event| event["type"] == "m.room.create"));
+    server
+        .request(
+            Method::POST,
+            &format!("/_matrix/client/v3/rooms/{room}/kick"),
+            Some(alice_token),
+            Some(json!({"user_id": bob["user_id"], "reason": "Test removal"})),
+            200,
+        )
+        .await;
+    server
+        .request(
+            Method::PUT,
+            &format!("/_matrix/client/v3/rooms/{room}/send/m.room.message/after-kick"),
+            Some(alice_token),
+            Some(json!({"msgtype": "m.text", "body": "After departure"})),
+            200,
+        )
+        .await;
+    let left = server
+        .request(
+            Method::GET,
+            &format!(
+                "/_matrix/client/v3/sync?since={}",
+                joined["next_batch"].as_str().unwrap()
+            ),
+            Some(token),
+            None,
+            200,
+        )
+        .await;
+    let timeline = left["rooms"]["leave"][room]["timeline"]["events"]
+        .as_array()
+        .expect("leave timeline");
+    assert!(timeline.iter().any(|event| event["type"] == "m.room.member"
+        && event["state_key"] == bob["user_id"]
+        && event["content"]["membership"] == "leave"));
+    assert!(!timeline
+        .iter()
+        .any(|event| event["content"]["body"] == "After departure"));
+    let quiet = server
+        .request(
+            Method::GET,
+            &format!(
+                "/_matrix/client/v3/sync?since={}",
+                left["next_batch"].as_str().unwrap()
+            ),
+            Some(token),
+            None,
+            200,
+        )
+        .await;
+    assert_eq!(quiet["rooms"]["leave"], json!({}));
 }

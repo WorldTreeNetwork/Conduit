@@ -377,9 +377,12 @@ async fn e2e_two_users_send_and_receive_messages() {
         join_map.keys().collect::<Vec<_>>()
     );
 
-    let state_evs = sync_a_initial["rooms"]["join"][&room_id]["state"]["events"]
-        .as_array()
-        .unwrap();
+    // The client folds state events from the timeline into the snapshot that
+    // precedes it; a complete short timeline may include the create event.
+    let mut state_evs = sync_a_initial["rooms"]["join"][&room_id]["state"]["events"]
+        .as_array().unwrap().clone();
+    state_evs.extend(sync_a_initial["rooms"]["join"][&room_id]["timeline"]["events"]
+        .as_array().unwrap().iter().filter(|event| event.get("state_key").is_some()).cloned());
     let state_types: Vec<&str> = state_evs.iter().filter_map(|e| e["type"].as_str()).collect();
 
     for required in &[
@@ -514,7 +517,9 @@ async fn e2e_two_users_send_and_receive_messages() {
     );
 
     // B's state should include B's own m.room.member (joined).
-    let b_state_evs = b_join[&room_id]["state"]["events"].as_array().unwrap();
+    let mut b_state_evs = b_join[&room_id]["state"]["events"].as_array().unwrap().clone();
+    b_state_evs.extend(b_join[&room_id]["timeline"]["events"].as_array().unwrap().iter()
+        .filter(|event| event.get("state_key").is_some()).cloned());
     let b_member_ev = b_state_evs.iter().find(|e| {
         e["type"].as_str() == Some("m.room.member")
             && e["state_key"].as_str() == Some(&user_id_b)

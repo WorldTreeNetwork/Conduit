@@ -247,7 +247,7 @@ fn parse_filter(raw: &str) -> SyncFilter {
         return f;
     };
     if let Some(limit) = v.pointer("/room/timeline/limit").and_then(Value::as_i64) {
-        f.timeline_limit = limit.max(1).min(500);
+        f.timeline_limit = limit.max(0).min(500);
     }
     if let Some(types) = v.pointer("/room/timeline/types").and_then(Value::as_array) {
         f.timeline_types = types
@@ -274,6 +274,10 @@ pub struct SyncQuery {
     /// Long-poll timeout in milliseconds. 0 = no wait (default).
     pub timeout: Option<u64>,
     pub filter: Option<String>,
+    #[serde(default)]
+    pub full_state: bool,
+    #[serde(default)]
+    pub include_leave: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -366,6 +370,8 @@ pub async fn sync<S: AuthState>(
             &authed.device_id,
             since_token.as_ref(),
             &filter,
+            query.full_state,
+            query.include_leave,
         )
         .await
         {
@@ -373,6 +379,7 @@ pub async fn sync<S: AuthState>(
             Err(error) => return error,
         };
         if since_token.is_none()
+            || query.full_state
             || timeout_ms == 0
             || has_updates(&response.body)
             || response.has_key_changes
@@ -408,6 +415,8 @@ async fn build_sync_response<S: AuthState>(
     authed_device_id: &str,
     since_token: Option<&SyncToken>,
     filter: &SyncFilter,
+    full_state: bool,
+    include_leave: bool,
 ) -> Result<SyncResponse, Response> {
     let storage = state.storage();
 
@@ -497,10 +506,67 @@ async fn build_sync_response<S: AuthState>(
     let (next_presence_pos, presence_changes, presence_expiry) =
         state.presence_store().snapshot(presence_since).await;
     let next_expiry = typing_expiry.into_iter().chain(presence_expiry).min();
-    let joined = storage
-        .joined_rooms(user_id)
+    let memberships = storage
+        .current_memberships(user_id)
         .await
         .map_err(|error| MatrixError::unknown(error.to_string()).into_response())?;
+    let joined: Vec<_> = memberships
+        .iter()
+        .filter(|event| event.content["membership"] == "join")
+        .map(|event| event.room_id.clone())
+        .collect();
+    let member_ids: Vec<_> = memberships
+        .iter()
+        .map(|event| event.event_id.clone())
+        .collect();
+    let member_positions = storage
+        .event_stream_positions(&member_ids)
+        .await
+        .map_err(|error| MatrixError::unknown(error.to_string()).into_response())?;
+    let mut invited_rooms = HashMap::new();
+    let mut knocked_rooms = HashMap::new();
+    let mut left_rooms = HashMap::new();
+    for membership in &memberships {
+        if !filter.rooms.is_empty() && !filter.rooms.contains(&membership.room_id) {
+            continue;
+        }
+        let position = *member_positions.get(&membership.event_id).unwrap_or(&0);
+        let changed = since_token.is_none() || position > since;
+        match membership.content["membership"].as_str() {
+            Some("invite" | "knock") if changed => {
+                let preview =
+                    stripped_membership_preview(storage.as_ref(), membership, user_id).await?;
+                let key = if membership.content["membership"] == "invite" {
+                    "invite_state"
+                } else {
+                    "knock_state"
+                };
+                let mut block = serde_json::Map::new();
+                block.insert(key.into(), json!({"events": preview}));
+                if key == "invite_state" {
+                    invited_rooms.insert(membership.room_id.clone(), Value::Object(block));
+                } else {
+                    knocked_rooms.insert(membership.room_id.clone(), Value::Object(block));
+                }
+            }
+            Some("leave" | "ban")
+                if (since_token.is_some() && position > since)
+                    || (since_token.is_none() && include_leave) =>
+            {
+                let block = departed_room_block(
+                    storage.as_ref(),
+                    user_id,
+                    membership,
+                    position,
+                    since,
+                    filter,
+                )
+                .await?;
+                left_rooms.insert(membership.room_id.clone(), block);
+            }
+            _ => {}
+        }
+    }
     let mut changed_rooms: std::collections::HashSet<_> = new_events
         .iter()
         .map(|event| event.room_id.clone())
@@ -510,7 +576,9 @@ async fn build_sync_response<S: AuthState>(
     changed_rooms.extend(typing_changes.keys().cloned());
     let all_rooms_to_check: Vec<_> = joined
         .iter()
-        .filter(|room| since_token.is_none() || !epoch_matches || changed_rooms.contains(*room))
+        .filter(|room| {
+            since_token.is_none() || full_state || !epoch_matches || changed_rooms.contains(*room)
+        })
         .cloned()
         .collect();
 
@@ -547,7 +615,16 @@ async fn build_sync_response<S: AuthState>(
             continue;
         }
 
-        let block = if since_token.is_none() {
+        let prior_members = storage
+            .member_events_for_user(room_id, user_id)
+            .await
+            .map_err(|error| MatrixError::unknown(error.to_string()).into_response())?;
+        let was_joined = prior_members
+            .iter()
+            .filter(|(position, _)| *position <= since)
+            .max_by_key(|(position, _)| *position)
+            .is_some_and(|(_, event)| event.content["membership"] == "join");
+        let block = if since_token.is_none() || !was_joined {
             // Initial sync: state = current state, timeline = recent events.
             match build_initial_room_block(state, user_id, room_id, filter).await {
                 Ok(b) => b,
@@ -555,8 +632,16 @@ async fn build_sync_response<S: AuthState>(
             }
         } else {
             // Incremental: state = empty, timeline = new events since `since`.
-            match build_incremental_room_block(state, user_id, room_id, &new_events, since, filter)
-                .await
+            match build_incremental_room_block(
+                state,
+                user_id,
+                room_id,
+                &new_events,
+                since,
+                filter,
+                full_state,
+            )
+            .await
             {
                 Ok(b) => b,
                 Err(resp) => return Err(resp),
@@ -744,9 +829,9 @@ async fn build_sync_response<S: AuthState>(
 
     let rooms_obj = json!({
         "join": joined_rooms,
-        "invite": {},
-        "leave":  {},
-        "knock":  {}
+        "invite": invited_rooms,
+        "leave": left_rooms,
+        "knock": knocked_rooms
     });
 
     Ok(SyncResponse {
@@ -765,6 +850,115 @@ async fn build_sync_response<S: AuthState>(
     })
 }
 
+async fn stripped_membership_preview(
+    storage: &dyn conduit::storage::Storage,
+    membership: &conduit::event::Event,
+    user: &str,
+) -> Result<Vec<Value>, Response> {
+    let events = storage
+        .get_current_state(&membership.room_id)
+        .await
+        .map_err(|error| MatrixError::unknown(error.to_string()).into_response())?;
+    let mut preview = Vec::new();
+    for event in events {
+        let safe = matches!(
+            event.event_type.as_str(),
+            "m.room.create"
+                | "m.room.name"
+                | "m.room.avatar"
+                | "m.room.canonical_alias"
+                | "m.room.join_rules"
+                | "m.room.encryption"
+        ) || (event.event_type == "m.room.member"
+            && event
+                .state_key
+                .as_deref()
+                .is_some_and(|target| target == user || target == membership.sender));
+        if safe {
+            preview.push(json!({"type": event.event_type, "state_key": event.state_key, "sender": event.sender, "content": event.content}));
+        }
+    }
+    Ok(preview)
+}
+
+async fn departed_room_block(
+    storage: &dyn conduit::storage::Storage,
+    user: &str,
+    membership: &conduit::event::Event,
+    departure: i64,
+    since: i64,
+    filter: &SyncFilter,
+) -> Result<JoinedRoomBlock, Response> {
+    let raw = storage
+        .room_events(&membership.room_id)
+        .await
+        .map_err(|error| MatrixError::unknown(error.to_string()).into_response())?;
+    let ids: Vec<_> = raw.iter().map(|event| event.event_id.clone()).collect();
+    let positions = storage
+        .event_stream_positions(&ids)
+        .await
+        .map_err(|error| MatrixError::unknown(error.to_string()).into_response())?;
+    let raw = raw
+        .into_iter()
+        .filter(|event| {
+            positions
+                .get(&event.event_id)
+                .is_some_and(|position| *position > since && *position <= departure)
+        })
+        .collect();
+    let mut visible =
+        conduit::auth::filter_visible_for_user(storage, &membership.room_id, user, raw)
+            .await
+            .map_err(|error| MatrixError::from_conduit(error).into_response())?;
+    // A user always needs their own departure, even where joined-history
+    // visibility stops at the instant that membership changes to leave/ban.
+    if !visible
+        .iter()
+        .any(|event| event.event_id == membership.event_id)
+    {
+        visible.push(membership.clone());
+    }
+    visible.sort_by_key(|event| positions.get(&event.event_id).copied().unwrap_or(0));
+    let mut events = apply_type_filter(visible, filter);
+    let limited = events.len() > filter.timeline_limit as usize;
+    if limited {
+        events = events.split_off(events.len() - filter.timeline_limit as usize);
+    }
+    let first = events
+        .first()
+        .and_then(|event| positions.get(&event.event_id))
+        .copied()
+        .unwrap_or(departure);
+    let before = state_before(storage, &membership.room_id, first).await?;
+    let previous = state_before(storage, &membership.room_id, since.saturating_add(1)).await?;
+    let state = before
+        .into_iter()
+        .filter(|(key, event)| {
+            previous
+                .get(key)
+                .is_none_or(|old| old.event_id != event.event_id)
+        })
+        .map(|(_, event)| serde_json::to_value(event).expect("state JSON"))
+        .collect();
+    Ok(JoinedRoomBlock {
+        timeline: TimelineBlock {
+            events: events
+                .iter()
+                .map(|event| serde_json::to_value(event).expect("event JSON"))
+                .collect(),
+            limited,
+            prev_batch: encode_token(first.saturating_sub(1)),
+        },
+        state: StateBlock { events: state },
+        account_data: AccountDataBlock { events: vec![] },
+        ephemeral: EphemeralBlock { events: vec![] },
+        unread_notifications: UnreadNotifications {
+            notification_count: 0,
+            highlight_count: 0,
+        },
+    })
+}
+
 /// Build a room block for initial sync.
 async fn build_initial_room_block<S: AuthState>(
     state: &S,
@@ -774,58 +968,49 @@ async fn build_initial_room_block<S: AuthState>(
 ) -> Result<JoinedRoomBlock, Response> {
     let storage = state.storage();
 
-    // Current state events (all of them — for initial sync).
-    let state_events = storage
-        .get_current_state(room_id)
-        .await
-        .map_err(|e| MatrixError::unknown(e.to_string()).into_response())?;
-
-    // Recent timeline events (newest N, backwards).
     let latest_pos = storage
         .room_latest_stream_position(room_id)
         .await
-        .map_err(|e| MatrixError::unknown(e.to_string()).into_response())?
+        .map_err(|error| MatrixError::unknown(error.to_string()).into_response())?
         .unwrap_or(0);
-
-    let (raw_timeline, _next) = storage
-        .room_events_paginated(room_id, 'b', latest_pos, filter.timeline_limit)
+    let (mut events, _) = storage
+        .room_events_paginated(room_id, 'b', latest_pos, i64::MAX)
         .await
-        .map_err(|e| MatrixError::unknown(e.to_string()).into_response())?;
-
-    // Reverse to chronological order.
-    let mut timeline_events = raw_timeline;
-    timeline_events.reverse();
-
-    // Apply type filter.
-    let timeline_events = apply_type_filter(timeline_events, filter);
-
-    // History visibility: a user who joined late does not get the
-    // room's past handed to them by /sync either.
-    let timeline_events =
-        conduit::auth::filter_visible_for_user(storage.as_ref(), room_id, user_id, timeline_events)
-            .await
-            .map_err(|e| MatrixError::from_conduit(e).into_response())?;
-
-    let prev_batch_pos = timeline_events.first().map(|e| e.depth).unwrap_or(0);
-
-    let timeline_values: Vec<Value> = timeline_events
-        .iter()
-        .map(|e| serde_json::to_value(e).unwrap_or(Value::Null))
-        .collect();
-
-    let state_values: Vec<Value> = state_events
-        .iter()
-        .map(|e| serde_json::to_value(e).unwrap_or(Value::Null))
-        .collect();
-
+        .map_err(|error| MatrixError::unknown(error.to_string()).into_response())?;
+    events.reverse();
+    let mut events = apply_type_filter(events, filter);
+    events = conduit::auth::filter_visible_for_user(storage.as_ref(), room_id, user_id, events)
+        .await
+        .map_err(|error| MatrixError::from_conduit(error).into_response())?;
+    let limited = events.len() > filter.timeline_limit as usize;
+    if limited {
+        events = events.split_off(events.len() - filter.timeline_limit as usize);
+    }
+    let ids: Vec<_> = events.iter().map(|event| event.event_id.clone()).collect();
+    let positions = storage
+        .event_stream_positions(&ids)
+        .await
+        .map_err(|error| MatrixError::unknown(error.to_string()).into_response())?;
+    let first = events
+        .first()
+        .and_then(|event| positions.get(&event.event_id))
+        .copied()
+        .unwrap_or(latest_pos.saturating_add(1));
+    let state_events = state_before(storage.as_ref(), room_id, first).await?;
     Ok(JoinedRoomBlock {
         timeline: TimelineBlock {
-            events: timeline_values,
-            limited: false,
-            prev_batch: encode_token(prev_batch_pos),
+            events: events
+                .iter()
+                .map(|event| serde_json::to_value(event).expect("event JSON"))
+                .collect(),
+            limited,
+            prev_batch: encode_token(first.saturating_sub(1)),
         },
         state: StateBlock {
-            events: state_values,
+            events: state_events
+                .into_values()
+                .map(|event| serde_json::to_value(event).expect("state JSON"))
+                .collect(),
         },
         account_data: AccountDataBlock { events: vec![] },
         ephemeral: EphemeralBlock { events: vec![] },
@@ -836,6 +1021,40 @@ async fn build_initial_room_block<S: AuthState>(
     })
 }
 
+async fn state_before(
+    storage: &dyn conduit::storage::Storage,
+    room_id: &str,
+    before: i64,
+) -> Result<HashMap<(String, String), conduit::event::Event>, Response> {
+    let events = storage
+        .room_events(room_id)
+        .await
+        .map_err(|error| MatrixError::unknown(error.to_string()).into_response())?;
+    let ids: Vec<_> = events.iter().map(|event| event.event_id.clone()).collect();
+    let positions = storage
+        .event_stream_positions(&ids)
+        .await
+        .map_err(|error| MatrixError::unknown(error.to_string()).into_response())?;
+    let mut events: Vec<_> = events
+        .into_iter()
+        .filter_map(|event| {
+            positions
+                .get(&event.event_id)
+                .copied()
+                .map(|position| (position, event))
+        })
+        .filter(|(position, _)| *position < before)
+        .collect();
+    events.sort_by_key(|(position, _)| *position);
+    let mut state = HashMap::new();
+    for (_, event) in events {
+        if let Some(key) = &event.state_key {
+            state.insert((event.event_type.clone(), key.clone()), event);
+        }
+    }
+    Ok(state)
+}
+
 /// Build a room block for incremental sync from pre-fetched new events.
 async fn build_incremental_room_block<S: AuthState>(
     state: &S,
@@ -844,6 +1063,7 @@ async fn build_incremental_room_block<S: AuthState>(
     new_events: &[conduit::event::Event],
     since: i64,
     filter: &SyncFilter,
+    full_state: bool,
 ) -> Result<JoinedRoomBlock, Response> {
     let mut room_events: Vec<conduit::event::Event> = new_events
         .iter()
@@ -872,7 +1092,41 @@ async fn build_incremental_room_block<S: AuthState>(
         room_events = room_events[start..].to_vec();
     }
 
-    let prev_batch = encode_token(since);
+    let ids: Vec<_> = room_events
+        .iter()
+        .map(|event| event.event_id.clone())
+        .collect();
+    let positions = state
+        .storage()
+        .event_stream_positions(&ids)
+        .await
+        .map_err(|error| MatrixError::unknown(error.to_string()).into_response())?;
+    let fallback = state
+        .storage()
+        .room_latest_stream_position(room_id)
+        .await
+        .map_err(|error| MatrixError::unknown(error.to_string()).into_response())?
+        .unwrap_or(since)
+        .saturating_add(1);
+    let first = room_events
+        .first()
+        .and_then(|event| positions.get(&event.event_id))
+        .copied()
+        .unwrap_or(fallback);
+    let previous_state =
+        state_before(state.storage().as_ref(), room_id, since.saturating_add(1)).await?;
+    let before_timeline = state_before(state.storage().as_ref(), room_id, first).await?;
+    let state_values = before_timeline
+        .into_iter()
+        .filter(|(key, event)| {
+            full_state
+                || previous_state
+                    .get(key)
+                    .is_none_or(|old| old.event_id != event.event_id)
+        })
+        .map(|(_, event)| serde_json::to_value(event).expect("state JSON"))
+        .collect();
+    let prev_batch = encode_token(first.saturating_sub(1));
 
     let timeline_values: Vec<Value> = room_events
         .iter()
@@ -885,7 +1139,9 @@ async fn build_incremental_room_block<S: AuthState>(
             limited,
             prev_batch,
         },
-        state: StateBlock { events: vec![] },
+        state: StateBlock {
+            events: state_values,
+        },
         account_data: AccountDataBlock { events: vec![] },
         ephemeral: EphemeralBlock { events: vec![] },
         unread_notifications: UnreadNotifications {

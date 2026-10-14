@@ -455,6 +455,84 @@
       "limitations": [
         "These tests cover the current capability backend; they do not prove every Matrix login/session flow"
       ]
+    },
+    {
+      "id": "event-insertion-cursors-and-retired-watermark",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#syncing",
+      "status": "covered_assertions_only",
+      "assertions": [
+        "Memory event order uses actual insertion positions independently of DAG depth",
+        "Duplicate IDs retain the original event and do not advance cursors",
+        "Atomic event writes use the same stream",
+        "Membership history and pagination use actual event positions",
+        "Both backends retain a monotonic global cursor after purging the latest room"
+      ],
+      "implementation": [
+        "conduit/src/storage.rs",
+        "conduit-server/src/storage_pg.rs",
+        "conduit-server/migrations/0012_retired_event_positions.sql"
+      ],
+      "tests": [
+        "conduit/src/storage.rs::tests::event_stream_positions_are_independent_of_depth_room_and_duplicates",
+        "conduit-server/tests/storage_pg.rs::purging_latest_events_retains_monotonic_global_stream_watermark"
+      ],
+      "limitations": [
+        "Out-of-order PostgreSQL commit/snapshot consistency remains under its own audit"
+      ],
+      "gap_issues": [
+        "conduit-y99.16"
+      ]
+    },
+    {
+      "id": "local-sync-room-entry-departure-and-state-gap",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#get_matrixclientv3sync",
+      "status": "covered_assertions_only",
+      "assertions": [
+        "Invite previews contain own membership and safe stripped room metadata",
+        "Acceptance introduces joined-room state",
+        "Kick/leave timelines include own transition and exclude later messages",
+        "Limited gaps carry state changes before the returned timeline",
+        "full_state returns immediately and zero-limit timelines support state-only snapshots",
+        "prev_batch fetches omitted events without repeating the timeline boundary"
+      ],
+      "implementation": [
+        "conduit-server/src/api/client/sync.rs",
+        "conduit-server/src/api/client/rooms.rs",
+        "conduit-server/src/storage_pg.rs"
+      ],
+      "tests": [
+        "conduit-server/tests/production_e2e.rs::production_invite_accept_and_kick_are_visible_in_sync",
+        "conduit-server/tests/production_e2e.rs::production_sync_pagination_covers_a_limited_gap_and_full_state"
+      ],
+      "limitations": [
+        "Historical state currently reconstructs local stream history; full resolved DAG state snapshots remain required",
+        "Stored/full filters, lazy member loading and knock API journeys remain incomplete"
+      ],
+      "gap_issues": [
+        "conduit-y99.13",
+        "conduit-embed-persist"
+      ]
+    },
+    {
+      "id": "v11-pdu-without-local-id-independent-regression",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/rooms/v11/#event-format",
+      "status": "failing",
+      "assertions": [
+        "A standard Synapse-signed v11 create PDU without event_id must deserialize and persist its extensions"
+      ],
+      "tests": [
+        "conduit-server/tests/peers/synapse_pdu_wire.py"
+      ],
+      "evidence": [
+        "Current server returns PDU parse error: missing field event_id",
+        "Prepared add-pdu-wire change awaits independent review; configured Opus authentication expired and Grok fallback timed out"
+      ],
+      "gap_issues": [
+        "conduit-embed-pdu"
+      ]
     }
   ]
 }

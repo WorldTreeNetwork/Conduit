@@ -78,3 +78,29 @@ messages, device list changes, ...
   clients still call `r0` paths — serve both for now.
 - Filters (in `/sync` and `/messages`) are tricky and easy to skimp on
   — but a missing filter implementation surfaces as Element being slow.
+
+## Sync room transitions and pagination
+
+Sync now enumerates current user memberships. Invitations produce a stripped
+preview (safe room metadata and the invitee/inviter membership); acceptance
+introduces joined-room state; leave/ban transitions produce a bounded departure
+block. Post-departure messages do not appear in that block, and unchanged
+invitations/departures are omitted from incremental responses. `include_leave`
+controls initial departed-room inclusion. Knock preview serialization exists,
+but the full knock API/journey remains required work.
+
+State snapshots precede the returned timeline. Clients fold timeline state
+events into them; a short initial timeline may contain the create/join events
+rather than duplicating them in the state array. Limited gaps include state
+changes omitted from the timeline. `full_state=true` returns room state
+immediately, and a zero timeline limit supports state-only requests.
+
+`prev_batch` uses the actual insertion position before the first timeline event.
+The messages endpoint accepts these opaque sync prefixes and validates malformed
+cursors. Backward pagination fetches omitted events without repeating the boundary.
+MemoryStorage now uses immutable insertion positions independently of DAG depth,
+as PostgreSQL does. Purges retain a durable high-water mark instead of moving the
+global stream backwards. Full DAG-resolved historical state snapshots, complete
+filters/lazy loading, and knock endpoints remain under `conduit-y99.13` and the
+persist/state-resolution audit; these local-history checks are not whole-protocol
+conformance proof.

@@ -26,6 +26,25 @@ use conduit::storage::Storage;
 use conduit_server::PostgresStorage;
 
 #[tokio::test]
+async fn purging_latest_events_retains_monotonic_global_stream_watermark() {
+    let db = TempDb::new().await;
+    let store = db.storage();
+    let first = make_event("$keep", "!keep:test", "m.room.message", None);
+    let second = make_event("$remove", "!remove:test", "m.room.message", None);
+    store.put_event(&first).await.unwrap();
+    store.put_event(&second).await.unwrap();
+    let before = store.global_max_stream_position().await.unwrap();
+    store.purge_room("!remove:test").await.unwrap();
+    assert_eq!(store.global_max_stream_position().await.unwrap(), before);
+    let reopened = db.reopen().await;
+    assert_eq!(reopened.global_max_stream_position().await.unwrap(), before);
+    let third = make_event("$new", "!keep:test", "m.room.message", None);
+    reopened.put_event(&third).await.unwrap();
+    assert!(reopened.global_max_stream_position().await.unwrap() > before);
+    assert_eq!(reopened.events_since(before, 100).await.unwrap(), vec![third]);
+}
+
+#[tokio::test]
 async fn transaction_guards_serialize_instances_without_starving_a_single_connection_pool() {
     use conduit::storage::TransactionKey;
     use std::sync::Arc;

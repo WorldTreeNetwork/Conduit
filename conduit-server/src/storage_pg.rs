@@ -870,6 +870,22 @@ impl Storage for PostgresStorage {
         Ok(events)
     }
 
+    async fn current_memberships(&self, user_id: &str) -> Result<Vec<Event>> {
+        let rows = sqlx::query!(
+            r#"SELECT e.event_id, e.room_id, e.sender, e.type AS event_type,
+                e.state_key, e.content, e.auth_events, e.prev_events, e.hashes,
+                e.signatures, e.unsigned, e.origin_server_ts, e.depth
+            FROM room_current_state rcs JOIN events e ON e.event_id = rcs.event_id
+            WHERE rcs.type = 'm.room.member' AND rcs.state_key = $1
+            ORDER BY rcs.room_id"#,
+            user_id
+        ).fetch_all(&self.pool).await.map_err(map_sqlx)?;
+        Ok(rows.into_iter().map(|row| Event {event_id: row.event_id, room_id: row.room_id,
+            sender: row.sender, event_type: row.event_type, state_key: row.state_key, content: row.content,
+            auth_events: row.auth_events, prev_events: row.prev_events, hashes: row.hashes, signatures: row.signatures,
+            unsigned: row.unsigned, origin_server_ts: row.origin_server_ts as u64, depth: row.depth}).collect())
+    }
+
     async fn joined_rooms(&self, user_id: &str) -> Result<Vec<String>> {
         let rows = sqlx::query!(
             r#"
@@ -1203,7 +1219,8 @@ impl Storage for PostgresStorage {
     async fn global_max_stream_position(&self) -> Result<i64> {
         let row = sqlx::query!(
             r#"
-            SELECT COALESCE(MAX(stream_position), 0) AS max_pos
+            SELECT GREATEST(COALESCE(MAX(stream_position), 0),
+                (SELECT position FROM retired_event_positions WHERE singleton)) AS max_pos
             FROM events
             "#
         )
@@ -2563,16 +2580,20 @@ impl Storage for PostgresStorage {
     }
 
     async fn purge_room(&self, room_id: &str) -> Result<()> {
-        // Delete state first (FK to events).
+        let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
         sqlx::query!("DELETE FROM room_current_state WHERE room_id = $1", room_id)
-            .execute(&self.pool)
-            .await
-            .map_err(map_sqlx)?;
-        // Delete events.
-        sqlx::query!("DELETE FROM events WHERE room_id = $1", room_id)
-            .execute(&self.pool)
-            .await
-            .map_err(map_sqlx)?;
+            .execute(&mut *transaction).await.map_err(map_sqlx)?;
+        // Capture exactly the rows deleted by this statement, including any
+        // insert committed before its snapshot. Retention and deletion commit together.
+        sqlx::query!(
+            r#"WITH deleted AS (
+                DELETE FROM events WHERE room_id = $1 RETURNING stream_position
+            ) UPDATE retired_event_positions
+              SET position = GREATEST(position, (SELECT COALESCE(MAX(stream_position), 0) FROM deleted))
+              WHERE singleton"#,
+            room_id
+        ).execute(&mut *transaction).await.map_err(map_sqlx)?;
+        transaction.commit().await.map_err(map_sqlx)?;
         Ok(())
     }
 

@@ -564,7 +564,10 @@ pub async fn get_messages<S: AuthState>(
 
     // Determine start position.
     let from: i64 = if let Some(token) = &query.from {
-        token.parse::<i64>().unwrap_or(0)
+        match token.strip_prefix('s').unwrap_or(token).split('_').next().unwrap_or("").parse::<i64>() {
+            Ok(position) if position >= 0 => position,
+            _ => return (StatusCode::BAD_REQUEST, Json(json!({"errcode": "M_INVALID_PARAM", "error": "invalid pagination token"}))).into_response(),
+        }
     } else {
         match dir_char {
             'b' => {

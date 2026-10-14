@@ -149,7 +149,7 @@ def wait_for(check, processes, timeout=45):
     raise AssertionError("peer readiness/delivery deadline expired")
 
 
-def main():
+def main(pdu_wire=False):
     # Importing the installed peer is a prerequisite check, never a skip.
     import synapse
     import importlib.metadata
@@ -364,6 +364,33 @@ def main():
         result = raw_transaction("large-frame", large)
         assert len(result["pdus"]) == 50
         print("Federation required fields, count limits and >2MB frame assertions passed", flush=True)
+
+        if pdu_wire:
+            from synapse.api.room_versions import RoomVersions
+            from synapse.crypto.event_signing import add_hashes_and_signatures
+            from synapse.events import make_event_from_dict
+            wire = {"auth_events": [], "prev_events": [], "depth": 1,
+                "room_id": f"!wire:{synapse_name}", "sender": bob["user_id"],
+                "type": "m.room.create", "state_key": "", "content": {"room_version": "11"},
+                "origin_server_ts": int(time.time() * 1000),
+                "org.conduit.test": {"opaque": "preserve me", "unicode": "世界"}}
+            add_hashes_and_signatures(RoomVersions.V11, wire, synapse_name, signing_key)
+            event_id = make_event_from_dict(wire, RoomVersions.V11).event_id
+            assert "event_id" not in wire
+            result = raw_transaction("wire-create", dict(transaction_body([]), pdus=[wire]))
+            assert result["pdus"].get(event_id) == {}, result
+            stop(conduit_process)
+            conduit_process = start_conduit()
+            event_path = "/_matrix/federation/v1/event/" + urllib.parse.quote(event_id, safe="")
+            signed = sign_json({"method": "GET", "uri": event_path, "origin": synapse_name,
+                "destination": conduit_name}, synapse_name, signing_key)
+            key_id, signature = next(iter(signed["signatures"][synapse_name].items()))
+            auth = f'X-Matrix origin="{synapse_name}",destination="{conduit_name}",key="{key_id}",sig="{signature}"'
+            stored = request("conduit", "GET", event_path, extra_headers={"Authorization": auth})["pdus"][0]
+            assert "event_id" not in stored, stored
+            assert stored["org.conduit.test"] == wire["org.conduit.test"]
+            assert make_event_from_dict(stored, RoomVersions.V11).event_id == event_id
+            print("Independent v11 PDU signing/reference ID, no-ID wire and extension persistence passed", flush=True)
 
 
 if __name__ == "__main__":

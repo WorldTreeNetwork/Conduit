@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT GREATEST(COALESCE(MAX(stream_position), 0),\n                (SELECT position FROM retired_event_positions WHERE singleton)) AS max_pos\n            FROM events\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "max_pos",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "9c628321318e732743e5d4b75e17023d2eb233a06957e98adf45244c4961ab5b"
+}

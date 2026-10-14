@@ -340,7 +340,9 @@ async fn initial_sync_shows_joined_rooms() {
 
     // State should include at least m.room.create and m.room.member.
     let room_block = &join[&room_id];
-    let state_events = room_block["state"]["events"].as_array().unwrap();
+    let mut state_events = room_block["state"]["events"].as_array().unwrap().clone();
+    state_events.extend(room_block["timeline"]["events"].as_array().unwrap()
+        .iter().filter(|event| event.get("state_key").is_some()).cloned());
     let types: Vec<&str> = state_events
         .iter()
         .filter_map(|e| e["type"].as_str())

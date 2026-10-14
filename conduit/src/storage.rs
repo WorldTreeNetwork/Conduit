@@ -425,6 +425,22 @@ pub trait Storage: Send + Sync + 'static {
     /// Rooms where the current membership of `user_id` is join.
     async fn joined_rooms(&self, user_id: &str) -> Result<Vec<String>>;
 
+    /// Current memberships across rooms, including invitations and departures.
+    async fn current_memberships(&self, user_id: &str) -> Result<Vec<Event>> {
+        let mut offset = 0;
+        let mut memberships = Vec::new();
+        loop {
+            let rooms = self.list_rooms(offset, 1000).await?;
+            for room in &rooms {
+                if let Some(event) = self.get_state_entry(room, "m.room.member", user_id).await? { memberships.push(event); }
+            }
+            if rooms.len() < 1000 { break; }
+            offset += rooms.len() as i64;
+        }
+        Ok(memberships)
+    }
+
+
     /// Paginated room timeline.
     ///
     /// `dir` is `'f'` (forward / chronological) or `'b'` (backward).
@@ -941,6 +957,8 @@ struct MemoryInner {
     requests: HashMap<TransactionKey, Value>,
     transactions: HashMap<TransactionKey, Value>,
     events: HashMap<String, Event>,
+    event_positions: HashMap<String, i64>,
+    event_next_position: i64,
     accounts: HashMap<String, Account>,
     /// (user_id, device_id) → Device
     devices: HashMap<(String, String), Device>,
@@ -1001,6 +1019,8 @@ impl Default for MemoryInner {
     fn default() -> Self {
         Self {
             events: HashMap::new(),
+            event_positions: HashMap::new(),
+            event_next_position: 0,
             requests: HashMap::new(),
             transactions: HashMap::new(),
             accounts: HashMap::new(),
@@ -1076,7 +1096,12 @@ impl Storage for MemoryStorage {
         if event.state_key.is_some() {
             return Err(crate::Error::InvalidEvent("put_event_once accepts non-state events only".into()));
         }
-        inner.events.entry(event.event_id.clone()).or_insert_with(|| event.clone());
+        if !inner.events.contains_key(&event.event_id) {
+            inner.event_next_position += 1;
+            let position = inner.event_next_position;
+            inner.event_positions.insert(event.event_id.clone(), position);
+            inner.events.insert(event.event_id.clone(), event.clone());
+        }
         inner.transactions.insert(key.clone(), serde_json::json!({"event_id": event.event_id}));
         Ok((event.event_id.clone(), true))
     }
@@ -1114,11 +1139,13 @@ impl Storage for MemoryStorage {
     }
 
     async fn put_event(&self, event: &Event) -> Result<()> {
-        self.inner
-            .write()
-            .await
-            .events
-            .insert(event.event_id.clone(), event.clone());
+        let mut inner = self.inner.write().await;
+        if !inner.events.contains_key(&event.event_id) {
+            inner.event_next_position += 1;
+            let position = inner.event_next_position;
+            inner.event_positions.insert(event.event_id.clone(), position);
+            inner.events.insert(event.event_id.clone(), event.clone());
+        }
         Ok(())
     }
 
@@ -1424,6 +1451,12 @@ impl Storage for MemoryStorage {
         Ok(events)
     }
 
+    async fn current_memberships(&self, user_id: &str) -> Result<Vec<Event>> {
+        let inner = self.inner.read().await;
+        Ok(inner.room_state.iter().filter(|((_, kind, key), _)| kind == "m.room.member" && key == user_id)
+            .filter_map(|(_, id)| inner.events.get(id).cloned()).collect())
+    }
+
     async fn joined_rooms(&self, user_id: &str) -> Result<Vec<String>> {
         let inner = self.inner.read().await;
         let mut rooms: Vec<_> = inner.room_state.iter()
@@ -1437,62 +1470,23 @@ impl Storage for MemoryStorage {
         Ok(rooms)
     }
 
-    async fn room_events_paginated(
-        &self,
-        room_id: &str,
-        dir: char,
-        from: i64,
-        limit: i64,
-    ) -> Result<(Vec<Event>, Option<i64>)> {
+    async fn room_events_paginated(&self, room_id: &str, dir: char, from: i64, limit: i64)
+        -> Result<(Vec<Event>, Option<i64>)> {
         let inner = self.inner.read().await;
-        // MemoryStorage doesn't have stream_position; use insertion order via
-        // the events map. We simulate stream_position as the index in a sorted
-        // Vec of room events.
-        let mut room_evs: Vec<Event> = inner
-            .events
-            .values()
-            .filter(|e| e.room_id == room_id)
-            .cloned()
-            .collect();
-        // Stable sort by depth as a proxy for stream_position in memory tests.
-        room_evs.sort_by_key(|e| e.depth);
-
-        let total = room_evs.len() as i64;
-        let (slice, next): (Vec<Event>, Option<i64>) = match dir {
-            'b' => {
-                // backwards from `from` (inclusive)
-                let end = (from + 1).min(total) as usize;
-                let start = (end as i64 - limit).max(0) as usize;
-                let chunk: Vec<Event> = room_evs[start..end]
-                    .iter()
-                    .rev()
-                    .cloned()
-                    .collect();
-                let next = if start > 0 { Some(start as i64 - 1) } else { None };
-                (chunk, next)
-            }
-            _ => {
-                // forwards from `from` (inclusive)
-                let start = from.max(0) as usize;
-                let end = (start as i64 + limit).min(total) as usize;
-                let chunk: Vec<Event> = room_evs[start..end].to_vec();
-                let next = if (end as i64) < total { Some(end as i64) } else { None };
-                (chunk, next)
-            }
-        };
-        Ok((slice, next))
+        let mut rows: Vec<_> = inner.events.values().filter(|event| event.room_id == room_id)
+            .filter_map(|event| inner.event_positions.get(&event.event_id).map(|position| (*position, event.clone())))
+            .filter(|(position, _)| if dir == 'b' { *position <= from } else { *position >= from }).collect();
+        rows.sort_by_key(|(position, _)| if dir == 'b' { -*position } else { *position });
+        rows.truncate(limit.max(0) as usize);
+        let next = rows.last().map(|(position, _)| if dir == 'b' { position.saturating_sub(1) } else { position.saturating_add(1) });
+        let next = if (rows.len() as i64) < limit { None } else { next };
+        Ok((rows.into_iter().map(|(_, event)| event).collect(), next))
     }
 
     async fn room_latest_stream_position(&self, room_id: &str) -> Result<Option<i64>> {
         let inner = self.inner.read().await;
-        let max_depth = inner
-            .events
-            .values()
-            .filter(|e| e.room_id == room_id)
-            .map(|e| e.depth)
-            .max();
-        // In MemoryStorage depth serves as stream_position proxy.
-        Ok(max_depth)
+        Ok(inner.events.values().filter(|event| event.room_id == room_id)
+            .filter_map(|event| inner.event_positions.get(&event.event_id).copied()).max())
     }
 
     async fn member_events_for_user(
@@ -1501,7 +1495,6 @@ impl Storage for MemoryStorage {
         user_id: &str,
     ) -> Result<Vec<(i64, Event)>> {
         let inner = self.inner.read().await;
-        // In MemoryStorage depth serves as the stream_position proxy.
         let mut rows: Vec<(i64, Event)> = inner
             .events
             .values()
@@ -1510,7 +1503,7 @@ impl Storage for MemoryStorage {
                     && e.event_type == "m.room.member"
                     && e.state_key.as_deref() == Some(user_id)
             })
-            .map(|e| (e.depth, e.clone()))
+            .filter_map(|e| inner.event_positions.get(&e.event_id).map(|position| (*position, e.clone())))
             .collect();
         rows.sort_by_key(|(pos, _)| *pos);
         Ok(rows)
@@ -1533,7 +1526,7 @@ impl Storage for MemoryStorage {
                         .as_deref()
                         .is_some_and(|sk| sk.ends_with(&suffix))
             })
-            .map(|e| (e.depth, e.clone()))
+            .filter_map(|e| inner.event_positions.get(&e.event_id).map(|position| (*position, e.clone())))
             .collect();
         rows.sort_by_key(|(pos, _)| *pos);
         Ok(rows)
@@ -1543,27 +1536,22 @@ impl Storage for MemoryStorage {
         let inner = self.inner.read().await;
         Ok(event_ids
             .iter()
-            .filter_map(|id| inner.events.get(id).map(|e| (id.clone(), e.depth)))
+            .filter_map(|id| inner.event_positions.get(id).map(|position| (id.clone(), *position)))
             .collect())
     }
 
     async fn events_since(&self, since: i64, limit: i64) -> Result<Vec<Event>> {
         let inner = self.inner.read().await;
-        // In MemoryStorage, depth is used as stream_position proxy.
-        let mut evs: Vec<Event> = inner
-            .events
-            .values()
-            .filter(|e| e.depth > since)
-            .cloned()
-            .collect();
-        evs.sort_by_key(|e| e.depth);
-        evs.truncate(limit as usize);
-        Ok(evs)
+        let mut rows: Vec<_> = inner.events.values()
+            .filter_map(|event| inner.event_positions.get(&event.event_id).map(|position| (*position, event.clone())))
+            .filter(|(position, _)| *position > since).collect();
+        rows.sort_by_key(|(position, _)| *position);
+        rows.truncate(limit.max(0) as usize);
+        Ok(rows.into_iter().map(|(_, event)| event).collect())
     }
 
     async fn global_max_stream_position(&self) -> Result<i64> {
-        let inner = self.inner.read().await;
-        Ok(inner.events.values().map(|e| e.depth).max().unwrap_or(0))
+        Ok(self.inner.read().await.event_next_position)
     }
 
     // --- Device keys ----------------------------------------------------------
@@ -2358,6 +2346,8 @@ impl Storage for MemoryStorage {
     async fn purge_room(&self, room_id: &str) -> Result<()> {
         let mut inner = self.inner.write().await;
         inner.events.retain(|_, e| e.room_id != room_id);
+        let surviving: std::collections::HashSet<_> = inner.events.keys().cloned().collect();
+        inner.event_positions.retain(|id, _| surviving.contains(id));
         inner.room_state.retain(|(r, _, _), _| r != room_id);
         Ok(())
     }
@@ -2673,6 +2663,44 @@ impl Storage for MemoryStorage {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn stream_event(id: &str, room: &str, depth: i64) -> Event {
+        Event { event_id: id.into(), room_id: room.into(), sender: "@a:test".into(),
+            event_type: "m.room.message".into(), content: json!({"body": id}), state_key: None,
+            origin_server_ts: 1, auth_events: vec![], prev_events: vec![], hashes: json!({}),
+            signatures: json!({}), depth, unsigned: None }
+    }
+
+    #[tokio::test]
+    async fn event_stream_positions_are_independent_of_depth_room_and_duplicates() {
+        let store = MemoryStorage::default();
+        let first = stream_event("$first", "!one:test", 10);
+        let second = stream_event("$second", "!two:test", 2);
+        let third = stream_event("$third", "!one:test", 2);
+        for event in [&first, &second, &third] { store.put_event(event).await.unwrap(); }
+        assert_eq!(store.global_max_stream_position().await.unwrap(), 3);
+        assert_eq!(store.events_since(1, 100).await.unwrap(), vec![second.clone(), third.clone()]);
+        let mut duplicate = first.clone();
+        duplicate.content = json!({"body": "wrong replacement"});
+        store.put_event(&duplicate).await.unwrap();
+        assert_eq!(store.get_event("$first").await.unwrap(), Some(first.clone()));
+        assert_eq!(store.global_max_stream_position().await.unwrap(), 3);
+        let (page, next) = store.room_events_paginated("!one:test", 'b', 3, 1).await.unwrap();
+        assert_eq!(page, vec![third]);
+        assert_eq!(next, Some(2));
+        let (page, _) = store.room_events_paginated("!one:test", 'b', 2, 10).await.unwrap();
+        assert_eq!(page, vec![first]);
+        store.purge_room("!one:test").await.unwrap();
+        assert_eq!(store.global_max_stream_position().await.unwrap(), 3);
+        store.put_event(&stream_event("$new", "!new:test", 1)).await.unwrap();
+        assert_eq!(store.global_max_stream_position().await.unwrap(), 4);
+        let key = TransactionKey::client("@a:test", "A", &["room_send", "!new:test", "m.room.message"], "atomic");
+        let atomic = stream_event("$atomic", "!new:test", 1);
+        assert_eq!(store.put_event_once(&key, &atomic).await.unwrap(), ("$atomic".into(), true));
+        assert_eq!(store.event_stream_positions(&["$atomic".into()]).await.unwrap()["$atomic"], 5);
+        assert_eq!(store.put_event_once(&key, &stream_event("$ignored", "!new:test", 1)).await.unwrap(), ("$atomic".into(), false));
+        assert_eq!(store.global_max_stream_position().await.unwrap(), 5);
+    }
 
     #[tokio::test]
     async fn replay_lock_cancellation_retains_original_request_and_result() {
