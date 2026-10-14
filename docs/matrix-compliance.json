@@ -25,7 +25,7 @@
       ],
       "status": "covered_for_typed_event_model",
       "limitations": [
-        "Unknown PDU fields are not retained; no separate PDU wire model"
+        "These named cryptographic vectors cover their assertions; broader wire-model validation and federation conformance require separate evidence."
       ],
       "gap_issue": "conduit-embed-pdu"
     },
@@ -879,7 +879,7 @@
       "id": "v11-pdu-without-local-id-independent-regression",
       "role": "homeserver",
       "source": "https://spec.matrix.org/v1.19/rooms/v11/#event-format",
-      "status": "failing",
+      "status": "covered_assertions_only",
       "assertions": [
         "A standard Synapse-signed v11 create PDU without event_id must deserialize and persist its extensions"
       ],
@@ -887,11 +887,15 @@
         "conduit-server/tests/peers/synapse_pdu_wire.py"
       ],
       "evidence": [
-        "Current server returns PDU parse error: missing field event_id",
-        "Prepared add-pdu-wire change awaits independent review; configured Opus authentication expired and Grok fallback timed out"
+        "Current integrated tree has wire Pdu/Event separation and accepted review contract; live Synapse no-ID/reference-hash/extension round-trip assertions now pass",
+        "Verified on integrated HEAD after b25b039; previous missing-event_id failure and reviewer outage are historical"
       ],
       "gap_issues": [
-        "conduit-embed-pdu"
+        "conduit-y99.3",
+        "conduit-y99.4.2"
+      ],
+      "limitations": [
+        "These peer assertions do not prove every authorization, room-version or federation surface; full compliance remains unproven"
       ]
     },
     {
@@ -922,7 +926,7 @@
         "conduit-server/tests/production_sync.rs::limited_ephemeral_and_state_windows_make_progress"
       ],
       "limitations": [
-        "Raw federation event format is still the legacy snapshot pending PDU wire work"
+        "Broader filter/state and resolved-DAG snapshot coverage remains under the full sync audit; newer integrated commits also add redundancy and limit-edge work"
       ],
       "gap_issues": [
         "conduit-embed-pdu"
@@ -2674,6 +2678,53 @@
         "conduit-server/tests/production_push.rs::push_rules_api_follows_spec"
       ],
       "limitations": []
+    },
+    {
+      "id": "joined-sync-state-across-history-visibility-gap",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#syncing",
+      "status": "covered_assertions_only",
+      "assertions": [
+        "Initial and newly joined room sync preserve explicit name, topic and membership when a hidden history interval separates visible event windows",
+        "Timeline starts after a visibility gap and its state snapshot precedes the returned window",
+        "Older visible creation history remains available through prev_batch pagination, while pre-invitation/join messages remain hidden"
+      ],
+      "implementation": [
+        "conduit-server/src/api/client/sync.rs"
+      ],
+      "tests": [
+        "conduit-server/tests/production_sync.rs::joining_preserves_state_across_a_history_visibility_gap",
+        "client/e2e/chat.spec.ts::two people create a room, invite, accept and chat both ways",
+        "client/e2e/features.spec.ts::room settings: rename, topic, history and roles"
+      ],
+      "limitations": [
+        "This regression covers local stream history, not complete resolved-DAG snapshots or every filter/state combination."
+      ],
+      "gap_issues": [
+        "conduit-y99.13"
+      ]
+    },
+    {
+      "id": "client-profile-draft-survives-stale-hydration",
+      "role": "client",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#put_matrixclientv3profileuseriddisplayname",
+      "status": "covered_assertions_only",
+      "assertions": [
+        "A superseded profile GET response cannot overwrite text typed into the current settings form",
+        "Saving the edited display name updates the account board, sent-message attribution and membership state description"
+      ],
+      "implementation": [
+        "client/src/ui/Settings.tsx"
+      ],
+      "tests": [
+        "client/e2e/chat.spec.ts::display name changes show on the board and in rooms"
+      ],
+      "limitations": [
+        "Current browser evidence uses Chromium; Firefox/WebKit and broader accessibility validation remain tracked separately."
+      ],
+      "gap_issues": [
+        "conduit-y99.9.6"
+      ]
     }
   ]
 }

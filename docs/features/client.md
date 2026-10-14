@@ -65,24 +65,23 @@ syncs from the stored `since`. When a snapshot was trimmed, the stored
 restarts from the live end (`/messages` without `from`), skipping known
 events. Logout (`POST /logout`) and `M_UNKNOWN_TOKEN` wipe all three keys.
 
-### Workarounds for server gaps (keep until the beads close)
+### Server integration and compatibility
 
-- **Unread counts:** Conduit sends real `unread_notifications` from push
-  rule evaluation (conduit-y99.30). The room list shows
-  `max(notification_count, local unread)` where local unread counts messages
-  from others after the user's own `m.read` receipt or local read marker.
-- **Display-name propagation:** the server does not rewrite room member
-  events after `PUT /profile/{userId}/displayname`; the client updates
-  its own `m.room.member` in each joined room whose member event still
-  has the old name. (`conduit-y99.25`)
-- **`/messages` visibility:** the creator's back-pagination omits the
-  room's create/initial join; the timeline still terminates correctly.
-  (`conduit-y99.26`)
-- **`unsigned.transaction_id`:** absent on the sender's own events; echo
-  reconciliation uses the event ID from the PUT response instead.
-  (`conduit-y99.27`)
-- **Empty state key with a trailing slash:** `PUT .../state/{type}/` is
-  404; the client uses the slash-less form. (`conduit-y99.47`)
+Conduit now propagates profile changes into joined-room membership events,
+includes the sending device's `unsigned.transaction_id`, supports empty state
+keys with a trailing slash, and paginates back through the creator's initial
+join and room creation. Production journeys assert these behaviours.
+
+The client retains compatibility with other homeservers: it updates its own
+membership when the cached profile has not yet changed, and reconciles local
+echoes by the event ID from the PUT response as well as the transaction ID.
+Unread badges show `max(notification_count, local unread)`; local unread counts
+messages after the user's read receipt or local read marker.
+
+Settings ignores superseded profile fetches, so a late response cannot erase
+an edited display-name draft. The browser profile journey deliberately releases
+an old response after typing, then checks the saved name on the board and in
+the room.
 
 ## UI (`client/src/ui`)
 

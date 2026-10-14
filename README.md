@@ -123,6 +123,7 @@ Apache-2.0 (placeholder — choose deliberately before publishing).
 
 The separate room-PDU contract regression is
 `python conduit-server/tests/peers/synapse_pdu_wire.py`, run from the pinned peer
-venv after building Conduit. It currently fails because standard v11 PDUs omit
-local `event_id`; the prepared wire-model change awaits independent review under
-`conduit-embed-pdu`. The to-device runner remains scoped to its tested surfaces.
+venv after building Conduit. The integrated wire model accepts standard v11
+PDUs without a local `event_id`, retains extensions and uses derived identities;
+this journey verifies those assertions independently with Synapse. Broader PDU
+and federation conformance remains tracked under the full protocol goal.
