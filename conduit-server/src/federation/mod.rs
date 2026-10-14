@@ -22,6 +22,7 @@
 //! let federation_queue = Arc::new(federation::Queue::new(Arc::clone(&fed_client)));
 //! ```
 
+pub mod admit;
 pub mod auth;
 pub mod client;
 pub mod discovery;
@@ -37,7 +38,7 @@ pub mod iroh_client;
 pub mod iroh_server;
 
 pub use client::{
-    Client, DirectoryResponse, FederationError, MakeJoinResponse, SendJoinResponse,
+    BackfillResponse, Client, DirectoryResponse, FederationError, MakeJoinResponse, SendJoinResponse,
     StateIdsResponse, StateResponse, TransactionResponse,
 };
 pub use queue::Queue;

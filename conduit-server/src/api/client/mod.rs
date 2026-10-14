@@ -221,6 +221,12 @@ impl MatrixError {
     pub fn unknown(msg: impl Into<String>) -> (StatusCode, Json<MatrixError>) {
         (StatusCode::INTERNAL_SERVER_ERROR, Json(Self::new("M_UNKNOWN", msg)))
     }
+    pub fn invalid_param(msg: impl Into<String>) -> (StatusCode, Json<MatrixError>) {
+        (StatusCode::BAD_REQUEST, Json(Self::new("M_INVALID_PARAM", msg)))
+    }
+    pub fn too_large(msg: impl Into<String>) -> (StatusCode, Json<MatrixError>) {
+        (StatusCode::PAYLOAD_TOO_LARGE, Json(Self::new("M_TOO_LARGE", msg)))
+    }
     pub fn new_not_found(msg: impl Into<String>) -> (StatusCode, Json<MatrixError>) {
         (StatusCode::NOT_FOUND, Json(Self::new("M_NOT_FOUND", msg)))
     }

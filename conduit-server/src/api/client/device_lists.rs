@@ -57,7 +57,7 @@ pub async fn room_peers(storage: &dyn Storage, room: &str) -> conduit::Result<Ro
             peers.encrypted = true;
         }
         if event.event_type == "m.room.member" && event.content["membership"] == "join" {
-            if let Some(member) = event.state_key {
+            if let Some(member) = event.pdu.state_key {
                 peers.members.insert(member);
             }
         }

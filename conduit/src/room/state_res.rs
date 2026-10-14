@@ -621,17 +621,20 @@ mod tests {
     ) -> Event {
         Event {
             event_id: event_id.to_owned(),
-            room_id: room_id.to_owned(),
-            sender: sender.to_owned(),
-            event_type: event_type.to_owned(),
-            content,
-            state_key: state_key.map(|s| s.to_owned()),
-            origin_server_ts,
-            auth_events,
-            prev_events: vec![],
-            hashes: json!({}),
-            signatures: json!({}),
-            depth,
+            pdu: crate::event::Pdu {
+                room_id: room_id.to_owned(),
+                sender: sender.to_owned(),
+                event_type: event_type.to_owned(),
+                content,
+                state_key: state_key.map(|s| s.to_owned()),
+                origin_server_ts,
+                auth_events,
+                prev_events: vec![],
+                hashes: json!({}),
+                signatures: json!({}),
+                depth,
+                extensions: Default::default(),
+            },
             unsigned: None,
         }
     }

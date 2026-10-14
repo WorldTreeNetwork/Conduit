@@ -1,0 +1,31 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT request_text, request FROM transactions WHERE scope = $1 AND owner = $2 AND endpoint = $3 AND txn_id = $4",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "request_text",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "request",
+        "type_info": "Jsonb"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      true,
+      true
+    ]
+  },
+  "hash": "fd86b99123dd0efe89f90d2f9d95b160b276985d1e064a9fc8420ba260e45bc5"
+}

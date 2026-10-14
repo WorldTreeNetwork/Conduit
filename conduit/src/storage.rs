@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::RwLock;
 
-use crate::event::Event;
+use crate::event::{Event, IntegrityClass, WirePdu};
 use crate::{Error, Result};
 
 // ---------------------------------------------------------------------------
@@ -99,6 +99,20 @@ pub struct ToDeviceMessage {
     pub sender: String,
     pub event_type: String,
     pub content: Value,
+}
+
+/// Counts from one batch of the legacy event-ID integrity sweep.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LegacySweep {
+    pub verified: u64,
+    pub content_mismatch: u64,
+    pub id_mismatch: u64,
+}
+
+impl LegacySweep {
+    pub fn total(&self) -> u64 {
+        self.verified + self.content_mismatch + self.id_mismatch
+    }
 }
 
 /// One entry in the durable outbound federation queue (conduit-5n3).
@@ -350,6 +364,39 @@ pub trait Storage: Send + Sync + 'static {
     async fn get_event(&self, event_id: &str) -> Result<Option<Event>>;
     async fn put_event(&self, event: &Event) -> Result<()>;
     async fn room_events(&self, room_id: &str) -> Result<Vec<Event>>;
+
+    // --- Federation wire integrity (add-pdu-wire) ---------------------------
+
+    /// The stored event's integrity class and, unless it is `IdMismatch`, its
+    /// federation form (`ContentMismatch` rows are served as their v11
+    /// redaction, computed now and never written back). `None` when no row
+    /// exists. Hosts with legacy rows classify an unchecked row inline and
+    /// persist the class; client reads are never affected.
+    async fn get_wire_pdu_with_class(&self, event_id: &str) -> Result<Option<(IntegrityClass, Option<WirePdu>)>> {
+        Ok(self.get_event(event_id).await?.map(|event| {
+            let class = crate::event::classify(&event.event_id, &event.pdu);
+            (class, WirePdu::checked(&event.event_id, event.pdu))
+        }))
+    }
+
+    /// The federation form of a stored event, or `None` when it is missing or
+    /// its bytes do not reproduce its ID. Every federation response built
+    /// from storage goes through here.
+    async fn get_wire_pdu(&self, event_id: &str) -> Result<Option<WirePdu>> {
+        Ok(self.get_wire_pdu_with_class(event_id).await?.and_then(|(_, wire)| wire))
+    }
+
+    /// Record the verdicts for legacy outbox snapshots on the queue row only
+    /// (`{event_id: class}`), plus an optional note in `last_error`.
+    async fn record_legacy_snapshot_verdicts(&self, _outbound_id: i64, _verdicts: &Value, _note: Option<&str>) -> Result<()> {
+        Ok(())
+    }
+
+    /// Classify up to `batch` unchecked legacy event rows. Returns how many
+    /// rows were classified in each class; all zeros when nothing is left.
+    async fn verify_legacy_event_ids(&self, _batch: i64) -> Result<LegacySweep> {
+        Ok(LegacySweep::default())
+    }
 
     // --- Accounts -----------------------------------------------------------
 
@@ -4037,10 +4084,7 @@ mod tests {
     }
 
     fn stream_event(id: &str, room: &str, depth: i64) -> Event {
-        Event { event_id: id.into(), room_id: room.into(), sender: "@a:test".into(),
-            event_type: "m.room.message".into(), content: json!({"body": id}), state_key: None,
-            origin_server_ts: 1, auth_events: vec![], prev_events: vec![], hashes: json!({}),
-            signatures: json!({}), depth, unsigned: None }
+        Event { event_id: id.into(), pdu: crate::event::Pdu { room_id: room.into(), sender: "@a:test".into(), event_type: "m.room.message".into(), content: json!({"body": id}), state_key: None, origin_server_ts: 1, auth_events: vec![], prev_events: vec![], hashes: json!({}), signatures: json!({}), depth, extensions: Default::default() }, unsigned: None }
     }
 
     #[tokio::test]

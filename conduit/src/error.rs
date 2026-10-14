@@ -9,6 +9,13 @@ pub enum Error {
     #[error("storage error: {0}")]
     Storage(String),
 
+    /// The database refused a value as a data exception (PostgreSQL SQLSTATE
+    /// class 22, e.g. U+0000 in JSONB/TEXT). Deterministic: retrying the same
+    /// bytes fails the same way, so callers may drop the item instead of
+    /// failing a whole request.
+    #[error("storage data error: {0}")]
+    StorageData(String),
+
     #[error("invalid event: {0}")]
     InvalidEvent(String),
 
@@ -36,7 +43,7 @@ impl Error {
             Error::Forbidden(_) => "M_FORBIDDEN",
             Error::UnsupportedRoomVersion(_) => "M_UNSUPPORTED_ROOM_VERSION",
             Error::InvalidEvent(_) => "M_BAD_JSON",
-            Error::Storage(_) | Error::Io(_) | Error::Serde(_) => "M_UNKNOWN",
+            Error::Storage(_) | Error::StorageData(_) | Error::Io(_) | Error::Serde(_) => "M_UNKNOWN",
         }
     }
 }

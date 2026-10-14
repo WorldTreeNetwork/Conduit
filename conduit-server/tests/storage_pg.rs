@@ -336,17 +336,20 @@ fn replace_db_in_url(url: &str, new_db: &str) -> String {
 fn make_event(event_id: &str, room_id: &str, event_type: &str, state_key: Option<&str>) -> Event {
     Event {
         event_id: event_id.to_owned(),
-        room_id: room_id.to_owned(),
-        sender: "@alice:localhost".to_owned(),
-        event_type: event_type.to_owned(),
-        state_key: state_key.map(|s| s.to_owned()),
-        content: json!({ "test": true }),
-        origin_server_ts: 1_700_000_000_000,
-        auth_events: vec!["$auth1:localhost".to_owned()],
-        prev_events: vec!["$prev1:localhost".to_owned()],
-        hashes: json!({ "sha256": "47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU" }),
-        signatures: json!({ "localhost": { "ed25519:key1": "sig_placeholder" } }),
-        depth: 1,
+        pdu: conduit::event::Pdu {
+            room_id: room_id.to_owned(),
+            sender: "@alice:localhost".to_owned(),
+            event_type: event_type.to_owned(),
+            state_key: state_key.map(|s| s.to_owned()),
+            content: json!({ "test": true }),
+            origin_server_ts: 1_700_000_000_000,
+            auth_events: vec!["$auth1:localhost".to_owned()],
+            prev_events: vec!["$prev1:localhost".to_owned()],
+            hashes: json!({ "sha256": "47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU" }),
+            signatures: json!({ "localhost": { "ed25519:key1": "sig_placeholder" } }),
+            depth: 1,
+            extensions: Default::default(),
+        },
         unsigned: None,
     }
 }

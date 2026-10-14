@@ -19,9 +19,8 @@ use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine as _};
 use serde_json::json;
 use tokio::sync::broadcast;
 
-use conduit::event::Event;
 use conduit::keys::{generate_server_key, public_bytes, ServerKey};
-use conduit::signing::sign_event;
+use conduit::signing::sign_authored;
 use conduit::storage::{MemoryStorage, Storage};
 use conduit::transport::iroh as iroh_transport;
 
@@ -196,22 +195,13 @@ async fn iroh_rt1_send_transaction_a_to_b() {
     .with_iroh_endpoint(Arc::clone(&server_a.iroh_endpoint));
 
     // Build a PDU signed by A.
-    let mut pdu = Event {
-        event_id: "$iroh_rt1_pdu:a.iroh.test".to_owned(),
-        room_id: "!iroh_rt1_room:a.iroh.test".to_owned(),
-        sender: "@alice:a.iroh.test".to_owned(),
-        event_type: "m.room.message".to_owned(),
-        content: json!({ "msgtype": "m.text", "body": "hello over iroh" }),
-        state_key: None,
-        origin_server_ts: 3_000_000,
-        auth_events: vec![],
-        prev_events: vec![],
-        hashes: json!({}),
-        signatures: json!({}),
-        depth: 1,
-        unsigned: None,
-    };
-    sign_event(&mut pdu, &server_a.server_key, "a.iroh.test").unwrap();
+    let mut pdu = conduit::event::Pdu::new(
+        "!iroh_rt1_room:a.iroh.test", "@alice:a.iroh.test", "m.room.message", None,
+        json!({ "msgtype": "m.text", "body": "hello over iroh" }), 3_000_000, vec![], vec![], 1,
+    );
+    sign_authored(&mut pdu, &server_a.server_key, "a.iroh.test").unwrap();
+    let pdu_id = conduit::hashing::event_id(&pdu).unwrap();
+    let pdu = conduit::event::WirePdu::checked(&pdu_id, pdu).unwrap();
 
     // Send via A's client — this will look up B's iroh NodeId and route over QUIC.
     let result = a_client
@@ -223,7 +213,7 @@ async fn iroh_rt1_send_transaction_a_to_b() {
             // PDU should be in B's storage.
             let stored = server_b
                 .storage
-                .get_event("$iroh_rt1_pdu:a.iroh.test")
+                .get_event(&pdu_id)
                 .await
                 .unwrap();
             // Check response: empty pdu map means no errors.

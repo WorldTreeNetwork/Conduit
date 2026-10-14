@@ -19,7 +19,7 @@ use thiserror::Error;
 #[cfg(feature = "iroh")]
 use tokio::sync::RwLock;
 
-use conduit::event::Event;
+use conduit::event::WirePdu;
 use conduit::keys::ServerKey;
 
 use crate::RemoteKeyCache;
@@ -56,6 +56,16 @@ pub struct TransactionResponse {
     /// Map of event_id → processing result; empty map on full success.
     #[serde(default)]
     pub pdus: std::collections::HashMap<String, Value>,
+}
+
+/// Response body for `GET /_matrix/federation/v1/backfill/{roomId}`: raw
+/// PDUs, admitted with `admit::admit_closure` before anything is stored.
+#[derive(Debug, Deserialize)]
+pub struct BackfillResponse {
+    #[serde(default)]
+    pub origin: String,
+    #[serde(default)]
+    pub pdus: Vec<Value>,
 }
 
 /// Response body for `GET /_matrix/federation/v1/make_join/{roomId}/{userId}`.
@@ -504,7 +514,7 @@ impl Client {
         &self,
         dest: &str,
         txn_id: &str,
-        pdus: Vec<Event>,
+        pdus: Vec<WirePdu>,
         edus: Vec<Value>,
     ) -> Result<TransactionResponse, FederationError> {
         let path = format!("/_matrix/federation/v1/send/{}", txn_id);
@@ -542,30 +552,33 @@ impl Client {
         &self,
         dest: &str,
         room_id: &str,
-        event_id: &str,
-        pdu: &Event,
+        pdu: &WirePdu,
     ) -> Result<SendJoinResponse, FederationError> {
+        // The path ID is derived from the PDU itself; the wire body has none.
         let path = format!(
             "/_matrix/federation/v2/send_join/{}/{}",
             urlencoding(room_id),
-            urlencoding(event_id)
+            urlencoding(&pdu.event_id())
         );
         self.signed_put(dest, &path, pdu).await
     }
 
     /// `PUT /_matrix/federation/v2/invite/{roomId}/{eventId}`
+    ///
+    /// Returns the raw `event` the invitee answered with; callers admit it
+    /// with `admit::admit_cosigned` (`Exactly(id)`, unchanged hashes, valid
+    /// invitee signature) before trusting it.
     pub async fn invite(
         &self,
         dest: &str,
         room_id: &str,
-        event_id: &str,
         invite_room_state: Vec<Value>,
-        pdu: &Event,
-    ) -> Result<Event, FederationError> {
+        pdu: &WirePdu,
+    ) -> Result<Value, FederationError> {
         let path = format!(
             "/_matrix/federation/v2/invite/{}/{}",
             urlencoding(room_id),
-            urlencoding(event_id)
+            urlencoding(&pdu.event_id())
         );
         let body = serde_json::json!({
             "event": pdu,
@@ -573,8 +586,7 @@ impl Client {
             "room_version": "11",
         });
         let resp: Value = self.signed_put(dest, &path, &body).await?;
-        serde_json::from_value(resp["event"].clone())
-            .map_err(|e| FederationError::Parse(e.to_string()))
+        resp.get("event").cloned().ok_or_else(|| FederationError::Parse("missing 'event'".to_owned()))
     }
 
     /// `GET /_matrix/federation/v1/state/{roomId}?event_id={eventId}`
@@ -614,7 +626,7 @@ impl Client {
         room_id: &str,
         event_ids: Vec<String>,
         limit: u32,
-    ) -> Result<TransactionResponse, FederationError> {
+    ) -> Result<BackfillResponse, FederationError> {
         let v_params: String = event_ids
             .iter()
             .map(|id| format!("v={}", urlencoding(id)))
@@ -634,7 +646,7 @@ impl Client {
         &self,
         dest: &str,
         event_id: &str,
-    ) -> Result<Event, FederationError> {
+    ) -> Result<Value, FederationError> {
         let path = format!("/_matrix/federation/v1/event/{}", urlencoding(event_id));
         // Response is a transaction-shaped object with a single PDU.
         let resp: Value = self.signed_get(dest, &path).await?;
@@ -657,7 +669,7 @@ impl Client {
         earliest: Vec<String>,
         latest: Vec<String>,
         limit: u32,
-    ) -> Result<Vec<Event>, FederationError> {
+    ) -> Result<Vec<Value>, FederationError> {
         let path = format!(
             "/_matrix/federation/v1/get_missing_events/{}",
             urlencoding(room_id)

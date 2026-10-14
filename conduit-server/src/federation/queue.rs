@@ -32,7 +32,7 @@ use tokio::task::JoinHandle;
 use tracing::{debug, error, warn};
 use uuid::Uuid;
 
-use conduit::event::Event;
+use conduit::event::{classify, Event, IntegrityClass, Pdu, WirePdu};
 use conduit::storage::{OutboundEntry, Storage};
 
 use super::client::Client;
@@ -100,7 +100,7 @@ impl Queue {
     }
 
     /// Legacy API: persist + dispatch a PDU + EDU batch.
-    pub async fn enqueue(&self, dest: &str, pdus: Vec<Event>, edus: Vec<Value>) {
+    pub async fn enqueue(&self, dest: &str, pdus: Vec<WirePdu>, edus: Vec<Value>) {
         let payload = json!({ "pdus": pdus, "edus": edus });
         self.persist_and_signal(dest, "transaction", &payload).await;
     }
@@ -232,7 +232,7 @@ async fn dispatch_one(
     entry: OutboundEntry,
 ) {
     let result: Result<(), String> = match entry.kind.as_str() {
-        "transaction" => send_transaction(client, dest, &entry).await,
+        "transaction" => send_transaction(client, storage, dest, &entry).await,
         "to_device" => send_to_device(client, dest, &entry).await,
         other => {
             error!(dest, id = entry.id, kind = other, "unknown outbound queue kind");
@@ -282,16 +282,89 @@ async fn dispatch_one(
     }
 }
 
+/// Choose what to emit for a legacy outbox snapshot saved under `saved_id`.
+/// The snapshot and the stored row were each classified from their own
+/// bytes; the first match wins: verified snapshot, verified row, redacted
+/// snapshot, redacted row. Otherwise nothing is sent. Nothing is ever
+/// re-signed under a new identity.
+pub fn choose_emission(
+    saved_id: &str,
+    snapshot_class: IntegrityClass,
+    snapshot: Pdu,
+    row: Option<(IntegrityClass, Option<WirePdu>)>,
+) -> Option<WirePdu> {
+    let (row_class, row_wire) = match row {
+        Some((class, wire)) => (Some(class), wire),
+        None => (None, None),
+    };
+    if snapshot_class == IntegrityClass::Verified {
+        return WirePdu::checked(saved_id, snapshot);
+    }
+    if row_class == Some(IntegrityClass::Verified) {
+        return row_wire;
+    }
+    if snapshot_class == IntegrityClass::ContentMismatch {
+        return WirePdu::checked(saved_id, snapshot);
+    }
+    if row_class == Some(IntegrityClass::ContentMismatch) {
+        return row_wire;
+    }
+    None
+}
+
 async fn send_transaction(
     client: &Arc<Client>,
+    storage: &Arc<dyn Storage>,
     dest: &str,
     entry: &OutboundEntry,
 ) -> Result<(), String> {
     let pdus_val = entry.payload.get("pdus").cloned().unwrap_or_else(|| json!([]));
     let edus_val = entry.payload.get("edus").cloned().unwrap_or_else(|| json!([]));
-
-    let pdus: Vec<Event> = serde_json::from_value(pdus_val).map_err(|e| e.to_string())?;
     let edus: Vec<Value> = serde_json::from_value(edus_val).map_err(|e| e.to_string())?;
+    let values: Vec<Value> = serde_json::from_value(pdus_val).map_err(|e| e.to_string())?;
+
+    let mut pdus = Vec::new();
+    let mut verdicts = serde_json::Map::new();
+    let mut withheld = 0usize;
+    for value in values {
+        if value.get("event_id").is_some() {
+            // Legacy flattened Event snapshot (written before add-pdu-wire). A
+            // v3+ wire PDU never carries event_id, so the key is the local ID.
+            let snapshot: Event = serde_json::from_value(value).map_err(|e| e.to_string())?;
+            let saved = snapshot.event_id.clone();
+            let snapshot_class = classify(&saved, &snapshot.pdu);
+            let derived = conduit::hashing::event_id(&snapshot.pdu).unwrap_or_default();
+            verdicts.insert(saved.clone(), json!(snapshot_class.as_str()));
+            let row = storage.get_wire_pdu_with_class(&saved).await.map_err(|e| e.to_string())?;
+            let row_class = row.as_ref().map(|(class, _)| class.as_str()).unwrap_or("missing");
+            match choose_emission(&saved, snapshot_class, snapshot.pdu, row) {
+                Some(wire) => pdus.push(wire),
+                None => {
+                    withheld += 1;
+                    warn!(dest, txn_id = %entry.txn_id, saved_event_id = %saved, snapshot_derived_id = %derived,
+                        row_class, "outbound: withheld legacy snapshot that does not reproduce its ID");
+                }
+            }
+        } else {
+            let pdu: Pdu = serde_json::from_value(value).map_err(|e| e.to_string())?;
+            let id = conduit::hashing::event_id(&pdu).map_err(|e| e.to_string())?;
+            match WirePdu::checked(&id, pdu) {
+                Some(wire) => pdus.push(wire),
+                None => withheld += 1,
+            }
+        }
+    }
+    if !verdicts.is_empty() {
+        let note = (pdus.is_empty() && edus.is_empty() && withheld > 0).then_some("withheld: legacy id_mismatch");
+        storage
+            .record_legacy_snapshot_verdicts(entry.id, &Value::Object(verdicts), note)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+    if pdus.is_empty() && edus.is_empty() && withheld > 0 {
+        // Everything was withheld: nothing to send, the row is retired.
+        return Ok(());
+    }
 
     match client.send_transaction(dest, &entry.txn_id, pdus, edus).await {
         Ok(resp) => {

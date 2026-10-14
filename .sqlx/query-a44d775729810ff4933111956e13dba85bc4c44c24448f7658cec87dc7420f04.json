@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE fed_outbound_queue SET legacy_snapshot_verdicts = $2, last_error = COALESCE($3, last_error) WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a44d775729810ff4933111956e13dba85bc4c44c24448f7658cec87dc7420f04"
+}

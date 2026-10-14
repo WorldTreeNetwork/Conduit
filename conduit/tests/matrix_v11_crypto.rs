@@ -10,7 +10,7 @@ use conduit::event::Event;
 use conduit::hashing::{content_hash, content_hash_matches, event_id};
 use conduit::keys::{public_bytes, server_key_from_bytes};
 use conduit::redaction::redact_event;
-use conduit::signing::{sign_event, verify_event_and_hash, verify_event_signature};
+use conduit::signing::{check_received, sign_authored, verify_event_signature};
 use serde_json::{json, Value};
 
 const CONTENT_HASH: &str = "G9c/FgXY1qHd5M2r5AI3RCAKzqggCtIQwIYBoKoAUY4";
@@ -55,7 +55,7 @@ fn signature_matches_openssl_vector_and_verifies_external_signature() {
     verify_event_signature(&event, "example.org", &key.key_id, &public_bytes(&key)).unwrap();
 
     event.signatures = json!({});
-    sign_event(&mut event, &key, "example.org").unwrap();
+    sign_authored(&mut event, &key, "example.org").unwrap();
     assert_eq!(event.hashes["sha256"], CONTENT_HASH);
     assert_eq!(event.signatures["example.org"]["ed25519:vector"], SIGNATURE);
     event.event_id = event_id(&event).unwrap();
@@ -95,7 +95,7 @@ fn redacted_content(event_type: &str, content: Value) -> Value {
     let mut event = message();
     event.event_type = event_type.into();
     event.content = content;
-    redact_event(&event).content
+    redact_event(&event).content.clone()
 }
 
 #[test]
@@ -196,21 +196,21 @@ fn redaction_removes_entire_unsigned_and_absent_optionals_stay_absent() {
 fn incoming_hash_mismatch_redacts_content_after_signature_validation() {
     let key = conduit::keys::generate_server_key();
     let mut event = message();
-    sign_event(&mut event, &key, "example.org").unwrap();
+    sign_authored(&mut event, &key, "example.org").unwrap();
     let lookup = |server: &str, key_id: &str| {
         (server == "example.org" && key_id == key.key_id).then(|| public_bytes(&key))
     };
-    assert_eq!(verify_event_and_hash(&event, lookup).unwrap(), event);
+    assert_eq!(check_received(event.pdu.clone(), lookup).unwrap().pdu, event.pdu);
     event.content["body"] = json!("untrusted replacement");
     assert!(!content_hash_matches(&event).unwrap());
-    let accepted = verify_event_and_hash(&event, lookup).unwrap();
+    let accepted = check_received(event.pdu.clone(), lookup).unwrap().pdu;
     assert_eq!(accepted.content, json!({}));
     assert_eq!(accepted.hashes, event.hashes);
     assert_eq!(accepted.signatures, event.signatures);
 
     // Changing the signed hash fails signature validation before redaction.
     event.hashes["sha256"] = json!("forged");
-    assert!(verify_event_and_hash(&event, lookup).is_err());
+    assert!(check_received(event.pdu.clone(), lookup).is_err());
 }
 
 #[test]

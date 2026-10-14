@@ -301,17 +301,20 @@ mod tests {
     fn event(id: &str, sender: &str, kind: &str, content: Value) -> Event {
         Event {
             event_id: id.into(),
-            room_id: "!r:a.test".into(),
-            sender: sender.into(),
-            event_type: kind.into(),
-            content,
-            state_key: None,
-            origin_server_ts: 1_000,
-            auth_events: vec![],
-            prev_events: vec![],
-            hashes: json!({}),
-            signatures: json!({}),
-            depth: 1,
+            pdu: crate::event::Pdu {
+                room_id: "!r:a.test".into(),
+                sender: sender.into(),
+                event_type: kind.into(),
+                content,
+                state_key: None,
+                origin_server_ts: 1_000,
+                auth_events: vec![],
+                prev_events: vec![],
+                hashes: json!({}),
+                signatures: json!({}),
+                depth: 1,
+                extensions: Default::default(),
+            },
             unsigned: None,
         }
     }

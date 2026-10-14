@@ -16,7 +16,14 @@ use tokio::sync::broadcast;
 
 use conduit::event::Event;
 use conduit::keys::{generate_server_key, public_bytes};
-use conduit::signing::sign_event;
+use conduit::event::Pdu;
+use conduit::signing::sign_authored;
+
+/// Sign `pdu` as `server` and wrap it with its derived (reference-hash) ID.
+fn signed_event(key: &conduit::keys::ServerKey, server: &str, mut pdu: Pdu) -> Event {
+    sign_authored(&mut pdu, key, server).unwrap();
+    Event::new(conduit::hashing::event_id(&pdu).unwrap(), pdu)
+}
 use conduit::storage::{MemoryStorage, Storage};
 
 use conduit_server::federation::rate_limit::RateLimiter;
@@ -263,36 +270,14 @@ async fn send_transaction_persists_pdus() {
     let base_a = format!("http://{}", addr_a);
 
     // Seed the room and sender membership needed to authorize a message.
-    let mut create = Event {
-        event_id: String::new(),
-        room_id: "!room1:server-a.test".into(),
-        sender: "@alice:server-a.test".into(),
-        event_type: "m.room.create".into(),
-        content: json!({"room_version": "11"}),
-        state_key: Some(String::new()),
-        origin_server_ts: 999_998,
-        auth_events: vec![],
-        prev_events: vec![],
-        hashes: json!({}),
-        signatures: json!({}),
-        depth: 1,
-        unsigned: None,
-    };
-    sign_event(&mut create, &key_a, "server-a.test").unwrap();
-    create.event_id = conduit::hashing::event_id(&create).unwrap();
-    let mut member = Event {
-        event_id: String::new(),
-        event_type: "m.room.member".into(),
-        content: json!({"membership": "join"}),
-        state_key: Some(create.sender.clone()),
-        origin_server_ts: 999_999,
-        auth_events: vec![create.event_id.clone()],
-        prev_events: vec![create.event_id.clone()],
-        depth: 2,
-        ..create.clone()
-    };
-    sign_event(&mut member, &key_a, "server-a.test").unwrap();
-    member.event_id = conduit::hashing::event_id(&member).unwrap();
+    let create = signed_event(&key_a, "server-a.test", Pdu::new(
+        "!room1:server-a.test", "@alice:server-a.test", "m.room.create", Some(String::new()),
+        json!({"room_version": "11"}), 999_998, vec![], vec![], 1,
+    ));
+    let member = signed_event(&key_a, "server-a.test", Pdu::new(
+        "!room1:server-a.test", "@alice:server-a.test", "m.room.member", Some(create.sender.clone()),
+        json!({"membership": "join"}), 999_999, vec![create.event_id.clone()], vec![create.event_id.clone()], 2,
+    ));
     for event in [&create, &member] {
         storage_a.put_event(event).await.unwrap();
         storage_a
@@ -306,25 +291,15 @@ async fn send_transaction_persists_pdus() {
             .unwrap();
     }
 
-    // Build a minimal valid PDU to send to server-a.
-    // Sender must be on server-a so that the signature from server-a's key
-    // validates as the originating server signature.
-    let mut pdu = Event {
-        event_id: "$test_pdu_1:server-a.test".to_owned(),
-        room_id: "!room1:server-a.test".to_owned(),
-        sender: "@alice:server-a.test".to_owned(),
-        event_type: "m.room.message".to_owned(),
-        content: json!({ "msgtype": "m.text", "body": "Hello" }),
-        state_key: None,
-        origin_server_ts: 1_000_000,
-        auth_events: vec![create.event_id.clone(), member.event_id.clone()],
-        prev_events: vec![member.event_id.clone()],
-        hashes: json!({}),
-        signatures: json!({}),
-        depth: 3,
-        unsigned: None,
-    };
-    sign_event(&mut pdu, &key_a, "server-a.test").unwrap();
+    // A v11 wire PDU: no event_id; server-a derives it from the reference hash.
+    let mut pdu = Pdu::new(
+        "!room1:server-a.test", "@alice:server-a.test", "m.room.message", None,
+        json!({ "msgtype": "m.text", "body": "Hello" }), 1_000_000,
+        vec![create.event_id.clone(), member.event_id.clone()], vec![member.event_id.clone()], 3,
+    );
+    pdu.extensions.insert("org.conduit.test".into(), json!({"opaque": "preserve me"}));
+    sign_authored(&mut pdu, &key_a, "server-a.test").unwrap();
+    let event_id = conduit::hashing::event_id(&pdu).unwrap();
 
     let txn_body = json!({
         "origin": "server-a.test",
@@ -359,21 +334,11 @@ async fn send_transaction_persists_pdus() {
         "send transaction should succeed; body={body_text}"
     );
     let result: Value = serde_json::from_str(&body_text).unwrap();
-    assert_eq!(
-        result["pdus"]["$test_pdu_1:server-a.test"],
-        json!({}),
-        "{result}"
-    );
+    assert_eq!(result["pdus"][&event_id], json!({}), "{result}");
 
-    // Verify the PDU landed in storage.
-    let stored = storage_a
-        .get_event("$test_pdu_1:server-a.test")
-        .await
-        .unwrap();
-    assert!(
-        stored.is_some(),
-        "PDU should be in storage after send_transaction"
-    );
+    // The PDU landed in storage under its derived ID, extension intact.
+    let stored = storage_a.get_event(&event_id).await.unwrap().expect("stored");
+    assert_eq!(stored.pdu, pdu);
 }
 
 #[tokio::test]
@@ -478,65 +443,30 @@ async fn make_send_join_roundtrip() {
     // Seed a public room on server-a so make_join works.
     let room_id = "!pub_room:server-a.test";
     let creator = "@alice:server-a.test";
-
-    let create_ev = Event {
-        event_id: "$create:server-a.test".to_owned(),
-        room_id: room_id.to_owned(),
-        sender: creator.to_owned(),
-        event_type: "m.room.create".to_owned(),
-        content: json!({ "room_version": "11" }),
-        state_key: Some("".to_owned()),
-        origin_server_ts: 1000,
-        auth_events: vec![],
-        prev_events: vec![],
-        hashes: json!({}),
-        signatures: json!({}),
-        depth: 1,
-        unsigned: None,
-    };
-    let join_ev = Event {
-        event_id: "$alice_join:server-a.test".to_owned(),
-        room_id: room_id.to_owned(),
-        sender: creator.to_owned(),
-        event_type: "m.room.member".to_owned(),
-        content: json!({ "membership": "join" }),
-        state_key: Some(creator.to_owned()),
-        origin_server_ts: 1001,
-        auth_events: vec!["$create:server-a.test".to_owned()],
-        prev_events: vec!["$create:server-a.test".to_owned()],
-        hashes: json!({}),
-        signatures: json!({}),
-        depth: 2,
-        unsigned: None,
-    };
-    let jr_ev = Event {
-        event_id: "$jr:server-a.test".to_owned(),
-        room_id: room_id.to_owned(),
-        sender: creator.to_owned(),
-        event_type: "m.room.join_rules".to_owned(),
-        content: json!({ "join_rule": "public" }),
-        state_key: Some("".to_owned()),
-        origin_server_ts: 1002,
-        auth_events: vec!["$create:server-a.test".to_owned()],
-        prev_events: vec!["$alice_join:server-a.test".to_owned()],
-        hashes: json!({}),
-        signatures: json!({}),
-        depth: 3,
-        unsigned: None,
-    };
-
-    storage_a.put_event(&create_ev).await.unwrap();
-    storage_a.set_state_entry(room_id, "m.room.create", "", "$create:server-a.test").await.unwrap();
-    storage_a.put_event(&join_ev).await.unwrap();
-    storage_a.set_state_entry(room_id, "m.room.member", creator, "$alice_join:server-a.test").await.unwrap();
-    storage_a.put_event(&jr_ev).await.unwrap();
-    storage_a.set_state_entry(room_id, "m.room.join_rules", "", "$jr:server-a.test").await.unwrap();
+    let create_ev = signed_event(&key_a, "server-a.test", Pdu::new(
+        room_id, creator, "m.room.create", Some(String::new()),
+        json!({ "room_version": "11" }), 1000, vec![], vec![], 1,
+    ));
+    let join_ev = signed_event(&key_a, "server-a.test", Pdu::new(
+        room_id, creator, "m.room.member", Some(creator.to_owned()), json!({ "membership": "join" }), 1001,
+        vec![create_ev.event_id.clone()], vec![create_ev.event_id.clone()], 2,
+    ));
+    let jr_ev = signed_event(&key_a, "server-a.test", Pdu::new(
+        room_id, creator, "m.room.join_rules", Some(String::new()), json!({ "join_rule": "public" }), 1002,
+        vec![create_ev.event_id.clone(), join_ev.event_id.clone()], vec![join_ev.event_id.clone()], 3,
+    ));
+    for (event, event_type, state_key) in [
+        (&create_ev, "m.room.create", ""),
+        (&join_ev, "m.room.member", creator),
+        (&jr_ev, "m.room.join_rules", ""),
+    ] {
+        storage_a.put_event(event).await.unwrap();
+        storage_a.set_state_entry(room_id, event_type, state_key, &event.event_id).await.unwrap();
+    }
 
     let client = reqwest::Client::new();
 
-    // Step 1: make_join.
-    // Use a user on server-a so that key_a can sign the join PDU
-    // (verify_event requires signature from the originating server).
+    // Step 1: make_join for a user on server-a, so key_a can sign the join.
     let user_id = "@bob:server-a.test";
     let path = format!(
         "/_matrix/federation/v1/make_join/{}/{}",
@@ -544,49 +474,51 @@ async fn make_send_join_roundtrip() {
         urlencoding::encode(user_id),
     );
     let auth = sign_req("GET", &path, "server-a.test", "server-a.test", None, &key_a);
-
     let resp = client
         .get(format!("{base_a}{path}"))
         .header("Authorization", auth)
         .send()
         .await
         .unwrap();
-
     assert_eq!(resp.status().as_u16(), 200, "make_join should succeed for public room");
     let make_join_resp: Value = resp.json().await.unwrap();
-    assert!(make_join_resp.get("event").is_some(), "make_join response should have event");
+    let template = make_join_resp.get("event").expect("make_join response should have event");
+    assert!(template.get("event_id").is_none(), "template must not carry event_id");
     assert_eq!(make_join_resp["room_version"].as_str(), Some("11"));
 
-    // Step 2: send_join — build and sign the join event.
-    // We sign with event_id="$placeholder" (from the template) and keep it;
-    // the event_id must stay stable after signing so the signature verifies.
-    let mut join_template: Event = serde_json::from_value(make_join_resp["event"].clone()).unwrap();
-    sign_event(&mut join_template, &key_a, "server-a.test").unwrap();
-    // Use the placeholder event_id (signing includes event_id in the signed bytes,
-    // so we can't change it after signing without invalidating the signature).
-    let join_event_id = join_template.event_id.clone();
+    // Step 2: sign the template; the path ID is the derived reference hash.
+    let join = signed_event(&key_a, "server-a.test", serde_json::from_value(template.clone()).unwrap());
+    let body = serde_json::to_value(&join.pdu).unwrap();
+    let send_join = |event_id: String, body: Value| {
+        let client = client.clone();
+        let base_a = base_a.clone();
+        let key_a = Arc::clone(&key_a);
+        async move {
+            let path = format!(
+                "/_matrix/federation/v2/send_join/{}/{}",
+                urlencoding::encode(room_id),
+                urlencoding::encode(&event_id),
+            );
+            let auth = sign_req("PUT", &path, "server-a.test", "server-a.test", Some(&body), &key_a);
+            client.put(format!("{base_a}{path}")).header("Authorization", auth).json(&body).send().await.unwrap()
+        }
+    };
 
-    let send_join_path = format!(
-        "/_matrix/federation/v2/send_join/{}/{}",
-        urlencoding::encode(room_id),
-        urlencoding::encode(&join_event_id),
-    );
-    let auth2 = sign_req(
-        "PUT", &send_join_path, "server-a.test", "server-a.test",
-        Some(&serde_json::to_value(&join_template).unwrap()), &key_a,
-    );
+    // A path ID that differs from the derived ID is refused, nothing stored.
+    let wrong = send_join("$not-the-derived-id".into(), body.clone()).await;
+    assert_eq!(wrong.status().as_u16(), 400);
+    assert_eq!(wrong.json::<Value>().await.unwrap()["errcode"], "M_INVALID_PARAM");
+    assert!(storage_a.get_event(&join.event_id).await.unwrap().is_none());
 
-    let resp2 = client
-        .put(format!("{base_a}{send_join_path}"))
-        .header("Authorization", auth2)
-        .json(&join_template)
-        .send()
-        .await
-        .unwrap();
-
+    let resp2 = send_join(join.event_id.clone(), body).await;
     assert_eq!(resp2.status().as_u16(), 200, "send_join should succeed");
     let send_join_resp: Value = resp2.json().await.unwrap();
-    assert!(send_join_resp.get("state").is_some(), "send_join response should have state");
+    let state = send_join_resp["state"].as_array().expect("send_join response should have state");
+    assert!(!state.is_empty());
+    for pdu in state.iter().chain(send_join_resp["auth_chain"].as_array().unwrap()).chain([&send_join_resp["event"]]) {
+        assert!(pdu.get("event_id").is_none(), "no local event_id on the wire: {pdu}");
+    }
+    assert_eq!(conduit::hashing::event_id(&serde_json::from_value::<Pdu>(send_join_resp["event"].clone()).unwrap()).unwrap(), join.event_id);
 }
 
 // ---------------------------------------------------------------------------
@@ -600,25 +532,12 @@ async fn state_endpoint_returns_room_state() {
 
     let room_id = "!state_room:server-a.test";
     let creator = "@alice:server-a.test";
-
-    let create_ev = Event {
-        event_id: "$state_create:server-a.test".to_owned(),
-        room_id: room_id.to_owned(),
-        sender: creator.to_owned(),
-        event_type: "m.room.create".to_owned(),
-        content: json!({ "room_version": "11" }),
-        state_key: Some("".to_owned()),
-        origin_server_ts: 1000,
-        auth_events: vec![],
-        prev_events: vec![],
-        hashes: json!({}),
-        signatures: json!({}),
-        depth: 1,
-        unsigned: None,
-    };
-
+    let create_ev = signed_event(&key_a, "server-a.test", Pdu::new(
+        room_id, creator, "m.room.create", Some(String::new()),
+        json!({ "room_version": "11" }), 1000, vec![], vec![], 1,
+    ));
     storage_a.put_event(&create_ev).await.unwrap();
-    storage_a.set_state_entry(room_id, "m.room.create", "", "$state_create:server-a.test").await.unwrap();
+    storage_a.set_state_entry(room_id, "m.room.create", "", &create_ev.event_id).await.unwrap();
 
     let client = reqwest::Client::new();
     let path = format!(
@@ -638,6 +557,7 @@ async fn state_endpoint_returns_room_state() {
     let body: Value = resp.json().await.unwrap();
     let pdus = body["pdus"].as_array().unwrap();
     assert!(!pdus.is_empty(), "state should contain at least the create event");
+    assert!(pdus.iter().all(|p| p.get("event_id").is_none()));
 }
 
 // ---------------------------------------------------------------------------
@@ -654,40 +574,18 @@ async fn backfill_returns_history_visibility_filtered_events() {
     // Seed the membership that makes the room visible to the origin at
     // all.  Backfill filters against the requesting server's membership
     // now, so a room no user of theirs ever joined yields nothing.
-    let join = Event {
-        event_id: "$alice_join:server-a.test".to_owned(),
-        room_id: room_id.to_owned(),
-        sender: "@alice:server-a.test".to_owned(),
-        event_type: "m.room.member".to_owned(),
-        content: json!({ "membership": "join" }),
-        state_key: Some("@alice:server-a.test".to_owned()),
-        origin_server_ts: 999,
-        auth_events: vec![],
-        prev_events: vec![],
-        hashes: json!({}),
-        signatures: json!({}),
-        depth: 0,
-        unsigned: None,
-    };
+    let join = signed_event(&key_a, "server-a.test", Pdu::new(
+        room_id, "@alice:server-a.test", "m.room.member", Some("@alice:server-a.test".to_owned()),
+        json!({ "membership": "join" }), 999, vec![], vec![], 0,
+    ));
     storage_a.put_event(&join).await.unwrap();
 
     // Seed a few events.
     for i in 1..=5u64 {
-        let ev = Event {
-            event_id: format!("$ev{}:server-a.test", i),
-            room_id: room_id.to_owned(),
-            sender: "@alice:server-a.test".to_owned(),
-            event_type: "m.room.message".to_owned(),
-            content: json!({ "msgtype": "m.text", "body": format!("msg {i}") }),
-            state_key: None,
-            origin_server_ts: 1000 + i,
-            auth_events: vec![],
-            prev_events: vec![],
-            hashes: json!({}),
-            signatures: json!({}),
-            depth: i as i64,
-            unsigned: None,
-        };
+        let ev = signed_event(&key_a, "server-a.test", Pdu::new(
+            room_id, "@alice:server-a.test", "m.room.message", None,
+            json!({ "msgtype": "m.text", "body": format!("msg {i}") }), 1000 + i, vec![], vec![], i as i64,
+        ));
         storage_a.put_event(&ev).await.unwrap();
     }
 
@@ -709,7 +607,7 @@ async fn backfill_returns_history_visibility_filtered_events() {
     let body: Value = resp.json().await.unwrap();
     let pdus = body["pdus"].as_array().unwrap();
     assert_eq!(pdus.len(), 3, "backfill should return at most limit events");
-
+    assert!(pdus.iter().all(|p| p.get("event_id").is_none()));
 }
 
 // ---------------------------------------------------------------------------

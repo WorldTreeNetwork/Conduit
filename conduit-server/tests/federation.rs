@@ -311,21 +311,12 @@ async fn send_transaction_to_mock_remote() {
 
     let client = make_test_client(Arc::clone(&server_key), "my.server", base_url).await;
 
-    let pdu = conduit::event::Event {
-        event_id: "$test:my.server".to_owned(),
-        room_id: "!room:my.server".to_owned(),
-        sender: "@user:my.server".to_owned(),
-        event_type: "m.room.message".to_owned(),
-        content: json!({ "msgtype": "m.text", "body": "hello" }),
-        state_key: None,
-        origin_server_ts: 1_000_000,
-        auth_events: vec![],
-        prev_events: vec![],
-        hashes: json!({}),
-        signatures: json!({}),
-        depth: 1,
-        unsigned: None,
-    };
+    let mut pdu = conduit::event::Pdu::new(
+        "!room:my.server", "@user:my.server", "m.room.message", None,
+        json!({ "msgtype": "m.text", "body": "hello" }), 1_000_000, vec![], vec![], 1,
+    );
+    conduit::signing::sign_authored(&mut pdu, &server_key, "my.server").unwrap();
+    let pdu = conduit::event::WirePdu::checked(&conduit::hashing::event_id(&pdu).unwrap(), pdu).unwrap();
 
     client
         .send_transaction("remote.server", "txn_test_001", vec![pdu], vec![])
@@ -401,24 +392,13 @@ async fn make_send_join_flow_against_mock() {
     assert_eq!(mj.room_version.as_deref(), Some("11"));
 
     // Construct a minimal PDU for send_join.
-    let pdu = conduit::event::Event {
-        event_id: "$join:my.server".to_owned(),
-        room_id: "!room:remote.server".to_owned(),
-        sender: "@user:my.server".to_owned(),
-        event_type: "m.room.member".to_owned(),
-        content: json!({ "membership": "join" }),
-        state_key: Some("@user:my.server".to_owned()),
-        origin_server_ts: 1_000_000,
-        auth_events: vec![],
-        prev_events: vec![],
-        hashes: json!({}),
-        signatures: json!({}),
-        depth: 1,
-        unsigned: None,
-    };
+    let mut pdu: conduit::event::Pdu = serde_json::from_value(mj.event.clone()).unwrap();
+    pdu.room_id = "!room:remote.server".to_owned();
+    conduit::signing::sign_authored(&mut pdu, &server_key, "my.server").unwrap();
+    let pdu = conduit::event::WirePdu::checked(&conduit::hashing::event_id(&pdu).unwrap(), pdu).unwrap();
 
     let sj = client
-        .send_join("remote.server", "!room:remote.server", "$join:my.server", &pdu)
+        .send_join("remote.server", "!room:remote.server", &pdu)
         .await
         .expect("send_join should succeed");
 

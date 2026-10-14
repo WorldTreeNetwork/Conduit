@@ -162,7 +162,7 @@ impl<'a> Viewer<'a> {
                 value["unsigned"] = json!({});
             }
             if let Some(redaction) = redaction {
-                value["content"] = conduit::redaction::redact_event(&event).content;
+                value["content"] = conduit::redaction::redact_event(&event).pdu.content;
                 value["unsigned"]["redacted_because"] = client_event(redaction, now);
             }
             if let Some(relations) = relations {
@@ -315,7 +315,7 @@ async fn authorizing_power(
         }
         match cache.get(id).cloned().flatten() {
             Some(event) if event.event_type == "m.room.power_levels" => power_levels = Some(event),
-            Some(event) if event.event_type == "m.room.create" => creator = Some(event.sender),
+            Some(event) if event.event_type == "m.room.create" => creator = Some(event.pdu.sender),
             _ => {}
         }
     }
@@ -330,17 +330,20 @@ mod tests {
     fn event(id: &str, sender: &str, kind: &str, content: Value) -> Event {
         Event {
             event_id: id.into(),
-            room_id: "!r:a.test".into(),
-            sender: sender.into(),
-            event_type: kind.into(),
-            content,
-            state_key: None,
-            origin_server_ts: 10,
-            auth_events: vec![],
-            prev_events: vec![],
-            hashes: json!({}),
-            signatures: json!({}),
-            depth: 1,
+            pdu: conduit::event::Pdu {
+                room_id: "!r:a.test".into(),
+                sender: sender.into(),
+                event_type: kind.into(),
+                content,
+                state_key: None,
+                origin_server_ts: 10,
+                auth_events: vec![],
+                prev_events: vec![],
+                hashes: json!({}),
+                signatures: json!({}),
+                depth: 1,
+                extensions: Default::default(),
+            },
             unsigned: None,
         }
     }

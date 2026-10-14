@@ -4,13 +4,15 @@
 //!
 //! - **Content hash** (`hashes.sha256`): strip `hashes`, `signatures`, `unsigned`
 //!   from the PDU, canonical-JSON-encode, sha256, standard-base64 (no padding).
-//!   <https://spec.matrix.org/latest/server-server-api/#calculating-the-content-hash-for-a-pdu>
+//!   <https://spec.matrix.org/v1.19/server-server-api/#calculating-the-content-hash-for-an-event>
 //!
 //! - **Reference hash / event ID** (room v11): redact, strip `signatures`,
 //!   `unsigned`, then canonical-JSON-encode, sha256, URL-safe-base64 (no padding),
 //!   then prefix with `$`.
-//!   <https://spec.matrix.org/latest/server-server-api/#calculating-the-reference-hash-for-a-pdu>
-//!   <https://spec.matrix.org/latest/rooms/v11/>
+//!   <https://spec.matrix.org/v1.19/server-server-api/#calculating-the-reference-hash-for-an-event>
+//!   <https://spec.matrix.org/v1.19/rooms/v11/>
+//!
+//! Both operate on [`Pdu`] only: a local event ID can never affect them.
 
 use base64::engine::general_purpose::{STANDARD_NO_PAD, URL_SAFE_NO_PAD};
 use base64::Engine as _;
@@ -18,8 +20,8 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::canonical_json::{to_canonical_bytes, CanonicalJsonError};
-use crate::event::Event;
-use crate::redaction::redact_event;
+use crate::event::Pdu;
+use crate::redaction::redact;
 
 /// Errors from the hashing operations.
 #[derive(Debug, Error)]
@@ -34,8 +36,6 @@ pub enum HashingError {
 }
 
 /// Remove `fields` (by name) from the top-level object of `value`.
-///
-/// Silently ignores any field that does not exist.
 fn strip_fields(value: &mut serde_json::Value, fields: &[&str]) {
     if let Some(map) = value.as_object_mut() {
         for &field in fields {
@@ -46,16 +46,14 @@ fn strip_fields(value: &mut serde_json::Value, fields: &[&str]) {
 
 /// Compute `hashes.sha256` for a PDU.
 ///
-/// Hashes the unredacted contents. Strips `hashes`, `signatures`, `unsigned`,
-/// and the locally derived `event_id` from a copy of the event,
-/// serializes to canonical JSON, and returns the SHA-256 digest encoded as
-/// **standard base64 without padding**.
-pub fn content_hash(event: &Event) -> Result<String, HashingError> {
-    let mut value = serde_json::to_value(event)?;
-    strip_fields(
-        &mut value,
-        &["event_id", "hashes", "signatures", "unsigned"],
-    );
+/// Hashes the unredacted PDU, extensions included. Strips `hashes` and
+/// `signatures` (a [`Pdu`] never holds `unsigned`), serializes to canonical
+/// JSON, and returns the SHA-256 digest encoded as **standard base64 without
+/// padding**. Unlike Synapse, `age_ts`, `outlier` and `destinations` are not
+/// stripped: the spec removes only `unsigned`, `signatures` and `hashes`.
+pub fn content_hash(pdu: &Pdu) -> Result<String, HashingError> {
+    let mut value = serde_json::to_value(pdu)?;
+    strip_fields(&mut value, &["hashes", "signatures", "unsigned"]);
     let canonical = to_canonical_bytes(&value)?;
     let digest = Sha256::digest(&canonical);
     Ok(STANDARD_NO_PAD.encode(digest))
@@ -64,14 +62,10 @@ pub fn content_hash(event: &Event) -> Result<String, HashingError> {
 /// Check the transmitted content hash. A mismatch indicates that the received
 /// event must be redacted after its signature is verified, rather than rejected.
 /// Compare decoded bytes, accepting both padded and unpadded base64.
-pub fn content_hash_matches(event: &Event) -> Result<bool, HashingError> {
+pub fn content_hash_matches(pdu: &Pdu) -> Result<bool, HashingError> {
     use base64::engine::{DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig};
 
-    let Some(expected) = event
-        .hashes
-        .get("sha256")
-        .and_then(serde_json::Value::as_str)
-    else {
+    let Some(expected) = pdu.hashes.get("sha256").and_then(serde_json::Value::as_str) else {
         return Ok(false);
     };
     let decoder = GeneralPurpose::new(
@@ -82,24 +76,28 @@ pub fn content_hash_matches(event: &Event) -> Result<bool, HashingError> {
         return Ok(false);
     };
     let actual = STANDARD_NO_PAD
-        .decode(content_hash(event)?)
+        .decode(content_hash(pdu)?)
         .expect("generated SHA-256 base64");
     Ok(expected == actual)
 }
 
 /// Derive the event ID (reference hash) for a room-v11 PDU.
 ///
-/// Redacts, then strips `signatures`, `unsigned`, and the locally derived
-/// `event_id` from a copy of the event (NOT `hashes`),
-/// serializes to canonical JSON, and returns `$` followed by the SHA-256
-/// digest encoded as **URL-safe base64 without padding**.
-pub fn event_id(event: &Event) -> Result<String, HashingError> {
-    let redacted = redact_event(event);
+/// Redacts (clearing extensions), strips `signatures`, serializes to
+/// canonical JSON, and returns `$` followed by the SHA-256 digest encoded as
+/// **URL-safe base64 without padding**. `hashes` is kept.
+pub fn event_id(pdu: &Pdu) -> Result<String, HashingError> {
+    let redacted = redact(pdu);
     let mut value = serde_json::to_value(&redacted)?;
-    strip_fields(&mut value, &["event_id", "signatures", "unsigned"]);
+    strip_fields(&mut value, &["signatures", "unsigned"]);
     let canonical = to_canonical_bytes(&value)?;
     let digest = Sha256::digest(&canonical);
     Ok(format!("${}", URL_SAFE_NO_PAD.encode(digest)))
+}
+
+/// Alias of [`event_id`] under the spec's name.
+pub fn reference_hash(pdu: &Pdu) -> Result<String, HashingError> {
+    event_id(pdu)
 }
 
 #[cfg(test)]
@@ -107,10 +105,9 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    /// Build a minimal valid Event for testing.
-    fn make_event() -> Event {
-        Event {
-            event_id: "$test_event_id".to_string(),
+    /// Build a minimal valid Pdu for testing.
+    fn make_event() -> Pdu {
+        Pdu {
             room_id: "!room:example.org".to_string(),
             sender: "@user:example.org".to_string(),
             event_type: "m.room.message".to_string(),
@@ -122,115 +119,74 @@ mod tests {
             hashes: json!({ "sha256": "AAAA" }),
             signatures: json!({ "example.org": { "ed25519:key1": "BBBB" } }),
             depth: 42,
-            unsigned: Some(json!({ "age": 100 })),
+            extensions: Default::default(),
         }
     }
 
-    /// Build the same event but with default (empty) hashes, signatures, and unsigned.
-    fn make_event_no_extras() -> Event {
-        Event {
-            hashes: json!({}),
-            signatures: json!({}),
-            unsigned: None,
-            ..make_event()
-        }
+    fn make_event_no_extras() -> Pdu {
+        Pdu { hashes: json!({}), signatures: json!({}), ..make_event() }
     }
 
-    /// Build the same event but with default (empty) signatures and unsigned.
-    fn make_event_no_sig_unsigned() -> Event {
-        Event {
-            signatures: json!({}),
-            unsigned: None,
-            ..make_event()
-        }
+    fn make_event_no_sig() -> Pdu {
+        Pdu { signatures: json!({}), ..make_event() }
     }
 
-    /// content_hash must be identical regardless of `hashes`, `signatures`, `unsigned` values.
+    /// content_hash must be identical regardless of `hashes` and `signatures`.
     #[test]
-    fn content_hash_strips_three_fields() {
-        let with_extras = content_hash(&make_event()).unwrap();
-        let without_extras = content_hash(&make_event_no_extras()).unwrap();
-        assert_eq!(
-            with_extras, without_extras,
-            "content_hash must not depend on hashes/signatures/unsigned"
-        );
+    fn content_hash_strips_hashes_and_signatures() {
+        assert_eq!(content_hash(&make_event()).unwrap(), content_hash(&make_event_no_extras()).unwrap());
     }
 
-    /// event_id must be identical regardless of `signatures` and `unsigned` values,
-    /// but MUST differ when `hashes` differs (since hashes is NOT stripped).
+    /// event_id ignores signatures but depends on hashes (which are not stripped).
     #[test]
-    fn event_id_strips_two_fields() {
+    fn event_id_strips_signatures_only() {
         let with_sig = event_id(&make_event()).unwrap();
-        let without_sig = event_id(&make_event_no_sig_unsigned()).unwrap();
-        assert_eq!(
-            with_sig, without_sig,
-            "event_id must not depend on signatures/unsigned"
-        );
-
-        // Sanity: changing `hashes` (which is NOT stripped) must change the event_id.
+        assert_eq!(with_sig, event_id(&make_event_no_sig()).unwrap());
         let mut different_hashes = make_event();
         different_hashes.hashes = json!({ "sha256": "ZZZZ" });
-        let with_different_hashes = event_id(&different_hashes).unwrap();
-        assert_ne!(
-            with_sig, with_different_hashes,
-            "event_id must depend on hashes (not stripped)"
-        );
+        assert_ne!(with_sig, event_id(&different_hashes).unwrap());
     }
 
-    /// event_id must start with `$`.
     #[test]
-    fn event_id_starts_with_dollar() {
-        let id = event_id(&make_event()).unwrap();
-        assert!(
-            id.starts_with('$'),
-            "event_id must start with '$', got: {id}"
-        );
+    fn extension_changes_content_hash_but_not_reference_hash() {
+        let plain = make_event();
+        let mut extended = make_event();
+        extended.extensions.insert("org.example.x".into(), json!("y"));
+        assert_ne!(content_hash(&plain).unwrap(), content_hash(&extended).unwrap());
+        assert_eq!(event_id(&plain).unwrap(), event_id(&extended).unwrap());
     }
 
-    /// The suffix of event_id (after `$`) must be URL-safe base64:
-    /// no `+` or `/` characters.
     #[test]
-    fn event_id_is_url_safe_base64() {
-        let id = event_id(&make_event()).unwrap();
-        let suffix = &id[1..]; // strip leading `$`
-        assert!(
-            !suffix.contains('+') && !suffix.contains('/'),
-            "event_id suffix must be URL-safe base64 (no '+' or '/'), got: {suffix}"
-        );
+    fn synapse_internal_keys_are_hashed_per_spec() {
+        // Synapse pops age_ts/outlier/destinations from the content hash; the
+        // spec does not, and Conduit follows the spec (recorded divergence).
+        let plain = make_event();
+        for key in ["age_ts", "outlier", "destinations"] {
+            let mut extended = make_event();
+            extended.extensions.insert(key.into(), json!(1));
+            assert_ne!(content_hash(&plain).unwrap(), content_hash(&extended).unwrap(), "{key}");
+            assert_eq!(event_id(&plain).unwrap(), event_id(&extended).unwrap(), "{key}");
+        }
     }
 
-    /// content_hash uses standard base64: may contain `+` or `/`, but NOT `_` or `-`.
+    #[test]
+    fn event_id_is_dollar_prefixed_url_safe_base64() {
+        let id = event_id(&make_event()).unwrap();
+        assert!(id.starts_with('$'));
+        assert!(!id[1..].contains('+') && !id[1..].contains('/') && id.len() == 44);
+    }
+
     #[test]
     fn content_hash_is_standard_base64() {
-        // Run many events to increase chance of hitting all alphabet chars.
-        // Our single test event may already demonstrate this; just check it.
         let hash = content_hash(&make_event()).unwrap();
-        assert!(
-            !hash.contains('_') && !hash.contains('-'),
-            "content_hash must be standard base64 (no '_' or '-'), got: {hash}"
-        );
+        assert!(!hash.contains('_') && !hash.contains('-'));
     }
 
-    /// Same event → same results across two calls (determinism).
     #[test]
-    fn deterministic() {
-        let event = make_event();
+    fn deterministic_and_distinct() {
+        let event = make_event_no_extras();
         assert_eq!(content_hash(&event).unwrap(), content_hash(&event).unwrap());
         assert_eq!(event_id(&event).unwrap(), event_id(&event).unwrap());
-    }
-
-    /// content_hash and event_id must produce DIFFERENT hashes because they
-    /// strip different fields and use different base64 alphabets.
-    #[test]
-    fn content_hash_and_event_id_differ() {
-        let event = make_event_no_extras(); // hashes={}, signatures={}, unsigned=None
-        let ch = content_hash(&event).unwrap();
-        let eid = event_id(&event).unwrap();
-        // event_id starts with $; strip it before comparing
-        assert_ne!(
-            ch,
-            &eid[1..],
-            "content_hash and event_id reference hash must differ"
-        );
+        assert_ne!(content_hash(&event).unwrap(), event_id(&event).unwrap()[1..]);
     }
 }

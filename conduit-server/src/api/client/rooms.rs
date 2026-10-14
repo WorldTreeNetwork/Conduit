@@ -555,7 +555,7 @@ async fn get_state_event_inner<S: AuthState>(
 
     let room = Room::new(&room_id);
     match room.get_state_entry(&event_type, &state_key, state.storage().as_ref()).await {
-        Ok(Some(ev)) => (StatusCode::OK, Json(ev.content)).into_response(),
+        Ok(Some(ev)) => (StatusCode::OK, Json(ev.pdu.content)).into_response(),
         Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(json!({ "errcode": "M_NOT_FOUND", "error": "State event not found" })),

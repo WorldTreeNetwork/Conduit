@@ -14,18 +14,17 @@
 //! Returns the canonical `event_id` string on success.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::http::StatusCode;
 use axum::Json;
-use serde_json::{json, Value};
+use serde_json::Value;
 
 use conduit::auth::{StateMap, auth_event_keys, check_auth};
-use conduit::event::Event;
+use conduit::event::{Event, Pdu};
 use conduit::hashing::event_id;
 use conduit::room::RoomEventSender;
-use conduit::signing::sign_event;
+use conduit::signing::{sign_authored, SigningError};
 use conduit::Result as ConduitResult;
 
 use super::{AuthState, MatrixError};
@@ -120,6 +119,15 @@ async fn build_sign_and_persist_inner<S: AuthState>(
     // Own joins carry the member's profile (spec §Profiles, conduit-y99.38).
     let content = super::profile::with_join_profile(state, sender, type_, state_key, content).await;
 
+    // PostgreSQL TEXT key columns cannot hold U+0000, and a U+FFFD stand-in
+    // could merge two state keys, so refuse it before building the event.
+    if type_.contains('\0') || state_key.is_some_and(|k| k.contains('\0')) {
+        return Err(MatrixError::invalid_param("event type and state key must not contain U+0000"));
+    }
+    if type_.len() > conduit::wire::MAX_ID_BYTES || state_key.is_some_and(|k| k.len() > conduit::wire::MAX_ID_BYTES) {
+        return Err(MatrixError::too_large("event type and state key are limited to 255 bytes"));
+    }
+
     // ------------------------------------------------------------------
     // Step 2 — prev_events and depth
     // ------------------------------------------------------------------
@@ -145,21 +153,10 @@ async fn build_sign_and_persist_inner<S: AuthState>(
     // ------------------------------------------------------------------
     // Build the unsigned event template (no event_id yet, no hashes, no sig)
     // ------------------------------------------------------------------
-    let mut event = Event {
-        event_id: String::new(), // filled in after hashing
-        room_id: room_id.to_owned(),
-        sender: sender.to_owned(),
-        event_type: type_.to_owned(),
-        content,
-        state_key: state_key.map(|s| s.to_owned()),
-        origin_server_ts: now_ms(),
-        auth_events: vec![], // filled in below
-        prev_events,
-        hashes: json!({}),
-        signatures: json!({}),
-        depth,
-        unsigned: None,
-    };
+    let mut event = Event::new(String::new(), Pdu::new(
+        room_id, sender, type_, state_key.map(|s| s.to_owned()), content,
+        now_ms(), vec![], prev_events, depth,
+    ));
 
     // ------------------------------------------------------------------
     // Step 4 — auth_events: look up current state for required keys
@@ -179,8 +176,9 @@ async fn build_sign_and_persist_inner<S: AuthState>(
     // ------------------------------------------------------------------
     // Step 5 & 6 — content hash + sign (sign_event sets hashes internally)
     // ------------------------------------------------------------------
-    sign_event(&mut event, &state.server_key(), server_name).map_err(|e| {
-        MatrixError::unknown(format!("signing error: {e}"))
+    sign_authored(&mut event.pdu, &state.server_key(), server_name).map_err(|e| match e {
+        SigningError::TooLarge { .. } => MatrixError::too_large("event exceeds the 65536-byte PDU limit"),
+        e => MatrixError::unknown(format!("signing error: {e}")),
     })?;
 
     // ------------------------------------------------------------------

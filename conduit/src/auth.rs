@@ -86,6 +86,32 @@ pub enum AuthError {
 
     #[error("failed to parse event content: {0}")]
     ContentParseError(String),
+
+    #[error("join_authorised_via_users_server is not validly signed by its homeserver")]
+    AuthoriserSignatureMissing,
+}
+
+/// v11 auth rule 4.2: "If `content` has a `join_authorised_via_users_server`
+/// key: If the event is not validly signed by the homeserver of the user ID
+/// denoted by the key, reject."
+///
+/// `signed_by` is the set of servers whose signatures verified on receipt
+/// ([`crate::signing::verify_signatures`]). Joins never reach this check
+/// without the authoriser (they are dropped at the signature stage, as
+/// Synapse does); for other memberships this is where a missing or invalid
+/// authoriser signature becomes a rejection rather than a drop. Passing it
+/// leaves every other auth rule applicable.
+pub fn check_authoriser_signature(event: &crate::event::Pdu, signed_by: &crate::event::SignedBy) -> Result<(), AuthError> {
+    if event.event_type != "m.room.member" {
+        return Ok(());
+    }
+    let Some(authoriser) = event.content.get("join_authorised_via_users_server") else {
+        return Ok(());
+    };
+    match authoriser.as_str().and_then(crate::signing::server_of_user_id) {
+        Some(server) if signed_by.contains(server) => Ok(()),
+        _ => Err(AuthError::AuthoriserSignatureMissing),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1087,17 +1113,20 @@ mod tests {
     ) -> Event {
         Event {
             event_id: event_id.to_owned(),
-            room_id: room_id.to_owned(),
-            sender: sender.to_owned(),
-            event_type: event_type.to_owned(),
-            content,
-            state_key: state_key.map(|s| s.to_owned()),
-            origin_server_ts: 1_000_000,
-            auth_events: vec![],
-            prev_events,
-            hashes: json!({}),
-            signatures: json!({}),
-            depth: 1,
+            pdu: crate::event::Pdu {
+                room_id: room_id.to_owned(),
+                sender: sender.to_owned(),
+                event_type: event_type.to_owned(),
+                content,
+                state_key: state_key.map(|s| s.to_owned()),
+                origin_server_ts: 1_000_000,
+                auth_events: vec![],
+                prev_events,
+                hashes: json!({}),
+                signatures: json!({}),
+                depth: 1,
+                extensions: Default::default(),
+            },
             unsigned: None,
         }
     }

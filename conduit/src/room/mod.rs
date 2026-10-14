@@ -398,17 +398,20 @@ mod tests {
             let event_id = format!("${}_{}", event_type, count);
             let ev = Event {
                 event_id: event_id.clone(),
-                room_id: room_id.to_owned(),
-                sender: _sender.to_owned(),
-                event_type: event_type.to_owned(),
-                content,
-                state_key: state_key.map(|s| s.to_owned()),
-                origin_server_ts: 0,
-                auth_events: vec![],
-                prev_events: vec![],
-                hashes: json!({}),
-                signatures: json!({}),
-                depth: 0,
+                pdu: crate::event::Pdu {
+                    room_id: room_id.to_owned(),
+                    sender: _sender.to_owned(),
+                    event_type: event_type.to_owned(),
+                    content,
+                    state_key: state_key.map(|s| s.to_owned()),
+                    origin_server_ts: 0,
+                    auth_events: vec![],
+                    prev_events: vec![],
+                    hashes: json!({}),
+                    signatures: json!({}),
+                    depth: 0,
+                    extensions: Default::default(),
+                },
                 unsigned: None,
             };
 

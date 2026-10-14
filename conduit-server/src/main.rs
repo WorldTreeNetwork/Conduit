@@ -305,6 +305,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Recover any pending outbound work persisted across restart.
     federation_queue.start().await;
 
+    // add-pdu-wire: classify legacy event rows in the background. Startup is
+    // never blocked; federation reads classify an unchecked row inline.
+    {
+        let storage = Arc::clone(&storage);
+        tokio::spawn(async move {
+            let mut total = conduit::storage::LegacySweep::default();
+            loop {
+                match storage.verify_legacy_event_ids(1000).await {
+                    Ok(batch) if batch.total() == 0 => break,
+                    Ok(batch) => {
+                        total.verified += batch.verified;
+                        total.content_mismatch += batch.content_mismatch;
+                        total.id_mismatch += batch.id_mismatch;
+                    }
+                    Err(error) => {
+                        tracing::error!(%error, "legacy event integrity sweep failed");
+                        return;
+                    }
+                }
+            }
+            if total.total() > 0 {
+                tracing::info!(verified = total.verified, content_mismatch = total.content_mismatch,
+                    id_mismatch = total.id_mismatch, "legacy event integrity sweep complete");
+            }
+        });
+    }
+
     // Blob storage for media.
     let blob_store = BlobStore::from_env()
         .map_err(|e| format!("failed to initialise media blob store: {e}"))?;

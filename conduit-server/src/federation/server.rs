@@ -30,9 +30,9 @@ use serde_json::{Value, json};
 use tokio::sync::broadcast;
 
 use conduit::auth::auth_event_keys;
-use conduit::event::Event;
-use conduit::signing::sign_event;
-use conduit::state_events::HistoryVisibility;
+use conduit::event::{Event, WirePdu};
+use conduit::signing::{add_signature, is_third_party_invite, server_of_user_id};
+use conduit::wire::decode_pdu;
 use conduit::storage::Storage;
 
 use crate::RemoteKeyCache;
@@ -42,7 +42,7 @@ use crate::media_storage::BlobStore;
 use crate::api::client::media::MediaState;
 
 use super::middleware::FederationOrigin;
-use super::pipeline::process_incoming_pdu;
+use super::pipeline::{process_incoming_pdu, process_received, verify_received, verify_received_as, PipelineError};
 
 // ---------------------------------------------------------------------------
 // Shared handler state
@@ -102,12 +102,42 @@ fn bad_json(msg: &str) -> Response {
     matrix_error(StatusCode::BAD_REQUEST, "M_BAD_JSON", msg)
 }
 
+fn invalid_param(msg: &str) -> Response {
+    matrix_error(StatusCode::BAD_REQUEST, "M_INVALID_PARAM", msg)
+}
+
+/// The federation form of stored events, in order. Events whose bytes do not
+/// reproduce their ID are omitted; content-mismatched ones are redacted.
+async fn wire_pdus(storage: &Arc<dyn Storage>, events: &[Event]) -> conduit::Result<Vec<WirePdu>> {
+    let mut out = Vec::with_capacity(events.len());
+    for event in events {
+        if let Some(wire) = storage.get_wire_pdu(&event.event_id).await? {
+            out.push(wire);
+        }
+    }
+    Ok(out)
+}
+
 fn forbidden(msg: &str) -> Response {
     matrix_error(StatusCode::FORBIDDEN, "M_FORBIDDEN", msg)
 }
 
 fn internal(msg: &str) -> Response {
     matrix_error(StatusCode::INTERNAL_SERVER_ERROR, "M_UNKNOWN", msg)
+}
+
+/// Per-PDU error text for `/send` results: a fixed vocabulary that never
+/// echoes values taken from the PDU (they may hold U+0000 or private data).
+fn pdu_error_text(error: &PipelineError) -> &'static str {
+    match error {
+        PipelineError::SignatureError(_) => "signature verification failed",
+        PipelineError::AuthFailed(_) => "auth check failed",
+        PipelineError::Storage(_) => "storage error",
+        PipelineError::StateRes(_) => "state resolution failed",
+        PipelineError::UnsupportedRoomVersion(_) => "unsupported room version",
+        PipelineError::AuthEventFetch(_) => "auth event fetch failed",
+        PipelineError::MissingAuthEvent { .. } => "missing auth event",
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -164,30 +194,34 @@ pub async fn send_transaction(
     }
     tracing::debug!(%origin, %txn_id, pdu_count = body.pdus.len(), edu_count = body.edus.len(), "inbound federation transaction");
 
-    // Process EDUs first (mrm.11).
+    // Process EDUs first (mrm.11). Each EDU persists in its own statement;
+    // a deterministic data exception (SQLSTATE class 22, e.g. U+0000 in a
+    // JSONB sink) drops that EDU, while transient failures still return 500
+    // so the origin retries.
     for edu in &body.edus {
-        if let Err(error) = handle_edu(&state, &origin, edu).await {
-            return internal(&error.to_string());
+        match handle_edu(&state, &origin, edu).await {
+            Ok(()) => {}
+            Err(conduit::Error::StorageData(error)) => {
+                tracing::warn!(%origin, %txn_id, %error, "dropped EDU the database refused as data");
+            }
+            Err(error) => return internal(&error.to_string()),
         }
     }
 
     let mut pdu_results: HashMap<String, Value> = HashMap::new();
+    let received_ts = crate::federation::now_ms();
 
     for pdu_val in body.pdus {
-        // Parse the PDU.
-        let pdu: Event = match serde_json::from_value(pdu_val) {
-            Ok(e) => e,
-            Err(e) => {
-                // Can't get event_id if parse fails — use placeholder.
-                pdu_results.insert(
-                    format!("parse_error_{}", pdu_results.len()),
-                    json!({ "error": format!("PDU parse error: {e}") }),
-                );
+        // "Is a valid event, otherwise it is dropped": no result entry, since
+        // an invalid PDU's ID cannot be trusted (as Synapse _handle_pdus_in_txn).
+        let decoded = match decode_pdu(pdu_val, received_ts) {
+            Ok(decoded) => decoded,
+            Err(error) => {
+                tracing::info!(%origin, %txn_id, %error, "dropped invalid PDU");
                 continue;
             }
         };
-
-        let eid = pdu.event_id.clone();
+        let eid = conduit::hashing::event_id(&decoded.pdu).unwrap_or_default();
         match process_incoming_pdu(
             &state.storage,
             &state.remote_keys,
@@ -195,17 +229,17 @@ pub async fn send_transaction(
             &state.events_tx,
             Some(&state.fed_client),
             Some(&state.recent),
-            pdu,
+            decoded,
             &origin,
         )
         .await
         {
-            Ok(()) => {
-                pdu_results.insert(eid, json!({}));
+            Ok(event_id) => {
+                pdu_results.insert(event_id, json!({}));
             }
             Err(e) => {
                 tracing::warn!(%eid, error = %e, "PDU rejected");
-                pdu_results.insert(eid, json!({ "error": e.to_string() }));
+                pdu_results.insert(eid, json!({ "error": pdu_error_text(&e) }));
             }
         }
     }
@@ -295,17 +329,20 @@ pub async fn make_join(
     // Build auth_events.
     let template_for_keys = Event {
         event_id: String::new(),
-        room_id: room_id.clone(),
-        sender: user_id.clone(),
-        event_type: "m.room.member".to_owned(),
-        content: json!({ "membership": "join" }),
-        state_key: Some(user_id.clone()),
-        origin_server_ts: 0,
-        auth_events: vec![],
-        prev_events: prev_events.clone(),
-        hashes: json!({}),
-        signatures: json!({}),
-        depth,
+        pdu: conduit::event::Pdu {
+            room_id: room_id.clone(),
+            sender: user_id.clone(),
+            event_type: "m.room.member".to_owned(),
+            content: json!({ "membership": "join" }),
+            state_key: Some(user_id.clone()),
+            origin_server_ts: 0,
+            auth_events: vec![],
+            prev_events: prev_events.clone(),
+            hashes: json!({}),
+            signatures: json!({}),
+            depth,
+            extensions: Default::default(),
+        },
         unsigned: None,
     };
 
@@ -317,11 +354,9 @@ pub async fn make_join(
         }
     }
 
-    // Build the join template event (unsigned — remote fills event_id, hashes, sig).
-    // Include a placeholder event_id so the Event struct can be deserialized;
-    // the remote server replaces it with the real computed event_id.
+    // Build the join template (v11 wire format: no event_id, hashes or signatures;
+    // the joining server signs it and the ID is derived from its reference hash).
     let template = json!({
-        "event_id": "$placeholder",
         "room_id": room_id,
         "sender": user_id,
         "type": "m.room.member",
@@ -331,8 +366,6 @@ pub async fn make_join(
         "prev_events": prev_events,
         "depth": depth,
         "origin_server_ts": crate::federation::now_ms(),
-        "hashes": {},
-        "signatures": {},
     });
 
     // Extract room version from create event.
@@ -355,10 +388,22 @@ pub async fn make_join(
 // ---------------------------------------------------------------------------
 
 /// `PUT /_matrix/federation/v2/send_join/:roomId/:eventId`
+///
+/// 1. Decode ("is a valid event"): failure is `400 M_BAD_JSON`.
+/// 2. `room_id`, `m.room.member`, `join`, `state_key == sender`, sender on
+///    the authenticated origin: failures are `400 M_INVALID_PARAM` (the
+///    v1.19 send_join v2 400 response; Synapse uses 403/M_BAD_JSON here,
+///    a recorded deliberate difference).
+/// 3. Restricted join: `join_authorised_via_users_server` must name a user
+///    on this server, and we co-sign with `add_signature` before verifying.
+/// 4. Signature stage + derived ID == path ID: `400 M_INVALID_PARAM`.
+/// 5. Auth: `403 M_FORBIDDEN`.
+/// 6. Respond with the join (incl. our co-signature), state and auth chain
+///    as `WirePdu`s. `state` is still current state (conduit-y99.22.1).
 pub async fn send_join(
     State(state): State<FedState>,
     origin_ext: Option<axum::extract::Extension<FederationOrigin>>,
-    Path((room_id, _event_id)): Path<(String, String)>,
+    Path((room_id, path_event_id)): Path<(String, String)>,
     Json(pdu_val): Json<Value>,
 ) -> Response {
     let origin = match origin_ext {
@@ -366,61 +411,90 @@ pub async fn send_join(
         None => return unauthorized("Not authenticated"),
     };
 
-    // Parse the join PDU.
-    let pdu: Event = match serde_json::from_value(pdu_val) {
-        Ok(e) => e,
-        Err(e) => return bad_json(&format!("Cannot parse join PDU: {e}")),
+    let decoded = match decode_pdu(pdu_val, crate::federation::now_ms()) {
+        Ok(decoded) => decoded,
+        Err(error) => return bad_json(&error.to_string()),
     };
+    let mut pdu = decoded.pdu;
 
-    // Validate it's a join event for this room.
     if pdu.room_id != room_id {
-        return bad_json("PDU room_id does not match URL");
+        return invalid_param("PDU room_id does not match the path");
     }
     if pdu.event_type != "m.room.member" {
-        return bad_json("Expected m.room.member event");
+        return invalid_param("Expected an m.room.member event");
     }
-    let membership = pdu.content.get("membership").and_then(|v| v.as_str());
-    if membership != Some("join") {
-        return bad_json("Expected join membership");
+    if pdu.content.get("membership").and_then(|v| v.as_str()) != Some("join") {
+        return invalid_param("Expected join membership");
+    }
+    if pdu.state_key.as_deref() != Some(pdu.sender.as_str()) {
+        return invalid_param("state_key must equal sender");
+    }
+    if server_of_user_id(&pdu.sender) != Some(origin.as_str()) {
+        return invalid_param("sender is not a user on the requesting server");
     }
 
-    // Process through pipeline (verifies sig, auth, persists).
-    match process_incoming_pdu(
+    // Restricted join: as resident we are the authorising server.
+    if let Some(authoriser) = pdu.content.get("join_authorised_via_users_server") {
+        match authoriser.as_str().and_then(server_of_user_id) {
+            Some(server) if server == &*state.server_name => {
+                if let Err(e) = add_signature(&mut pdu, &state.server_key, &state.server_name) {
+                    return internal(&format!("Failed to co-sign join: {e}"));
+                }
+            }
+            _ => return invalid_param("We can only authorise joins for users on this server"),
+        }
+    }
+
+    let received = match verify_received_as(&state.remote_keys, &state.http, pdu.clone(),
+        &state.server_name, &state.server_key).await
+    {
+        Ok(received) => received,
+        Err(_) => return invalid_param("Join event signature check failed"),
+    };
+    if received.event_id != path_event_id {
+        return invalid_param("Join event ID does not match the path");
+    }
+
+    match process_received(
         &state.storage,
         &state.remote_keys,
         &state.http,
         &state.events_tx,
         Some(&state.fed_client),
         Some(&state.recent),
-        pdu.clone(),
+        received.clone(),
+        decoded.unsigned,
         &origin,
     )
     .await
     {
-        Ok(()) => {}
-        Err(e) => {
-            return (
-                StatusCode::FORBIDDEN,
-                Json(json!({ "errcode": "M_FORBIDDEN", "error": e.to_string() })),
-            )
-                .into_response();
-        }
+        Ok(_) => {}
+        Err(PipelineError::AuthFailed(e)) => return forbidden(&e),
+        Err(e) => return internal(&e.to_string()),
     }
 
-    // Collect current state of the room for the response.
     let state_events = match state.storage.get_current_state(&room_id).await {
         Ok(evs) => evs,
         Err(e) => return internal(&e.to_string()),
     };
-
-    // Build the auth chain: union of auth_events from all state events.
     let auth_chain = build_auth_chain(&state.storage, &state_events).await;
+    let (state_pdus, chain_pdus) = match (
+        wire_pdus(&state.storage, &state_events).await,
+        wire_pdus(&state.storage, &auth_chain).await,
+    ) {
+        (Ok(s), Ok(c)) => (s, c),
+        (Err(e), _) | (_, Err(e)) => return internal(&e.to_string()),
+    };
+    // The join exactly as received plus our co-signature (when restricted).
+    let Some(event) = WirePdu::checked(&received.event_id, pdu) else {
+        return internal("join no longer reproduces its ID");
+    };
 
     (StatusCode::OK, Json(json!({
         "origin": &*state.server_name,
-        "state": state_events,
-        "auth_chain": auth_chain,
-        "event": pdu,
+        "state": state_pdus,
+        "auth_chain": chain_pdus,
+        "event": event,
     })))
     .into_response()
 }
@@ -439,67 +513,88 @@ pub struct InviteBody {
 }
 
 /// `PUT /_matrix/federation/v2/invite/:roomId/:eventId`
+///
+/// Decode; check room, type, membership, local target, and the sender's
+/// server == origin (3rd-party invites exempt); verify required signatures
+/// with event-time keys; require derived ID == path ID and a matching
+/// content hash (an invite never takes the redact-on-mismatch path); only
+/// then co-sign with `add_signature` and persist. Failures after decode are
+/// `400 M_INVALID_PARAM` with nothing signed or stored.
 pub async fn invite(
     State(state): State<FedState>,
     origin_ext: Option<axum::extract::Extension<FederationOrigin>>,
-    Path((room_id, _event_id)): Path<(String, String)>,
+    Path((room_id, path_event_id)): Path<(String, String)>,
     Json(body): Json<InviteBody>,
 ) -> Response {
-    let _origin = match origin_ext {
+    let origin = match origin_ext {
         Some(axum::extract::Extension(o)) => o.server_name,
         None => return unauthorized("Not authenticated"),
     };
 
-    // Parse the invite PDU.
-    let mut pdu: Event = match serde_json::from_value(body.event) {
-        Ok(e) => e,
-        Err(e) => return bad_json(&format!("Cannot parse invite PDU: {e}")),
+    let decoded = match decode_pdu(body.event, crate::federation::now_ms()) {
+        Ok(decoded) => decoded,
+        Err(error) => return bad_json(&error.to_string()),
     };
+    let mut pdu = decoded.pdu;
 
-    // Basic validation.
     if pdu.room_id != room_id {
-        return bad_json("PDU room_id does not match URL");
+        return invalid_param("PDU room_id does not match the path");
     }
     if pdu.event_type != "m.room.member" {
-        return bad_json("Expected m.room.member event");
+        return invalid_param("Expected an m.room.member event");
     }
-    let membership = pdu.content.get("membership").and_then(|v| v.as_str());
-    if membership != Some("invite") {
-        return bad_json("Expected invite membership");
+    if pdu.content.get("membership").and_then(|v| v.as_str()) != Some("invite") {
+        return invalid_param("Expected invite membership");
+    }
+    let target_server = pdu.state_key.as_deref().and_then(server_of_user_id);
+    if target_server != Some(&*state.server_name) {
+        return invalid_param("Invite target is not on this server");
+    }
+    if !is_third_party_invite(&pdu) && server_of_user_id(&pdu.sender) != Some(origin.as_str()) {
+        return invalid_param("sender is not a user on the requesting server");
     }
 
-    // The target user must be on our server.
-    let target = pdu.state_key.as_deref().unwrap_or("");
-    let target_server = target.split(':').nth(1).unwrap_or("");
-    if target_server != &*state.server_name {
-        return bad_json("Invite target is not on this server");
+    let received = match verify_received(&state.remote_keys, &state.http, pdu.clone()).await {
+        Ok(received) => received,
+        Err(_) => return invalid_param("Invite signature check failed"),
+    };
+    if received.event_id != path_event_id {
+        return invalid_param("Invite event ID must match the event ID in the path");
+    }
+    if received.redacted_on_receipt {
+        return invalid_param("Invite content hash does not match");
     }
 
-    // Co-sign the invite PDU with our server key.
-    if let Err(e) = sign_event(&mut pdu, &state.server_key, &state.server_name) {
+    if let Err(e) = add_signature(&mut pdu, &state.server_key, &state.server_name) {
         return internal(&format!("Failed to sign invite: {e}"));
     }
 
-    // Store the invite as a pending member event so local /sync picks it up.
-    if let Err(e) = state.storage.put_event(&pdu).await {
+    let mut unsigned = decoded.unsigned.unwrap_or_else(|| json!({}));
+    if !body.invite_room_state.is_empty() {
+        unsigned["invite_room_state"] = Value::Array(body.invite_room_state);
+    }
+    let unsigned = unsigned.as_object().is_some_and(|m| !m.is_empty()).then_some(unsigned);
+    let stored = Event { event_id: received.event_id.clone(), pdu: pdu.clone(), unsigned };
+    if let Err(e) = state.storage.put_event(&stored).await {
         return internal(&format!("Failed to store invite: {e}"));
     }
-    if let Some(sk) = &pdu.state_key.clone() {
+    if let Some(sk) = &stored.state_key {
         if let Err(e) = state
             .storage
-            .set_state_entry(&pdu.room_id, &pdu.event_type, sk, &pdu.event_id)
+            .set_state_entry(&stored.room_id, &stored.event_type, sk, &stored.event_id)
             .await
         {
             tracing::warn!(error = %e, "failed to update state for invite");
         }
     }
-
-    // Notify /sync.
     if let Ok(pos) = state.storage.global_max_stream_position().await {
         let _ = state.events_tx.send(pos);
     }
 
-    (StatusCode::OK, Json(json!({ "event": pdu }))).into_response()
+    let Some(event) = WirePdu::checked(&received.event_id, pdu) else {
+        return internal("co-signed invite no longer reproduces its ID");
+    };
+    (StatusCode::OK, Json(json!({ "event": event }))).into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -529,9 +624,16 @@ pub async fn state(
     }
 
     let auth_chain = build_auth_chain(&state.storage, &state_events).await;
+    let (pdus, auth_chain) = match (
+        wire_pdus(&state.storage, &state_events).await,
+        wire_pdus(&state.storage, &auth_chain).await,
+    ) {
+        (Ok(p), Ok(a)) => (p, a),
+        (Err(e), _) | (_, Err(e)) => return internal(&e.to_string()),
+    };
 
     (StatusCode::OK, Json(json!({
-        "pdus": state_events,
+        "pdus": pdus,
         "auth_chain": auth_chain,
     })))
     .into_response()
@@ -615,6 +717,10 @@ pub async fn backfill(
         Err(e) => return internal(&e.to_string()),
     };
     let filtered: Vec<Event> = visible.into_iter().take(limit).collect();
+    let filtered = match wire_pdus(&state.storage, &filtered).await {
+        Ok(pdus) => pdus,
+        Err(e) => return internal(&e.to_string()),
+    };
 
     (StatusCode::OK, Json(json!({
         "origin": &*state.server_name,
@@ -638,7 +744,9 @@ pub async fn get_event(
         return unauthorized("Not authenticated");
     }
 
-    match state.storage.get_event(&event_id).await {
+    // Only bytes that reproduce their ID are served; content-mismatched
+    // legacy rows are served as their redaction, ID mismatches as 404.
+    match state.storage.get_wire_pdu(&event_id).await {
         Ok(Some(ev)) => (StatusCode::OK, Json(json!({
             "origin": &*state.server_name,
             "origin_server_ts": crate::federation::now_ms(),
@@ -735,6 +843,10 @@ pub async fn get_missing_events(
         Err(e) => return internal(&e.to_string()),
     };
 
+    let found = match wire_pdus(&state.storage, &found).await {
+        Ok(pdus) => pdus,
+        Err(e) => return internal(&e.to_string()),
+    };
     (StatusCode::OK, Json(json!({ "events": found }))).into_response()
 }
 

@@ -1,0 +1,118 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            WITH q AS (SELECT websearch_to_tsquery('english', $2) AS query),\n            hits AS (\n                SELECT e.event_id, e.room_id, e.sender, e.type AS event_type, e.state_key,\n                       e.content, e.auth_events, e.prev_events, e.hashes, e.signatures,\n                       e.unsigned, e.origin_server_ts, e.depth, e.pdu_json, e.stream_position,\n                       CASE e.type\n                           WHEN 'm.room.message' THEN ts_rank(to_tsvector('english', e.content->>'body'), q.query)\n                           WHEN 'm.room.name' THEN ts_rank(to_tsvector('english', e.content->>'name'), q.query)\n                           ELSE ts_rank(to_tsvector('english', e.content->>'topic'), q.query)\n                       END AS rank\n                FROM events e, q\n                WHERE e.room_id = ANY($1)\n                  AND (\n                      ($3 AND e.type = 'm.room.message' AND to_tsvector('english', e.content->>'body') @@ q.query)\n                   OR ($4 AND e.type = 'm.room.name' AND to_tsvector('english', e.content->>'name') @@ q.query)\n                   OR ($5 AND e.type = 'm.room.topic' AND to_tsvector('english', e.content->>'topic') @@ q.query)\n                  )\n            )\n            SELECT event_id AS \"event_id!\", room_id AS \"room_id!\", sender AS \"sender!\",\n                   event_type AS \"event_type!\", state_key, content AS \"content!\",\n                   auth_events AS \"auth_events!\", prev_events AS \"prev_events!\",\n                   hashes AS \"hashes!\", signatures AS \"signatures!\", unsigned, pdu_json,\n                   origin_server_ts AS \"origin_server_ts!\", depth AS \"depth!\",\n                   stream_position AS \"stream_position!\", rank AS \"rank!\"\n            FROM hits\n            ORDER BY CASE WHEN $6 THEN 0 ELSE rank END DESC, stream_position DESC\n            LIMIT $7\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "event_id!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "room_id!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "sender!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "event_type!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "state_key",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "content!",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 6,
+        "name": "auth_events!",
+        "type_info": "TextArray"
+      },
+      {
+        "ordinal": 7,
+        "name": "prev_events!",
+        "type_info": "TextArray"
+      },
+      {
+        "ordinal": 8,
+        "name": "hashes!",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 9,
+        "name": "signatures!",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 10,
+        "name": "unsigned",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 11,
+        "name": "pdu_json",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 12,
+        "name": "origin_server_ts!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 13,
+        "name": "depth!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 14,
+        "name": "stream_position!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 15,
+        "name": "rank!",
+        "type_info": "Float4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "TextArray",
+        "Text",
+        "Bool",
+        "Bool",
+        "Bool",
+        "Bool",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      false,
+      false,
+      false,
+      null
+    ]
+  },
+  "hash": "eeccd506f250eda55663687c21c0e49cc598cb664652e2cd3d518774c5eb9e7d"
+}

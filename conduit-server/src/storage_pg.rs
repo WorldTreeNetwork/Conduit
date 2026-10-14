@@ -15,7 +15,7 @@ use serde_json::Value;
 
 use conduit::{
     Error, Result,
-    event::Event,
+    event::{Event, IntegrityClass, WirePdu},
     storage::{
         RefreshTokenRecord,
         Account, AuditEntry, Device, DirectoryScope, DlqEntry, MediaMetadata, OutboundEntry,
@@ -31,6 +31,8 @@ use conduit::{
 pub struct PostgresStorage {
     pool: PgPool,
     lock_pool: PgPool,
+    /// Highest stream position the legacy integrity sweep has visited.
+    sweep_cursor: std::sync::atomic::AtomicI64,
 }
 
 impl PostgresStorage {
@@ -39,7 +41,34 @@ impl PostgresStorage {
         // guarded requests can occupy every connection needed for their writes.
         let lock_pool = sqlx::postgres::PgPoolOptions::new().max_connections(4)
             .connect_lazy_with((*pool.connect_options()).clone());
-        Self { pool, lock_pool }
+        Self { pool, lock_pool, sweep_cursor: std::sync::atomic::AtomicI64::new(0) }
+    }
+
+    /// Classify a legacy (`unchecked`) row from its own bytes and persist the
+    /// class. `verified` and `content_mismatch` rows get `pdu_json` backfilled
+    /// with the rebuilt, unredacted Pdu, so client reads are byte-identical
+    /// before and after; `id_mismatch` rows keep `pdu_json` NULL. Never
+    /// rewrites a primary key. Only an `unchecked` row is updated.
+    async fn classify_legacy_row(&self, event: &Event, had_pdu_json: bool) -> Result<IntegrityClass> {
+        let class = conduit::event::classify(&event.event_id, &event.pdu);
+        let backfill = match class {
+            IntegrityClass::IdMismatch => None,
+            _ if had_pdu_json => None,
+            _ => conduit::canonical_json::to_canonical_string(&event.pdu).ok(),
+        };
+        if class == IntegrityClass::IdMismatch {
+            let derived = conduit::hashing::event_id(&event.pdu).unwrap_or_default();
+            tracing::warn!(event_id = %event.event_id, %derived,
+                "legacy event row does not reproduce its ID; it will not be served over federation");
+        }
+        sqlx::query!(
+            "UPDATE events SET id_integrity = $2, pdu_json = COALESCE(pdu_json, $3) WHERE event_id = $1 AND id_integrity = 'unchecked'",
+            event.event_id, class.as_str(), backfill
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(class)
     }
 
     /// Convenience constructor that wraps self in `Arc<dyn Storage>`.
@@ -57,8 +86,135 @@ impl conduit::storage::TransactionGuard for PostgresTransactionGuard {}
 // Helper: map sqlx errors to conduit::Error
 // ---------------------------------------------------------------------------
 
+/// Map a sqlx error, keeping the PostgreSQL data-exception class (SQLSTATE
+/// 22xxx, e.g. U+0000 in JSONB/TEXT) distinct so callers can drop that one
+/// item deterministically instead of failing a whole request.
 fn map_sqlx(e: sqlx::Error) -> Error {
+    if let sqlx::Error::Database(db) = &e {
+        if let Some(code) = db.code() {
+            if code.starts_with("22") {
+                return Error::StorageData(format!("SQLSTATE {code}"));
+            }
+        }
+    }
     Error::Storage(e.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Lossless JSON text (replay + outbox sinks; add-pdu-wire migration 0091)
+// ---------------------------------------------------------------------------
+
+/// Lossless JSON text: `serde_json` keeps floats and escapes U+0000 as
+/// `\u0000`. Never the Matrix canonical encoder, which refuses floats.
+fn json_text(value: &Value) -> String {
+    serde_json::to_string(value).expect("serde_json::Value always serialises")
+}
+
+/// Prefer the text column; fall back to the legacy JSONB column.
+fn text_or_json(text: Option<String>, legacy: Option<Value>) -> Result<Value> {
+    match text {
+        Some(text) => serde_json::from_str(&text).map_err(|e| Error::Storage(format!("stored JSON text: {e}"))),
+        None => Ok(legacy.unwrap_or(Value::Null)),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Events: the single row decoder and writer (add-pdu-wire)
+// ---------------------------------------------------------------------------
+
+/// The columns every `events` read selects.
+struct EventRow {
+    event_id: String,
+    pdu_json: Option<String>,
+    room_id: String,
+    sender: String,
+    event_type: String,
+    state_key: Option<String>,
+    content: Value,
+    origin_server_ts: i64,
+    auth_events: Vec<String>,
+    prev_events: Vec<String>,
+    hashes: Value,
+    signatures: Value,
+    depth: i64,
+    unsigned: Option<Value>,
+}
+
+/// Rebuild a Pdu from the projection columns (legacy rows: no extensions).
+fn projected_pdu(row: &EventRow) -> conduit::event::Pdu {
+    conduit::event::Pdu {
+        room_id: row.room_id.clone(),
+        sender: row.sender.clone(),
+        event_type: row.event_type.clone(),
+        content: row.content.clone(),
+        state_key: row.state_key.clone(),
+        origin_server_ts: row.origin_server_ts as u64,
+        auth_events: row.auth_events.clone(),
+        prev_events: row.prev_events.clone(),
+        hashes: row.hashes.clone(),
+        signatures: row.signatures.clone(),
+        depth: row.depth,
+        extensions: Default::default(),
+    }
+}
+
+/// The single `events` row decoder: `pdu_json` (authoritative) when present,
+/// otherwise the projection columns exactly as pre-change reads returned.
+fn event_from_row(row: EventRow) -> Event {
+    let pdu = match row.pdu_json.as_deref().map(serde_json::from_str::<conduit::event::Pdu>) {
+        Some(Ok(pdu)) => pdu,
+        Some(Err(error)) => {
+            tracing::error!(event_id = %row.event_id, %error, "unreadable pdu_json; using projections");
+            projected_pdu(&row)
+        }
+        None => projected_pdu(&row),
+    };
+    Event { event_id: row.event_id, pdu, unsigned: row.unsigned }
+}
+
+/// Insert one event: authoritative canonical `pdu_json`, NUL-safe JSONB
+/// projections, NUL-free unsigned, and its integrity class. A row whose
+/// reference hash equals its ID is `verified` (including PDUs redacted on
+/// receipt: the redaction is the authoritative copy); otherwise `id_mismatch`.
+async fn insert_event(connection: &mut sqlx::PgConnection, event: &Event) -> Result<()> {
+    use conduit::wire::{project_nul, strip_nul_unsigned};
+    let (pdu_json, integrity) = match conduit::canonical_json::to_canonical_string(&event.pdu) {
+        Ok(text) => {
+            let verified = conduit::hashing::event_id(&event.pdu).is_ok_and(|id| id == event.event_id);
+            (text, if verified { "verified" } else { "id_mismatch" })
+        }
+        // Not canonical JSON (e.g. a float): cannot be hashed, never served.
+        Err(_) => (json_text(&serde_json::to_value(&event.pdu)?), "id_mismatch"),
+    };
+    sqlx::query!(
+        r#"
+        INSERT INTO events
+            (event_id, room_id, sender, type, state_key, content,
+             auth_events, prev_events, signatures, hashes, unsigned,
+             origin_server_ts, depth, pdu_json, id_integrity)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+        ON CONFLICT (event_id) DO NOTHING
+        "#,
+        event.event_id,
+        event.room_id,
+        event.sender,
+        event.event_type,
+        event.state_key,
+        project_nul(&event.content),
+        &event.auth_events,
+        &event.prev_events,
+        project_nul(&event.signatures),
+        project_nul(&event.hashes),
+        strip_nul_unsigned(event.unsigned.as_ref()),
+        event.origin_server_ts as i64,
+        event.depth,
+        pdu_json,
+        integrity,
+    )
+    .execute(connection)
+    .await
+    .map_err(map_sqlx)?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -137,81 +293,91 @@ impl Storage for PostgresStorage {
         Ok(Box::new(PostgresTransactionGuard {_transaction: transaction}))
     }
 
+    // Replay bodies and results are lossless JSON text (`*_text`, migration
+    // 0091); rows written before it keep their JSONB columns, read as a
+    // fallback. Text keeps U+0000 (`\u0000`) and floats, which JSONB or the
+    // canonical encoder would refuse.
+
     async fn transaction_original(&self, key: &conduit::storage::TransactionKey) -> Result<Option<Value>> {
-        let row = sqlx::query!("SELECT request FROM transactions WHERE scope = $1 AND owner = $2 AND endpoint = $3 AND txn_id = $4",
+        let row = sqlx::query!("SELECT request_text, request FROM transactions WHERE scope = $1 AND owner = $2 AND endpoint = $3 AND txn_id = $4",
             key.scope, key.owner, key.endpoint, key.txn_id).fetch_optional(&self.pool).await.map_err(map_sqlx)?;
-        Ok(row.and_then(|row| row.request))
+        match row {
+            Some(row) if row.request_text.is_some() || row.request.is_some() => Ok(Some(text_or_json(row.request_text, row.request)?)),
+            _ => Ok(None),
+        }
     }
 
     async fn transaction_request(&self, key: &conduit::storage::TransactionKey, request: &Value) -> Result<Value> {
         let row = sqlx::query!(
-            r#"INSERT INTO transactions (scope, owner, endpoint, txn_id, request)
+            r#"INSERT INTO transactions (scope, owner, endpoint, txn_id, request_text)
             VALUES ($1, $2, $3, $4, $5)
             ON CONFLICT (scope, owner, endpoint, txn_id) DO UPDATE
-                SET request = COALESCE(transactions.request, EXCLUDED.request)
-            RETURNING request"#,
-            key.scope, key.owner, key.endpoint, key.txn_id, request
+                SET request_text = CASE WHEN transactions.request IS NULL
+                    THEN COALESCE(transactions.request_text, EXCLUDED.request_text)
+                    ELSE transactions.request_text END
+            RETURNING request_text, request"#,
+            key.scope, key.owner, key.endpoint, key.txn_id, json_text(request)
         ).fetch_one(&self.pool).await.map_err(map_sqlx)?;
-        row.request.ok_or_else(|| Error::Storage("missing original transaction request".into()))
+        if row.request_text.is_none() && row.request.is_none() {
+            return Err(Error::Storage("missing original transaction request".into()));
+        }
+        text_or_json(row.request_text, row.request)
     }
 
     async fn finish_transaction(&self, key: &conduit::storage::TransactionKey, result: &Value) -> Result<Value> {
         let row = sqlx::query!(
-            r#"INSERT INTO transactions (scope, owner, endpoint, txn_id, result)
+            r#"INSERT INTO transactions (scope, owner, endpoint, txn_id, result_text)
             VALUES ($1, $2, $3, $4, $5)
             ON CONFLICT (scope, owner, endpoint, txn_id) DO UPDATE
-                SET result = COALESCE(transactions.result, EXCLUDED.result)
-            RETURNING result"#,
-            key.scope, key.owner, key.endpoint, key.txn_id, result
+                SET result_text = CASE WHEN transactions.result IS NULL
+                    THEN COALESCE(transactions.result_text, EXCLUDED.result_text)
+                    ELSE transactions.result_text END
+            RETURNING result_text, result"#,
+            key.scope, key.owner, key.endpoint, key.txn_id, json_text(result)
         ).fetch_one(&self.pool).await.map_err(map_sqlx)?;
-        row.result.ok_or_else(|| Error::Storage("missing completed transaction result".into()))
+        if row.result_text.is_none() && row.result.is_none() {
+            return Err(Error::Storage("missing completed transaction result".into()));
+        }
+        text_or_json(row.result_text, row.result)
     }
 
     async fn transaction_result(&self, key: &conduit::storage::TransactionKey) -> Result<Option<Value>> {
         let row = sqlx::query!(
-            "SELECT result FROM transactions WHERE scope = $1 AND owner = $2 AND endpoint = $3 AND txn_id = $4",
+            "SELECT result_text, result FROM transactions WHERE scope = $1 AND owner = $2 AND endpoint = $3 AND txn_id = $4",
             key.scope, key.owner, key.endpoint, key.txn_id
         ).fetch_optional(&self.pool).await.map_err(map_sqlx)?;
-        Ok(row.and_then(|row| row.result))
+        match row {
+            Some(row) if row.result_text.is_some() || row.result.is_some() => Ok(Some(text_or_json(row.result_text, row.result)?)),
+            _ => Ok(None),
+        }
     }
 
     async fn put_event_once(&self, key: &conduit::storage::TransactionKey, event: &Event) -> Result<(String, bool)> {
         let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
-        let result = serde_json::json!({"event_id": event.event_id});
+        let result = json_text(&serde_json::json!({"event_id": event.event_id}));
         let inserted = sqlx::query!(
-            "INSERT INTO transactions (scope, owner, endpoint, txn_id, result) VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING",
+            "INSERT INTO transactions (scope, owner, endpoint, txn_id, result_text) VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING",
             key.scope, key.owner, key.endpoint, key.txn_id, result
         ).execute(&mut *transaction).await.map_err(map_sqlx)?.rows_affected() > 0;
         if !inserted {
             let row = sqlx::query!(
-                "SELECT result FROM transactions WHERE scope = $1 AND owner = $2 AND endpoint = $3 AND txn_id = $4 FOR UPDATE",
+                "SELECT result_text, result FROM transactions WHERE scope = $1 AND owner = $2 AND endpoint = $3 AND txn_id = $4 FOR UPDATE",
                 key.scope, key.owner, key.endpoint, key.txn_id
             ).fetch_one(&mut *transaction).await.map_err(map_sqlx)?;
-            if let Some(result) = row.result {
-                let id = result["event_id"].as_str().ok_or_else(|| Error::Storage("invalid stored event transaction".into()))?.to_owned();
+            if row.result_text.is_some() || row.result.is_some() {
+                let stored = text_or_json(row.result_text, row.result)?;
+                let id = stored["event_id"].as_str().ok_or_else(|| Error::Storage("invalid stored event transaction".into()))?.to_owned();
                 transaction.commit().await.map_err(map_sqlx)?;
                 return Ok((id, false));
             }
-            sqlx::query!("UPDATE transactions SET result = $5 WHERE scope = $1 AND owner = $2 AND endpoint = $3 AND txn_id = $4",
+            sqlx::query!("UPDATE transactions SET result_text = $5 WHERE scope = $1 AND owner = $2 AND endpoint = $3 AND txn_id = $4",
                 key.scope, key.owner, key.endpoint, key.txn_id, result).execute(&mut *transaction).await.map_err(map_sqlx)?;
         }
         if event.state_key.is_some() {
             return Err(Error::InvalidEvent("put_event_once accepts non-state events only".into()));
         }
         lock_stream(&mut transaction, Stream::Events).await?;
-        sqlx::query!(
-            r#"
-            INSERT INTO events
-                (event_id, room_id, sender, type, state_key, content,
-                 auth_events, prev_events, signatures, hashes, unsigned,
-                 origin_server_ts, depth)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-            ON CONFLICT (event_id) DO NOTHING
-            "#,
-            event.event_id, event.room_id, event.sender, event.event_type, event.state_key, event.content,
-            &event.auth_events, &event.prev_events, event.signatures, event.hashes, event.unsigned,
-            event.origin_server_ts as i64, event.depth
-        ).execute(&mut *transaction).await.map_err(map_sqlx)?;
+        insert_event(&mut transaction, event).await?;
         transaction.commit().await.map_err(map_sqlx)?;
         Ok((event.event_id.clone(), true))
     }
@@ -219,16 +385,16 @@ impl Storage for PostgresStorage {
     async fn deliver_to_device_once(&self, key: &conduit::storage::TransactionKey,
         local: &[conduit::storage::ToDeviceDelivery], remote: &[conduit::storage::OutboundDelivery]) -> Result<bool> {
         let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
-        let result = serde_json::json!({});
+        let result = json_text(&serde_json::json!({}));
         let inserted = sqlx::query!(
-            "INSERT INTO transactions (scope, owner, endpoint, txn_id, result) VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING",
+            "INSERT INTO transactions (scope, owner, endpoint, txn_id, result_text) VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING",
             key.scope, key.owner, key.endpoint, key.txn_id, result
         ).execute(&mut *transaction).await.map_err(map_sqlx)?.rows_affected() > 0;
         if !inserted {
-            let row = sqlx::query!("SELECT result FROM transactions WHERE scope = $1 AND owner = $2 AND endpoint = $3 AND txn_id = $4 FOR UPDATE",
+            let row = sqlx::query!("SELECT result_text, result FROM transactions WHERE scope = $1 AND owner = $2 AND endpoint = $3 AND txn_id = $4 FOR UPDATE",
                 key.scope, key.owner, key.endpoint, key.txn_id).fetch_one(&mut *transaction).await.map_err(map_sqlx)?;
-            if row.result.is_some() { transaction.commit().await.map_err(map_sqlx)?; return Ok(false); }
-            sqlx::query!("UPDATE transactions SET result = $5 WHERE scope = $1 AND owner = $2 AND endpoint = $3 AND txn_id = $4",
+            if row.result_text.is_some() || row.result.is_some() { transaction.commit().await.map_err(map_sqlx)?; return Ok(false); }
+            sqlx::query!("UPDATE transactions SET result_text = $5 WHERE scope = $1 AND owner = $2 AND endpoint = $3 AND txn_id = $4",
                 key.scope, key.owner, key.endpoint, key.txn_id, result).execute(&mut *transaction).await.map_err(map_sqlx)?;
         }
         if !local.is_empty() {
@@ -247,10 +413,10 @@ impl Storage for PostgresStorage {
         for delivery in remote {
             sqlx::query!(
                 r#"
-                INSERT INTO fed_outbound_queue (destination, kind, txn_id, payload)
+                INSERT INTO fed_outbound_queue (destination, kind, txn_id, payload_text)
                 VALUES ($1, 'transaction', $2, $3)
                 "#,
-                delivery.destination, delivery.txn_id, delivery.payload
+                delivery.destination, delivery.txn_id, json_text(&delivery.payload)
             ).execute(&mut *transaction).await.map_err(map_sqlx)?;
         }
         transaction.commit().await.map_err(map_sqlx)?;
@@ -266,7 +432,7 @@ impl Storage for PostgresStorage {
             r#"
             SELECT event_id, room_id, sender, type AS event_type, state_key,
                    content, auth_events, prev_events, hashes, signatures,
-                   unsigned, origin_server_ts, depth
+                   unsigned, origin_server_ts, depth, pdu_json
             FROM events
             WHERE event_id = $1
             "#,
@@ -278,53 +444,14 @@ impl Storage for PostgresStorage {
 
         let Some(r) = row else { return Ok(None) };
 
-        let event = Event {
-            event_id: r.event_id,
-            room_id: r.room_id,
-            sender: r.sender,
-            event_type: r.event_type,
-            state_key: r.state_key,
-            content: r.content,
-            origin_server_ts: r.origin_server_ts as u64,
-            auth_events: r.auth_events,
-            prev_events: r.prev_events,
-            hashes: r.hashes,
-            signatures: r.signatures,
-            depth: r.depth,
-            unsigned: r.unsigned,
-        };
+        let event = event_from_row(EventRow { event_id: r.event_id, pdu_json: r.pdu_json, room_id: r.room_id, sender: r.sender, event_type: r.event_type, state_key: r.state_key, content: r.content, origin_server_ts: r.origin_server_ts, auth_events: r.auth_events, prev_events: r.prev_events, hashes: r.hashes, signatures: r.signatures, depth: r.depth, unsigned: r.unsigned });
         Ok(Some(event))
     }
 
     async fn put_event(&self, event: &Event) -> Result<()> {
         let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
         lock_stream(&mut transaction, Stream::Events).await?;
-        sqlx::query!(
-            r#"
-            INSERT INTO events
-                (event_id, room_id, sender, type, state_key, content,
-                 auth_events, prev_events, signatures, hashes, unsigned,
-                 origin_server_ts, depth)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-            ON CONFLICT (event_id) DO NOTHING
-            "#,
-            event.event_id,
-            event.room_id,
-            event.sender,
-            event.event_type,
-            event.state_key,
-            event.content,
-            &event.auth_events,
-            &event.prev_events,
-            event.signatures,
-            event.hashes,
-            event.unsigned,
-            event.origin_server_ts as i64,
-            event.depth
-        )
-        .execute(&mut *transaction)
-        .await
-        .map_err(map_sqlx)?;
+        insert_event(&mut transaction, event).await?;
         transaction.commit().await.map_err(map_sqlx)?;
         Ok(())
     }
@@ -334,7 +461,7 @@ impl Storage for PostgresStorage {
             r#"
             SELECT event_id, room_id, sender, type AS event_type, state_key,
                    content, auth_events, prev_events, hashes, signatures,
-                   unsigned, origin_server_ts, depth
+                   unsigned, origin_server_ts, depth, pdu_json
             FROM events
             WHERE room_id = $1
             ORDER BY stream_position
@@ -347,24 +474,75 @@ impl Storage for PostgresStorage {
 
         let events = rows
             .into_iter()
-            .map(|r| Event {
-                event_id: r.event_id,
-                room_id: r.room_id,
-                sender: r.sender,
-                event_type: r.event_type,
-                state_key: r.state_key,
-                content: r.content,
-                origin_server_ts: r.origin_server_ts as u64,
-                auth_events: r.auth_events,
-                prev_events: r.prev_events,
-                hashes: r.hashes,
-                signatures: r.signatures,
-                depth: r.depth,
-                unsigned: r.unsigned,
-            })
+            .map(|r| event_from_row(EventRow { event_id: r.event_id, pdu_json: r.pdu_json, room_id: r.room_id, sender: r.sender, event_type: r.event_type, state_key: r.state_key, content: r.content, origin_server_ts: r.origin_server_ts, auth_events: r.auth_events, prev_events: r.prev_events, hashes: r.hashes, signatures: r.signatures, depth: r.depth, unsigned: r.unsigned }))
             .collect();
 
         Ok(events)
+    }
+
+    // --- Federation wire integrity (add-pdu-wire) ---------------------------
+
+    async fn get_wire_pdu_with_class(&self, event_id: &str) -> Result<Option<(IntegrityClass, Option<WirePdu>)>> {
+        let row = sqlx::query!(
+            r#"
+            SELECT event_id, room_id, sender, type AS event_type, state_key,
+                   content, auth_events, prev_events, hashes, signatures,
+                   unsigned, origin_server_ts, depth, pdu_json, id_integrity
+            FROM events WHERE event_id = $1
+            "#,
+            event_id
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        let Some(r) = row else { return Ok(None) };
+        let stored = IntegrityClass::parse(&r.id_integrity);
+        let had_pdu_json = r.pdu_json.is_some();
+        let event = event_from_row(EventRow { event_id: r.event_id, pdu_json: r.pdu_json, room_id: r.room_id, sender: r.sender, event_type: r.event_type, state_key: r.state_key, content: r.content, origin_server_ts: r.origin_server_ts, auth_events: r.auth_events, prev_events: r.prev_events, hashes: r.hashes, signatures: r.signatures, depth: r.depth, unsigned: r.unsigned });
+        let class = match stored {
+            Some(class) => class,
+            // Unchecked legacy row: classify its own bytes inline and persist.
+            None => self.classify_legacy_row(&event, had_pdu_json).await?,
+        };
+        let wire = match class {
+            IntegrityClass::IdMismatch => None,
+            // Redacted on receipt or lossy: `checked` yields the redaction,
+            // computed now and never written back to retained history.
+            _ => WirePdu::checked(&event.event_id, event.pdu),
+        };
+        Ok(Some((class, wire)))
+    }
+
+    async fn verify_legacy_event_ids(&self, batch: i64) -> Result<conduit::storage::LegacySweep> {
+        use std::sync::atomic::Ordering;
+        let cursor = self.sweep_cursor.load(Ordering::Relaxed);
+        let rows = sqlx::query!(
+            r#"
+            SELECT event_id, room_id, sender, type AS event_type, state_key,
+                   content, auth_events, prev_events, hashes, signatures,
+                   unsigned, origin_server_ts, depth, pdu_json, stream_position
+            FROM events
+            WHERE id_integrity = 'unchecked' AND stream_position > $1
+            ORDER BY stream_position
+            LIMIT $2
+            "#,
+            cursor, batch
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        let mut sweep = conduit::storage::LegacySweep::default();
+        for r in rows {
+            self.sweep_cursor.fetch_max(r.stream_position, Ordering::Relaxed);
+            let had_pdu_json = r.pdu_json.is_some();
+            let event = event_from_row(EventRow { event_id: r.event_id, pdu_json: r.pdu_json, room_id: r.room_id, sender: r.sender, event_type: r.event_type, state_key: r.state_key, content: r.content, origin_server_ts: r.origin_server_ts, auth_events: r.auth_events, prev_events: r.prev_events, hashes: r.hashes, signatures: r.signatures, depth: r.depth, unsigned: r.unsigned });
+            match self.classify_legacy_row(&event, had_pdu_json).await? {
+                IntegrityClass::Verified => sweep.verified += 1,
+                IntegrityClass::ContentMismatch => sweep.content_mismatch += 1,
+                IntegrityClass::IdMismatch => sweep.id_mismatch += 1,
+            }
+        }
+        Ok(sweep)
     }
 
     // -----------------------------------------------------------------------
@@ -871,7 +1049,7 @@ impl Storage for PostgresStorage {
             r#"
             SELECT e.event_id, e.room_id, e.sender, e.type AS event_type,
                    e.state_key, e.content, e.auth_events, e.prev_events,
-                   e.hashes, e.signatures, e.unsigned, e.origin_server_ts, e.depth
+                   e.hashes, e.signatures, e.unsigned, e.origin_server_ts, e.depth, e.pdu_json
             FROM room_current_state rcs
             JOIN events e ON e.event_id = rcs.event_id
             WHERE rcs.room_id = $1 AND rcs.type = $2 AND rcs.state_key = $3
@@ -886,21 +1064,7 @@ impl Storage for PostgresStorage {
 
         let Some(r) = row else { return Ok(None) };
 
-        Ok(Some(Event {
-            event_id: r.event_id,
-            room_id: r.room_id,
-            sender: r.sender,
-            event_type: r.event_type,
-            state_key: r.state_key,
-            content: r.content,
-            origin_server_ts: r.origin_server_ts as u64,
-            auth_events: r.auth_events,
-            prev_events: r.prev_events,
-            hashes: r.hashes,
-            signatures: r.signatures,
-            depth: r.depth,
-            unsigned: r.unsigned,
-        }))
+        Ok(Some(event_from_row(EventRow { event_id: r.event_id, pdu_json: r.pdu_json, room_id: r.room_id, sender: r.sender, event_type: r.event_type, state_key: r.state_key, content: r.content, origin_server_ts: r.origin_server_ts, auth_events: r.auth_events, prev_events: r.prev_events, hashes: r.hashes, signatures: r.signatures, depth: r.depth, unsigned: r.unsigned })))
     }
 
     async fn get_current_state(&self, room_id: &str) -> Result<Vec<Event>> {
@@ -908,7 +1072,7 @@ impl Storage for PostgresStorage {
             r#"
             SELECT e.event_id, e.room_id, e.sender, e.type AS event_type,
                    e.state_key, e.content, e.auth_events, e.prev_events,
-                   e.hashes, e.signatures, e.unsigned, e.origin_server_ts, e.depth
+                   e.hashes, e.signatures, e.unsigned, e.origin_server_ts, e.depth, e.pdu_json
             FROM room_current_state rcs
             JOIN events e ON e.event_id = rcs.event_id
             WHERE rcs.room_id = $1
@@ -922,21 +1086,7 @@ impl Storage for PostgresStorage {
 
         let events = rows
             .into_iter()
-            .map(|r| Event {
-                event_id: r.event_id,
-                room_id: r.room_id,
-                sender: r.sender,
-                event_type: r.event_type,
-                state_key: r.state_key,
-                content: r.content,
-                origin_server_ts: r.origin_server_ts as u64,
-                auth_events: r.auth_events,
-                prev_events: r.prev_events,
-                hashes: r.hashes,
-                signatures: r.signatures,
-                depth: r.depth,
-                unsigned: r.unsigned,
-            })
+            .map(|r| event_from_row(EventRow { event_id: r.event_id, pdu_json: r.pdu_json, room_id: r.room_id, sender: r.sender, event_type: r.event_type, state_key: r.state_key, content: r.content, origin_server_ts: r.origin_server_ts, auth_events: r.auth_events, prev_events: r.prev_events, hashes: r.hashes, signatures: r.signatures, depth: r.depth, unsigned: r.unsigned }))
             .collect();
 
         Ok(events)
@@ -946,16 +1096,13 @@ impl Storage for PostgresStorage {
         let rows = sqlx::query!(
             r#"SELECT e.event_id, e.room_id, e.sender, e.type AS event_type,
                 e.state_key, e.content, e.auth_events, e.prev_events, e.hashes,
-                e.signatures, e.unsigned, e.origin_server_ts, e.depth
+                e.signatures, e.unsigned, e.origin_server_ts, e.depth, e.pdu_json
             FROM room_current_state rcs JOIN events e ON e.event_id = rcs.event_id
             WHERE rcs.type = 'm.room.member' AND rcs.state_key = $1
             ORDER BY rcs.room_id"#,
             user_id
         ).fetch_all(&self.pool).await.map_err(map_sqlx)?;
-        Ok(rows.into_iter().map(|row| Event {event_id: row.event_id, room_id: row.room_id,
-            sender: row.sender, event_type: row.event_type, state_key: row.state_key, content: row.content,
-            auth_events: row.auth_events, prev_events: row.prev_events, hashes: row.hashes, signatures: row.signatures,
-            unsigned: row.unsigned, origin_server_ts: row.origin_server_ts as u64, depth: row.depth}).collect())
+        Ok(rows.into_iter().map(|row| event_from_row(EventRow { event_id: row.event_id, pdu_json: row.pdu_json, room_id: row.room_id, sender: row.sender, event_type: row.event_type, state_key: row.state_key, content: row.content, auth_events: row.auth_events, prev_events: row.prev_events, hashes: row.hashes, signatures: row.signatures, origin_server_ts: row.origin_server_ts, depth: row.depth, unsigned: row.unsigned })).collect())
     }
 
     async fn joined_rooms(&self, user_id: &str) -> Result<Vec<String>> {
@@ -1004,6 +1151,7 @@ impl Storage for PostgresStorage {
             origin_server_ts: i64,
             depth: i64,
             stream_position: i64,
+            pdu_json: Option<String>,
         }
 
         let rows: Vec<Row> = if dir == 'b' {
@@ -1011,7 +1159,7 @@ impl Storage for PostgresStorage {
                 r#"
                 SELECT event_id, room_id, sender, type AS event_type, state_key,
                        content, auth_events, prev_events, hashes, signatures,
-                       unsigned, origin_server_ts, depth, stream_position
+                       unsigned, origin_server_ts, depth, pdu_json, stream_position
                 FROM events
                 WHERE room_id = $1 AND stream_position <= $2
                 ORDER BY stream_position DESC
@@ -1040,6 +1188,7 @@ impl Storage for PostgresStorage {
                 origin_server_ts: r.origin_server_ts,
                 depth: r.depth,
                 stream_position: r.stream_position,
+                pdu_json: r.pdu_json,
             })
             .collect()
         } else {
@@ -1047,7 +1196,7 @@ impl Storage for PostgresStorage {
                 r#"
                 SELECT event_id, room_id, sender, type AS event_type, state_key,
                        content, auth_events, prev_events, hashes, signatures,
-                       unsigned, origin_server_ts, depth, stream_position
+                       unsigned, origin_server_ts, depth, pdu_json, stream_position
                 FROM events
                 WHERE room_id = $1 AND stream_position >= $2
                 ORDER BY stream_position ASC
@@ -1076,6 +1225,7 @@ impl Storage for PostgresStorage {
                 origin_server_ts: r.origin_server_ts,
                 depth: r.depth,
                 stream_position: r.stream_position,
+                pdu_json: r.pdu_json,
             })
             .collect()
         };
@@ -1093,21 +1243,7 @@ impl Storage for PostgresStorage {
 
         let events = rows
             .into_iter()
-            .map(|r| Event {
-                event_id: r.event_id,
-                room_id: r.room_id,
-                sender: r.sender,
-                event_type: r.event_type,
-                state_key: r.state_key,
-                content: r.content,
-                origin_server_ts: r.origin_server_ts as u64,
-                auth_events: r.auth_events,
-                prev_events: r.prev_events,
-                hashes: r.hashes,
-                signatures: r.signatures,
-                depth: r.depth,
-                unsigned: r.unsigned,
-            })
+            .map(|r| event_from_row(EventRow { event_id: r.event_id, pdu_json: r.pdu_json, room_id: r.room_id, sender: r.sender, event_type: r.event_type, state_key: r.state_key, content: r.content, origin_server_ts: r.origin_server_ts, auth_events: r.auth_events, prev_events: r.prev_events, hashes: r.hashes, signatures: r.signatures, depth: r.depth, unsigned: r.unsigned }))
             .collect();
 
         Ok((events, next))
@@ -1138,7 +1274,7 @@ impl Storage for PostgresStorage {
             r#"
             SELECT stream_position, event_id, room_id, sender, type AS event_type,
                    state_key, content, auth_events, prev_events, hashes, signatures,
-                   unsigned, origin_server_ts, depth
+                   unsigned, origin_server_ts, depth, pdu_json
             FROM events
             WHERE room_id = $1 AND type = 'm.room.member' AND state_key = $2
             ORDER BY stream_position ASC
@@ -1155,21 +1291,7 @@ impl Storage for PostgresStorage {
             .map(|r| {
                 (
                     r.stream_position,
-                    Event {
-                        event_id: r.event_id,
-                        room_id: r.room_id,
-                        sender: r.sender,
-                        event_type: r.event_type,
-                        state_key: r.state_key,
-                        content: r.content,
-                        origin_server_ts: r.origin_server_ts as u64,
-                        auth_events: r.auth_events,
-                        prev_events: r.prev_events,
-                        hashes: r.hashes,
-                        signatures: r.signatures,
-                        depth: r.depth,
-                        unsigned: r.unsigned,
-                    },
+                    event_from_row(EventRow { event_id: r.event_id, pdu_json: r.pdu_json, room_id: r.room_id, sender: r.sender, event_type: r.event_type, state_key: r.state_key, content: r.content, origin_server_ts: r.origin_server_ts, auth_events: r.auth_events, prev_events: r.prev_events, hashes: r.hashes, signatures: r.signatures, depth: r.depth, unsigned: r.unsigned }),
                 )
             })
             .collect())
@@ -1185,7 +1307,7 @@ impl Storage for PostgresStorage {
             r#"
             SELECT stream_position, event_id, room_id, sender, type AS event_type,
                    state_key, content, auth_events, prev_events, hashes, signatures,
-                   unsigned, origin_server_ts, depth
+                   unsigned, origin_server_ts, depth, pdu_json
             FROM events
             WHERE room_id = $1 AND type = 'm.room.member' AND state_key LIKE '%' || $2
             ORDER BY stream_position ASC
@@ -1202,21 +1324,7 @@ impl Storage for PostgresStorage {
             .map(|r| {
                 (
                     r.stream_position,
-                    Event {
-                        event_id: r.event_id,
-                        room_id: r.room_id,
-                        sender: r.sender,
-                        event_type: r.event_type,
-                        state_key: r.state_key,
-                        content: r.content,
-                        origin_server_ts: r.origin_server_ts as u64,
-                        auth_events: r.auth_events,
-                        prev_events: r.prev_events,
-                        hashes: r.hashes,
-                        signatures: r.signatures,
-                        depth: r.depth,
-                        unsigned: r.unsigned,
-                    },
+                    event_from_row(EventRow { event_id: r.event_id, pdu_json: r.pdu_json, room_id: r.room_id, sender: r.sender, event_type: r.event_type, state_key: r.state_key, content: r.content, origin_server_ts: r.origin_server_ts, auth_events: r.auth_events, prev_events: r.prev_events, hashes: r.hashes, signatures: r.signatures, depth: r.depth, unsigned: r.unsigned }),
                 )
             })
             .collect())
@@ -1253,7 +1361,7 @@ impl Storage for PostgresStorage {
             r#"
             SELECT event_id, room_id, sender, type AS event_type, state_key,
                    content, auth_events, prev_events, hashes, signatures,
-                   unsigned, origin_server_ts, depth
+                   unsigned, origin_server_ts, depth, pdu_json
             FROM events
             WHERE stream_position > $1
             ORDER BY stream_position ASC
@@ -1268,21 +1376,7 @@ impl Storage for PostgresStorage {
 
         let events = rows
             .into_iter()
-            .map(|r| Event {
-                event_id: r.event_id,
-                room_id: r.room_id,
-                sender: r.sender,
-                event_type: r.event_type,
-                state_key: r.state_key,
-                content: r.content,
-                origin_server_ts: r.origin_server_ts as u64,
-                auth_events: r.auth_events,
-                prev_events: r.prev_events,
-                hashes: r.hashes,
-                signatures: r.signatures,
-                depth: r.depth,
-                unsigned: r.unsigned,
-            })
+            .map(|r| event_from_row(EventRow { event_id: r.event_id, pdu_json: r.pdu_json, room_id: r.room_id, sender: r.sender, event_type: r.event_type, state_key: r.state_key, content: r.content, origin_server_ts: r.origin_server_ts, auth_events: r.auth_events, prev_events: r.prev_events, hashes: r.hashes, signatures: r.signatures, depth: r.depth, unsigned: r.unsigned }))
             .collect();
 
         Ok(events)
@@ -2905,16 +2999,17 @@ impl Storage for PostgresStorage {
         txn_id: &str,
         payload: &Value,
     ) -> Result<i64> {
+        let payload_text = json_text(payload);
         let row = sqlx::query!(
             r#"
-            INSERT INTO fed_outbound_queue (destination, kind, txn_id, payload)
+            INSERT INTO fed_outbound_queue (destination, kind, txn_id, payload_text)
             VALUES ($1, $2, $3, $4)
             RETURNING id
             "#,
             destination,
             kind,
             txn_id,
-            payload,
+            payload_text,
         )
         .fetch_one(&self.pool)
         .await
@@ -2943,7 +3038,7 @@ impl Storage for PostgresStorage {
     ) -> Result<Vec<OutboundEntry>> {
         let rows = sqlx::query!(
             r#"
-            SELECT id, destination, kind, txn_id, payload, attempts
+            SELECT id, destination, kind, txn_id, payload, payload_text, attempts
             FROM fed_outbound_queue
             WHERE status = 'pending'
               AND destination = $1
@@ -2957,17 +3052,24 @@ impl Storage for PostgresStorage {
         .fetch_all(&self.pool)
         .await
         .map_err(map_sqlx)?;
-        Ok(rows
-            .into_iter()
-            .map(|r| OutboundEntry {
+        rows.into_iter()
+            .map(|r| Ok(OutboundEntry {
                 id: r.id,
                 destination: r.destination,
                 kind: r.kind,
                 txn_id: r.txn_id,
-                payload: r.payload,
+                payload: text_or_json(r.payload_text, r.payload)?,
                 attempts: r.attempts,
-            })
-            .collect())
+            }))
+            .collect()
+    }
+
+    async fn record_legacy_snapshot_verdicts(&self, outbound_id: i64, verdicts: &Value, note: Option<&str>) -> Result<()> {
+        sqlx::query!(
+            "UPDATE fed_outbound_queue SET legacy_snapshot_verdicts = $2, last_error = COALESCE($3, last_error) WHERE id = $1",
+            outbound_id, json_text(verdicts), note
+        ).execute(&self.pool).await.map_err(map_sqlx)?;
+        Ok(())
     }
 
     async fn mark_outbound_sent(&self, id: i64) -> Result<()> {
@@ -3472,7 +3574,7 @@ impl Storage for PostgresStorage {
             r#"
             SELECT event_id, room_id, sender, type AS event_type, state_key,
                    content, auth_events, prev_events, hashes, signatures,
-                   unsigned, origin_server_ts, depth, stream_position
+                   unsigned, origin_server_ts, depth, pdu_json, stream_position
             FROM events WHERE room_id = $1 ORDER BY stream_position
             "#,
             room_id
@@ -3489,7 +3591,7 @@ impl Storage for PostgresStorage {
             r#"
             SELECT event_id, room_id, sender, type AS event_type, state_key,
                    content, auth_events, prev_events, hashes, signatures,
-                   unsigned, origin_server_ts, depth, stream_position
+                   unsigned, origin_server_ts, depth, pdu_json, stream_position
             FROM events
             WHERE room_id = $1 AND state_key IS NOT NULL AND stream_position <= $2
             ORDER BY stream_position
@@ -3512,7 +3614,7 @@ impl Storage for PostgresStorage {
             r#"
             SELECT event_id, room_id, sender, type AS event_type, state_key,
                    content, auth_events, prev_events, hashes, signatures,
-                   unsigned, origin_server_ts, depth, stream_position
+                   unsigned, origin_server_ts, depth, pdu_json, stream_position
             FROM events
             WHERE room_id = $1 AND type = 'm.room.redaction'
               AND content->>'redacts' = ANY($2)
@@ -3536,7 +3638,7 @@ impl Storage for PostgresStorage {
             r#"
             SELECT event_id, room_id, sender, type AS event_type, state_key,
                    content, auth_events, prev_events, hashes, signatures,
-                   unsigned, origin_server_ts, depth, stream_position
+                   unsigned, origin_server_ts, depth, pdu_json, stream_position
             FROM events
             WHERE room_id = $1 AND content ? 'm.relates_to'
               AND content->'m.relates_to'->>'event_id' = ANY($2)
@@ -3581,7 +3683,7 @@ impl Storage for PostgresStorage {
                 r#"
                 SELECT event_id, room_id, sender, type AS event_type, state_key,
                        content, auth_events, prev_events, hashes, signatures,
-                       unsigned, origin_server_ts, depth, stream_position
+                       unsigned, origin_server_ts, depth, pdu_json, stream_position
                 FROM events
                 WHERE room_id = $1 AND origin_server_ts >= $2
                 ORDER BY origin_server_ts ASC, stream_position ASC
@@ -3599,7 +3701,7 @@ impl Storage for PostgresStorage {
                 r#"
                 SELECT event_id, room_id, sender, type AS event_type, state_key,
                        content, auth_events, prev_events, hashes, signatures,
-                       unsigned, origin_server_ts, depth, stream_position
+                       unsigned, origin_server_ts, depth, pdu_json, stream_position
                 FROM events
                 WHERE room_id = $1 AND origin_server_ts <= $2
                 ORDER BY origin_server_ts DESC, stream_position DESC
@@ -3635,7 +3737,7 @@ impl Storage for PostgresStorage {
             hits AS (
                 SELECT e.event_id, e.room_id, e.sender, e.type AS event_type, e.state_key,
                        e.content, e.auth_events, e.prev_events, e.hashes, e.signatures,
-                       e.unsigned, e.origin_server_ts, e.depth, e.stream_position,
+                       e.unsigned, e.origin_server_ts, e.depth, e.pdu_json, e.stream_position,
                        CASE e.type
                            WHEN 'm.room.message' THEN ts_rank(to_tsvector('english', e.content->>'body'), q.query)
                            WHEN 'm.room.name' THEN ts_rank(to_tsvector('english', e.content->>'name'), q.query)
@@ -3652,7 +3754,7 @@ impl Storage for PostgresStorage {
             SELECT event_id AS "event_id!", room_id AS "room_id!", sender AS "sender!",
                    event_type AS "event_type!", state_key, content AS "content!",
                    auth_events AS "auth_events!", prev_events AS "prev_events!",
-                   hashes AS "hashes!", signatures AS "signatures!", unsigned,
+                   hashes AS "hashes!", signatures AS "signatures!", unsigned, pdu_json,
                    origin_server_ts AS "origin_server_ts!", depth AS "depth!",
                    stream_position AS "stream_position!", rank AS "rank!"
             FROM hits
@@ -3675,21 +3777,7 @@ impl Storage for PostgresStorage {
             .map(|r| conduit::room_content::SearchHit {
                 rank: f64::from(r.rank),
                 position: r.stream_position,
-                event: Event {
-                    event_id: r.event_id,
-                    room_id: r.room_id,
-                    sender: r.sender,
-                    event_type: r.event_type,
-                    state_key: r.state_key,
-                    content: r.content,
-                    origin_server_ts: r.origin_server_ts as u64,
-                    auth_events: r.auth_events,
-                    prev_events: r.prev_events,
-                    hashes: r.hashes,
-                    signatures: r.signatures,
-                    depth: r.depth,
-                    unsigned: r.unsigned,
-                },
+                event: event_from_row(EventRow { event_id: r.event_id, pdu_json: r.pdu_json, room_id: r.room_id, sender: r.sender, event_type: r.event_type, state_key: r.state_key, content: r.content, origin_server_ts: r.origin_server_ts, auth_events: r.auth_events, prev_events: r.prev_events, hashes: r.hashes, signatures: r.signatures, depth: r.depth, unsigned: r.unsigned }),
             })
             .collect())
     }
@@ -4541,27 +4629,14 @@ struct PositionedEventRow {
     origin_server_ts: i64,
     depth: i64,
     stream_position: i64,
+    pdu_json: Option<String>,
 }
 
 impl PositionedEventRow {
     fn into_pair(self) -> (i64, Event) {
         (
             self.stream_position,
-            Event {
-                event_id: self.event_id,
-                room_id: self.room_id,
-                sender: self.sender,
-                event_type: self.event_type,
-                state_key: self.state_key,
-                content: self.content,
-                origin_server_ts: self.origin_server_ts as u64,
-                auth_events: self.auth_events,
-                prev_events: self.prev_events,
-                hashes: self.hashes,
-                signatures: self.signatures,
-                depth: self.depth,
-                unsigned: self.unsigned,
-            },
+            event_from_row(EventRow { event_id: self.event_id, pdu_json: self.pdu_json, room_id: self.room_id, sender: self.sender, event_type: self.event_type, state_key: self.state_key, content: self.content, origin_server_ts: self.origin_server_ts, auth_events: self.auth_events, prev_events: self.prev_events, hashes: self.hashes, signatures: self.signatures, depth: self.depth, unsigned: self.unsigned }),
         )
     }
 }

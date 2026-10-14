@@ -482,17 +482,20 @@ mod tests {
     fn ev(kind: &str, key: &str, content: Value) -> Event {
         Event {
             event_id: format!("${kind}{key}"),
-            room_id: "!r:x".into(),
-            sender: "@a:x".into(),
-            event_type: kind.into(),
-            content,
-            state_key: Some(key.into()),
-            origin_server_ts: 0,
-            auth_events: vec![],
-            prev_events: vec![],
-            hashes: json!({}),
-            signatures: json!({}),
-            depth: 1,
+            pdu: conduit::event::Pdu {
+                room_id: "!r:x".into(),
+                sender: "@a:x".into(),
+                event_type: kind.into(),
+                content,
+                state_key: Some(key.into()),
+                origin_server_ts: 0,
+                auth_events: vec![],
+                prev_events: vec![],
+                hashes: json!({}),
+                signatures: json!({}),
+                depth: 1,
+                extensions: Default::default(),
+            },
             unsigned: None,
         }
     }

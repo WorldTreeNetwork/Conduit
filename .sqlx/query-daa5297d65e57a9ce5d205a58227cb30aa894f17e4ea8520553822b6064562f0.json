@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE events SET id_integrity = $2, pdu_json = COALESCE(pdu_json, $3) WHERE event_id = $1 AND id_integrity = 'unchecked'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "daa5297d65e57a9ce5d205a58227cb30aa894f17e4ea8520553822b6064562f0"
+}

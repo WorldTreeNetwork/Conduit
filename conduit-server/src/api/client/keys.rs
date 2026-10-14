@@ -1664,17 +1664,20 @@ mod fanout_tests {
     fn member_event(room: &str, user: &str, membership: &str) -> Event {
         Event {
             event_id: format!("$mem-{room}-{user}"),
-            room_id: room.to_owned(),
-            sender: user.to_owned(),
-            event_type: "m.room.member".to_owned(),
-            content: json!({ "membership": membership }),
-            state_key: Some(user.to_owned()),
-            origin_server_ts: 0,
-            auth_events: vec![],
-            prev_events: vec![],
-            hashes: json!({}),
-            signatures: json!({}),
-            depth: 1,
+            pdu: conduit::event::Pdu {
+                room_id: room.to_owned(),
+                sender: user.to_owned(),
+                event_type: "m.room.member".to_owned(),
+                content: json!({ "membership": membership }),
+                state_key: Some(user.to_owned()),
+                origin_server_ts: 0,
+                auth_events: vec![],
+                prev_events: vec![],
+                hashes: json!({}),
+                signatures: json!({}),
+                depth: 1,
+                extensions: Default::default(),
+            },
             unsigned: None,
         }
     }

@@ -36,6 +36,7 @@ pub mod signing;
 pub mod state_events;
 pub mod storage;
 pub mod transport;
+pub mod wire;
 
 pub use config::Config;
 pub use error::{require_room_version, Error, Result, ROOM_VERSION};

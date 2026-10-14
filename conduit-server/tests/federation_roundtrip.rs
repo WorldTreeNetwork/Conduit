@@ -21,7 +21,8 @@ use tokio::sync::broadcast;
 
 use conduit::event::Event;
 use conduit::keys::{generate_server_key, public_bytes, ServerKey};
-use conduit::signing::sign_event;
+use conduit::event::Pdu;
+use conduit::signing::sign_authored;
 use conduit::storage::{MemoryStorage, Storage};
 
 use conduit_server::federation::auth::sign_request;
@@ -176,36 +177,30 @@ async fn rt1_server_b_fetches_a_keys() {
 // Test RT-2: Server B sends a transaction to Server A; PDU lands in A's storage
 // ---------------------------------------------------------------------------
 
+/// Sign `pdu` as `server` and wrap it with its derived (reference-hash) ID.
+fn signed_event(key: &conduit::keys::ServerKey, server: &str, mut pdu: Pdu) -> Event {
+    sign_authored(&mut pdu, key, server).unwrap();
+    Event::new(conduit::hashing::event_id(&pdu).unwrap(), pdu)
+}
+
 #[tokio::test]
 async fn rt2_b_sends_transaction_to_a() {
     let server_a = spawn_server("a.test").await;
 
-    // Build a PDU signed by server-a's key (in a real scenario server-b would
-    // sign it; for the roundtrip we reuse a's key since RemoteKeyCache only
-    // points to a's key endpoint in this fixture).
-    let mut pdu = Event {
-        event_id: "$rt2_pdu:a.test".to_owned(),
-        room_id: "!rt2_room:a.test".to_owned(),
-        sender: "@alice:a.test".to_owned(),
-        event_type: "m.room.create".to_owned(),
-        content: json!({ "room_version": "11" }),
-        state_key: Some(String::new()),
-        origin_server_ts: 2_000_000,
-        auth_events: vec![],
-        prev_events: vec![],
-        hashes: json!({}),
-        signatures: json!({}),
-        depth: 1,
-        unsigned: None,
-    };
-    sign_event(&mut pdu, &server_a.server_key, "a.test").unwrap();
+    // A v11 wire PDU (no event_id) signed by server-a's key (RemoteKeyCache
+    // only points to a's key endpoint in this fixture).
+    let event = signed_event(&server_a.server_key, "a.test", Pdu::new(
+        "!rt2_room:a.test", "@alice:a.test", "m.room.create", Some(String::new()),
+        json!({ "room_version": "11" }), 2_000_000, vec![], vec![], 1,
+    ));
 
     let txn_body = json!({
         "origin": "a.test",
         "origin_server_ts": 2_000_000u64,
-        "pdus": [pdu],
+        "pdus": [event.pdu],
         "edus": [],
     });
+    assert!(txn_body["pdus"][0].get("event_id").is_none());
 
     let path = "/_matrix/federation/v1/send/rt2_txn";
     let auth = sign_req("PUT", path, "a.test", "a.test", Some(&txn_body), &server_a.server_key);
@@ -221,14 +216,10 @@ async fn rt2_b_sends_transaction_to_a() {
 
     assert_eq!(resp.status().as_u16(), 200);
     let result: Value = resp.json().await.unwrap();
-    assert_eq!(result["pdus"]["$rt2_pdu:a.test"], json!({}), "{result}");
+    assert_eq!(result["pdus"][&event.event_id], json!({}), "{result}");
 
-    let stored = server_a
-        .storage
-        .get_event("$rt2_pdu:a.test")
-        .await
-        .unwrap();
-    assert!(stored.is_some(), "PDU should be stored on A after transaction");
+    let stored = server_a.storage.get_event(&event.event_id).await.unwrap();
+    assert!(stored.is_some(), "PDU should be stored on A under its derived ID");
 }
 
 // ---------------------------------------------------------------------------
@@ -238,63 +229,35 @@ async fn rt2_b_sends_transaction_to_a() {
 #[tokio::test]
 async fn rt3_join_room_on_a() {
     let server_a = spawn_server("a.test").await;
+    let key = &server_a.server_key;
 
     let room_id = "!rt3_room:a.test";
     let creator = "@alice:a.test";
 
-    // Seed room state on A.
-    let create_ev = Event {
-        event_id: "$rt3_create:a.test".to_owned(),
-        room_id: room_id.to_owned(),
-        sender: creator.to_owned(),
-        event_type: "m.room.create".to_owned(),
-        content: json!({ "room_version": "11" }),
-        state_key: Some("".to_owned()),
-        origin_server_ts: 1000,
-        auth_events: vec![],
-        prev_events: vec![],
-        hashes: json!({}),
-        signatures: json!({}),
-        depth: 1,
-        unsigned: None,
-    };
-    let alice_join = Event {
-        event_id: "$rt3_alice_join:a.test".to_owned(),
-        room_id: room_id.to_owned(),
-        sender: creator.to_owned(),
-        event_type: "m.room.member".to_owned(),
-        content: json!({ "membership": "join" }),
-        state_key: Some(creator.to_owned()),
-        origin_server_ts: 1001,
-        auth_events: vec!["$rt3_create:a.test".to_owned()],
-        prev_events: vec!["$rt3_create:a.test".to_owned()],
-        hashes: json!({}),
-        signatures: json!({}),
-        depth: 2,
-        unsigned: None,
-    };
-    let join_rules = Event {
-        event_id: "$rt3_jr:a.test".to_owned(),
-        room_id: room_id.to_owned(),
-        sender: creator.to_owned(),
-        event_type: "m.room.join_rules".to_owned(),
-        content: json!({ "join_rule": "public" }),
-        state_key: Some("".to_owned()),
-        origin_server_ts: 1002,
-        auth_events: vec!["$rt3_create:a.test".to_owned()],
-        prev_events: vec!["$rt3_alice_join:a.test".to_owned()],
-        hashes: json!({}),
-        signatures: json!({}),
-        depth: 3,
-        unsigned: None,
-    };
+    // Seed room state on A with real, signed v11 events.
+    let create_ev = signed_event(key, "a.test", Pdu::new(
+        room_id, creator, "m.room.create", Some(String::new()),
+        json!({ "room_version": "11" }), 1000, vec![], vec![], 1,
+    ));
+    let alice_join = signed_event(key, "a.test", Pdu::new(
+        room_id, creator, "m.room.member", Some(creator.to_owned()),
+        json!({ "membership": "join" }), 1001,
+        vec![create_ev.event_id.clone()], vec![create_ev.event_id.clone()], 2,
+    ));
+    let join_rules = signed_event(key, "a.test", Pdu::new(
+        room_id, creator, "m.room.join_rules", Some(String::new()),
+        json!({ "join_rule": "public" }), 1002,
+        vec![create_ev.event_id.clone(), alice_join.event_id.clone()], vec![alice_join.event_id.clone()], 3,
+    ));
 
-    server_a.storage.put_event(&create_ev).await.unwrap();
-    server_a.storage.set_state_entry(room_id, "m.room.create", "", "$rt3_create:a.test").await.unwrap();
-    server_a.storage.put_event(&alice_join).await.unwrap();
-    server_a.storage.set_state_entry(room_id, "m.room.member", creator, "$rt3_alice_join:a.test").await.unwrap();
-    server_a.storage.put_event(&join_rules).await.unwrap();
-    server_a.storage.set_state_entry(room_id, "m.room.join_rules", "", "$rt3_jr:a.test").await.unwrap();
+    for (event, event_type, state_key) in [
+        (&create_ev, "m.room.create", ""),
+        (&alice_join, "m.room.member", creator),
+        (&join_rules, "m.room.join_rules", ""),
+    ] {
+        server_a.storage.put_event(event).await.unwrap();
+        server_a.storage.set_state_entry(room_id, event_type, state_key, &event.event_id).await.unwrap();
+    }
 
     let client = &server_a.http;
 
@@ -317,27 +280,24 @@ async fn rt3_join_room_on_a() {
         .await
         .unwrap();
 
-    assert!(mj_resp.get("event").is_some(), "make_join must return event template");
+    let template = mj_resp.get("event").expect("make_join must return event template");
+    assert!(template.get("event_id").is_none(), "v11 template has no event_id: {template}");
 
-    // Step 2: Complete and sign the join event.
-    // Keep event_id stable after signing — signing_bytes includes event_id,
-    // so changing it after sign_event would invalidate the signature.
-    let mut join_ev: Event = serde_json::from_value(mj_resp["event"].clone()).unwrap();
-    sign_event(&mut join_ev, &server_a.server_key, "a.test").unwrap();
-    let join_eid = join_ev.event_id.clone();
+    // Step 2: Complete and sign the join event; its ID is derived.
+    let join_ev = signed_event(key, "a.test", serde_json::from_value(template.clone()).unwrap());
 
     let send_join_path = format!(
         "/_matrix/federation/v2/send_join/{}/{}",
         pct_encode(room_id),
-        pct_encode(&join_eid),
+        pct_encode(&join_ev.event_id),
     );
-    let pdu_val = serde_json::to_value(&join_ev).unwrap();
+    let pdu_val = serde_json::to_value(&join_ev.pdu).unwrap();
     let auth2 = sign_req("PUT", &send_join_path, "a.test", "a.test", Some(&pdu_val), &server_a.server_key);
 
     let sj_resp = client
         .put(format!("{}{}", server_a.base_url, send_join_path))
         .header("Authorization", auth2)
-        .json(&join_ev)
+        .json(&pdu_val)
         .send()
         .await
         .unwrap();
@@ -347,11 +307,13 @@ async fn rt3_join_room_on_a() {
     let sj_body: Value = sj_resp.json().await.unwrap();
     let state_evs = sj_body["state"].as_array().expect("state array in send_join response");
 
-    // Verify the state contains the create event.
     let has_create = state_evs
         .iter()
         .any(|e| e["type"].as_str() == Some("m.room.create"));
     assert!(has_create, "send_join state should include m.room.create");
+    for pdu in state_evs.iter().chain(sj_body["auth_chain"].as_array().unwrap()).chain([&sj_body["event"]]) {
+        assert!(pdu.get("event_id").is_none(), "no local event_id on the wire: {pdu}");
+    }
 
     // Verify bob is now in server-a's storage.
     let bob_member = server_a

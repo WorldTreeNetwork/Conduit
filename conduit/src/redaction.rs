@@ -1,19 +1,33 @@
 //! Room version 11 redaction, including the signed third-party invite subset.
 //!
 //! <https://spec.matrix.org/v1.19/rooms/v11/#redactions>
-//! Signing and reference hashing remove signatures separately. The derived
-//! event ID remains local metadata; it is not part of the v11 PDU bytes.
+//!
+//! The v11 top-level keep-list is `event_id, type, room_id, sender,
+//! state_key, content, hashes, signatures, depth, prev_events, auth_events,
+//! origin_server_ts`. A [`Pdu`] never carries `event_id` (v3+ wire format),
+//! so redaction keeps the typed fields and clears every extension —
+//! including `origin`, `membership` and `prev_state`, which "are no longer
+//! protected from redaction" in v11.
 
-use crate::event::Event;
+use crate::event::{Event, Pdu};
 use serde_json::Value;
 
-/// Return a redacted copy, retaining essential fields and signatures.
-/// All unsigned data is removed, including previous event content.
-pub fn redact_event(event: &Event) -> Event {
-    let mut redacted = event.clone();
-    redacted.content = redact_content(&event.event_type, &event.content);
-    redacted.unsigned = None;
+/// Return the v11 redaction of `pdu`: typed fields kept, content pruned,
+/// extensions cleared. `hashes` and `signatures` are preserved.
+pub fn redact(pdu: &Pdu) -> Pdu {
+    let mut redacted = pdu.clone();
+    redacted.content = redact_content(&pdu.event_type, &pdu.content);
+    redacted.extensions.clear();
     redacted
+}
+
+/// Redact an event's PDU and drop all of its unsigned data, keeping its ID.
+pub fn redact_event(event: &Event) -> Event {
+    Event {
+        event_id: event.event_id.clone(),
+        pdu: redact(&event.pdu),
+        unsigned: None,
+    }
 }
 
 fn redact_content(event_type: &str, content: &Value) -> Value {
@@ -101,5 +115,20 @@ mod tests {
             json!({"membership": "join"})
         );
         assert_eq!(original["reason"], "private");
+    }
+
+    #[test]
+    fn redaction_clears_every_extension_including_v10_protected_keys() {
+        let mut pdu = Pdu::new(
+            "!r:x", "@a:x", "m.room.member", Some("@a:x".into()),
+            json!({"membership": "join"}), 1, vec![], vec![], 1,
+        );
+        for key in ["origin", "membership", "prev_state", "age_ts", "outlier", "destinations", "org.x"] {
+            pdu.extensions.insert(key.into(), json!("v"));
+        }
+        let redacted = redact(&pdu);
+        assert!(redacted.extensions.is_empty());
+        assert_eq!(redacted.hashes, pdu.hashes);
+        assert_eq!(redacted.signatures, pdu.signatures);
     }
 }
