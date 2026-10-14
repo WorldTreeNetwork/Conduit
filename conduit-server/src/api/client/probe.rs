@@ -25,17 +25,27 @@ use super::{AuthState, AuthedUser, MatrixError};
 
 /// `GET /_matrix/client/v3/capabilities`
 pub async fn capabilities<S: AuthState>(
-    State(_state): State<S>,
-    _authed: AuthedUser,
+    State(state): State<S>,
+    authed: AuthedUser,
 ) -> Response {
+    // Account capabilities reflect what this account can actually do
+    // (conduit-y99.18): passwordless and guest accounts cannot change a
+    // password, guests may only change their display name and cannot
+    // mint login tokens, and no 3PIDs are supported.
+    let (has_password, is_guest) = match state.storage().get_account(&authed.user_id).await {
+        Ok(Some(a)) => (a.password_hash.is_some(), a.is_guest),
+        Ok(None) => (false, false),
+        Err(e) => return MatrixError::unknown(e.to_string()).into_response(),
+    };
     (
         StatusCode::OK,
         Json(json!({
             "capabilities": {
-                "m.change_password": { "enabled": true },
+                "m.change_password": { "enabled": has_password && !is_guest },
                 "m.set_displayname":  { "enabled": true },
-                "m.set_avatar_url":   { "enabled": true },
+                "m.set_avatar_url":   { "enabled": !is_guest },
                 "m.3pid_changes":     { "enabled": false },
+                "m.get_login_token":  { "enabled": !is_guest },
                 "m.room_versions": {
                     "default": "11",
                     "available": {

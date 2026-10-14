@@ -217,3 +217,72 @@ log plus `room_forgotten` and `content_reports`.
 - **Ignored users.** Non-state events from `m.ignored_user_list` users are
   dropped before timeline limits in `/sync`, and from `/messages`, `/context`,
   relations, aggregations and search; their invites are not delivered.
+## Account, devices and sessions (conduit-y99.18)
+
+Module map (`conduit-server/src/api/client/`): `account.rs` (router for the
+whole lane, password, deactivation, 3PIDs, whois), `devices.rs`,
+`registration.rs`, `session.rs` (token issuance, `/refresh`,
+`/login/get_token`, device removal, last-seen, guest gate), `uia.rs`,
+`auth_fallback.rs`, `well_known.rs`, `account_config.rs` (environment knobs).
+
+**Tokens.** Access tokens are Biscuits bound to the device epoch. Every login
+on-ramp goes through `session::issue_session`: a known `device_id` keeps the
+device (and its E2EE keys) but advances the epoch, invalidating the device's
+previous access and refresh tokens (spec: relationship between tokens and
+devices). Deleting a device retires its epoch in `retired_device_epochs`, so a
+device recreated with the same ID can never resurrect old tokens. Logout and
+`/logout/all` delete devices, as the spec requires.
+
+**Refresh and soft logout.** `refresh_token: true` on login/register issues a
+hashed refresh token bound to the device epoch and an access token living
+`CONDUIT_REFRESH_TOKEN_ACCESS_LIFETIME_MS` (default 5 min); without it tokens
+live 30 days and `expires_in_ms` says so. `/refresh` rotates: the old token
+stays usable until the new one is used (siblings issued from a reused token are
+revoked). An expired token answers `401 M_UNKNOWN_TOKEN` with
+`soft_logout: true`; a deleted device or moved epoch answers `soft_logout:
+false`. Tokens are also accepted from the deprecated `access_token` query
+parameter.
+
+**UIA.** In-memory sessions bound to the operation and the user; stages must
+follow an offered flow in order; completed stages are not re-run; sessions are
+deleted on success (so `/login/get_token` always re-prompts). Accounts with a
+password get `m.login.password`; passwordless (identikey/SSO) accounts get
+`m.login.dummy` for now. The fallback page (`/auth/{type}/fallback/web`) serves
+password, dummy and registration-token stages and ends with the
+`onAuthDone`/`postMessage("authDone")` script.
+
+**Registration.** Username problems (`M_INVALID_USERNAME`, `M_EXCLUSIVE`,
+`M_USER_IN_USE`) are returned before UIA. Usernames map to lowercase
+localparts; purely numeric localparts are reserved for guests. Missing
+usernames are generated. `inhibit_login`, application-service registration
+(`as_token` bearer, namespace enforced) and `CONDUIT_REGISTRATION_TOKENS`
+(`m.login.registration_token` flow + `/validity`) are supported;
+`CONDUIT_ALLOW_REGISTRATION=false` disables `kind=user`.
+
+**Guests.** `CONDUIT_ALLOW_GUEST_ACCESS=true` enables `kind=guest`
+(numeric user ID, all parameters but `initial_device_display_name` ignored).
+The `AuthedUser` extractor confines guests to the spec's guest endpoint list
+plus sync housekeeping (`session::GUEST_ALLOWED`), answering
+`403 M_GUEST_ACCESS_FORBIDDEN` otherwise, and only lets them join rooms whose
+`m.room.guest_access` is `can_join`. Guests upgrade by registering with
+`guest_access_token` and their own localpart.
+
+**Deactivation.** Leaves joined/invited/knocked rooms, deletes pushers and all
+devices (tokens, keys), marks the account; `erase: true` also clears profile and
+account data and records `accounts.erased_at`. The admin API deactivates the
+same way. Login then answers `M_USER_DEACTIVATED`.
+
+**3PIDs.** None are stored; there is no identity-server client and no outbound
+email/SMS. `GET /account/3pid` is empty, add/bind/legacy-add are `403
+M_FORBIDDEN` (`m.3pid_changes` disabled), delete/unbind return
+`id_server_unbind_result: no-support`, every `requestToken` is `403
+M_THREEPID_DENIED`, and deactivation reports `success` (nothing to unbind).
+
+**Discovery.** `/.well-known/matrix/client` uses
+`CONDUIT_WELL_KNOWN_CLIENT_BASE_URL` or the origin the request reached
+(`X-Forwarded-Host/Proto` aware), plus `CONDUIT_WELL_KNOWN_IDENTITY_SERVER`.
+`/.well-known/matrix/server` is 404 unless `CONDUIT_WELL_KNOWN_SERVER` is set.
+`/.well-known/matrix/support` uses `CONDUIT_SUPPORT_CONTACTS` (JSON array) and
+`CONDUIT_SUPPORT_PAGE`, defaulting to local admins; 404 when nothing is known.
+CORS is the global `*` layer. `GET /admin/whois/{userId}` is limited to the user
+and server admins and reports last-seen IP, timestamp and user agent per device.

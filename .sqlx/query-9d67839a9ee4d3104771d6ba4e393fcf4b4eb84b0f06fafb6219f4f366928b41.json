@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n            SELECT user_id, device_id, display_name, epoch, last_seen_ts,\n                   last_seen_ip::TEXT AS last_seen_ip\n            FROM devices\n            WHERE user_id = $1 AND device_id = $2\n            ",
+  "query": "\n            SELECT user_id, device_id, display_name, epoch, last_seen_ts,\n                   host(last_seen_ip) AS last_seen_ip, last_seen_user_agent\n            FROM devices\n            WHERE user_id = $1\n            ORDER BY device_id\n            ",
   "describe": {
     "columns": [
       {
@@ -32,11 +32,15 @@
         "ordinal": 5,
         "name": "last_seen_ip",
         "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "last_seen_user_agent",
+        "type_info": "Text"
       }
     ],
     "parameters": {
       "Left": [
-        "Text",
         "Text"
       ]
     },
@@ -46,8 +50,9 @@
       true,
       false,
       true,
-      null
+      null,
+      true
     ]
   },
-  "hash": "fb1d304073740e85876da1f82cf573aaec3c27eaf75bf0adaaab47ad5213cc8a"
+  "hash": "9d67839a9ee4d3104771d6ba4e393fcf4b4eb84b0f06fafb6219f4f366928b41"
 }

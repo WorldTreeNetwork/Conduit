@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM to_device_queue WHERE target_user = $1 AND target_device = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "23fcd266215ee2f4096adf34df8399e92e75e28e68c86b40b0153de99d4c715d"
+}

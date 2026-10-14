@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE accounts\n            SET displayname = NULL, avatar_url = NULL, erased_at = now()\n            WHERE user_id = $1\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "7dec3219613e9ea2edf55feed8f66e232f6e6330d088718a89af6356d0026ea0"
+}

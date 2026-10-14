@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n            SELECT user_id, password_hash, is_admin, created_at, deactivated_at,\n                   displayname, avatar_url\n            FROM accounts\n            WHERE user_id = $1\n            ",
+  "query": "\n            SELECT user_id, password_hash, is_admin, created_at, deactivated_at, displayname, avatar_url,\n                   is_guest\n            FROM accounts\n            ORDER BY user_id\n            LIMIT $2 OFFSET $1\n            ",
   "describe": {
     "columns": [
       {
@@ -37,11 +37,17 @@
         "ordinal": 6,
         "name": "avatar_url",
         "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "is_guest",
+        "type_info": "Bool"
       }
     ],
     "parameters": {
       "Left": [
-        "Text"
+        "Int8",
+        "Int8"
       ]
     },
     "nullable": [
@@ -51,8 +57,9 @@
       false,
       true,
       true,
-      true
+      true,
+      false
     ]
   },
-  "hash": "808937612e761de5eb847c15e798bd535ff73aaa630f1cd88e80d103ed510cd6"
+  "hash": "f365e28497eaac401ecbb044ed05fab89356f1e56ea2881cee2c30fe15108ff2"
 }

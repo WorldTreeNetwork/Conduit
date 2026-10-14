@@ -17,6 +17,7 @@ use conduit::{
     Error, Result,
     event::Event,
     storage::{
+        RefreshTokenRecord,
         Account, AuditEntry, Device, DirectoryScope, DlqEntry, MediaMetadata, OutboundEntry,
         Pusher, PushRule, RoomKeyVersion, SigningKey, Storage, ThumbnailMetadata,
         ToDeviceMessage, TokenOwner, UserDirectoryEntry,
@@ -341,7 +342,7 @@ impl Storage for PostgresStorage {
         let row = sqlx::query!(
             r#"
             SELECT user_id, password_hash, is_admin, created_at, deactivated_at,
-                   displayname, avatar_url
+                   displayname, avatar_url, is_guest
             FROM accounts
             WHERE user_id = $1
             "#,
@@ -361,6 +362,7 @@ impl Storage for PostgresStorage {
             deactivated_at: r.deactivated_at,
             displayname: r.displayname,
             avatar_url: r.avatar_url,
+            is_guest: r.is_guest,
         }))
     }
 
@@ -409,8 +411,10 @@ impl Storage for PostgresStorage {
     ) -> Result<()> {
         sqlx::query!(
             r#"
-            INSERT INTO devices (user_id, device_id, display_name)
-            VALUES ($1, $2, $3)
+            INSERT INTO devices (user_id, device_id, display_name, epoch)
+            VALUES ($1, $2, $3, COALESCE(
+                (SELECT epoch + 1 FROM retired_device_epochs
+                 WHERE user_id = $1 AND device_id = $2), 0))
             ON CONFLICT (user_id, device_id)
             DO UPDATE SET display_name = EXCLUDED.display_name
             "#,
@@ -429,7 +433,7 @@ impl Storage for PostgresStorage {
         let row = sqlx::query!(
             r#"
             SELECT user_id, device_id, display_name, epoch, last_seen_ts,
-                   last_seen_ip::TEXT AS last_seen_ip
+                   host(last_seen_ip) AS last_seen_ip, last_seen_user_agent
             FROM devices
             WHERE user_id = $1 AND device_id = $2
             "#,
@@ -449,6 +453,7 @@ impl Storage for PostgresStorage {
             epoch: r.epoch,
             last_seen_ts: r.last_seen_ts,
             last_seen_ip: r.last_seen_ip,
+            last_seen_user_agent: r.last_seen_user_agent,
         }))
     }
 
@@ -456,7 +461,7 @@ impl Storage for PostgresStorage {
         let rows = sqlx::query!(
             r#"
             SELECT user_id, device_id, display_name, epoch, last_seen_ts,
-                   last_seen_ip::TEXT AS last_seen_ip
+                   host(last_seen_ip) AS last_seen_ip, last_seen_user_agent
             FROM devices
             WHERE user_id = $1
             ORDER BY device_id
@@ -476,6 +481,7 @@ impl Storage for PostgresStorage {
                 epoch: r.epoch,
                 last_seen_ts: r.last_seen_ts,
                 last_seen_ip: r.last_seen_ip,
+                last_seen_user_agent: r.last_seen_user_agent,
             })
             .collect();
 
@@ -2685,7 +2691,8 @@ impl Storage for PostgresStorage {
     async fn list_accounts(&self, from: i64, limit: i64) -> Result<Vec<Account>> {
         let rows = sqlx::query!(
             r#"
-            SELECT user_id, password_hash, is_admin, created_at, deactivated_at, displayname, avatar_url
+            SELECT user_id, password_hash, is_admin, created_at, deactivated_at, displayname, avatar_url,
+                   is_guest
             FROM accounts
             ORDER BY user_id
             LIMIT $2 OFFSET $1
@@ -2705,6 +2712,7 @@ impl Storage for PostgresStorage {
             deactivated_at: r.deactivated_at,
             displayname: r.displayname,
             avatar_url: r.avatar_url,
+            is_guest: r.is_guest,
         }).collect())
     }
 
@@ -3702,6 +3710,266 @@ impl Storage for PostgresStorage {
                 received_ts: row.received_ts,
             })
             .collect())
+    }
+
+    // -----------------------------------------------------------------------
+    // Account & device management (conduit-y99.18)
+    // -----------------------------------------------------------------------
+
+    async fn create_device_if_absent(
+        &self,
+        user_id: &str,
+        device_id: &str,
+        display_name: Option<&str>,
+    ) -> Result<bool> {
+        let result = sqlx::query!(
+            r#"
+            INSERT INTO devices (user_id, device_id, display_name, epoch)
+            VALUES ($1, $2, $3, COALESCE(
+                (SELECT epoch + 1 FROM retired_device_epochs
+                 WHERE user_id = $1 AND device_id = $2), 0))
+            ON CONFLICT (user_id, device_id) DO NOTHING
+            "#,
+            user_id,
+            device_id,
+            display_name
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    async fn set_device_display_name(
+        &self,
+        user_id: &str,
+        device_id: &str,
+        display_name: Option<&str>,
+    ) -> Result<bool> {
+        let result = sqlx::query!(
+            r#"
+            UPDATE devices SET display_name = $3
+            WHERE user_id = $1 AND device_id = $2
+            "#,
+            user_id,
+            device_id,
+            display_name
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    async fn delete_device(&self, user_id: &str, device_id: &str) -> Result<bool> {
+        let mut tx = self.pool.begin().await.map_err(map_sqlx)?;
+        sqlx::query!(
+            "DELETE FROM access_tokens WHERE user_id = $1 AND device_id = $2",
+            user_id,
+            device_id
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(map_sqlx)?;
+        sqlx::query!(
+            "DELETE FROM device_keys WHERE user_id = $1 AND device_id = $2",
+            user_id,
+            device_id
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(map_sqlx)?;
+        sqlx::query!(
+            "DELETE FROM one_time_keys WHERE user_id = $1 AND device_id = $2",
+            user_id,
+            device_id
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(map_sqlx)?;
+        sqlx::query!(
+            "DELETE FROM fallback_keys WHERE user_id = $1 AND device_id = $2",
+            user_id,
+            device_id
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(map_sqlx)?;
+        sqlx::query!(
+            "DELETE FROM to_device_queue WHERE target_user = $1 AND target_device = $2",
+            user_id,
+            device_id
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(map_sqlx)?;
+        // refresh_tokens rows cascade with the device row.
+        let retired = sqlx::query!(
+            r#"
+            DELETE FROM devices WHERE user_id = $1 AND device_id = $2
+            RETURNING epoch
+            "#,
+            user_id,
+            device_id
+        )
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(map_sqlx)?;
+        let Some(row) = retired else {
+            tx.commit().await.map_err(map_sqlx)?;
+            return Ok(false);
+        };
+        sqlx::query!(
+            r#"
+            INSERT INTO retired_device_epochs (user_id, device_id, epoch)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (user_id, device_id)
+            DO UPDATE SET epoch = GREATEST(retired_device_epochs.epoch, EXCLUDED.epoch)
+            "#,
+            user_id,
+            device_id,
+            row.epoch
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(map_sqlx)?;
+        tx.commit().await.map_err(map_sqlx)?;
+        Ok(true)
+    }
+
+    async fn touch_device(
+        &self,
+        user_id: &str,
+        device_id: &str,
+        ts_ms: i64,
+        ip: Option<&str>,
+        user_agent: Option<&str>,
+    ) -> Result<()> {
+        sqlx::query!(
+            r#"
+            UPDATE devices
+            SET last_seen_ts = $3,
+                last_seen_ip = COALESCE($4::TEXT::INET, last_seen_ip),
+                last_seen_user_agent = COALESCE($5, last_seen_user_agent)
+            WHERE user_id = $1 AND device_id = $2
+            "#,
+            user_id,
+            device_id,
+            ts_ms,
+            ip,
+            user_agent
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(())
+    }
+
+    async fn set_guest(&self, user_id: &str, is_guest: bool) -> Result<()> {
+        sqlx::query!(
+            "UPDATE accounts SET is_guest = $2 WHERE user_id = $1",
+            user_id,
+            is_guest
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(())
+    }
+
+    async fn list_admin_user_ids(&self) -> Result<Vec<String>> {
+        let rows = sqlx::query!(
+            r#"
+            SELECT user_id FROM accounts
+            WHERE is_admin AND deactivated_at IS NULL
+            ORDER BY user_id
+            "#
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(rows.into_iter().map(|r| r.user_id).collect())
+    }
+
+    async fn erase_account(&self, user_id: &str) -> Result<()> {
+        let mut tx = self.pool.begin().await.map_err(map_sqlx)?;
+        sqlx::query!("DELETE FROM account_data WHERE user_id = $1", user_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx)?;
+        sqlx::query!(
+            r#"
+            UPDATE accounts
+            SET displayname = NULL, avatar_url = NULL, erased_at = now()
+            WHERE user_id = $1
+            "#,
+            user_id
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(map_sqlx)?;
+        tx.commit().await.map_err(map_sqlx)?;
+        Ok(())
+    }
+
+    async fn insert_refresh_token(
+        &self,
+        token_hash: &str,
+        user_id: &str,
+        device_id: &str,
+        epoch: i64,
+        parent_hash: Option<&str>,
+    ) -> Result<()> {
+        sqlx::query!(
+            r#"
+            INSERT INTO refresh_tokens (token_hash, user_id, device_id, epoch, parent_hash)
+            VALUES ($1, $2, $3, $4, $5)
+            "#,
+            token_hash,
+            user_id,
+            device_id,
+            epoch,
+            parent_hash
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(())
+    }
+
+    async fn get_refresh_token(&self, token_hash: &str) -> Result<Option<RefreshTokenRecord>> {
+        let row = sqlx::query!(
+            r#"
+            SELECT user_id, device_id, epoch, parent_hash
+            FROM refresh_tokens WHERE token_hash = $1
+            "#,
+            token_hash
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(row.map(|r| RefreshTokenRecord {
+            user_id: r.user_id,
+            device_id: r.device_id,
+            epoch: r.epoch,
+            parent_hash: r.parent_hash,
+        }))
+    }
+
+    async fn delete_refresh_token(&self, token_hash: &str) -> Result<()> {
+        sqlx::query!("DELETE FROM refresh_tokens WHERE token_hash = $1", token_hash)
+            .execute(&self.pool)
+            .await
+            .map_err(map_sqlx)?;
+        Ok(())
+    }
+
+    async fn delete_refresh_token_children(&self, parent_hash: &str) -> Result<()> {
+        sqlx::query!("DELETE FROM refresh_tokens WHERE parent_hash = $1", parent_hash)
+            .execute(&self.pool)
+            .await
+            .map_err(map_sqlx)?;
+        Ok(())
     }
 }
 

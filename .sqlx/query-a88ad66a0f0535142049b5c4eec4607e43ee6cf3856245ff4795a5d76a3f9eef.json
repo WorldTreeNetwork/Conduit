@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE devices SET display_name = $3\n            WHERE user_id = $1 AND device_id = $2\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a88ad66a0f0535142049b5c4eec4607e43ee6cf3856245ff4795a5d76a3f9eef"
+}

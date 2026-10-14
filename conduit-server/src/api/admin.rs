@@ -117,9 +117,10 @@ pub async fn deactivate_user<S: AuthState>(
 ) -> Response {
     let storage = state.storage();
 
-    match storage.deactivate_account(&user_id).await {
-        Ok(_) => {}
-        Err(e) => return MatrixError::unknown(e.to_string()).into_response(),
+    // Same semantics as POST /account/deactivate: rooms left, devices
+    // (and so every token) removed.
+    if let Err(r) = crate::api::client::account::deactivate_user(&state, &user_id, false).await {
+        return r;
     }
 
     let detail = json!({ "user_id": user_id });

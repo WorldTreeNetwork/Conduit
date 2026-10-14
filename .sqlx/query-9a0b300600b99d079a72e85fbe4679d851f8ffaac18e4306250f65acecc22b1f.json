@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO devices (user_id, device_id, display_name, epoch)\n            VALUES ($1, $2, $3, COALESCE(\n                (SELECT epoch + 1 FROM retired_device_epochs\n                 WHERE user_id = $1 AND device_id = $2), 0))\n            ON CONFLICT (user_id, device_id) DO NOTHING\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "9a0b300600b99d079a72e85fbe4679d851f8ffaac18e4306250f65acecc22b1f"
+}

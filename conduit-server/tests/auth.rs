@@ -517,7 +517,7 @@ async fn access_token_is_a_verifiable_biscuit() {
 }
 
 #[tokio::test]
-async fn logout_bumps_the_device_epoch() {
+async fn logout_deletes_the_device_and_retires_its_epoch() {
     let db = TempDb::new().await;
     let (state, app) = state_and_app(&db).await;
 
@@ -534,13 +534,26 @@ async fn logout_bumps_the_device_epoch() {
 
     assert_eq!(do_logout(&app, &token).await.status(), StatusCode::OK);
 
+    // Spec: logout deletes the device.  Its epoch is retired, so a
+    // device recreated under the same ID starts past it.
+    assert!(state
+        .storage
+        .device_epoch("@alice:localhost", &device_id)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(state
+        .storage
+        .create_device_if_absent("@alice:localhost", &device_id, None)
+        .await
+        .unwrap());
     let after = state
         .storage
         .device_epoch("@alice:localhost", &device_id)
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(after, before + 1, "logout advances the epoch");
+    assert_eq!(after, before + 1, "a recreated device resumes past the retired epoch");
     assert_eq!(do_whoami(&app, &token).await.status(), StatusCode::UNAUTHORIZED);
 }
 

@@ -161,6 +161,9 @@ impl AuthState for AppState {
     fn federation_queue(&self) -> Option<&Arc<federation::Queue>> {
         Some(&self.federation_queue)
     }
+    fn registered_app_services(&self) -> Option<Arc<Vec<AppService>>> {
+        Some(Arc::clone(&self.app_services))
+    }
 }
 
 impl conduit_server::app_service::AsState for AppState {
@@ -681,6 +684,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .merge(conduit_server::api::client::thirdparty::router::<AppState>())
         .merge(conduit_server::api::client::appservice_ping::router::<AppState>())
         .merge(conduit_server::api::client::room_content::router::<AppState>())
+        .merge(conduit_server::api::client::account::router::<AppState>())
         // Apply CS-API rate limiter to everything above (conduit-9m4).
         // Federation routes are nested below and use their own per-origin
         // limiter, so they bypass this one.

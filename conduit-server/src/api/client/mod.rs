@@ -7,9 +7,16 @@
 //!   POST /_matrix/client/v3/logout
 //!   GET  /_matrix/client/v3/account/whoami
 
+pub mod account;
+pub mod account_config;
 pub mod account_data;
 pub mod appservice_ping;
+pub mod auth_fallback;
+pub mod devices;
 pub mod directory;
+pub mod registration;
+pub mod session;
+pub mod well_known;
 pub mod event_pipeline;
 pub mod filters;
 pub mod keys;
@@ -160,6 +167,12 @@ pub trait AuthState: Clone + Send + Sync + 'static + conduit::room::RoomEventSen
     fn login_tokens(&self) -> Arc<sso::LoginTokenStore> {
         static STORE: std::sync::OnceLock<Arc<sso::LoginTokenStore>> = std::sync::OnceLock::new();
         Arc::clone(STORE.get_or_init(|| Arc::new(sso::LoginTokenStore::new())))
+    }
+
+    /// Registered application services (exclusive namespaces, AS
+    /// registration).  Default: none.
+    fn registered_app_services(&self) -> Option<Arc<Vec<crate::app_service::AppService>>> {
+        None
     }
 }
 
@@ -346,28 +359,13 @@ impl<S: AuthState> FromRequestParts<S> for AuthedUser {
     type Rejection = Response;
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
-        let token = extract_bearer_token(&parts.headers)
+        let token = extract_access_token(parts)
             .ok_or_else(|| MatrixError::missing_token().into_response())?;
 
-        let minter = state.minter();
+        let grant = verify_access_token(state, &token).await?;
 
-        // Two steps, because the epoch the Datalog compares against
-        // lives in the device row: read the signed claims first, then
-        // fetch that row, then authorize.
-        let claims = agency::parse_claims(&minter.public_key(), &token)
-            .map_err(|_| MatrixError::unknown_token().into_response())?;
-
-        let epoch = state
-            .storage()
-            .device_epoch(&claims.user_id, &claims.device_id)
-            .await
-            .map_err(|e| MatrixError::unknown(e.to_string()).into_response())?
-            // No device row means the device was deleted: fail closed.
-            .ok_or_else(|| MatrixError::unknown_token().into_response())?;
-
-        let ctx = VerifyContext::cs(state.server_name(), now_unix(), epoch);
-        let grant = agency::verify(&minter.public_key(), &token, &ctx)
-            .map_err(|_| MatrixError::unknown_token().into_response())?;
+        session::guest_gate(state, parts, &grant.user_id).await?;
+        session::touch(state, parts, &grant.user_id, &grant.device_id);
 
         Ok(AuthedUser {
             user_id: grant.user_id.clone(),
@@ -377,9 +375,60 @@ impl<S: AuthState> FromRequestParts<S> for AuthedUser {
     }
 }
 
+/// Verify a capability access token.
+///
+/// Failures are `401 M_UNKNOWN_TOKEN`.  `soft_logout` is `true` only
+/// when the session itself is intact and merely the token's lifetime ran
+/// out — the client may refresh or log in again with the same device.
+/// A deleted device or a logged-out session (epoch moved on) is a hard
+/// logout.
+pub async fn verify_access_token<S: AuthState>(
+    state: &S,
+    token: &str,
+) -> Result<agency::Grant, Response> {
+    let minter = state.minter();
+
+    // Two steps, because the epoch the Datalog compares against
+    // lives in the device row: read the signed claims first, then
+    // fetch that row, then authorize.
+    let claims = agency::parse_claims(&minter.public_key(), token)
+        .map_err(|_| MatrixError::unknown_token().into_response())?;
+
+    let epoch = state
+        .storage()
+        .device_epoch(&claims.user_id, &claims.device_id)
+        .await
+        .map_err(|e| MatrixError::unknown(e.to_string()).into_response())?
+        // No device row means the device was deleted: fail closed.
+        .ok_or_else(|| session::unknown_token_response(false, "Unrecognised access token"))?;
+
+    let ctx = VerifyContext::cs(state.server_name(), now_unix(), epoch);
+    agency::verify(&minter.public_key(), token, &ctx).map_err(|_| {
+        if claims.epoch == epoch && claims.server_name == state.server_name() {
+            // Same live session, so the time check is what failed.
+            session::unknown_token_response(true, "Access token has expired")
+        } else {
+            session::unknown_token_response(false, "Unrecognised access token")
+        }
+    })
+}
+
 fn extract_bearer_token(headers: &HeaderMap) -> Option<String> {
     let val = headers.get("authorization")?.to_str().ok()?;
     val.strip_prefix("Bearer ").map(|s| s.to_owned())
+}
+
+/// The access token from `Authorization: Bearer`, or the deprecated
+/// `access_token` query parameter (servers MUST support both).
+pub fn extract_access_token(parts: &Parts) -> Option<String> {
+    if let Some(t) = extract_bearer_token(&parts.headers) {
+        return Some(t);
+    }
+    let query = parts.uri.query()?;
+    url::form_urlencoded::parse(query.as_bytes())
+        .find(|(k, _)| k == "access_token")
+        .map(|(_, v)| v.into_owned())
+        .filter(|v| !v.is_empty())
 }
 
 // ---------------------------------------------------------------------------
@@ -387,53 +436,33 @@ fn extract_bearer_token(headers: &HeaderMap) -> Option<String> {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
-pub struct RegisterRequest {
-    pub username: Option<String>,
-    pub password: Option<String>,
-    pub device_id: Option<String>,
-    pub initial_device_display_name: Option<String>,
-    /// UIA auth block
-    pub auth: Option<UiaAuthBlock>,
-    /// Optional identikey-auth fingerprint (base58) to link to the new
-    /// account, so a later challenge/response can log in as this user.
-    #[serde(rename = "io.identikey.fingerprint")]
-    pub identikey_fingerprint: Option<String>,
-    /// Optional OIDC `sub`. Ignored unless `oidc_token` is also present
-    /// and verifies to this same subject — a bare sub is not accepted.
-    #[serde(rename = "io.identikey.oidc_sub")]
-    pub oidc_sub: Option<String>,
-    /// OP ID token (JWT). Verified before any account link is written.
-    #[serde(rename = "io.identikey.oidc_token")]
-    pub oidc_token: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct UiaAuthBlock {
-    #[serde(rename = "type")]
-    pub auth_type: String,
-    pub session: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct RegisterResponse {
-    pub user_id: String,
-    pub access_token: String,
-    pub device_id: String,
-}
-
-#[derive(Debug, Deserialize)]
 pub struct LoginRequest {
     #[serde(rename = "type")]
     pub login_type: String,
     pub identifier: Option<LoginIdentifier>,
+    /// Deprecated top-level user field, still sent by older clients.
+    pub user: Option<String>,
     pub password: Option<String>,
     pub device_id: Option<String>,
     pub initial_device_display_name: Option<String>,
+    /// `true` when the client supports refresh tokens.
+    #[serde(default)]
+    pub refresh_token: bool,
     /// For `io.identikey.auth`: url-safe base64 of the challenge
     /// response bytes.
     pub response: Option<String>,
     /// For `io.identikey.oidc`: the OP ID/access token (JWT).
     pub token: Option<String>,
+}
+
+impl LoginRequest {
+    fn options(&self) -> session::LoginOptions {
+        session::LoginOptions {
+            device_id: self.device_id.clone(),
+            initial_device_display_name: self.initial_device_display_name.clone(),
+            refresh_token: self.refresh_token,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -454,122 +483,17 @@ pub struct LoginResponse {
 // POST /_matrix/client/v3/register
 // ---------------------------------------------------------------------------
 
+/// Registration lives in [`registration`]; this keeps the long-standing
+/// handler path for routers and tests.
 pub async fn register<S: AuthState>(
     State(state): State<S>,
-    Json(body): Json<RegisterRequest>,
+    query: Option<axum::extract::Query<registration::RegisterQuery>>,
+    headers: HeaderMap,
+    body: Option<Json<serde_json::Value>>,
 ) -> Response {
-    // UIA: require m.login.dummy stage completed.
-    let auth = match &body.auth {
-        Some(a) if a.auth_type == "m.login.dummy" => a,
-        _ => {
-            // Return 401 with flows to prompt client to complete UIA.
-            let session_id = uia::new_session_id();
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(json!({
-                    "flows": [{ "stages": ["m.login.dummy"] }],
-                    "params": {},
-                    "session": session_id
-                })),
-            )
-                .into_response();
-        }
-    };
-
-    let localpart = match &body.username {
-        Some(u) if !u.is_empty() => u.clone(),
-        _ => {
-            return MatrixError::invalid_username("username is required").into_response();
-        }
-    };
-
-    // Validate localpart: only lowercase a-z, 0-9, -, _, .
-    if !localpart.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')) {
-        return MatrixError::invalid_username("username contains invalid characters").into_response();
-    }
-
-    let user_id = format!("@{}:{}", localpart, state.server_name());
-
-    // Hash password (or None for passwordless).
-    let password_hash = match &body.password {
-        Some(pw) if !pw.is_empty() => match hash_password(pw.clone()).await {
-            Ok(h) => Some(h),
-            Err(e) => return MatrixError::unknown(format!("password hashing failed: {e}")).into_response(),
-        },
-        _ => None,
-    };
-
-    // Create account.
-    if let Err(e) = state.storage().create_account(&user_id, password_hash.as_deref()).await {
-        let msg = e.to_string();
-        if msg.contains("already exists") {
-            return MatrixError::user_in_use(&user_id).into_response();
-        }
-        return MatrixError::unknown(msg).into_response();
-    }
-
-    // Device.
-    let device_id = body.device_id.clone().unwrap_or_else(|| generate_device_id());
-    let display_name = body.initial_device_display_name.as_deref();
-    if let Err(e) = state.storage().upsert_device(&user_id, &device_id, display_name).await {
-        return MatrixError::unknown(e.to_string()).into_response();
-    }
-
-    // Registration is also where an identikey-auth identity may be
-    // linked: the account is being created here, so this is one of the
-    // only two places a fingerprint may be bound to an MXID.
-    if let Some(fingerprint) = body.identikey_fingerprint.as_deref() {
-        if let Err(e) =
-            conduit::identity::link_at_registration(state.storage().as_ref(), fingerprint, &user_id)
-                .await
-        {
-            return MatrixError::forbidden(e.to_string()).into_response();
-        }
-    }
-    if body.oidc_sub.is_some() && body.oidc_token.is_none() {
-        return MatrixError::forbidden(
-            "io.identikey.oidc_sub is not accepted without a verified io.identikey.oidc_token",
-        )
-        .into_response();
-    }
-    if let Some(token) = body.oidc_token.as_deref() {
-        let Some(client) = state.oidc_client() else {
-            return MatrixError::forbidden("oidc is not configured").into_response();
-        };
-        let identity = match client.validate(token, now_unix().max(0) as u64).await {
-            Ok(id) => id,
-            Err(e) => return MatrixError::forbidden(e.to_string()).into_response(),
-        };
-        if let Some(claimed) = body.oidc_sub.as_deref() {
-            if claimed != identity.subject {
-                return MatrixError::forbidden("io.identikey.oidc_sub does not match token")
-                    .into_response();
-            }
-        }
-        let key = conduit::identity::oidc_identity_key(&identity.subject);
-        if let Err(e) =
-            conduit::identity::link_at_registration(state.storage().as_ref(), &key, &user_id).await
-        {
-            return MatrixError::forbidden(e.to_string()).into_response();
-        }
-    }
-
-    // Agency: mint the capability token for the new session.
-    let raw_token = match mint_access_token(&state, &user_id, &device_id).await {
-        Ok(t) => t,
-        Err(e) => return MatrixError::unknown(e).into_response(),
-    };
-
-    // Mark UIA session used (no-op for dummy, but keeps the pattern).
-    if let Some(session) = &auth.session {
-        uia::mark_session_used(session);
-    }
-
-    (
-        StatusCode::OK,
-        Json(RegisterResponse { user_id, access_token: raw_token, device_id }),
-    )
-        .into_response()
+    let query = query.map(|q| q.0).unwrap_or_default();
+    let body = body.map(|b| b.0).unwrap_or_else(|| json!({}));
+    registration::register(state, query, headers, body).await
 }
 
 // ---------------------------------------------------------------------------
@@ -593,8 +517,9 @@ pub async fn get_login_flows<S: AuthState>(State(state): State<S>) -> Json<serde
                 "brand": "identikey",
             }],
         }));
-        flows.push(json!({ "type": "m.login.token" }));
     }
+    // Tokens come from SSO and from POST /login/get_token.
+    flows.push(json!({ "type": "m.login.token", "get_login_token": true }));
     Json(json!({ "flows": flows }))
 }
 
@@ -602,6 +527,23 @@ pub async fn get_login_flows<S: AuthState>(State(state): State<S>) -> Json<serde
 pub const IDENTIKEY_LOGIN_TYPE: &str = "io.identikey.auth";
 /// The login `type` for a verified identikey-core (OIDC) ID token.
 pub const OIDC_LOGIN_TYPE: &str = "io.identikey.oidc";
+
+/// `403 M_USER_DEACTIVATED`.
+pub fn user_deactivated() -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        Json(json!({"errcode": "M_USER_DEACTIVATED", "error": "This account has been deactivated"})),
+    )
+        .into_response()
+}
+
+/// Issue the login response for an authenticated user.
+async fn login_response<S: AuthState>(state: &S, user_id: &str, body: &LoginRequest) -> Response {
+    match session::issue_session(state, user_id, &body.options()).await {
+        Ok(v) => (StatusCode::OK, Json(v)).into_response(),
+        Err(r) => r,
+    }
+}
 
 // ---------------------------------------------------------------------------
 // POST /_matrix/client/v3/login
@@ -621,28 +563,39 @@ pub async fn login<S: AuthState>(
         let Some(token) = body.token.as_deref() else {
             return MatrixError::forbidden("m.login.token requires a token").into_response();
         };
-        return sso::token_login(state, token).await;
+        return sso::token_login(state, token, body.options()).await;
     }
     if body.login_type != "m.login.password" {
-        return MatrixError::forbidden(format!("unsupported login type: {}", body.login_type))
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "errcode": "M_UNKNOWN",
+                "error": format!("unsupported login type: {}", body.login_type),
+            })),
+        )
             .into_response();
     }
 
-    // Extract localpart from identifier.
-    let localpart = match &body.identifier {
-        Some(id) if id.id_type == "m.id.user" => match &id.user {
-            Some(u) if !u.is_empty() => {
-                // Strip leading @ if present (some clients send the full user_id here).
-                u.trim_start_matches('@')
-                 .split(':')
-                 .next()
-                 .unwrap_or(u)
-                 .to_owned()
-            }
-            _ => return MatrixError::forbidden("missing user identifier").into_response(),
-        },
-        _ => return MatrixError::forbidden("identifier type must be m.id.user").into_response(),
+    // Extract the localpart from the identifier (or the deprecated
+    // top-level `user`).
+    let raw_user = match &body.identifier {
+        Some(id) if id.id_type == "m.id.user" => id.user.clone(),
+        Some(_) => {
+            return MatrixError::forbidden("unknown or unsupported identifier").into_response()
+        }
+        None => body.user.clone(),
     };
+    let Some(raw_user) = raw_user.filter(|u| !u.is_empty()) else {
+        return MatrixError::forbidden("missing user identifier").into_response();
+    };
+    let localpart = match raw_user.strip_prefix('@') {
+        Some(full) => match full.split_once(':') {
+            Some((local, server)) if server == state.server_name() => local.to_owned(),
+            _ => return MatrixError::forbidden("unknown user or bad password").into_response(),
+        },
+        None => raw_user.clone(),
+    }
+    .to_lowercase();
 
     let user_id = format!("@{}:{}", localpart, state.server_name());
 
@@ -658,15 +611,10 @@ pub async fn login<S: AuthState>(
         Err(e) => return MatrixError::unknown(e.to_string()).into_response(),
     };
 
-    // Check deactivated.
-    if account.deactivated_at.is_some() {
-        return MatrixError::forbidden("account deactivated").into_response();
-    }
-
     // Verify password.
-    let stored_hash = match account.password_hash {
+    let stored_hash = match account.password_hash.clone() {
         Some(h) => h,
-        None => return MatrixError::forbidden("account has no password").into_response(),
+        None => return MatrixError::forbidden("unknown user or bad password").into_response(),
     };
 
     match verify_password(password, stored_hash).await {
@@ -675,59 +623,44 @@ pub async fn login<S: AuthState>(
         Err(e) => return MatrixError::unknown(e.to_string()).into_response(),
     }
 
-    // Issue device + token.
-    let device_id = body.device_id.clone().unwrap_or_else(|| generate_device_id());
-    let display_name = body.initial_device_display_name.as_deref();
-    if let Err(e) = state.storage().upsert_device(&user_id, &device_id, display_name).await {
-        return MatrixError::unknown(e.to_string()).into_response();
+    // Only after the password proved who is asking: deactivated.
+    if account.deactivated_at.is_some() {
+        return user_deactivated();
     }
 
-    let raw_token = match mint_access_token(&state, &user_id, &device_id).await {
-        Ok(t) => t,
-        Err(e) => return MatrixError::unknown(e).into_response(),
-    };
-
-    (
-        StatusCode::OK,
-        Json(LoginResponse { user_id, access_token: raw_token, device_id }),
-    )
-        .into_response()
+    login_response(&state, &user_id, &body).await
 }
 
 // ---------------------------------------------------------------------------
 // POST /_matrix/client/v3/logout
 // ---------------------------------------------------------------------------
 
-/// Logging out advances the device's epoch.  Every capability token
-/// minted for that device stops verifying on the next request, without
-/// a denylist and without the server having stored the token bytes.
+/// Logging out deletes the device (spec): its tokens, refresh tokens and
+/// E2EE keys go with it, and every outstanding capability token for it
+/// fails on the next request because its device row is gone.
 pub async fn logout<S: AuthState>(
     State(state): State<S>,
     authed: AuthedUser,
 ) -> Response {
-    if let Err(e) = state
-        .storage()
-        .bump_device_epoch(&authed.user_id, &authed.device_id)
-        .await
-    {
-        return MatrixError::unknown(e.to_string()).into_response();
+    match session::remove_devices(&state, &authed.user_id, std::slice::from_ref(&authed.device_id)).await {
+        Ok(()) => (StatusCode::OK, Json(json!({}))).into_response(),
+        Err(r) => r,
     }
-    (StatusCode::OK, Json(json!({}))).into_response()
 }
 
-/// `POST /_matrix/client/v3/logout/all` — every device, one update.
+/// `POST /_matrix/client/v3/logout/all` — every device of the user.
 pub async fn logout_all<S: AuthState>(
     State(state): State<S>,
     authed: AuthedUser,
 ) -> Response {
-    if let Err(e) = state
-        .storage()
-        .bump_all_device_epochs(&authed.user_id)
-        .await
-    {
-        return MatrixError::unknown(e.to_string()).into_response();
+    let devices = match session::device_ids_except(&state, &authed.user_id, None).await {
+        Ok(d) => d,
+        Err(r) => return r,
+    };
+    match session::remove_devices(&state, &authed.user_id, &devices).await {
+        Ok(()) => (StatusCode::OK, Json(json!({}))).into_response(),
+        Err(r) => r,
     }
-    (StatusCode::OK, Json(json!({}))).into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -782,37 +715,11 @@ async fn identikey_login<S: AuthState>(state: S, body: LoginRequest) -> Response
         Err(e) => return MatrixError::unknown(e.to_string()).into_response(),
     };
     if account.deactivated_at.is_some() {
-        return MatrixError::forbidden("account deactivated").into_response();
-    }
-
-    let device_id = body.device_id.clone().unwrap_or_else(generate_device_id);
-    if let Err(e) = state
-        .storage()
-        .upsert_device(
-            &logged_in.user_id,
-            &device_id,
-            body.initial_device_display_name.as_deref(),
-        )
-        .await
-    {
-        return MatrixError::unknown(e.to_string()).into_response();
+        return user_deactivated();
     }
 
     // Agency, minted exactly as the password on-ramp mints it.
-    let raw_token = match mint_access_token(&state, &logged_in.user_id, &device_id).await {
-        Ok(t) => t,
-        Err(e) => return MatrixError::unknown(e).into_response(),
-    };
-
-    (
-        StatusCode::OK,
-        Json(LoginResponse {
-            user_id: logged_in.user_id,
-            access_token: raw_token,
-            device_id,
-        }),
-    )
-        .into_response()
+    login_response(&state, &logged_in.user_id, &body).await
 }
 
 /// The `io.identikey.oidc` branch of `POST /login`.
@@ -849,36 +756,10 @@ async fn oidc_login<S: AuthState>(state: S, body: LoginRequest) -> Response {
         Err(e) => return MatrixError::unknown(e.to_string()).into_response(),
     };
     if account.deactivated_at.is_some() {
-        return MatrixError::forbidden("account deactivated").into_response();
+        return user_deactivated();
     }
 
-    let device_id = body.device_id.clone().unwrap_or_else(generate_device_id);
-    if let Err(e) = state
-        .storage()
-        .upsert_device(
-            &logged_in.user_id,
-            &device_id,
-            body.initial_device_display_name.as_deref(),
-        )
-        .await
-    {
-        return MatrixError::unknown(e.to_string()).into_response();
-    }
-
-    let raw_token = match mint_access_token(&state, &logged_in.user_id, &device_id).await {
-        Ok(t) => t,
-        Err(e) => return MatrixError::unknown(e).into_response(),
-    };
-
-    (
-        StatusCode::OK,
-        Json(LoginResponse {
-            user_id: logged_in.user_id,
-            access_token: raw_token,
-            device_id,
-        }),
-    )
-        .into_response()
+    login_response(&state, &logged_in.user_id, &body).await
 }
 
 /// `POST /_matrix/client/v3/account/identikey/bind`

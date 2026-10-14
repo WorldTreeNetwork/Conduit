@@ -1351,6 +1351,300 @@
         "conduit-server/tests/production_rooms.rs::ignored_users_are_filtered_from_sync_messages_and_invites",
         "conduit-server/src/api/client/room_content/serve.rs::tests"
       ]
+    },
+    {
+      "id": "cs-device-management",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#device-management",
+      "status": "covered_assertions_only",
+      "assertions": [
+        "GET /devices and /devices/{id} list the caller's devices with display name and last-seen data; unknown device is 404 M_NOT_FOUND",
+        "PUT /devices/{id} renames, leaves the name unchanged when display_name is absent, and 404s for unknown devices",
+        "DELETE /devices/{id} and POST /delete_devices require UIA (m.login.password for password accounts) and succeed for already-deleted devices",
+        "Deleting a device invalidates its access tokens (hard logout), removes device keys and one-time keys, and reports the user in other users' device_lists.changed",
+        "A device recreated with a deleted device ID never accepts tokens minted for the deleted device",
+        "Re-login with a known device_id ignores initial_device_display_name and invalidates the device's previous tokens"
+      ],
+      "implementation": [
+        "conduit-server/src/api/client/devices.rs",
+        "conduit-server/src/api/client/session.rs",
+        "conduit-server/src/storage_pg.rs",
+        "conduit-server/migrations/0015_account_devices.sql"
+      ],
+      "tests": [
+        "conduit-server/tests/production_account.rs::production_device_lifecycle_with_uia_keys_and_device_lists",
+        "conduit-server/tests/auth.rs::logout_deletes_the_device_and_retires_its_epoch"
+      ],
+      "limitations": [
+        "Application-service device creation via PUT /devices (201) is not implemented: CS-API identity assertion for application services is absent server-wide"
+      ],
+      "gap_issues": [
+        "conduit-y99.18.1"
+      ]
+    },
+    {
+      "id": "cs-logout-deletes-device",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#post_matrixclientv3logout",
+      "status": "covered_assertions_only",
+      "assertions": [
+        "POST /logout deletes the calling device and its tokens",
+        "POST /logout/all deletes every device of the user"
+      ],
+      "implementation": [
+        "conduit-server/src/api/client/mod.rs",
+        "conduit-server/src/api/client/session.rs"
+      ],
+      "tests": [
+        "conduit-server/tests/production_account.rs::production_logout_deletes_devices"
+      ],
+      "limitations": []
+    },
+    {
+      "id": "cs-user-interactive-auth",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#user-interactive-authentication-api",
+      "status": "covered_assertions_only",
+      "assertions": [
+        "Requests without auth receive 401 with flows, params and session",
+        "Failed stages return 401 with errcode, the same session and completed stages",
+        "Stages outside the offered flows are refused; sessions are bound to the operation and user",
+        "Unknown sessions are an error, not a fresh challenge",
+        "Fallback pages for m.login.password and m.login.registration_token complete the stage and run the onAuthDone/postMessage script; the client then resubmits with only the session"
+      ],
+      "implementation": [
+        "conduit-server/src/api/client/uia.rs",
+        "conduit-server/src/api/client/auth_fallback.rs"
+      ],
+      "tests": [
+        "conduit-server/src/api/client/uia.rs::tests",
+        "conduit-server/tests/production_account.rs::production_password_fallback_page_completes_uia",
+        "conduit-server/tests/production_account.rs::production_registration_tokens_gate_registration",
+        "conduit-server/tests/production_account.rs::production_device_lifecycle_with_uia_keys_and_device_lists"
+      ],
+      "limitations": [
+        "Passwordless (identikey/SSO) accounts are offered m.login.dummy; an m.login.sso or identikey re-authentication stage is a follow-up",
+        "Sessions are process-memory only"
+      ],
+      "gap_issues": [
+        "conduit-y99.18.2"
+      ]
+    },
+    {
+      "id": "cs-password-change",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#post_matrixclientv3accountpassword",
+      "status": "covered_assertions_only",
+      "assertions": [
+        "UIA with m.login.password is required; missing new_password is M_MISSING_PARAM",
+        "logout_devices defaults to true: other devices are revoked, the requesting session survives",
+        "logout_devices false keeps every session",
+        "Without an access token the password stage identifies the user and every device is revoked",
+        "m.change_password capability is enabled only for non-guest accounts with a password"
+      ],
+      "implementation": [
+        "conduit-server/src/api/client/account.rs",
+        "conduit-server/src/api/client/probe.rs"
+      ],
+      "tests": [
+        "conduit-server/tests/production_account.rs::production_password_change_revokes_other_devices",
+        "conduit-server/tests/production_account.rs::production_guest_access_is_restricted_and_upgradable"
+      ],
+      "limitations": []
+    },
+    {
+      "id": "cs-account-deactivation",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#post_matrixclientv3accountdeactivate",
+      "status": "covered_assertions_only",
+      "assertions": [
+        "UIA is required; success returns id_server_unbind_result success (no 3PIDs to unbind)",
+        "Every token is invalidated, rooms are left (membership leave visible to others) and login returns M_USER_DEACTIVATED",
+        "erase clears profile and account data; the user ID remains unavailable"
+      ],
+      "implementation": [
+        "conduit-server/src/api/client/account.rs",
+        "conduit-server/src/api/admin.rs"
+      ],
+      "tests": [
+        "conduit-server/tests/production_account.rs::production_deactivation_leaves_rooms_and_blocks_login"
+      ],
+      "limitations": [
+        "Erasure does not yet serve redacted copies of the user's events to later joiners"
+      ],
+      "gap_issues": [
+        "conduit-y99.18.3"
+      ]
+    },
+    {
+      "id": "cs-registration",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#post_matrixclientv3register",
+      "status": "covered_assertions_only",
+      "assertions": [
+        "M_INVALID_USERNAME, M_EXCLUSIVE and M_USER_IN_USE are returned before UIA",
+        "Usernames map to lowercase localparts under the user ID grammar; numeric localparts are reserved for guests; omitted usernames are generated",
+        "inhibit_login returns only user_id; unknown kind is M_INVALID_PARAM",
+        "Application services register in their namespace with their as_token and receive M_EXCLUSIVE outside it",
+        "GET /register/available reports available, M_USER_IN_USE, M_INVALID_USERNAME, M_EXCLUSIVE and M_MISSING_PARAM",
+        "Registration tokens gate registration via m.login.registration_token and the validity endpoint; disabled registration is 403 M_FORBIDDEN on register, validity and availability"
+      ],
+      "implementation": [
+        "conduit-server/src/api/client/registration.rs",
+        "conduit-server/src/api/client/account_config.rs"
+      ],
+      "tests": [
+        "conduit-server/src/api/client/registration.rs::tests",
+        "conduit-server/tests/production_account.rs::production_registration_validates_usernames_before_uia",
+        "conduit-server/tests/production_account.rs::production_registration_tokens_gate_registration",
+        "conduit-server/tests/production_account.rs::production_registration_can_be_disabled"
+      ],
+      "limitations": [
+        "Registration tokens come from configuration and have no use limits or expiry"
+      ]
+    },
+    {
+      "id": "cs-refresh-tokens-and-soft-logout",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#refreshing-access-tokens",
+      "status": "covered_assertions_only",
+      "assertions": [
+        "refresh_token true yields refresh_token and expires_in_ms; otherwise the 30-day lifetime is advertised",
+        "Expired access tokens answer M_UNKNOWN_TOKEN with soft_logout true; revoked sessions with soft_logout false",
+        "POST /refresh rotates tokens; the old refresh token stays valid until the new one is used",
+        "Unknown, revoked, logged-out and re-login-superseded refresh tokens are M_UNKNOWN_TOKEN; missing refresh_token is M_MISSING_PARAM",
+        "Soft-logout recovery by re-login with the same device keeps the device's E2EE keys"
+      ],
+      "implementation": [
+        "conduit-server/src/api/client/session.rs",
+        "conduit-server/src/api/client/mod.rs"
+      ],
+      "tests": [
+        "conduit-server/tests/production_account.rs::production_refresh_tokens_rotate_and_soft_logout"
+      ],
+      "limitations": [
+        "The old refresh token is revoked when the new refresh token is used, not when the new access token is first used"
+      ]
+    },
+    {
+      "id": "cs-access-token-query-parameter",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#using-access-tokens",
+      "status": "covered_assertions_only",
+      "assertions": [
+        "The deprecated access_token query parameter authenticates like the Authorization header"
+      ],
+      "implementation": [
+        "conduit-server/src/api/client/mod.rs"
+      ],
+      "tests": [
+        "conduit-server/tests/production_account.rs::production_access_token_query_parameter_is_accepted"
+      ],
+      "limitations": []
+    },
+    {
+      "id": "cs-guest-access",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#guest-access",
+      "status": "covered_assertions_only",
+      "assertions": [
+        "kind=guest is 403 M_GUEST_ACCESS_FORBIDDEN unless enabled; enabled guests get a numeric user ID and only initial_device_display_name is honoured",
+        "Guests are confined to the guest endpoint subset with M_GUEST_ACCESS_FORBIDDEN otherwise",
+        "Guests may only join rooms whose m.room.guest_access is can_join",
+        "Guests upgrade with guest_access_token and their own localpart, keeping the user ID"
+      ],
+      "implementation": [
+        "conduit-server/src/api/client/registration.rs",
+        "conduit-server/src/api/client/session.rs"
+      ],
+      "tests": [
+        "conduit-server/src/api/client/session.rs::tests",
+        "conduit-server/tests/production_account.rs::production_guest_access_is_restricted_and_upgradable"
+      ],
+      "limitations": [
+        "Guests are not removed from rooms when m.room.guest_access later stops being can_join"
+      ],
+      "gap_issues": [
+        "conduit-y99.18.4"
+      ]
+    },
+    {
+      "id": "cs-login-get-token",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#post_matrixclientv1loginget_token",
+      "status": "covered_assertions_only",
+      "assertions": [
+        "GET /login advertises m.login.token with get_login_token true; m.get_login_token capability is enabled for non-guests",
+        "Every call requires fresh UIA; tokens expire in 120000 ms and log in exactly once with the requested device"
+      ],
+      "implementation": [
+        "conduit-server/src/api/client/session.rs",
+        "conduit-server/src/api/client/sso.rs"
+      ],
+      "tests": [
+        "conduit-server/tests/production_account.rs::production_get_login_token_reprompts_and_logs_in_once"
+      ],
+      "limitations": []
+    },
+    {
+      "id": "cs-well-known-discovery",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#well-known-uris",
+      "status": "covered_assertions_only",
+      "assertions": [
+        "/.well-known/matrix/client returns m.homeserver.base_url (configured or request origin) and optional m.identity_server, with CORS",
+        "/.well-known/matrix/server returns configured delegation, else 404",
+        "/.well-known/matrix/support returns configured contacts/support page or local admins, else 404"
+      ],
+      "implementation": [
+        "conduit-server/src/api/client/well_known.rs",
+        "conduit-server/src/api/client/account_config.rs"
+      ],
+      "tests": [
+        "conduit-server/src/api/client/well_known.rs::tests",
+        "conduit-server/tests/production_account.rs::production_well_known_defaults_and_cors",
+        "conduit-server/tests/production_account.rs::production_well_known_configured"
+      ],
+      "limitations": []
+    },
+    {
+      "id": "cs-admin-whois",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#get_matrixclientv3adminwhoisuserid",
+      "status": "covered_assertions_only",
+      "assertions": [
+        "Users may look themselves up; others need server admin, checked before lookup",
+        "Devices report sessions with connection ip, last_seen and user_agent"
+      ],
+      "implementation": [
+        "conduit-server/src/api/client/account.rs",
+        "conduit-server/src/api/client/session.rs"
+      ],
+      "tests": [
+        "conduit-server/tests/production_account.rs::production_whois_reports_sessions_to_self_and_admins"
+      ],
+      "limitations": [
+        "One session per device is reported; per-token sessions are not tracked"
+      ]
+    },
+    {
+      "id": "cs-third-party-identifiers-unsupported",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#adding-account-administrative-contact-information",
+      "status": "covered_assertions_only",
+      "assertions": [
+        "m.3pid_changes is disabled and GET /account/3pid is empty",
+        "add, bind and legacy add are 403 M_FORBIDDEN; delete and unbind return no-support; requestToken endpoints are 403 M_THREEPID_DENIED"
+      ],
+      "implementation": [
+        "conduit-server/src/api/client/account.rs"
+      ],
+      "tests": [
+        "conduit-server/tests/production_account.rs::production_threepid_endpoints_answer_honestly"
+      ],
+      "limitations": [
+        "No email/SMS validation or identity-server integration exists"
+      ]
     }
   ]
 }

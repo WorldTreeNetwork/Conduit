@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO retired_device_epochs (user_id, device_id, epoch)\n            VALUES ($1, $2, $3)\n            ON CONFLICT (user_id, device_id)\n            DO UPDATE SET epoch = GREATEST(retired_device_epochs.epoch, EXCLUDED.epoch)\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "7419437760ea67101a5d86f7e1247bbf5433ed0cc2cf76f989395c309edc7021"
+}

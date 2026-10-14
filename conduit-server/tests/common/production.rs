@@ -21,6 +21,8 @@ pub struct Server {
     pub database_name: String,
     pub base_url: String,
     pub http: Client,
+    /// Extra environment for the server process (feature switches).
+    pub extra_env: Vec<(String, String)>,
 }
 
 impl Server {
@@ -65,6 +67,11 @@ impl Server {
     }
 
     pub async fn new() -> Self {
+        Self::with_env(&[]).await
+    }
+
+    /// Like [`Server::new`], with additional server environment.
+    pub async fn with_env(env: &[(&str, &str)]) -> Self {
         let files = tempfile::tempdir().unwrap();
         let admin_url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgresql://postgres@localhost/postgres".into());
@@ -93,6 +100,10 @@ impl Server {
                 .timeout(Duration::from_secs(5))
                 .build()
                 .unwrap(),
+            extra_env: env
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
         };
         server.start().await;
         server
@@ -171,6 +182,7 @@ impl Server {
                     self.files.path().join("app-services"),
                 )
                 .env("RUST_LOG", "info")
+                .envs(self.extra_env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
                 .stdin(Stdio::null())
                 .stderr(log.try_clone().unwrap())
                 .stdout(log)

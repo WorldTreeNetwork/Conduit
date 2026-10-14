@@ -28,7 +28,7 @@ use url::Url;
 use identikey_oidc_client::{self, AuthorizeRequest};
 use sha2::Digest;
 
-use super::{generate_device_id, mint_access_token, now_unix, AuthState, LoginResponse, MatrixError};
+use super::{now_unix, AuthState, MatrixError};
 
 /// Identity-provider id advertised in `m.login.sso`.
 pub const IDENTIKEY_IDP_ID: &str = "identikey";
@@ -355,7 +355,11 @@ fn valid_localpart(localpart: &str) -> bool {
 }
 
 /// `m.login.token` — consume a one-shot token issued by the callback.
-pub async fn token_login<S: AuthState>(state: S, token: &str) -> Response {
+pub async fn token_login<S: AuthState>(
+    state: S,
+    token: &str,
+    opts: super::session::LoginOptions,
+) -> Response {
     let Some(user_id) = state.login_tokens().consume(token).await else {
         return MatrixError::forbidden("invalid or expired login token").into_response();
     };
@@ -365,29 +369,12 @@ pub async fn token_login<S: AuthState>(state: S, token: &str) -> Response {
         Err(e) => return MatrixError::unknown(e.to_string()).into_response(),
     };
     if account.deactivated_at.is_some() {
-        return MatrixError::forbidden("account deactivated").into_response();
+        return super::user_deactivated();
     }
-    let device_id = generate_device_id();
-    if let Err(e) = state
-        .storage()
-        .upsert_device(&user_id, &device_id, None)
-        .await
-    {
-        return MatrixError::unknown(e.to_string()).into_response();
+    match super::session::issue_session(&state, &user_id, &opts).await {
+        Ok(v) => (StatusCode::OK, Json(v)).into_response(),
+        Err(r) => r,
     }
-    let raw_token = match mint_access_token(&state, &user_id, &device_id).await {
-        Ok(t) => t,
-        Err(e) => return MatrixError::unknown(e).into_response(),
-    };
-    (
-        StatusCode::OK,
-        Json(LoginResponse {
-            user_id,
-            access_token: raw_token,
-            device_id,
-        }),
-    )
-        .into_response()
 }
 
 pub fn redirect_allowed(url: &str, allowlist: &[String]) -> bool {

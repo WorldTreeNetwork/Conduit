@@ -156,6 +156,9 @@ pub struct Account {
     pub displayname: Option<String>,
     /// Avatar URL set via `PUT /profile/{userId}/avatar_url`.
     pub avatar_url: Option<String>,
+    /// Guest accounts (`POST /register?kind=guest`) may only use the
+    /// guest subset of the client-server API.
+    pub is_guest: bool,
 }
 
 /// A client device registered to a user.
@@ -171,6 +174,21 @@ pub struct Device {
     /// Unix-ms timestamp of last activity, if recorded.
     pub last_seen_ts: Option<i64>,
     pub last_seen_ip: Option<String>,
+    /// User agent of the most recent authenticated request.
+    pub last_seen_user_agent: Option<String>,
+}
+
+/// A stored refresh token (only its hash is kept).
+#[derive(Debug, Clone)]
+pub struct RefreshTokenRecord {
+    pub user_id: String,
+    pub device_id: String,
+    /// Device epoch the token was issued at; a later epoch (logout,
+    /// re-login with the same device ID) invalidates it.
+    pub epoch: i64,
+    /// The refresh token this one was issued in exchange for.  It stays
+    /// usable until this token is used, then it is revoked.
+    pub parent_hash: Option<String>,
 }
 
 /// The (user_id, device_id) pair that owns an access token.
@@ -1179,6 +1197,71 @@ pub trait Storage: Send + Sync + 'static {
 
     /// Reports with id > `from`, ascending, at most `limit`.
     async fn list_reports(&self, from: i64, limit: i64) -> Result<Vec<crate::room_content::ContentReport>>;
+
+    // --- Account & device management (conduit-y99.18) -------------------------
+
+    /// Create the device when absent, returning `true` if it was created.
+    /// A known device keeps its display name (the spec ignores
+    /// `initial_device_display_name` for known devices).  A device ID that
+    /// was deleted earlier resumes past its retired epoch, so capability
+    /// tokens minted for the old device never verify again.
+    async fn create_device_if_absent(
+        &self,
+        user_id: &str,
+        device_id: &str,
+        display_name: Option<&str>,
+    ) -> Result<bool>;
+
+    /// Rename an existing device.  `false` when the device does not exist.
+    async fn set_device_display_name(
+        &self,
+        user_id: &str,
+        device_id: &str,
+        display_name: Option<&str>,
+    ) -> Result<bool>;
+
+    /// Delete a device and everything bound to it: OpenID and refresh
+    /// tokens, device keys, one-time and fallback keys, and queued
+    /// to-device messages.  Its epoch is retired so a recreated device
+    /// with the same ID cannot resurrect old tokens.  Returns whether the
+    /// device existed.
+    async fn delete_device(&self, user_id: &str, device_id: &str) -> Result<bool>;
+
+    /// Record last-seen activity for a device.
+    async fn touch_device(
+        &self,
+        user_id: &str,
+        device_id: &str,
+        ts_ms: i64,
+        ip: Option<&str>,
+        user_agent: Option<&str>,
+    ) -> Result<()>;
+
+    /// Mark or clear the guest flag on an account.
+    async fn set_guest(&self, user_id: &str, is_guest: bool) -> Result<()>;
+
+    /// Local, active server administrators.
+    async fn list_admin_user_ids(&self) -> Result<Vec<String>>;
+
+    /// Erase non-event data for a deactivating account (account data,
+    /// profile) and remember that erasure was requested.
+    async fn erase_account(&self, user_id: &str) -> Result<()>;
+
+    async fn insert_refresh_token(
+        &self,
+        token_hash: &str,
+        user_id: &str,
+        device_id: &str,
+        epoch: i64,
+        parent_hash: Option<&str>,
+    ) -> Result<()>;
+
+    async fn get_refresh_token(&self, token_hash: &str) -> Result<Option<RefreshTokenRecord>>;
+
+    async fn delete_refresh_token(&self, token_hash: &str) -> Result<()>;
+
+    /// Revoke every token issued in exchange for `parent_hash`.
+    async fn delete_refresh_token_children(&self, parent_hash: &str) -> Result<()>;
 }
 
 // ---------------------------------------------------------------------------
@@ -1304,6 +1387,17 @@ struct MemoryInner {
     outbound_queue: MemoryOutbound,
     // Room aliases (conduit-v0y): alias → (room_id, creator, created_at)
     aliases: HashMap<String, (String, String, DateTime<Utc>)>,
+    // Account & device management (conduit-y99.18)
+    account_lane: AccountLaneMemory,
+}
+
+#[derive(Default)]
+struct AccountLaneMemory {
+    /// (user_id, device_id) → last epoch of a deleted device
+    retired_epochs: HashMap<(String, String), i64>,
+    /// token_hash → record
+    refresh_tokens: HashMap<String, RefreshTokenRecord>,
+    erased: std::collections::HashSet<String>,
 }
 
 impl Default for MemoryInner {
@@ -1348,6 +1442,7 @@ impl Default for MemoryInner {
             audit_log_next_id: 0,
             outbound_queue: MemoryOutbound::default(),
             aliases: HashMap::new(),
+            account_lane: AccountLaneMemory::default(),
         }
     }
 }
@@ -1489,6 +1584,7 @@ impl Storage for MemoryStorage {
                 deactivated_at: None,
                 displayname: None,
                 avatar_url: None,
+                is_guest: false,
             },
         );
         Ok(())
@@ -1524,13 +1620,20 @@ impl Storage for MemoryStorage {
     ) -> Result<()> {
         let mut inner = self.inner.write().await;
         let key = (user_id.to_owned(), device_id.to_owned());
+        let epoch = inner
+            .account_lane
+            .retired_epochs
+            .get(&key)
+            .map(|e| e + 1)
+            .unwrap_or(0);
         let entry = inner.devices.entry(key).or_insert_with(|| Device {
             user_id: user_id.to_owned(),
             device_id: device_id.to_owned(),
             display_name: None,
-            epoch: 0,
+            epoch,
             last_seen_ts: None,
             last_seen_ip: None,
+            last_seen_user_agent: None,
         });
         entry.display_name = display_name.map(|s| s.to_owned());
         Ok(())
@@ -3244,6 +3347,172 @@ impl Storage for MemoryStorage {
             .take(limit.max(0) as usize)
             .cloned()
             .collect())
+    }
+
+    // --- Account & device management (conduit-y99.18) -------------------------
+
+    async fn create_device_if_absent(
+        &self,
+        user_id: &str,
+        device_id: &str,
+        display_name: Option<&str>,
+    ) -> Result<bool> {
+        let mut inner = self.inner.write().await;
+        let key = (user_id.to_owned(), device_id.to_owned());
+        if inner.devices.contains_key(&key) {
+            return Ok(false);
+        }
+        let epoch = inner
+            .account_lane
+            .retired_epochs
+            .get(&key)
+            .map(|e| e + 1)
+            .unwrap_or(0);
+        inner.devices.insert(
+            key,
+            Device {
+                user_id: user_id.to_owned(),
+                device_id: device_id.to_owned(),
+                display_name: display_name.map(str::to_owned),
+                epoch,
+                last_seen_ts: None,
+                last_seen_ip: None,
+                last_seen_user_agent: None,
+            },
+        );
+        Ok(true)
+    }
+
+    async fn set_device_display_name(
+        &self,
+        user_id: &str,
+        device_id: &str,
+        display_name: Option<&str>,
+    ) -> Result<bool> {
+        let mut inner = self.inner.write().await;
+        match inner.devices.get_mut(&(user_id.to_owned(), device_id.to_owned())) {
+            Some(d) => {
+                d.display_name = display_name.map(str::to_owned);
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    async fn delete_device(&self, user_id: &str, device_id: &str) -> Result<bool> {
+        let mut inner = self.inner.write().await;
+        let key = (user_id.to_owned(), device_id.to_owned());
+        let Some(device) = inner.devices.remove(&key) else {
+            return Ok(false);
+        };
+        inner.account_lane.retired_epochs.insert(key.clone(), device.epoch);
+        inner.tokens.retain(|_, (u, d, _)| !(u == user_id && d == device_id));
+        inner
+            .account_lane
+            .refresh_tokens
+            .retain(|_, r| !(r.user_id == user_id && r.device_id == device_id));
+        inner.device_keys.remove(&key);
+        inner
+            .one_time_keys
+            .retain(|(u, d, _), _| !(u == user_id && d == device_id));
+        inner
+            .fallback_keys
+            .retain(|(u, d, _), _| !(u == user_id && d == device_id));
+        inner
+            .to_device_queue
+            .retain(|(_, u, d, _, _, _)| !(u == user_id && d == device_id));
+        Ok(true)
+    }
+
+    async fn touch_device(
+        &self,
+        user_id: &str,
+        device_id: &str,
+        ts_ms: i64,
+        ip: Option<&str>,
+        user_agent: Option<&str>,
+    ) -> Result<()> {
+        let mut inner = self.inner.write().await;
+        if let Some(d) = inner.devices.get_mut(&(user_id.to_owned(), device_id.to_owned())) {
+            d.last_seen_ts = Some(ts_ms);
+            if ip.is_some() {
+                d.last_seen_ip = ip.map(str::to_owned);
+            }
+            if user_agent.is_some() {
+                d.last_seen_user_agent = user_agent.map(str::to_owned);
+            }
+        }
+        Ok(())
+    }
+
+    async fn set_guest(&self, user_id: &str, is_guest: bool) -> Result<()> {
+        let mut inner = self.inner.write().await;
+        if let Some(acct) = inner.accounts.get_mut(user_id) {
+            acct.is_guest = is_guest;
+        }
+        Ok(())
+    }
+
+    async fn list_admin_user_ids(&self) -> Result<Vec<String>> {
+        let inner = self.inner.read().await;
+        let mut out: Vec<String> = inner
+            .accounts
+            .values()
+            .filter(|a| a.is_admin && a.deactivated_at.is_none())
+            .map(|a| a.user_id.clone())
+            .collect();
+        out.sort();
+        Ok(out)
+    }
+
+    async fn erase_account(&self, user_id: &str) -> Result<()> {
+        let mut inner = self.inner.write().await;
+        inner.account_data.retain(|(u, _, _), _| u != user_id);
+        if let Some(acct) = inner.accounts.get_mut(user_id) {
+            acct.displayname = None;
+            acct.avatar_url = None;
+        }
+        inner.account_lane.erased.insert(user_id.to_owned());
+        Ok(())
+    }
+
+    async fn insert_refresh_token(
+        &self,
+        token_hash: &str,
+        user_id: &str,
+        device_id: &str,
+        epoch: i64,
+        parent_hash: Option<&str>,
+    ) -> Result<()> {
+        self.inner.write().await.account_lane.refresh_tokens.insert(
+            token_hash.to_owned(),
+            RefreshTokenRecord {
+                user_id: user_id.to_owned(),
+                device_id: device_id.to_owned(),
+                epoch,
+                parent_hash: parent_hash.map(str::to_owned),
+            },
+        );
+        Ok(())
+    }
+
+    async fn get_refresh_token(&self, token_hash: &str) -> Result<Option<RefreshTokenRecord>> {
+        Ok(self.inner.read().await.account_lane.refresh_tokens.get(token_hash).cloned())
+    }
+
+    async fn delete_refresh_token(&self, token_hash: &str) -> Result<()> {
+        self.inner.write().await.account_lane.refresh_tokens.remove(token_hash);
+        Ok(())
+    }
+
+    async fn delete_refresh_token_children(&self, parent_hash: &str) -> Result<()> {
+        self.inner
+            .write()
+            .await
+            .account_lane
+            .refresh_tokens
+            .retain(|_, r| r.parent_hash.as_deref() != Some(parent_hash));
+        Ok(())
     }
 }
 
