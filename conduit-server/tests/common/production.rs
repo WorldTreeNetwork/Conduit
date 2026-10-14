@@ -97,7 +97,7 @@ impl Server {
             database_name,
             base_url: String::new(),
             http: Client::builder()
-                .timeout(Duration::from_secs(5))
+                .timeout(Duration::from_secs(30))
                 .build()
                 .unwrap(),
             extra_env: env
