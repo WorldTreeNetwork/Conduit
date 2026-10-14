@@ -258,3 +258,77 @@ pub async fn threads<S: AuthState>(
     }
     (StatusCode::OK, Json(body)).into_response()
 }
+
+// ---------------------------------------------------------------------------
+// Send-time relation rules
+// ---------------------------------------------------------------------------
+
+/// Server-side checks on an outgoing event's cleartext `m.relates_to`
+/// (spec v1.19 "Server behaviour"):
+///
+/// - a second `m.annotation` with the same event type and key from the same
+///   sender is rejected with `M_DUPLICATE_ANNOTATION` unless the first was
+///   redacted;
+/// - a thread may not be rooted at an event that is itself a relation
+///   (400 `M_UNKNOWN`; the spec defines no dedicated code).
+///
+/// Errors are `(status, Matrix error body)` so transaction replay can
+/// persist them.
+pub async fn validate_outgoing<S: AuthState>(
+    state: &S,
+    sender: &str,
+    room_id: &str,
+    event_type: &str,
+    content: &Value,
+) -> Result<(), (StatusCode, Value)> {
+    let Some(relates_to) = content.get("m.relates_to") else { return Ok(()) };
+    let (Some(rel_type), Some(parent_id)) = (
+        relates_to.get("rel_type").and_then(Value::as_str),
+        relates_to.get("event_id").and_then(Value::as_str),
+    ) else {
+        return Ok(());
+    };
+    let storage = state.storage().as_ref();
+    let failed = |e: conduit::Error| {
+        (StatusCode::INTERNAL_SERVER_ERROR, json!({"errcode": "M_UNKNOWN", "error": e.to_string()}))
+    };
+    match rel_type {
+        "m.thread" => {
+            let parent = storage.get_event(parent_id).await.map_err(failed)?;
+            if parent.is_some_and(|parent| parent.room_id == room_id && relation(&parent).is_some()) {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    json!({"errcode": "M_UNKNOWN", "error": "cannot start a thread from an event with a relation"}),
+                ));
+            }
+        }
+        "m.annotation" => {
+            let key = relates_to.get("key").and_then(Value::as_str);
+            let siblings: Vec<Event> = storage
+                .relation_children(room_id, &[parent_id.to_owned()])
+                .await
+                .map_err(failed)?
+                .into_iter()
+                .map(|(_, event)| event)
+                .filter(|event| {
+                    event.sender == sender
+                        && event.event_type == event_type
+                        && relation(event).is_some_and(|(kind, _)| kind == "m.annotation")
+                        && event.content["m.relates_to"].get("key").and_then(Value::as_str) == key
+                })
+                .collect();
+            if !siblings.is_empty() {
+                let viewer = Viewer { storage, user_id: sender, ignored: HashSet::new() };
+                let redacted = viewer.redactions(&siblings).await.map_err(failed)?;
+                if siblings.iter().any(|event| !redacted.contains_key(&event.event_id)) {
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        json!({"errcode": "M_DUPLICATE_ANNOTATION", "error": "duplicate annotation"}),
+                    ));
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}

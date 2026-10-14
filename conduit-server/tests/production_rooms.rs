@@ -479,6 +479,30 @@ async fn relations_threads_and_edit_aggregation() {
     assert_eq!(ids(&mine["chunk"]), vec![root.clone()]);
     let alices = get(&server, &alice, &format!("/_matrix/client/v1/rooms/{room}/threads?include=participated"), 200).await;
     assert_eq!(ids(&alices["chunk"]), vec![root.clone()], "the root's sender participates");
+    // Send-time rules: no duplicate annotations, no threads off relations.
+    let duplicate = put(
+        &server,
+        &bob,
+        &format!("/_matrix/client/v3/rooms/{room}/send/m.reaction/dup1"),
+        json!({"m.relates_to": {"rel_type": "m.annotation", "event_id": root, "key": "👍"}}),
+        400,
+    )
+    .await;
+    assert_eq!(duplicate["errcode"], "M_DUPLICATE_ANNOTATION");
+    let other_key = send(&server, &bob, &room, "m.reaction", json!({"m.relates_to": {"rel_type": "m.annotation", "event_id": root, "key": "🎉"}})).await;
+    put(&server, &bob, &format!("/_matrix/client/v3/rooms/{room}/redact/{reaction}/unreact"), json!({}), 200).await;
+    send(&server, &bob, &room, "m.reaction", json!({"m.relates_to": {"rel_type": "m.annotation", "event_id": root, "key": "👍"}})).await;
+    assert_ne!(other_key, reaction);
+    let nested_thread = put(
+        &server,
+        &carol,
+        &format!("/_matrix/client/v3/rooms/{room}/send/m.room.message/nest1"),
+        json!({"body": "x", "m.relates_to": {"rel_type": "m.thread", "event_id": t1}}),
+        400,
+    )
+    .await;
+    assert_eq!(nested_thread["errcode"], "M_UNKNOWN");
+
     let bad = get(&server, &carol, &format!("/_matrix/client/v1/rooms/{room}/threads?include=some"), 400).await;
     assert_eq!(bad["errcode"], "M_INVALID_PARAM");
     let outside = get(&server, &outsider, &format!("/_matrix/client/v1/rooms/{room}/threads"), 403).await;
@@ -650,7 +674,8 @@ async fn room_upgrade_replaces_and_tombstones() {
     let room = create_room(
         &server,
         &alice,
-        json!({"preset": "public_chat", "name": "Old", "topic": "History", "room_alias_name": "upgrade-me"}),
+        json!({"preset": "public_chat", "name": "Old", "topic": "History", "room_alias_name": "upgrade-me",
+               "creation_content": {"type": "org.example.board"}}),
     )
     .await;
     state(&server, &alice, &room, "m.room.canonical_alias", "", json!({"alias": "#upgrade-me:production.test"})).await;
@@ -671,6 +696,7 @@ async fn room_upgrade_replaces_and_tombstones() {
     let create = get(&server, &alice, &format!("/_matrix/client/v3/rooms/{new_room}/state/m.room.create"), 200).await;
     assert_eq!(create["predecessor"]["room_id"], room.as_str());
     assert_eq!(create["room_version"], "11");
+    assert_eq!(create["type"], "org.example.board", "the room type carries over");
     let name = get(&server, &alice, &format!("/_matrix/client/v3/rooms/{new_room}/state/m.room.name"), 200).await;
     assert_eq!(name["name"], "Old");
     let topic = get(&server, &alice, &format!("/_matrix/client/v3/rooms/{new_room}/state/m.room.topic"), 200).await;
@@ -704,7 +730,12 @@ async fn space_hierarchy_walks_children_depth_first() {
     let server = Server::new().await;
     let alice = user(&server, "alice").await;
     let bob = user(&server, "bob").await;
-    let space = create_room(&server, &alice, json!({"preset": "public_chat", "name": "Space"})).await;
+    let space = create_room(
+        &server,
+        &alice,
+        json!({"preset": "public_chat", "name": "Space", "creation_content": {"type": "m.space"}}),
+    )
+    .await;
     let room_a = create_room(&server, &alice, json!({"preset": "public_chat", "name": "A"})).await;
     let room_b = create_room(&server, &alice, json!({"preset": "public_chat", "name": "B"})).await;
     let private = create_room(&server, &alice, json!({"preset": "private_chat", "name": "Private"})).await;
@@ -732,6 +763,8 @@ async fn space_hierarchy_walks_children_depth_first() {
     assert_eq!(root["world_readable"], false);
     assert_eq!(root["guest_can_join"], false);
     assert_eq!(root["room_version"], "11");
+    assert_eq!(root["room_type"], "m.space");
+    assert!(full["rooms"][1].get("room_type").is_none(), "ordinary rooms have no type");
     assert_eq!(root["children_state"].as_array().unwrap().len(), 4, "invalid children are not listed");
     assert!(root["children_state"].as_array().unwrap().iter().all(|c| c["type"] == "m.space.child" && c["origin_server_ts"].is_u64()));
     assert!(full.get("next_batch").is_none());

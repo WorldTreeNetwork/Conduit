@@ -892,6 +892,258 @@
         "Not yet verified against a live Synapse peer"
       ],
       "gap_issue": "conduit-y99.21.1"
+    },
+    {
+      "id": "cs-room-event-members-context",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#get_matrixclientv3roomsroomideventeventid",
+      "status": "covered_assertions_only",
+      "assertions": [
+        "GET /event serves the client event format (no PDU-only fields, unsigned.age) with bundled aggregations",
+        "Unknown events and events the user may not see are both 404 M_NOT_FOUND",
+        "GET /members filters membership/not_membership (or-combined), rejects unknown values with M_INVALID_PARAM, honours at tokens and returns 403 to never-members",
+        "Departed users see members and history as of their departure only",
+        "GET /context returns events_before reverse-chronologically and events_after chronologically, split from limit, with state at the last returned event",
+        "Context start/end tokens continue pagination through /messages; the RoomEventFilter applies to before/after/state with lazy member loading",
+        "GET /joined_rooms lists only rooms with join membership"
+      ],
+      "implementation": [
+        "conduit-server/src/api/client/room_content/events.rs",
+        "conduit-server/src/api/client/room_content/mod.rs",
+        "conduit-server/src/storage_pg.rs"
+      ],
+      "tests": [
+        "conduit-server/tests/production_rooms.rs::events_members_context_and_joined_rooms",
+        "conduit-server/src/api/client/room_content/mod.rs::tests"
+      ],
+      "limitations": [
+        "Historical state is folded from stream order, not resolved DAG snapshots (see conduit-y99.13)"
+      ]
+    },
+    {
+      "id": "cs-redaction-serving",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#redactions",
+      "status": "covered_assertions_only",
+      "assertions": [
+        "PUT /redact is idempotent per transaction ID through persisted transactions",
+        "Own events need the m.room.redaction level; other users' events need redact; server admins may redact local users' events",
+        "PUT /send of m.room.redaction obeys the same permission rules",
+        "Redacted events are pruned by the room-version algorithm and carry unsigned.redacted_because on /event, /messages, /sync and context",
+        "A redaction applies only from the same server or a sender with redact power in the redaction's own auth power levels",
+        "m.room.redaction events mirror content.redacts at top level for older clients"
+      ],
+      "implementation": [
+        "conduit-server/src/api/client/room_content/redact.rs",
+        "conduit-server/src/api/client/room_content/serve.rs",
+        "conduit/src/room_content.rs",
+        "conduit-server/src/api/client/sync.rs",
+        "conduit-server/src/api/client/rooms.rs"
+      ],
+      "tests": [
+        "conduit-server/tests/production_rooms.rs::redaction_permissions_idempotency_and_serving",
+        "conduit-server/src/api/client/room_content/serve.rs::tests",
+        "conduit/src/room_content.rs::tests"
+      ],
+      "limitations": [
+        "Original content remains in storage although never served"
+      ],
+      "gap_issue": "conduit-y99.19.4"
+    },
+    {
+      "id": "cs-forget-room",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#post_matrixclientv3roomsroomidforget",
+      "status": "covered_assertions_only",
+      "assertions": [
+        "Forgetting while joined is 400 M_UNKNOWN",
+        "Forgotten rooms leave /sync (including include_leave) and their history becomes unreadable",
+        "Rejoining un-forgets; forgetting a room never joined is a no-op"
+      ],
+      "implementation": [
+        "conduit-server/src/api/client/room_content/events.rs",
+        "conduit-server/src/api/client/sync.rs",
+        "conduit-server/migrations/0020_room_content.sql"
+      ],
+      "tests": [
+        "conduit-server/tests/production_rooms.rs::forget_hides_departed_rooms_until_rejoin"
+      ]
+    },
+    {
+      "id": "cs-read-markers-and-tags",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#post_matrixclientv3roomsroomidread_markers",
+      "status": "covered_assertions_only",
+      "assertions": [
+        "POST /read_markers stores m.fully_read room account data and m.read / m.read.private receipts",
+        "Markers must name visible events of the room (404 M_NOT_FOUND otherwise)",
+        "Private receipts are visible only to their owner in /sync",
+        "Room tags are stored as m.tag room account data, appear in /sync, reject non-numeric order with M_BAD_JSON and are owner-only (403)",
+        "Deleting an absent tag succeeds"
+      ],
+      "implementation": [
+        "conduit-server/src/api/client/room_content/events.rs"
+      ],
+      "tests": [
+        "conduit-server/tests/production_rooms.rs::read_markers_and_room_tags"
+      ]
+    },
+    {
+      "id": "cs-relations-threads-aggregations",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#forming-relationships-between-events",
+      "status": "covered_assertions_only",
+      "assertions": [
+        "GET /v1/relations supports relType and eventType forms, dir, from/to, limit and prev_batch/next_batch pagination",
+        "recurse=true follows indirect relations to depth 3 and reports recursion_depth; it is absent unless recurse was supplied",
+        "Parents the user cannot see are 404 M_NOT_FOUND",
+        "Bundled m.replace is the latest valid edit (same sender/type, m.new_content, not state) and original content is not replaced",
+        "Redacting the latest edit reverts the bundle to the previous edit",
+        "Bundled m.thread reports count, latest_event and current_user_participated; m.reference lists referencing event IDs; annotations are not aggregated",
+        "GET /v1/threads orders roots by latest activity, paginates, supports include=participated and rejects invalid include",
+        "Duplicate annotations are rejected with M_DUPLICATE_ANNOTATION; threads off relations with 400 M_UNKNOWN"
+      ],
+      "implementation": [
+        "conduit-server/src/api/client/room_content/relations.rs",
+        "conduit-server/src/api/client/room_content/serve.rs",
+        "conduit/src/room_content.rs"
+      ],
+      "tests": [
+        "conduit-server/tests/production_rooms.rs::relations_threads_and_edit_aggregation",
+        "conduit-server/src/api/client/room_content/serve.rs::tests",
+        "conduit/src/room_content.rs::tests"
+      ]
+    },
+    {
+      "id": "cs-timestamp-to-event",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#get_matrixclientv1roomsroomidtimestamp_to_event",
+      "status": "covered_assertions_only",
+      "assertions": [
+        "dir=f returns the earliest visible event at or after ts and dir=b the latest at or before it",
+        "No event is 404 M_NOT_FOUND; missing dir/ts is 400 M_INVALID_PARAM; non-members are 403"
+      ],
+      "implementation": [
+        "conduit-server/src/api/client/room_content/events.rs",
+        "conduit-server/src/storage_pg.rs"
+      ],
+      "tests": [
+        "conduit-server/tests/production_rooms.rs::timestamp_to_event_finds_nearest_visible_event"
+      ],
+      "limitations": [
+        "No federation fallback for rooms with incomplete local history"
+      ]
+    },
+    {
+      "id": "cs-server-side-search",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#server-side-search",
+      "status": "covered_assertions_only",
+      "assertions": [
+        "room_events searches content.body/name/topic with PostgreSQL full-text stemming and honours keys",
+        "Only events the user may see are searched, including left rooms up to the departure; redacted and ignored events are excluded",
+        "order_by rank|recent, filter limit with next_batch pagination and count",
+        "event_context returns events before/after with tokens and historic profile_info",
+        "include_state and room_id/sender groupings are returned",
+        "Missing search_term is M_BAD_JSON; invalid order_by is M_INVALID_PARAM"
+      ],
+      "implementation": [
+        "conduit-server/src/api/client/room_content/search.rs",
+        "conduit-server/src/storage_pg.rs",
+        "conduit-server/migrations/0020_room_content.sql"
+      ],
+      "tests": [
+        "conduit-server/tests/production_rooms.rs::search_room_events_with_ordering_context_and_groupings"
+      ],
+      "limitations": [
+        "At most 1000 candidate hits per request; offset pagination"
+      ]
+    },
+    {
+      "id": "cs-reporting-content",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#reporting-content",
+      "status": "covered_assertions_only",
+      "assertions": [
+        "Event reports require current membership and return 404 for unknown events or non-members",
+        "Room reports need no membership and 404 for unknown rooms; user reports 404 for unknown local users",
+        "reason is required for room and user reports (M_BAD_JSON)",
+        "Reports are stored and listed for server administrators only"
+      ],
+      "implementation": [
+        "conduit-server/src/api/client/room_content/reports.rs",
+        "conduit-server/migrations/0020_room_content.sql"
+      ],
+      "tests": [
+        "conduit-server/tests/production_rooms.rs::reports_are_stored_for_administrators"
+      ]
+    },
+    {
+      "id": "cs-room-upgrades",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#room-upgrades",
+      "status": "covered_assertions_only",
+      "assertions": [
+        "Only users allowed to send m.room.tombstone may upgrade (403 M_FORBIDDEN)",
+        "Unsupported versions are 400 M_UNSUPPORTED_ROOM_VERSION",
+        "The replacement has predecessor and the old room type; recommended state is copied; local and canonical aliases move",
+        "The old room receives a tombstone and events_default/invite of at least 50"
+      ],
+      "implementation": [
+        "conduit-server/src/api/client/room_content/upgrade.rs"
+      ],
+      "tests": [
+        "conduit-server/tests/production_rooms.rs::room_upgrade_replaces_and_tombstones"
+      ],
+      "limitations": [
+        "Per-user settings are not transferred on join; additional_creators awaits room version 12"
+      ],
+      "gap_issue": "conduit-y99.19.3"
+    },
+    {
+      "id": "cs-space-hierarchy",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#get_matrixclientv1roomsroomidhierarchy",
+      "status": "covered_assertions_only",
+      "assertions": [
+        "Depth-first walk over valid m.space.child events in spec order, cutting loops",
+        "suggested_only, max_depth, limit and from are honoured; changing walk parameters during pagination is 400 M_INVALID_PARAM",
+        "Rooms are listed only when joined/invited, joinable, knockable or world-readable; inaccessible roots are 403",
+        "Summaries include children_state with origin_server_ts, room_type, room_version and join/visibility fields"
+      ],
+      "implementation": [
+        "conduit-server/src/api/client/room_content/hierarchy.rs",
+        "conduit/src/room_content.rs"
+      ],
+      "tests": [
+        "conduit-server/tests/production_rooms.rs::space_hierarchy_walks_children_depth_first",
+        "conduit/src/room_content.rs::tests"
+      ],
+      "limitations": [
+        "Children unknown to this server are skipped instead of fetched over federation"
+      ],
+      "gap_issue": "conduit-y99.19.2"
+    },
+    {
+      "id": "cs-ignored-users",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#ignoring-users",
+      "status": "covered_assertions_only",
+      "assertions": [
+        "Non-state events from ignored users are withheld from /sync, /messages and /context",
+        "State events from ignored users are still delivered",
+        "Invites from ignored users are not delivered",
+        "Un-ignoring resumes delivery of new events"
+      ],
+      "implementation": [
+        "conduit-server/src/api/client/room_content/serve.rs",
+        "conduit-server/src/api/client/sync.rs",
+        "conduit-server/src/api/client/rooms.rs"
+      ],
+      "tests": [
+        "conduit-server/tests/production_rooms.rs::ignored_users_are_filtered_from_sync_messages_and_invites",
+        "conduit-server/src/api/client/room_content/serve.rs::tests"
+      ]
     }
   ]
 }

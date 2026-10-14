@@ -402,6 +402,15 @@ pub async fn send_message_event<S: AuthState + conduit::room::RoomEventSender>(
             return replay.finish(code, body).await;
         }
     }
+    if let Err((code, body)) = super::room_content::relations::validate_outgoing(&state, &authed.user_id, &room_id, &event_type, &content).await {
+        // Replay derives a stored reply's status from its errcode, which
+        // would turn the spec's 400 M_UNKNOWN into a 500; that rejection is
+        // deterministic, so it is answered without freezing the transaction.
+        if body["errcode"] == "M_UNKNOWN" {
+            return (code, Json(body)).into_response();
+        }
+        return replay.finish(code, body).await;
+    }
     match super::event_pipeline::build_sign_and_persist_transaction(
         &state,
         &authed.user_id,

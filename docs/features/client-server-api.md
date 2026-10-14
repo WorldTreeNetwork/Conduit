@@ -153,3 +153,67 @@ Implemented in `room_directory.rs`, `directory.rs`, `user_directory.rs` and
   join), deny = kick, rescind = leave. `/sync` reports `rooms.knock` with
   stripped `knock_state`. Federated knocks (`make_knock`/`send_knock`) are
   not implemented.
+
+## Room content
+
+Implemented in `conduit-server/src/api/client/room_content/` with pure rules in
+`conduit/src/room_content.rs` (conduit-y99.19); journeys in
+`tests/production_rooms.rs`. Migration 0020 adds partial indexes over the event
+log plus `room_forgotten` and `content_reports`.
+
+- **Serving (`serve.rs`).** One `Viewer` decides how a stored event looks to a
+  user. Redactions are applied at serve time from the log: a redaction applies
+  when its sender shares the target sender's server or held `redact` in the
+  power levels named by the redaction's own `auth_events` (demoting a moderator
+  later does not un-redact). Redacted events are pruned with
+  `conduit::redaction::redact_event` and carry `unsigned.redacted_because`.
+  Bundles (`unsigned.m.relations`) cover `m.replace` (latest valid edit by
+  `origin_server_ts` then event ID; original content is never replaced),
+  `m.thread` (`count`, `latest_event` with its own edit bundle,
+  `current_user_participated`) and `m.reference` (`chunk` of IDs); children must
+  be visible, unredacted and not from ignored users. This module's endpoints
+  emit the client format; `/sync` (bundles only when `limited`) and
+  `/messages` decorate their PDU-shaped values in place.
+- **Access (`RoomAccess`).** Joined users see current state and visible history;
+  departed users keep what they could see up to their leave/ban (members as of
+  the departure) until they `/forget`; `world_readable` rooms are readable by
+  anyone authenticated. Unknown and invisible events are both `404 M_NOT_FOUND`.
+- **Tokens.** Every position token is an inclusive stream cursor (`s{pos}`), so
+  `/context` `start`/`end`, `/relations` `next_batch` and `/sync`/`/messages`
+  tokens interchange. `/members?at=` is clamped to the caller's horizon.
+- **Redact.** `PUT /redact` replays through the persisted transactions table.
+  Own events need the `m.room.redaction` level (pipeline auth); others' events
+  need `redact`, except server admins redacting local users. `/send` of
+  `m.room.redaction` applies the same check; `/send` also rejects duplicate
+  annotations (`M_DUPLICATE_ANNOTATION`) and threads rooted at relations
+  (`400 M_UNKNOWN`, answered without freezing the transaction because replay
+  maps `M_UNKNOWN` to 500).
+- **Forget.** The marker records the departure event it forgot, so a later
+  membership change un-forgets without a write hook. Forgotten departures leave
+  `/sync` and all history endpoints.
+- **Read markers / tags.** `m.fully_read` is room account data; `m.read` and
+  `m.read.private` are receipts. Tags live in `m.tag` room account data and
+  appear in `/sync`.
+- **Relations / threads.** `recurse=true` follows three levels and reports
+  `recursion_depth`; `rel_type` filters every level, `eventType` the results.
+  `/threads` orders roots by latest child position; `include=participated`
+  counts the root sender and repliers; roots from ignored users are served
+  redacted.
+- **Search.** `websearch_to_tsquery('english')` over one partial GIN index per
+  key (`body` of `m.room.message`, `name` of `m.room.name`, `topic` of
+  `m.room.topic`). Candidates (at most 1000 per request) come from rooms the
+  user is in or left, then pass visibility, forget, ignore, redaction and the
+  request filter before `count` and offset pagination (`o{offset}`).
+- **Reports.** Event reports need current membership; room and user reports do
+  not. Admins list them at `GET /_matrix/conduit/admin/v1/reports`.
+- **Upgrade.** Checks tombstone permission, creates the replacement with
+  `predecessor` and the old `type`, copies the recommended state, moves local
+  and canonical aliases, tombstones the old room and raises its
+  `events_default`/`invite` to max(50, users_default + 1).
+- **Hierarchy.** Depth-first over valid `m.space.child` (non-empty `via`),
+  ordered by `order`, `origin_server_ts`, room ID; tokens pin `suggested_only`
+  and `max_depth`. Rooms unknown locally are skipped (federation fill-in is
+  conduit-y99.19.2).
+- **Ignored users.** Non-state events from `m.ignored_user_list` users are
+  dropped before timeline limits in `/sync`, and from `/messages`, `/context`,
+  relations, aggregations and search; their invites are not delivered.
