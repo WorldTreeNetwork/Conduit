@@ -1,0 +1,86 @@
+name: ci
+
+# Unattended conformance gate. Nothing here may skip silently: a missing
+# prerequisite (Postgres, the private-dependency deploy key, Synapse) fails
+# the job instead of reporting a pass.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+  SQLX_OFFLINE: "true"
+  DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+
+jobs:
+  rust:
+    name: workspace tests (unit, PG integration, production binary)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 5s
+          --health-timeout 5s --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Require private dependency key
+        env:
+          KEY: ${{ secrets.CARGO_SSH_PRIVATE_KEY }}
+        run: |
+          if [ -z "$KEY" ]; then
+            echo "::error::CARGO_SSH_PRIVATE_KEY is not set; identikey git dependencies cannot be fetched"
+            exit 1
+          fi
+      - uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.CARGO_SSH_PRIVATE_KEY }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Install PostgreSQL client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      - name: Build
+        run: cargo build --workspace --locked
+      - name: Clippy
+        run: cargo clippy --workspace --locked -- -D clippy::correctness
+      - name: Tests
+        run: cargo test --workspace --locked
+
+  synapse-peer:
+    name: independent Synapse peer journeys
+    runs-on: ubuntu-latest
+    needs: rust
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 5s
+          --health-timeout 5s --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.CARGO_SSH_PRIVATE_KEY }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: astral-sh/setup-uv@v5
+      - name: Install PostgreSQL client and OpenSSL
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client openssl
+      - name: Synapse to-device federation journey
+        run: bash conduit-server/tests/peers/run_synapse_to_device.sh

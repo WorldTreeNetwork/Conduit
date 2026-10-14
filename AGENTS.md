@@ -137,3 +137,22 @@ live Postgres.
   then with `DATABASE_URL` set to a migrated database run
   `cargo sqlx prepare --workspace`. **Commit the resulting `.sqlx/`
   changes.** CI relies on this cache.
+
+## Continuous integration
+
+`.github/workflows/ci.yml` runs on every push to `main`:
+
+- `rust`: build, clippy (correctness lints fatal), `cargo test --workspace`
+  against a Postgres 16 service. Includes the production-binary journeys
+  in `conduit-server/tests/production_*.rs`.
+- `synapse-peer`: `conduit-server/tests/peers/run_synapse_to_device.sh`
+  against a pinned, independent Synapse.
+
+Prerequisite: repository secret `CARGO_SSH_PRIVATE_KEY`, a read-only deploy
+key with access to the private `identikey/identikey-protocol` and
+`identikey/identikey-core` git dependencies. Without it the job fails
+explicitly; it never skips.
+
+Production journeys share one harness: `conduit-server/tests/common/production.rs`
+(`Server::new()`, `register`, `request`, `chat_pair`). New feature areas get
+their own `production_<area>.rs` file with `mod common;`.
