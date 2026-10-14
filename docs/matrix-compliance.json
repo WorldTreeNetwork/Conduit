@@ -2524,6 +2524,156 @@
       "limitations": [
         "Homeserver-validated 3PIDs (requestToken, /account/3pid/add) remain refused (conduit-y99.36.1)"
       ]
+    },
+    {
+      "id": "cs-push-rules-predefined-and-api",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#push-rules-api",
+      "status": "covered_assertions_only",
+      "assertions": [
+        "GET /pushrules/ and /pushrules/global/ return the v1.19 server-default ruleset in spec order with default: true, user ID substituted in invite_for_me and is_user_mention",
+        "PUT creates enabled rules as the most important user rule of their kind, honours before/after, keeps place on update; missing anchors are 400 M_UNKNOWN",
+        "reserved '.' IDs, slashes, unknown kinds, bad actions/conditions are 400 M_INVALID_PARAM; missing actions/pattern are M_MISSING_PARAM; unknown rules 404 M_NOT_FOUND; defaults cannot be deleted",
+        "enabled/actions of server-default rules are mutable and historical dont_notify is stripped",
+        "m.push_rules account data mirrors the ruleset and reaches /sync after each change"
+      ],
+      "implementation": [
+        "conduit-server/src/api/client/push.rs",
+        "conduit-server/src/api/client/push/rules.rs"
+      ],
+      "tests": [
+        "conduit-server/tests/production_push.rs::push_rules_api_follows_spec",
+        "conduit-server/src/api/client/push/rules.rs::default_ruleset_matches_spec_order_and_outcomes",
+        "conduit-server/src/api/client/push/rules.rs::user_rules_precede_defaults_and_master_precedes_all"
+      ],
+      "limitations": []
+    },
+    {
+      "id": "cs-push-rule-conditions-and-appendix-matching",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#conditions-1",
+      "status": "covered_assertions_only",
+      "assertions": [
+        "event_match matches whole string values case-insensitively by glob; content.body matches at word boundaries; non-strings never match",
+        "event_property_is / event_property_contains compare non-compound canonical JSON values exactly",
+        "room_member_count operators, sender_notification_permission against power levels, contains_display_name word-bounded; unknown conditions never match",
+        "dot-separated paths honour \\. and \\\\ escapes"
+      ],
+      "implementation": [
+        "conduit-server/src/api/client/push/rules.rs"
+      ],
+      "tests": [
+        "conduit-server/src/api/client/push/rules.rs::event_match_requires_string_values",
+        "conduit-server/src/api/client/push/rules.rs::property_is_and_contains_are_exact",
+        "conduit-server/src/api/client/push/rules.rs::dot_paths_honour_escapes",
+        "conduit-server/src/api/client/push/rules.rs::body_globs_match_at_word_boundaries",
+        "conduit-server/src/api/client/push/rules.rs::sender_notification_permission_uses_power_levels"
+      ],
+      "limitations": []
+    },
+    {
+      "id": "cs-receiving-notifications-counts",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#receiving-notifications",
+      "status": "covered_assertions_only",
+      "assertions": [
+        "a notifying event's count appears in the same /sync response as the event",
+        "notices, edits, reactions, member events and the user's own events do not notify; m.mentions highlight; @room highlights only from senders with notification power",
+        "m.read and m.read.private receipts clear counts up to their event; the user's own event marks its scope read",
+        "unread_thread_notifications partitions per thread root when requested and threaded receipts clear only their thread",
+        "room, master and content rules change subsequent counts"
+      ],
+      "implementation": [
+        "conduit-server/src/api/client/push/notifications.rs",
+        "conduit-server/src/api/client/notification_counts.rs",
+        "conduit-server/src/api/client/sync.rs"
+      ],
+      "tests": [
+        "conduit-server/tests/production_push.rs::unread_counts_follow_rules_and_receipts",
+        "conduit-server/tests/production_push.rs::thread_notifications_are_split_when_requested",
+        "conduit-server/tests/production_sync.rs::unread_counts_follow_push_rules_receipts_and_threads"
+      ],
+      "limitations": [
+        "Encrypted events are counted by the server-side rules only (clients re-evaluate after decryption)"
+      ]
+    },
+    {
+      "id": "cs-notifications-endpoint",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#get_matrixclientv3notifications",
+      "status": "covered_assertions_only",
+      "assertions": [
+        "notifications are listed newest first with actions, event, read, room_id and ts; invites notify the invitee",
+        "limit/from paginate with next_token; only=highlight filters; invalid limit/from are 400 M_INVALID_PARAM"
+      ],
+      "implementation": [
+        "conduit-server/src/api/client/push.rs"
+      ],
+      "tests": [
+        "conduit-server/tests/production_push.rs::notifications_endpoint_lists_paginates_and_filters"
+      ],
+      "limitations": [
+        "profile_tag is omitted (no per-device rulesets)"
+      ]
+    },
+    {
+      "id": "cs-pushers-set-semantics",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#post_matrixclientv3pushersset",
+      "status": "covered_assertions_only",
+      "assertions": [
+        "missing required fields are 400 M_MISSING_PARAM; over-long app_id/pushkey, wrong data.url path, unknown format and email kind are M_INVALID_PARAM",
+        "append true keeps other users' pushers for the key; append false removes them; kind null deletes"
+      ],
+      "implementation": [
+        "conduit-server/src/api/client/push.rs"
+      ],
+      "tests": [
+        "conduit-server/tests/production_push.rs::pushers_set_validates_appends_and_deletes",
+        "conduit-server/tests/push.rs::pusher_set_and_list"
+      ],
+      "limitations": [
+        "Email pushers unsupported (conduit-y99.31.2)"
+      ]
+    },
+    {
+      "id": "pg-notify-homeserver-behaviour",
+      "role": "homeserver as client",
+      "source": "https://spec.matrix.org/v1.19/push-gateway-api/#homeserver-behaviour",
+      "status": "covered_assertions_only",
+      "assertions": [
+        "full-format notify carries event_id, room_id, type, sender, sender_display_name, room_name, content, counts.unread, prio and devices with app_id, pushkey, pushkey_ts, data minus url and the rule's tweaks",
+        "event_id_only carries only event_id, room_id, counts, devices and prio",
+        "no request for the user's own or non-notifying events",
+        "5xx responses are retried with backoff until accepted; 4xx drops the notification; rejected pushkeys remove the pusher and stop requests"
+      ],
+      "implementation": [
+        "conduit-server/src/push_worker.rs"
+      ],
+      "tests": [
+        "conduit-server/tests/production_push.rs::gateway_receives_spec_notify_payloads",
+        "conduit-server/tests/production_push.rs::gateway_failures_retry_and_rejected_pushkeys_remove_pushers"
+      ],
+      "limitations": [
+        "Gateway URLs are not SSRF-filtered yet (conduit-y99.31.1)"
+      ]
+    },
+    {
+      "id": "cs-body-rejections-are-matrix-errors",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#standard-error-response",
+      "status": "covered_assertions_only",
+      "assertions": [
+        "unparsable or non-JSON bodies become 400 M_NOT_JSON, wrongly shaped JSON 400 M_BAD_JSON, oversized bodies 413 M_TOO_LARGE; handler JSON errors pass through"
+      ],
+      "implementation": [
+        "conduit-server/src/api/client/standards.rs"
+      ],
+      "tests": [
+        "conduit-server/src/api/client/standards.rs::plain_text_body_rejections_become_matrix_errors",
+        "conduit-server/tests/production_push.rs::push_rules_api_follows_spec"
+      ],
+      "limitations": []
     }
   ]
 }

@@ -519,6 +519,11 @@ async fn build_sync_response<S: AuthState>(
         Ok(evs) => evs,
         Err(e) => return Err(MatrixError::unknown(e.to_string()).into_response()),
     };
+    // Evaluate push rules for everything just collected so each event's
+    // notification count lands in this same response (conduit-y99.30).
+    super::push::notifications::process_pending(storage.as_ref(), state.server_name())
+        .await
+        .map_err(|error| MatrixError::unknown(error.to_string()).into_response())?;
 
     let epoch_matches =
         since_token.is_some_and(|token| token.ephemeral_epoch == Some(ephemeral_epoch()));
@@ -681,15 +686,6 @@ async fn build_sync_response<S: AuthState>(
         .map_err(|error| MatrixError::unknown(error.to_string()).into_response())?;
     let next_events_pos = positions.values().copied().max().unwrap_or(since);
 
-    // Push rules and display name for unread counts (once per response).
-    let push_rules = super::notification_counts::effective_push_rules(storage.as_ref(), user_id)
-        .await
-        .map_err(|error| MatrixError::unknown(error.to_string()).into_response())?;
-    let displayname = storage
-        .get_account(user_id)
-        .await
-        .map_err(|error| MatrixError::unknown(error.to_string()).into_response())?
-        .and_then(|account| account.displayname);
     let thread_counts = filter.definition.room.timeline.unread_thread_notifications;
     let lazy = filter.definition.room.state.lazy_load_members;
     let drop_redundant = lazy
@@ -788,13 +784,7 @@ async fn build_sync_response<S: AuthState>(
             .map_err(|error| MatrixError::unknown(error.to_string()).into_response())?;
         block.summary = Some(summary);
         block.heroes = heroes;
-        let counts = super::notification_counts::room_counts(
-            storage.as_ref(),
-            user_id,
-            room_id,
-            &push_rules,
-            displayname.as_deref(),
-        )
+        let counts = super::notification_counts::room_counts(storage.as_ref(), user_id, room_id)
         .await
         .map_err(|error| MatrixError::unknown(error.to_string()).into_response())?;
         let unread = if thread_counts {

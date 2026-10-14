@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT scope, stream_pos FROM push_read_marks WHERE user_id = $1 AND room_id = $2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "scope",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "stream_pos",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "875bbf7ce5115e8609978cda37f57f49da5b96f0426b2762995f03016c6401c7"
+}

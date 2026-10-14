@@ -2619,8 +2619,8 @@ impl Storage for PostgresStorage {
             r#"
             INSERT INTO pushers
                 (user_id, pushkey, app_id, app_display_name, device_display_name,
-                 kind, lang, profile_tag, url, format, data)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                 kind, lang, profile_tag, url, format, data, pushkey_ts)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
             ON CONFLICT (user_id, pushkey, app_id) DO UPDATE SET
                 app_display_name    = EXCLUDED.app_display_name,
                 device_display_name = EXCLUDED.device_display_name,
@@ -2629,7 +2629,8 @@ impl Storage for PostgresStorage {
                 profile_tag         = EXCLUDED.profile_tag,
                 url                 = EXCLUDED.url,
                 format              = EXCLUDED.format,
-                data                = EXCLUDED.data
+                data                = EXCLUDED.data,
+                pushkey_ts          = EXCLUDED.pushkey_ts
             "#,
             p.user_id,
             p.pushkey,
@@ -2642,6 +2643,7 @@ impl Storage for PostgresStorage {
             p.url,
             p.format,
             p.data,
+            p.pushkey_ts,
         )
         .execute(&self.pool)
         .await
@@ -2664,7 +2666,7 @@ impl Storage for PostgresStorage {
         let rows = sqlx::query!(
             r#"
             SELECT user_id, pushkey, app_id, app_display_name, device_display_name,
-                   kind, lang, profile_tag, url, format, data
+                   kind, lang, profile_tag, url, format, data, pushkey_ts
             FROM pushers
             WHERE user_id = $1
             ORDER BY created_at
@@ -2687,6 +2689,7 @@ impl Storage for PostgresStorage {
             url: r.url,
             format: r.format,
             data: r.data,
+            pushkey_ts: r.pushkey_ts,
         }).collect())
     }
 
@@ -2836,6 +2839,220 @@ impl Storage for PostgresStorage {
             pattern: r.pattern,
             is_default: r.is_default,
         }))
+    }
+
+    // -----------------------------------------------------------------------
+    // Push notifications and delivery (conduit-y99.30, conduit-y99.31)
+    // -----------------------------------------------------------------------
+
+    async fn push_cursor(&self) -> Result<i64> {
+        sqlx::query_scalar!("SELECT stream_pos FROM push_cursor")
+            .fetch_one(&self.pool)
+            .await
+            .map_err(map_sqlx)
+    }
+
+    async fn commit_push_batch(
+        &self,
+        notifications: &[conduit::storage::PushNotification],
+        read_marks: &[conduit::storage::PushReadMark],
+        deliveries: &[conduit::storage::PushDelivery],
+        cursor: i64,
+    ) -> Result<()> {
+        let mut tx = self.pool.begin().await.map_err(map_sqlx)?;
+        for m in read_marks {
+            sqlx::query!(
+                r#"
+                INSERT INTO push_read_marks (user_id, room_id, scope, stream_pos)
+                VALUES ($1, $2, $3, $4)
+                ON CONFLICT (user_id, room_id, scope)
+                DO UPDATE SET stream_pos = GREATEST(push_read_marks.stream_pos, EXCLUDED.stream_pos)
+                "#,
+                m.user_id, m.room_id, m.scope, m.stream_pos,
+            )
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx)?;
+        }
+        for n in notifications {
+            sqlx::query!(
+                r#"
+                INSERT INTO push_notifications
+                    (user_id, room_id, event_id, stream_pos, thread_id, actions, highlight, ts)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                ON CONFLICT (user_id, event_id) DO NOTHING
+                "#,
+                n.user_id, n.room_id, n.event_id, n.stream_pos, n.thread_id, n.actions, n.highlight, n.ts,
+            )
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx)?;
+        }
+        for d in deliveries {
+            sqlx::query!(
+                r#"
+                INSERT INTO push_outbox
+                    (user_id, app_id, pushkey, room_id, event_id, actions, attempts, next_attempt_ms, created_ms)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                ON CONFLICT (user_id, app_id, pushkey, event_id) DO NOTHING
+                "#,
+                d.user_id, d.app_id, d.pushkey, d.room_id, d.event_id, d.actions, d.attempts,
+                d.next_attempt_ms, d.created_ms,
+            )
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx)?;
+        }
+        sqlx::query!(
+            "UPDATE push_cursor SET stream_pos = GREATEST(stream_pos, $1)",
+            cursor
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(map_sqlx)?;
+        tx.commit().await.map_err(map_sqlx)
+    }
+
+    async fn push_read_marks(&self, user_id: &str, room_id: &str) -> Result<Vec<(String, i64)>> {
+        let rows = sqlx::query!(
+            "SELECT scope, stream_pos FROM push_read_marks WHERE user_id = $1 AND room_id = $2",
+            user_id, room_id
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(rows.into_iter().map(|r| (r.scope, r.stream_pos)).collect())
+    }
+
+    async fn unread_push_notifications(
+        &self,
+        user_id: &str,
+        room_id: &str,
+        after_pos: i64,
+    ) -> Result<Vec<(Option<String>, i64, bool)>> {
+        let rows = sqlx::query!(
+            r#"
+            SELECT thread_id, stream_pos, highlight FROM push_notifications
+            WHERE user_id = $1 AND room_id = $2 AND stream_pos > $3
+            ORDER BY stream_pos
+            "#,
+            user_id, room_id, after_pos
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(rows.into_iter().map(|r| (r.thread_id, r.stream_pos, r.highlight)).collect())
+    }
+
+    async fn list_push_notifications(
+        &self,
+        user_id: &str,
+        before_pos: Option<i64>,
+        limit: i64,
+        only_highlight: bool,
+    ) -> Result<Vec<conduit::storage::PushNotification>> {
+        let rows = sqlx::query!(
+            r#"
+            SELECT user_id, room_id, event_id, stream_pos, thread_id, actions, highlight, ts
+            FROM push_notifications
+            WHERE user_id = $1
+              AND ($2::BIGINT IS NULL OR stream_pos < $2)
+              AND (NOT $3 OR highlight)
+            ORDER BY stream_pos DESC
+            LIMIT $4
+            "#,
+            user_id, before_pos, only_highlight, limit
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(rows
+            .into_iter()
+            .map(|r| conduit::storage::PushNotification {
+                user_id: r.user_id,
+                room_id: r.room_id,
+                event_id: r.event_id,
+                stream_pos: r.stream_pos,
+                thread_id: r.thread_id,
+                actions: r.actions,
+                highlight: r.highlight,
+                ts: r.ts,
+            })
+            .collect())
+    }
+
+    async fn due_push_deliveries(
+        &self,
+        now_ms: i64,
+        limit: i64,
+    ) -> Result<Vec<conduit::storage::PushDelivery>> {
+        let rows = sqlx::query!(
+            r#"
+            SELECT id, user_id, app_id, pushkey, room_id, event_id, actions, attempts,
+                   next_attempt_ms, created_ms
+            FROM push_outbox
+            WHERE next_attempt_ms <= $1
+            ORDER BY id
+            LIMIT $2
+            "#,
+            now_ms, limit
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(rows
+            .into_iter()
+            .map(|r| conduit::storage::PushDelivery {
+                id: r.id,
+                user_id: r.user_id,
+                app_id: r.app_id,
+                pushkey: r.pushkey,
+                room_id: r.room_id,
+                event_id: r.event_id,
+                actions: r.actions,
+                attempts: r.attempts,
+                next_attempt_ms: r.next_attempt_ms,
+                created_ms: r.created_ms,
+            })
+            .collect())
+    }
+
+    async fn finish_push_delivery(&self, id: i64) -> Result<()> {
+        sqlx::query!("DELETE FROM push_outbox WHERE id = $1", id)
+            .execute(&self.pool)
+            .await
+            .map_err(map_sqlx)?;
+        Ok(())
+    }
+
+    async fn retry_push_delivery(&self, id: i64, attempts: i32, next_attempt_ms: i64) -> Result<()> {
+        sqlx::query!(
+            "UPDATE push_outbox SET attempts = $2, next_attempt_ms = $3 WHERE id = $1",
+            id, attempts, next_attempt_ms
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(())
+    }
+
+    async fn delete_pushers_for_key(
+        &self,
+        app_id: &str,
+        pushkey: &str,
+        keep_user: Option<&str>,
+    ) -> Result<u64> {
+        let result = sqlx::query!(
+            r#"
+            DELETE FROM pushers
+            WHERE app_id = $1 AND pushkey = $2 AND ($3::TEXT IS NULL OR user_id <> $3)
+            "#,
+            app_id, pushkey, keep_user
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(result.rows_affected())
     }
 
     // -----------------------------------------------------------------------

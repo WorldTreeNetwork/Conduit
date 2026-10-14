@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE push_cursor SET stream_pos = GREATEST(stream_pos, $1)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d3dd98138226613eff0c05cb6b0c1db7941ba542481a6ef22722ea1c5999b6fa"
+}

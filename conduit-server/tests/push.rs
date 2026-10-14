@@ -22,7 +22,7 @@ use axum::{
     Router,
     body::Body,
     http::{Request, StatusCode},
-    routing::{delete, get, post, put},
+    routing::{get, post},
 };
 use serde_json::{Value, json};
 use sqlx::PgPool;
@@ -165,24 +165,7 @@ fn build_router(state: TestState) -> Router {
         .route("/_matrix/client/v3/login",
             get(auth::get_login_flows::<TestState>).post(auth::login::<TestState>))
         .route("/_matrix/client/v3/logout", post(auth::logout::<TestState>))
-        .route("/_matrix/client/v3/pushers",
-            get(push_api::get_pushers::<TestState>))
-        .route("/_matrix/client/v3/pushers/set",
-            post(push_api::set_pusher::<TestState>))
-        .route("/_matrix/client/v3/pushrules/",
-            get(push_api::get_all_push_rules::<TestState>))
-        .route("/_matrix/client/v3/pushrules/:scope/:kind/:ruleId",
-            get(push_api::get_push_rule::<TestState>)
-            .put(push_api::put_push_rule::<TestState>)
-            .delete(push_api::delete_push_rule::<TestState>))
-        .route("/_matrix/client/v3/pushrules/:scope/:kind/:ruleId/enabled",
-            get(push_api::get_push_rule_enabled::<TestState>)
-            .put(push_api::put_push_rule_enabled::<TestState>))
-        .route("/_matrix/client/v3/pushrules/:scope/:kind/:ruleId/actions",
-            get(push_api::get_push_rule_actions::<TestState>)
-            .put(push_api::put_push_rule_actions::<TestState>))
-        .route("/_matrix/client/v3/notifications",
-            get(push_api::get_notifications::<TestState>))
+        .merge(push_api::router::<TestState>())
         .with_state(state)
 }
 
@@ -293,10 +276,21 @@ async fn pusher_set_and_list() {
     assert_eq!(pushers[0]["app_id"].as_str().unwrap(), "com.example.app");
     assert_eq!(pushers[0]["kind"].as_str().unwrap(), "http");
 
+    // `kind` is required: omitting it is M_MISSING_PARAM, not a delete.
+    let resp = authed_post(
+        &app,
+        "/_matrix/client/v3/pushers/set",
+        &token,
+        json!({ "pushkey": "push_key_abc", "app_id": "com.example.app" }),
+    ).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(json_body(resp).await["errcode"], "M_MISSING_PARAM");
+
     // Delete the pusher (kind=null).
     let del_body = json!({
         "pushkey": "push_key_abc",
-        "app_id": "com.example.app"
+        "app_id": "com.example.app",
+        "kind": null
     });
     let resp = authed_post(&app, "/_matrix/client/v3/pushers/set", &token, del_body).await;
     assert_eq!(resp.status(), StatusCode::OK);
@@ -369,14 +363,14 @@ async fn push_rules_crud() {
     ).await;
     assert_eq!(resp.status(), StatusCode::OK);
 
-    // GET /actions.
+    // GET /actions: the historical dont_notify action is stripped.
     let resp = authed_get(
         &app,
         "/_matrix/client/v3/pushrules/global/override/my_custom_rule/actions",
         &token,
     ).await;
     let body = json_body(resp).await;
-    assert_eq!(body["actions"], json!(["dont_notify"]));
+    assert_eq!(body["actions"], json!([]));
 
     // DELETE the rule.
     let resp = authed_delete(
@@ -429,83 +423,58 @@ async fn default_push_rules_seeded() {
 
 #[tokio::test]
 async fn push_rule_evaluator_basic_match() {
-    use conduit_server::api::client::push::rules::{evaluate_rule, parse_actions, EvalContext, default_push_rules};
-    use serde_json::json;
+    use conduit_server::api::client::push::rules::{evaluate, outcome, ruleset, EvalContext};
 
-    let user_id = "@dave:localhost";
-    let rules = default_push_rules(user_id);
+    let rules = ruleset("@dave:localhost", &[]);
+    let ctx = |event| EvalContext {
+        event,
+        user_id: "@dave:localhost",
+        display_name: None,
+        member_count: 5,
+        power_levels: None,
+        sender_power_level: 0,
+    };
 
-    // A plain message event should match .m.rule.message (underride).
+    // A plain message event matches .m.rule.message (underride) and notifies.
     let event = json!({
         "type": "m.room.message",
         "room_id": "!testroom:localhost",
         "sender": "@alice:localhost",
         "content": { "msgtype": "m.text", "body": "Hello!" }
     });
-    let ctx = EvalContext {
-        event: &event,
-        displayname: None,
-        member_count: 5,
-        power_levels: None,
-        sender: "@alice:localhost",
-    };
+    let rule = evaluate(&rules, &ctx(&event)).expect("a rule matches");
+    assert_eq!(rule.rule_id, ".m.rule.message");
+    assert!(outcome(&rule.actions).notify);
 
-    let mut matched = false;
-    for rule in &rules {
-        if let Some(actions) = evaluate_rule(rule, &ctx) {
-            if actions.should_notify {
-                matched = true;
-                break;
-            }
-        }
-    }
-    assert!(matched, "plain message should trigger notify");
-
-    // A notice should NOT notify (.m.rule.suppress_notices).
-    let notice_event = json!({
+    // A notice does not notify (.m.rule.suppress_notices).
+    let notice = json!({
         "type": "m.room.message",
         "room_id": "!testroom:localhost",
         "sender": "@bot:localhost",
         "content": { "msgtype": "m.notice", "body": "Bot output" }
     });
-    let notice_ctx = EvalContext {
-        event: &notice_event,
-        displayname: None,
-        member_count: 5,
-        power_levels: None,
-        sender: "@bot:localhost",
-    };
-
-    let mut notice_notify = false;
-    for rule in &rules {
-        if let Some(actions) = evaluate_rule(rule, &notice_ctx) {
-            if actions.should_notify {
-                notice_notify = true;
-            }
-            break; // first matching rule wins
-        }
-    }
-    assert!(!notice_notify, ".m.rule.suppress_notices should block m.notice");
+    let rule = evaluate(&rules, &ctx(&notice)).expect("a rule matches");
+    assert_eq!(rule.rule_id, ".m.rule.suppress_notices");
+    assert!(!outcome(&rule.actions).notify);
 }
 
 // ---------------------------------------------------------------------------
-// Test: parse_actions helpers (dd8.4, dd8.5)
+// Test: action outcomes (dd8.4, dd8.5)
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn parse_actions_variants() {
-    use conduit_server::api::client::push::rules::parse_actions;
-    use serde_json::json;
+    use conduit_server::api::client::push::rules::{normalize_actions, outcome};
 
-    let a = parse_actions(&json!(["notify", { "set_tweak": "highlight" }, { "set_tweak": "sound", "value": "default" }]));
-    assert!(a.should_notify);
+    let a = outcome(&normalize_actions(&json!(["notify", { "set_tweak": "highlight" }, { "set_tweak": "sound", "value": "default" }])).unwrap());
+    assert!(a.notify);
     assert!(a.highlight);
-    assert_eq!(a.sound.as_deref(), Some("default"));
+    assert_eq!(a.tweaks["sound"], "default");
 
-    let b = parse_actions(&json!(["dont_notify"]));
-    assert!(!b.should_notify);
+    let b = outcome(&normalize_actions(&json!(["dont_notify"])).unwrap());
+    assert!(!b.notify);
     assert!(!b.highlight);
-    assert!(b.sound.is_none());
+    assert!(b.tweaks.is_empty());
 }
 
 // ---------------------------------------------------------------------------

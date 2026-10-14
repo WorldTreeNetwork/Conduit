@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                INSERT INTO push_read_marks (user_id, room_id, scope, stream_pos)\n                VALUES ($1, $2, $3, $4)\n                ON CONFLICT (user_id, room_id, scope)\n                DO UPDATE SET stream_pos = GREATEST(push_read_marks.stream_pos, EXCLUDED.stream_pos)\n                ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "e00e4d972b4c77a9c0da2295518666a8fdf5e92ce96a2ef6a453aecd843d4a90"
+}

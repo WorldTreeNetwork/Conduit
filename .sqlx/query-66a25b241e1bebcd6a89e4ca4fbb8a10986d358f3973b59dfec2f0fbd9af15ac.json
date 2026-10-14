@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            DELETE FROM pushers\n            WHERE app_id = $1 AND pushkey = $2 AND ($3::TEXT IS NULL OR user_id <> $3)\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "66a25b241e1bebcd6a89e4ca4fbb8a10986d358f3973b59dfec2f0fbd9af15ac"
+}

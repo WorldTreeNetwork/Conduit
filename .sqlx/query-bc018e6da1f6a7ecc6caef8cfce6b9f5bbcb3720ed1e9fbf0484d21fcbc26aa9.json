@@ -1,0 +1,67 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT user_id, room_id, event_id, stream_pos, thread_id, actions, highlight, ts\n            FROM push_notifications\n            WHERE user_id = $1\n              AND ($2::BIGINT IS NULL OR stream_pos < $2)\n              AND (NOT $3 OR highlight)\n            ORDER BY stream_pos DESC\n            LIMIT $4\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "room_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "event_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "stream_pos",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 4,
+        "name": "thread_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "actions",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 6,
+        "name": "highlight",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 7,
+        "name": "ts",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Int8",
+        "Bool",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "bc018e6da1f6a7ecc6caef8cfce6b9f5bbcb3720ed1e9fbf0484d21fcbc26aa9"
+}

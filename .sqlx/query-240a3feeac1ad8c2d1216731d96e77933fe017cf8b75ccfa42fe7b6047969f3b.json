@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE push_outbox SET attempts = $2, next_attempt_ms = $3 WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int4",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "240a3feeac1ad8c2d1216731d96e77933fe017cf8b75ccfa42fe7b6047969f3b"
+}

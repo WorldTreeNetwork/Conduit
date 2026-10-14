@@ -1,0 +1,77 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT id, user_id, app_id, pushkey, room_id, event_id, actions, attempts,\n                   next_attempt_ms, created_ms\n            FROM push_outbox\n            WHERE next_attempt_ms <= $1\n            ORDER BY id\n            LIMIT $2\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "user_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "app_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "pushkey",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "room_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "event_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "actions",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 7,
+        "name": "attempts",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 8,
+        "name": "next_attempt_ms",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 9,
+        "name": "created_ms",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "f4745130d7594ebf8ff0d56d23e0b500f465bec8b5bfef19abbdd84b79f08946"
+}

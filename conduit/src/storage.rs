@@ -299,6 +299,52 @@ pub struct Pusher {
     pub url: Option<String>,
     pub format: Option<String>,
     pub data: Value,
+    /// Unix seconds when the pushkey was last set (`pushkey_ts` on /notify).
+    #[serde(default)]
+    pub pushkey_ts: i64,
+}
+
+/// One event a user was notified about, as decided by their push rules at
+/// processing time (conduit-y99.30).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PushNotification {
+    pub user_id: String,
+    pub room_id: String,
+    pub event_id: String,
+    pub stream_pos: i64,
+    /// Thread root for threaded events, `None` for the main timeline.
+    pub thread_id: Option<String>,
+    pub actions: Value,
+    pub highlight: bool,
+    /// Milliseconds since the epoch when the notification was generated.
+    pub ts: i64,
+}
+
+/// A user's own event marking a room thread scope (`main` or a thread
+/// root) read up to `stream_pos` (conduit-y99.30).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PushReadMark {
+    pub user_id: String,
+    pub room_id: String,
+    pub scope: String,
+    pub stream_pos: i64,
+}
+
+/// A queued push gateway request for one pusher and one event
+/// (conduit-y99.31). Retried with backoff until delivered or expired.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PushDelivery {
+    /// Assigned by storage; ignored on enqueue.
+    pub id: i64,
+    pub user_id: String,
+    pub app_id: String,
+    pub pushkey: String,
+    pub room_id: String,
+    pub event_id: String,
+    pub actions: Value,
+    pub attempts: i32,
+    pub next_attempt_ms: i64,
+    pub created_ms: i64,
 }
 
 /// A push rule stored for a user.
@@ -946,6 +992,53 @@ pub trait Storage: Send + Sync + 'static {
         kind: &str,
         rule_id: &str,
     ) -> Result<Option<PushRule>>;
+
+    // --- Push notifications and delivery (conduit-y99.30, conduit-y99.31) -----
+
+    /// Stream position up to which events have been evaluated for push.
+    async fn push_cursor(&self) -> Result<i64>;
+    /// Record notifications, own-event read marks (kept at their maximum)
+    /// and queued gateway deliveries for a batch of evaluated events and
+    /// advance the push cursor, atomically. Re-recording is a no-op.
+    async fn commit_push_batch(
+        &self,
+        notifications: &[PushNotification],
+        read_marks: &[PushReadMark],
+        deliveries: &[PushDelivery],
+        cursor: i64,
+    ) -> Result<()>;
+    /// `(scope, stream_pos)` read marks from the user's own events in a room.
+    async fn push_read_marks(&self, user_id: &str, room_id: &str) -> Result<Vec<(String, i64)>>;
+    /// `(thread_id, stream_pos, highlight)` of the user's notifications in
+    /// a room after `after_pos`, ascending.
+    async fn unread_push_notifications(
+        &self,
+        user_id: &str,
+        room_id: &str,
+        after_pos: i64,
+    ) -> Result<Vec<(Option<String>, i64, bool)>>;
+    /// The user's notifications, newest first, strictly before `before_pos`.
+    async fn list_push_notifications(
+        &self,
+        user_id: &str,
+        before_pos: Option<i64>,
+        limit: i64,
+        only_highlight: bool,
+    ) -> Result<Vec<PushNotification>>;
+    /// Queued deliveries due at `now_ms`, oldest first.
+    async fn due_push_deliveries(&self, now_ms: i64, limit: i64) -> Result<Vec<PushDelivery>>;
+    /// Remove a delivery (sent, permanently failed or expired).
+    async fn finish_push_delivery(&self, id: i64) -> Result<()>;
+    /// Reschedule a delivery after a transient failure.
+    async fn retry_push_delivery(&self, id: i64, attempts: i32, next_attempt_ms: i64) -> Result<()>;
+    /// Delete every pusher with this app ID and pushkey, except those of
+    /// `keep_user` (pushers/set with `append: false`). Returns the count.
+    async fn delete_pushers_for_key(
+        &self,
+        app_id: &str,
+        pushkey: &str,
+        keep_user: Option<&str>,
+    ) -> Result<u64>;
 
     // --- Admin (E11 AD1–AD6) -------------------------------------------------
 
@@ -1611,6 +1704,12 @@ struct MemoryInner {
     // Push (E11)
     pushers: HashMap<(String, String, String), Pusher>,
     push_rules: HashMap<(String, String, String, String), PushRule>,
+    // Push notifications and delivery (conduit-y99.30, conduit-y99.31)
+    push_cursor: i64,
+    push_read_marks: HashMap<(String, String, String), i64>,
+    push_notifications: Vec<PushNotification>,
+    push_deliveries: Vec<PushDelivery>,
+    push_delivery_next_id: i64,
     // Admin audit log (E11)
     audit_log: Vec<AuditEntry>,
     audit_log_next_id: i64,
@@ -1669,6 +1768,11 @@ impl Default for MemoryInner {
             url_previews: Vec::new(),
             pushers: HashMap::new(),
             push_rules: HashMap::new(),
+            push_cursor: 0,
+            push_read_marks: HashMap::new(),
+            push_notifications: Vec::new(),
+            push_deliveries: Vec::new(),
+            push_delivery_next_id: 0,
             audit_log: Vec::new(),
             audit_log_next_id: 0,
             outbound_queue: MemoryOutbound::default(),
@@ -3051,6 +3155,142 @@ impl Storage for MemoryStorage {
     ) -> Result<Option<PushRule>> {
         let key = (user_id.to_owned(), scope.to_owned(), kind.to_owned(), rule_id.to_owned());
         Ok(self.inner.read().await.push_rules.get(&key).cloned())
+    }
+
+    // --- Push notifications and delivery (conduit-y99.30, conduit-y99.31) -----
+
+    async fn push_cursor(&self) -> Result<i64> {
+        Ok(self.inner.read().await.push_cursor)
+    }
+
+    async fn commit_push_batch(
+        &self,
+        notifications: &[PushNotification],
+        read_marks: &[PushReadMark],
+        deliveries: &[PushDelivery],
+        cursor: i64,
+    ) -> Result<()> {
+        let mut inner = self.inner.write().await;
+        for m in read_marks {
+            let entry = inner
+                .push_read_marks
+                .entry((m.user_id.clone(), m.room_id.clone(), m.scope.clone()))
+                .or_insert(0);
+            *entry = (*entry).max(m.stream_pos);
+        }
+        for n in notifications {
+            if !inner
+                .push_notifications
+                .iter()
+                .any(|e| e.user_id == n.user_id && e.event_id == n.event_id)
+            {
+                inner.push_notifications.push(n.clone());
+            }
+        }
+        for d in deliveries {
+            if inner.push_deliveries.iter().any(|e| {
+                e.user_id == d.user_id && e.app_id == d.app_id && e.pushkey == d.pushkey && e.event_id == d.event_id
+            }) {
+                continue;
+            }
+            inner.push_delivery_next_id += 1;
+            let mut d = d.clone();
+            d.id = inner.push_delivery_next_id;
+            inner.push_deliveries.push(d);
+        }
+        inner.push_cursor = inner.push_cursor.max(cursor);
+        Ok(())
+    }
+
+    async fn push_read_marks(&self, user_id: &str, room_id: &str) -> Result<Vec<(String, i64)>> {
+        let inner = self.inner.read().await;
+        Ok(inner
+            .push_read_marks
+            .iter()
+            .filter(|((u, r, _), _)| u == user_id && r == room_id)
+            .map(|((_, _, scope), pos)| (scope.clone(), *pos))
+            .collect())
+    }
+
+    async fn unread_push_notifications(
+        &self,
+        user_id: &str,
+        room_id: &str,
+        after_pos: i64,
+    ) -> Result<Vec<(Option<String>, i64, bool)>> {
+        let inner = self.inner.read().await;
+        let mut rows: Vec<_> = inner
+            .push_notifications
+            .iter()
+            .filter(|n| n.user_id == user_id && n.room_id == room_id && n.stream_pos > after_pos)
+            .map(|n| (n.thread_id.clone(), n.stream_pos, n.highlight))
+            .collect();
+        rows.sort_by_key(|r| r.1);
+        Ok(rows)
+    }
+
+    async fn list_push_notifications(
+        &self,
+        user_id: &str,
+        before_pos: Option<i64>,
+        limit: i64,
+        only_highlight: bool,
+    ) -> Result<Vec<PushNotification>> {
+        let inner = self.inner.read().await;
+        let mut rows: Vec<_> = inner
+            .push_notifications
+            .iter()
+            .filter(|n| {
+                n.user_id == user_id
+                    && before_pos.is_none_or(|b| n.stream_pos < b)
+                    && (!only_highlight || n.highlight)
+            })
+            .cloned()
+            .collect();
+        rows.sort_by_key(|n| std::cmp::Reverse(n.stream_pos));
+        rows.truncate(limit.max(0) as usize);
+        Ok(rows)
+    }
+
+    async fn due_push_deliveries(&self, now_ms: i64, limit: i64) -> Result<Vec<PushDelivery>> {
+        let inner = self.inner.read().await;
+        let mut rows: Vec<_> = inner
+            .push_deliveries
+            .iter()
+            .filter(|d| d.next_attempt_ms <= now_ms)
+            .cloned()
+            .collect();
+        rows.sort_by_key(|d| d.id);
+        rows.truncate(limit.max(0) as usize);
+        Ok(rows)
+    }
+
+    async fn finish_push_delivery(&self, id: i64) -> Result<()> {
+        self.inner.write().await.push_deliveries.retain(|d| d.id != id);
+        Ok(())
+    }
+
+    async fn retry_push_delivery(&self, id: i64, attempts: i32, next_attempt_ms: i64) -> Result<()> {
+        let mut inner = self.inner.write().await;
+        if let Some(d) = inner.push_deliveries.iter_mut().find(|d| d.id == id) {
+            d.attempts = attempts;
+            d.next_attempt_ms = next_attempt_ms;
+        }
+        Ok(())
+    }
+
+    async fn delete_pushers_for_key(
+        &self,
+        app_id: &str,
+        pushkey: &str,
+        keep_user: Option<&str>,
+    ) -> Result<u64> {
+        let mut inner = self.inner.write().await;
+        let before = inner.pushers.len();
+        inner.pushers.retain(|(user, key, app), _| {
+            !(key == pushkey && app == app_id && keep_user != Some(user.as_str()))
+        });
+        Ok((before - inner.pushers.len()) as u64)
     }
 
     // --- Admin (E11) ---------------------------------------------------------

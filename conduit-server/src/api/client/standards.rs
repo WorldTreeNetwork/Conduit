@@ -10,6 +10,8 @@
 //!   the OAuth 2.0 API is not supported, and authentication API discovery
 //!   requires that answer (#authentication-api-discovery).
 //! - `GET /_matrix/client/versions` advertises the spec versions served.
+//! - Plain-text body rejections from axum extractors become `M_NOT_JSON`,
+//!   `M_BAD_JSON` or `M_TOO_LARGE` JSON errors.
 
 use axum::{
     body::Body,
@@ -72,6 +74,22 @@ pub async fn normalize_errors(response: Response) -> Response {
         }
         return rewritten;
     }
+    // axum's body extractors reject with plain text; Matrix wants JSON
+    // errors: unparsable or non-JSON bodies are M_NOT_JSON, JSON of the
+    // wrong shape is M_BAD_JSON, oversized bodies M_TOO_LARGE.
+    let rewrite = match status {
+        StatusCode::BAD_REQUEST | StatusCode::UNSUPPORTED_MEDIA_TYPE => {
+            Some((StatusCode::BAD_REQUEST, "M_NOT_JSON"))
+        }
+        StatusCode::UNPROCESSABLE_ENTITY => Some((StatusCode::BAD_REQUEST, "M_BAD_JSON")),
+        StatusCode::PAYLOAD_TOO_LARGE => Some((StatusCode::PAYLOAD_TOO_LARGE, "M_TOO_LARGE")),
+        _ => None,
+    };
+    if let Some((new_status, errcode)) = rewrite.filter(|_| !is_json(&response)) {
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024).await.unwrap_or_default();
+        let message = String::from_utf8_lossy(&bytes).trim().to_owned();
+        return (new_status, Json(json!({ "errcode": errcode, "error": message }))).into_response();
+    }
     if status == StatusCode::TOO_MANY_REQUESTS && !response.headers().contains_key(header::RETRY_AFTER) {
         let (mut parts, body) = response.into_parts();
         let bytes = axum::body::to_bytes(body, 64 * 1024).await.unwrap_or_default();
@@ -110,6 +128,27 @@ mod tests {
         let body = axum::body::to_bytes(response.into_body(), 1024).await.unwrap();
         let body: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(body["errcode"], "M_UNRECOGNIZED");
+    }
+
+    #[tokio::test]
+    async fn plain_text_body_rejections_become_matrix_errors() {
+        for (status, expected_status, errcode) in [
+            (StatusCode::BAD_REQUEST, 400, "M_NOT_JSON"),
+            (StatusCode::UNSUPPORTED_MEDIA_TYPE, 400, "M_NOT_JSON"),
+            (StatusCode::UNPROCESSABLE_ENTITY, 400, "M_BAD_JSON"),
+            (StatusCode::PAYLOAD_TOO_LARGE, 413, "M_TOO_LARGE"),
+        ] {
+            let response = normalize_errors((status, "Failed to parse").into_response()).await;
+            assert_eq!(response.status().as_u16(), expected_status);
+            let body = axum::body::to_bytes(response.into_body(), 1024).await.unwrap();
+            let body: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(body["errcode"], errcode);
+            assert_eq!(body["error"], "Failed to parse");
+        }
+        // JSON 400s from handlers pass through.
+        let response = (StatusCode::BAD_REQUEST, Json(json!({"errcode": "M_INVALID_PARAM"}))).into_response();
+        let body = axum::body::to_bytes(normalize_errors(response).await.into_body(), 1024).await.unwrap();
+        assert_eq!(serde_json::from_slice::<Value>(&body).unwrap()["errcode"], "M_INVALID_PARAM");
     }
 
     #[tokio::test]

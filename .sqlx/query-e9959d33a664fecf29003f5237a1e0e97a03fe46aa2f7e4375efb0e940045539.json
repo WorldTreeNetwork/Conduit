@@ -1,0 +1,25 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO pushers\n                (user_id, pushkey, app_id, app_display_name, device_display_name,\n                 kind, lang, profile_tag, url, format, data, pushkey_ts)\n            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)\n            ON CONFLICT (user_id, pushkey, app_id) DO UPDATE SET\n                app_display_name    = EXCLUDED.app_display_name,\n                device_display_name = EXCLUDED.device_display_name,\n                kind                = EXCLUDED.kind,\n                lang                = EXCLUDED.lang,\n                profile_tag         = EXCLUDED.profile_tag,\n                url                 = EXCLUDED.url,\n                format              = EXCLUDED.format,\n                data                = EXCLUDED.data,\n                pushkey_ts          = EXCLUDED.pushkey_ts\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Jsonb",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "e9959d33a664fecf29003f5237a1e0e97a03fe46aa2f7e4375efb0e940045539"
+}

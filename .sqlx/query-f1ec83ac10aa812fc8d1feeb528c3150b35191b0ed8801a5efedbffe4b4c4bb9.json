@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT stream_pos FROM push_cursor",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "stream_pos",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "f1ec83ac10aa812fc8d1feeb528c3150b35191b0ed8801a5efedbffe4b4c4bb9"
+}

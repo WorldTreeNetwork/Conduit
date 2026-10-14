@@ -67,10 +67,10 @@ events. Logout (`POST /logout`) and `M_UNKNOWN_TOKEN` wipe all three keys.
 
 ### Workarounds for server gaps (keep until the beads close)
 
-- **Unread counts:** Conduit currently sends `unread_notifications` as
-  zeros. The room list shows `max(notification_count, local unread)`
-  where local unread counts messages from others after the user's own
-  `m.read` receipt or local read marker. (`conduit-y99.24`)
+- **Unread counts:** Conduit sends real `unread_notifications` from push
+  rule evaluation (conduit-y99.30). The room list shows
+  `max(notification_count, local unread)` where local unread counts messages
+  from others after the user's own `m.read` receipt or local read marker.
 - **Display-name propagation:** the server does not rewrite room member
   events after `PUT /profile/{userId}/displayname`; the client updates
   its own `m.room.member` in each joined room whose member event still

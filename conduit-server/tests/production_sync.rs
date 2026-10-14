@@ -1119,9 +1119,17 @@ async fn unread_counts_follow_push_rules_receipts_and_threads() {
 
     // The display name change was propagated as Bob's own member event
     // (conduit-y99.25), which reads everything before it, including the
-    // initial message.  A mention of the display name notifies and
-    // highlights; notices do not notify.
-    send_text(&server, &alice, &room, "mention", json!({"msgtype": "m.text", "body": "hi Bobby"})).await;
+    // initial message.  An m.mentions user mention notifies and highlights
+    // (v1.17 removed the display-name body rule, so "hi Bobby" alone is an
+    // ordinary message); notices do not notify.
+    send_text(
+        &server,
+        &alice,
+        &room,
+        "mention",
+        json!({"msgtype": "m.text", "body": "hi Bobby", "m.mentions": {"user_ids": [user(&bob)]}}),
+    )
+    .await;
     send_text(&server, &alice, &room, "notice", json!({"msgtype": "m.notice", "body": "bot"})).await;
     let first = sync(&server, &bob, None).await;
     assert_eq!(counts(&first), json!({"notification_count": 1, "highlight_count": 1}), "{first}");

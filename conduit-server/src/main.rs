@@ -492,6 +492,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let push_rx = state.events_tx.subscribe();
         push_worker::spawn_push_worker(
             Arc::clone(&state.storage),
+            Arc::clone(&state.server_name),
             state.http.clone(),
             push_rx,
         );
@@ -646,25 +647,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .put(presence_api::put_presence::<AppState>))
         // Media (E07, conduit-y99.21): content repository
         .merge(media_api::router::<AppState>())
-        // Push (E11 P1–P2)
-        .route("/_matrix/client/v3/pushers",
-            get(push_api::get_pushers::<AppState>))
-        .route("/_matrix/client/v3/pushers/set",
-            post(push_api::set_pusher::<AppState>))
-        .route("/_matrix/client/v3/pushrules/",
-            get(push_api::get_all_push_rules::<AppState>))
-        .route("/_matrix/client/v3/pushrules/:scope/:kind/:ruleId",
-            get(push_api::get_push_rule::<AppState>)
-            .put(push_api::put_push_rule::<AppState>)
-            .delete(push_api::delete_push_rule::<AppState>))
-        .route("/_matrix/client/v3/pushrules/:scope/:kind/:ruleId/enabled",
-            get(push_api::get_push_rule_enabled::<AppState>)
-            .put(push_api::put_push_rule_enabled::<AppState>))
-        .route("/_matrix/client/v3/pushrules/:scope/:kind/:ruleId/actions",
-            get(push_api::get_push_rule_actions::<AppState>)
-            .put(push_api::put_push_rule_actions::<AppState>))
-        .route("/_matrix/client/v3/notifications",
-            get(push_api::get_notifications::<AppState>))
+        // Push (conduit-y99.30, conduit-y99.31)
+        .merge(push_api::router::<AppState>())
         // Admin API (E11 AD1–AD6)
         .route("/_matrix/conduit/admin/v1/users",
             get(admin_api::list_users::<AppState>))

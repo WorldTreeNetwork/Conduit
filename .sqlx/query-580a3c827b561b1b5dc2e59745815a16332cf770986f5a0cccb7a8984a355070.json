@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n            SELECT user_id, pushkey, app_id, app_display_name, device_display_name,\n                   kind, lang, profile_tag, url, format, data\n            FROM pushers\n            WHERE user_id = $1\n            ORDER BY created_at\n            ",
+  "query": "\n            SELECT user_id, pushkey, app_id, app_display_name, device_display_name,\n                   kind, lang, profile_tag, url, format, data, pushkey_ts\n            FROM pushers\n            WHERE user_id = $1\n            ORDER BY created_at\n            ",
   "describe": {
     "columns": [
       {
@@ -57,6 +57,11 @@
         "ordinal": 10,
         "name": "data",
         "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 11,
+        "name": "pushkey_ts",
+        "type_info": "Int8"
       }
     ],
     "parameters": {
@@ -75,8 +80,9 @@
       true,
       true,
       true,
+      false,
       false
     ]
   },
-  "hash": "db51dd23876b080793d3f2a9096f0194af8a0b064735ea591ab47e9d22a39d26"
+  "hash": "580a3c827b561b1b5dc2e59745815a16332cf770986f5a0cccb7a8984a355070"
 }

@@ -16,18 +16,18 @@
  "summary": {
   "cs": {
    "endpoint": {
-    "implemented+tested": 133,
+    "implemented+tested": 138,
     "implemented-untested": 0,
-    "partial": 29,
-    "missing": 1,
+    "partial": 25,
+    "missing": 0,
     "not-applicable": 1,
     "total": 164
    },
    "requirement": {
-    "implemented+tested": 43,
+    "implemented+tested": 45,
     "implemented-untested": 0,
-    "partial": 30,
-    "missing": 4,
+    "partial": 29,
+    "missing": 3,
     "not-applicable": 9,
     "total": 86
    }
@@ -70,17 +70,17 @@
   },
   "pg": {
    "endpoint": {
-    "implemented+tested": 0,
+    "implemented+tested": 1,
     "implemented-untested": 0,
-    "partial": 1,
+    "partial": 0,
     "missing": 0,
     "not-applicable": 0,
     "total": 1
    },
    "requirement": {
-    "implemented+tested": 0,
+    "implemented+tested": 1,
     "implemented-untested": 0,
-    "partial": 1,
+    "partial": 0,
     "missing": 0,
     "not-applicable": 1,
     "total": 2
@@ -116,19 +116,19 @@
   },
   "app": {
    "requirement": {
-    "implemented+tested": 7,
+    "implemented+tested": 8,
     "implemented-untested": 0,
     "partial": 5,
-    "missing": 5,
+    "missing": 4,
     "not-applicable": 4,
     "total": 21
    }
   },
   "all": {
-   "implemented+tested": 232,
+   "implemented+tested": 242,
    "implemented-untested": 3,
-   "partial": 99,
-   "missing": 94,
+   "partial": 92,
+   "missing": 91,
    "not-applicable": 37,
    "total": 465
   }
@@ -1188,7 +1188,6 @@
     "conduit-y99.13.4",
     "conduit-y99.14",
     "conduit-y99.16",
-    "conduit-y99.24",
     "conduit-y99.27"
    ],
    "notes": "Core sync works with production journeys; open semantic gaps tracked by the sync beads."
@@ -3713,23 +3712,23 @@
    "rate_limited": "No",
    "deprecated": false,
    "role": "homeserver",
-   "status": "partial",
+   "status": "implemented+tested",
    "code": [
     {
-     "loc": "conduit-server/src/main.rs:633",
-     "handler": "push_api::get_all_push_rules",
+     "loc": "conduit-server/src/api/client/push.rs:240",
+     "handler": "push::get_all_push_rules",
      "kind": "exact"
     }
    ],
    "tests": [
     "conduit-server/tests/push.rs::default_push_rules_seeded",
-    "conduit-server/tests/push.rs::push_rules_crud"
+    "conduit-server/tests/push.rs::push_rules_crud",
+    "conduit-server/tests/production_push.rs::push_rules_api_follows_spec",
+    "conduit-server/src/api/client/push/rules.rs::default_ruleset_matches_spec_order_and_outcomes"
    ],
-   "tests_total": 2,
-   "gap_beads": [
-    "conduit-y99.30"
-   ],
-   "notes": "Default ruleset incomplete (mentions, roomnotif, server_acl, suppress_edits, call...)."
+   "tests_total": 4,
+   "gap_beads": [],
+   "notes": "Full v1.19 server-default ruleset (v1.17 removed body-mention rules) in spec order with user rules before defaults; also republishes m.push_rules account data."
   },
   {
    "id": "cs.ep.get_matrixclientv3pushrulesglobal",
@@ -3743,14 +3742,20 @@
    "rate_limited": "No",
    "deprecated": false,
    "role": "homeserver",
-   "status": "missing",
-   "code": [],
-   "tests": [],
-   "tests_total": 0,
-   "gap_beads": [
-    "conduit-y99.30"
+   "status": "implemented+tested",
+   "code": [
+    {
+     "loc": "conduit-server/src/api/client/push.rs:253",
+     "handler": "push::get_global_push_rules",
+     "kind": "exact"
+    }
    ],
-   "notes": ""
+   "tests": [
+    "conduit-server/tests/production_push.rs::push_rules_api_follows_spec"
+   ],
+   "tests_total": 1,
+   "gap_beads": [],
+   "notes": "Returns the global Ruleset object directly."
   },
   {
    "id": "cs.ep.get_matrixclientv3pushrulesglobalkindruleid",
@@ -3767,18 +3772,19 @@
    "status": "implemented+tested",
    "code": [
     {
-     "loc": "conduit-server/src/main.rs:635",
-     "handler": "push_api::get_push_rule",
+     "loc": "conduit-server/src/api/client/push.rs:278",
+     "handler": "push::get_push_rule",
      "kind": "exact"
     }
    ],
    "tests": [
     "conduit-server/tests/push.rs::push_rules_crud",
-    "conduit-server/tests/push.rs::pusher_set_and_list"
+    "conduit-server/tests/push.rs::pusher_set_and_list",
+    "conduit-server/tests/production_push.rs::push_rules_api_follows_spec"
    ],
-   "tests_total": 2,
+   "tests_total": 3,
    "gap_beads": [],
-   "notes": ""
+   "notes": "Default and user rules; 404 M_NOT_FOUND; invalid kind 400 M_INVALID_PARAM."
   },
   {
    "id": "cs.ep.put_matrixclientv3pushrulesglobalkindruleid",
@@ -3792,23 +3798,22 @@
    "rate_limited": "Yes",
    "deprecated": false,
    "role": "homeserver",
-   "status": "partial",
+   "status": "implemented+tested",
    "code": [
     {
-     "loc": "conduit-server/src/main.rs:635",
-     "handler": "push_api::put_push_rule",
+     "loc": "conduit-server/src/api/client/push.rs:296",
+     "handler": "push::put_push_rule",
      "kind": "exact"
     }
    ],
    "tests": [
     "conduit-server/tests/push.rs::push_rules_crud",
-    "conduit-server/tests/push.rs::pusher_set_and_list"
+    "conduit-server/tests/push.rs::pusher_set_and_list",
+    "conduit-server/tests/production_push.rs::push_rules_api_follows_spec"
    ],
-   "tests_total": 2,
-   "gap_beads": [
-    "conduit-y99.30"
-   ],
-   "notes": "before/after insertion semantics unverified."
+   "tests_total": 3,
+   "gap_beads": [],
+   "notes": "before/after ordering (400 M_UNKNOWN for a missing anchor), new rules first and enabled, updates keep place/enabled; '.'-prefixed IDs, slashes, bad actions/conditions are M_INVALID_PARAM; content rules need pattern."
   },
   {
    "id": "cs.ep.delete_matrixclientv3pushrulesglobalkindruleid",
@@ -3825,18 +3830,19 @@
    "status": "implemented+tested",
    "code": [
     {
-     "loc": "conduit-server/src/main.rs:635",
-     "handler": "push_api::delete_push_rule",
+     "loc": "conduit-server/src/api/client/push.rs:394",
+     "handler": "push::delete_push_rule",
      "kind": "exact"
     }
    ],
    "tests": [
     "conduit-server/tests/push.rs::push_rules_crud",
-    "conduit-server/tests/push.rs::pusher_set_and_list"
+    "conduit-server/tests/push.rs::pusher_set_and_list",
+    "conduit-server/tests/production_push.rs::push_rules_api_follows_spec"
    ],
-   "tests_total": 2,
+   "tests_total": 3,
    "gap_beads": [],
-   "notes": ""
+   "notes": "404 M_NOT_FOUND for unknown rules; server-default rules cannot be deleted (400 M_INVALID_PARAM)."
   },
   {
    "id": "cs.ep.get_matrixclientv3pushrulesglobalkindruleidactions",
@@ -3853,16 +3859,17 @@
    "status": "implemented+tested",
    "code": [
     {
-     "loc": "conduit-server/src/main.rs:642",
-     "handler": "push_api::get_push_rule_actions",
+     "loc": "conduit-server/src/api/client/push.rs:423",
+     "handler": "push::get_push_rule_actions",
      "kind": "exact"
     }
    ],
    "tests": [
     "conduit-server/tests/push.rs::push_rules_crud",
-    "conduit-server/tests/push.rs::pusher_set_and_list"
+    "conduit-server/tests/push.rs::pusher_set_and_list",
+    "conduit-server/tests/production_push.rs::push_rules_api_follows_spec"
    ],
-   "tests_total": 2,
+   "tests_total": 3,
    "gap_beads": [],
    "notes": ""
   },
@@ -3881,18 +3888,19 @@
    "status": "implemented+tested",
    "code": [
     {
-     "loc": "conduit-server/src/main.rs:642",
-     "handler": "push_api::put_push_rule_actions",
+     "loc": "conduit-server/src/api/client/push.rs:489",
+     "handler": "push::put_push_rule_actions",
      "kind": "exact"
     }
    ],
    "tests": [
     "conduit-server/tests/push.rs::push_rules_crud",
-    "conduit-server/tests/push.rs::pusher_set_and_list"
+    "conduit-server/tests/push.rs::pusher_set_and_list",
+    "conduit-server/tests/production_push.rs::push_rules_api_follows_spec"
    ],
-   "tests_total": 2,
+   "tests_total": 3,
    "gap_beads": [],
-   "notes": ""
+   "notes": "Works on server-default rules (stored as overlays); historical dont_notify/coalesce stripped."
   },
   {
    "id": "cs.ep.get_matrixclientv3pushrulesglobalkindruleidenabled",
@@ -3909,16 +3917,17 @@
    "status": "implemented+tested",
    "code": [
     {
-     "loc": "conduit-server/src/main.rs:639",
-     "handler": "push_api::get_push_rule_enabled",
+     "loc": "conduit-server/src/api/client/push.rs:412",
+     "handler": "push::get_push_rule_enabled",
      "kind": "exact"
     }
    ],
    "tests": [
     "conduit-server/tests/push.rs::push_rules_crud",
-    "conduit-server/tests/push.rs::pusher_set_and_list"
+    "conduit-server/tests/push.rs::pusher_set_and_list",
+    "conduit-server/tests/production_push.rs::push_rules_api_follows_spec"
    ],
-   "tests_total": 2,
+   "tests_total": 3,
    "gap_beads": [],
    "notes": ""
   },
@@ -3937,16 +3946,18 @@
    "status": "implemented+tested",
    "code": [
     {
-     "loc": "conduit-server/src/main.rs:639",
-     "handler": "push_api::put_push_rule_enabled",
+     "loc": "conduit-server/src/api/client/push.rs:477",
+     "handler": "push::put_push_rule_enabled",
      "kind": "exact"
     }
    ],
    "tests": [
     "conduit-server/tests/push.rs::push_rules_crud",
-    "conduit-server/tests/push.rs::pusher_set_and_list"
+    "conduit-server/tests/push.rs::pusher_set_and_list",
+    "conduit-server/tests/production_push.rs::push_rules_api_follows_spec",
+    "conduit-server/tests/production_push.rs::unread_counts_follow_rules_and_receipts"
    ],
-   "tests_total": 2,
+   "tests_total": 4,
    "gap_beads": [],
    "notes": ""
   },
@@ -3965,15 +3976,16 @@
    "status": "implemented+tested",
    "code": [
     {
-     "loc": "conduit-server/src/main.rs:629",
-     "handler": "push_api::get_pushers",
+     "loc": "conduit-server/src/api/client/push.rs:86",
+     "handler": "push::get_pushers",
      "kind": "exact"
     }
    ],
    "tests": [
-    "conduit-server/tests/push.rs::pusher_set_and_list"
+    "conduit-server/tests/push.rs::pusher_set_and_list",
+    "conduit-server/tests/production_push.rs::pushers_set_validates_appends_and_deletes"
    ],
-   "tests_total": 1,
+   "tests_total": 2,
    "gap_beads": [],
    "notes": ""
   },
@@ -3989,22 +4001,21 @@
    "rate_limited": "Yes",
    "deprecated": false,
    "role": "homeserver",
-   "status": "partial",
+   "status": "implemented+tested",
    "code": [
     {
-     "loc": "conduit-server/src/main.rs:631",
-     "handler": "push_api::set_pusher",
+     "loc": "conduit-server/src/api/client/push.rs:116",
+     "handler": "push::set_pusher",
      "kind": "exact"
     }
    ],
    "tests": [
-    "conduit-server/tests/push.rs::pusher_set_and_list"
+    "conduit-server/tests/push.rs::pusher_set_and_list",
+    "conduit-server/tests/production_push.rs::pushers_set_validates_appends_and_deletes"
    ],
-   "tests_total": 1,
-   "gap_beads": [
-    "conduit-y99.31"
-   ],
-   "notes": "append / kind:null deletion / data.url validation unverified."
+   "tests_total": 2,
+   "gap_beads": [],
+   "notes": "M_MISSING_PARAM for missing fields (kind required, null deletes); app_id/pushkey length, data.url path and format validated (M_INVALID_PARAM); append false removes other users' pushers with the same key; email pushers refused."
   },
   {
    "id": "cs.ep.get_matrixclientv3notifications",
@@ -4018,22 +4029,20 @@
    "rate_limited": "No",
    "deprecated": false,
    "role": "homeserver",
-   "status": "partial",
+   "status": "implemented+tested",
    "code": [
     {
-     "loc": "conduit-server/src/main.rs:645",
-     "handler": "push_api::get_notifications",
+     "loc": "conduit-server/src/api/client/push.rs:519",
+     "handler": "push::get_notifications",
      "kind": "exact"
     }
    ],
    "tests": [
-    "conduit-server/tests/push.rs::notifications_endpoint_returns_empty_list"
+    "conduit-server/tests/production_push.rs::notifications_endpoint_lists_paginates_and_filters"
    ],
    "tests_total": 1,
-   "gap_beads": [
-    "conduit-y99.30"
-   ],
-   "notes": "Always returns an empty list (test asserts empty)."
+   "gap_beads": [],
+   "notes": "Real notifications newest first with actions, event, read, room_id, ts; from/limit pagination with next_token; only=highlight. profile_tag omitted (no per-device rules)."
   },
   {
    "id": "cs.ep.thirdparty_post_matrixclientv3roomsroomidinvite",
@@ -6144,20 +6153,21 @@
    "rate_limited": "No",
    "deprecated": false,
    "role": "homeserver as client",
-   "status": "partial",
+   "status": "implemented+tested",
    "code": [
     {
-     "loc": "conduit-server/src/push_worker.rs:205",
-     "handler": "spawn_push_worker (outbound)",
+     "loc": "conduit-server/src/push_worker.rs",
+     "handler": "push_worker::notify_body / deliver",
      "kind": "client"
     }
    ],
-   "tests": [],
-   "tests_total": 0,
-   "gap_beads": [
-    "conduit-y99.31"
+   "tests": [
+    "conduit-server/tests/production_push.rs::gateway_receives_spec_notify_payloads",
+    "conduit-server/tests/production_push.rs::gateway_failures_retry_and_rejected_pushkeys_remove_pushers"
    ],
-   "notes": "Homeserver->gateway: counts.unread hard-coded 1, devices[] shape incomplete, no rejected-pushkey handling, no retry."
+   "tests_total": 2,
+   "gap_beads": [],
+   "notes": "Homeserver->gateway: full and event_id_only payloads, counts.unread from real counts, devices[] with pushkey_ts/data minus url/tweaks, prio; rejected pushkeys remove pushers; 5xx retried with backoff from a durable outbox."
   },
   {
    "id": "is.ep.get_matrixidentityversions",
@@ -7278,7 +7288,6 @@
     "conduit-y99.13",
     "conduit-y99.16",
     "conduit-y99.14",
-    "conduit-y99.24",
     "conduit-y99.27"
    ],
    "notes": ""
@@ -7862,7 +7871,7 @@
    "title": "Push notifications (rules, evaluation, pushers, notifications, counts)",
    "source": "https://spec.matrix.org/v1.19/client-server-api/#push-notifications",
    "role": "homeserver",
-   "status": "partial",
+   "status": "implemented+tested",
    "code": [
     {
      "loc": "conduit-server/src/api/client/push.rs"
@@ -7871,20 +7880,26 @@
      "loc": "conduit-server/src/api/client/push/rules.rs"
     },
     {
+     "loc": "conduit-server/src/api/client/push/notifications.rs"
+    },
+    {
+     "loc": "conduit-server/src/api/client/notification_counts.rs"
+    },
+    {
      "loc": "conduit-server/src/push_worker.rs"
     }
    ],
    "tests": [
     "conduit-server/tests/push.rs::push_rules_crud",
-    "conduit-server/tests/push.rs::pusher_set_and_list"
+    "conduit-server/tests/push.rs::pusher_set_and_list",
+    "conduit-server/tests/production_push.rs::unread_counts_follow_rules_and_receipts",
+    "conduit-server/tests/production_push.rs::thread_notifications_are_split_when_requested",
+    "conduit-server/tests/production_push.rs::notifications_endpoint_lists_paginates_and_filters",
+    "conduit-server/tests/production_sync.rs::unread_counts_follow_push_rules_receipts_and_threads"
    ],
-   "tests_total": 2,
-   "gap_beads": [
-    "conduit-y99.30",
-    "conduit-y99.31",
-    "conduit-y99.24"
-   ],
-   "notes": ""
+   "tests_total": 6,
+   "gap_beads": [],
+   "notes": "Rules, evaluation once per event, counts in the same /sync response, receipts and own events clear, thread partitioning, /notifications, pushers and gateway delivery."
   },
   {
    "id": "cs.mod.3pid-invites",
@@ -8256,10 +8271,9 @@
    "tests": [],
    "tests_total": 0,
    "gap_beads": [
-    "conduit-y99.22",
-    "conduit-y99.30"
+    "conduit-y99.22"
    ],
-   "notes": ""
+   "notes": ".m.rule.room.server_acl suppression done (y99.30); ACL enforcement is y99.22."
   },
   {
    "id": "cs.mod.mentions",
@@ -8268,14 +8282,19 @@
    "title": "User and room mentions (m.mentions push rules)",
    "source": "https://spec.matrix.org/v1.19/client-server-api/#user-and-room-mentions",
    "role": "homeserver",
-   "status": "missing",
-   "code": [],
-   "tests": [],
-   "tests_total": 0,
-   "gap_beads": [
-    "conduit-y99.30"
+   "status": "implemented+tested",
+   "code": [
+    {
+     "loc": "conduit-server/src/api/client/push/rules.rs"
+    }
    ],
-   "notes": ""
+   "tests": [
+    "conduit-server/tests/production_push.rs::unread_counts_follow_rules_and_receipts",
+    "conduit-server/src/api/client/push/rules.rs::default_ruleset_matches_spec_order_and_outcomes"
+   ],
+   "tests_total": 2,
+   "gap_beads": [],
+   "notes": "m.mentions user_ids highlight; room mentions highlight only with sender_notification_permission room."
   },
   {
    "id": "cs.mod.room-upgrades",
@@ -8456,13 +8475,12 @@
     }
    ],
    "tests": [
-    "conduit-server/tests/production_rooms.rs::relations_threads_and_edit_aggregation"
+    "conduit-server/tests/production_rooms.rs::relations_threads_and_edit_aggregation",
+    "conduit-server/tests/production_push.rs::thread_notifications_are_split_when_requested"
    ],
-   "tests_total": 1,
-   "gap_beads": [
-    "conduit-y99.30"
-   ],
-   "notes": "Validation, m.thread bundle and /threads done; thread notification counts are y99.30."
+   "tests_total": 2,
+   "gap_beads": [],
+   "notes": "Validation, m.thread bundle, /threads and per-thread notification counts done."
   },
   {
    "id": "cs.mod.reference-relations",
@@ -9697,18 +9715,22 @@
    "title": "Homeserver behaviour: notify payload, counts, devices, prio, format=event_id_only, rejected pushkeys",
    "source": "https://spec.matrix.org/v1.19/push-gateway-api/#homeserver-behaviour",
    "role": "homeserver",
-   "status": "partial",
+   "status": "implemented+tested",
    "code": [
     {
      "loc": "conduit-server/src/push_worker.rs"
     }
    ],
-   "tests": [],
-   "tests_total": 0,
-   "gap_beads": [
-    "conduit-y99.31"
+   "tests": [
+    "conduit-server/tests/production_push.rs::gateway_receives_spec_notify_payloads",
+    "conduit-server/tests/production_push.rs::gateway_failures_retry_and_rejected_pushkeys_remove_pushers",
+    "conduit-server/src/push_worker.rs::backoff_grows_and_caps"
    ],
-   "notes": "No test exercises the outbound notify request."
+   "tests_total": 3,
+   "gap_beads": [
+    "conduit-y99.31.1"
+   ],
+   "notes": "Exponential backoff for 24h, 4xx drops, rejected removal, event_id_only. Gateway URLs are not SSRF-filtered (y99.31.1)."
   },
   {
    "id": "pg.unsupported-endpoints",
@@ -11119,14 +11141,15 @@
     }
    ],
    "tests": [
-    "conduit-server/tests/push.rs::push_rules_crud"
+    "conduit-server/tests/push.rs::push_rules_crud",
+    "conduit-server/src/api/client/push/rules.rs::globs_match_whole_values_case_insensitively",
+    "conduit-server/src/api/client/push/rules.rs::body_globs_match_at_word_boundaries"
    ],
-   "tests_total": 1,
+   "tests_total": 3,
    "gap_beads": [
-    "conduit-y99.30",
     "conduit-y99.22"
    ],
-   "notes": ""
+   "notes": "Push rule globs done (y99.30); server ACL globs are y99.22."
   },
   {
    "id": "app.dot-paths",
@@ -11135,14 +11158,19 @@
    "title": "Dot-separated property paths (escaping)",
    "source": "https://spec.matrix.org/v1.19/appendices/#dot-separated-property-paths",
    "role": "homeserver",
-   "status": "missing",
-   "code": [],
-   "tests": [],
-   "tests_total": 0,
-   "gap_beads": [
-    "conduit-y99.30"
+   "status": "implemented+tested",
+   "code": [
+    {
+     "loc": "conduit-server/src/api/client/push/rules.rs"
+    }
    ],
-   "notes": ""
+   "tests": [
+    "conduit-server/src/api/client/push/rules.rs::dot_paths_honour_escapes",
+    "conduit-server/tests/production_push.rs::unread_counts_follow_rules_and_receipts"
+   ],
+   "tests_total": 2,
+   "gap_beads": [],
+   "notes": "\\. and \\\\ escapes; other backslash sequences literal."
   },
   {
    "id": "app.threat-model",
