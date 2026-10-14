@@ -161,20 +161,16 @@ async fn production_device_lifecycle_with_uia_keys_and_device_lists() {
         .await;
     assert_eq!(got["display_name"], "Work phone");
 
-    // The phone publishes E2EE keys; bob sees them.
+    // The phone publishes self-signed E2EE keys; bob sees them.
+    let phone_keys = common::keys::Device::new(alice_id, "PHONE");
     server
         .request(
             Method::POST,
             "/_matrix/client/v3/keys/upload",
             Some(phone_token),
             Some(json!({
-                "device_keys": {
-                    "user_id": alice_id, "device_id": "PHONE",
-                    "algorithms": ["m.olm.v1.curve25519-aes-sha2"],
-                    "keys": {"curve25519:PHONE": "curve", "ed25519:PHONE": "ed"},
-                    "signatures": {}
-                },
-                "one_time_keys": {"signed_curve25519:AAAA": {"key": "otk", "signatures": {}}}
+                "device_keys": phone_keys.keys,
+                "one_time_keys": {"signed_curve25519:AAAA": phone_keys.signed_key("b3Rr", false)}
             })),
             200,
         )
@@ -892,11 +888,7 @@ async fn production_refresh_tokens_rotate_and_soft_logout() {
             Method::POST,
             "/_matrix/client/v3/keys/upload",
             Some(token(&session)),
-            Some(json!({"device_keys": {
-                "user_id": alice_id, "device_id": "LAPTOP",
-                "algorithms": ["m.olm.v1.curve25519-aes-sha2"],
-                "keys": {"curve25519:LAPTOP": "c", "ed25519:LAPTOP": "e"}, "signatures": {}
-            }})),
+            Some(json!({"device_keys": common::keys::Device::new(&alice_id, "LAPTOP").keys})),
             200,
         )
         .await;
