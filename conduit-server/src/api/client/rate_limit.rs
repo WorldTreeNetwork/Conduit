@@ -70,6 +70,23 @@ pub struct CsRateLimiter {
 }
 
 impl CsRateLimiter {
+    /// Operator-configurable authenticated bucket. A zero rate disables refill,
+    /// useful for deterministic tests; it does not exempt requests from limits.
+    pub fn from_env() -> Result<Self, String> {
+        let mut limiter = Self::default_cs();
+        for (name, target, minimum) in [
+            ("CONDUIT_CS_AUTH_RATE_PER_SECOND", &mut limiter.auth_rate, 0.0),
+            ("CONDUIT_CS_AUTH_BURST", &mut limiter.auth_burst, 1.0),
+        ] {
+            match std::env::var(name) {
+                Ok(value) => *target = parse_limit(name, &value, minimum)?,
+                Err(std::env::VarError::NotPresent) => {},
+                Err(_) => return Err(format!("{name} must be a UTF-8 number")),
+            }
+        }
+        Ok(limiter)
+    }
+
     /// Defaults: 100 r/s burst 200 for authenticated tokens; 10 r/s burst 20
     /// for unauthenticated IPs.
     pub fn default_cs() -> Self {
@@ -134,6 +151,11 @@ impl CsRateLimiter {
         let bucket = map.entry(key.to_owned()).or_insert_with(|| Bucket::new(burst));
         bucket.try_consume(rate, burst)
     }
+}
+
+fn parse_limit(name: &str, value: &str, minimum: f64) -> Result<f64, String> {
+    value.parse::<f64>().ok().filter(|value| value.is_finite() && *value >= minimum)
+        .ok_or_else(|| format!("{name} must be finite and at least {minimum}"))
 }
 
 /// Extract the bearer access token from `Authorization: Bearer ...`.
@@ -204,6 +226,28 @@ pub async fn cs_rate_limit(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn configured_limits_reject_non_finite_and_invalid_values() {
+        for value in ["NaN", "inf", "-inf", "-1", "garbage", ""] {
+            assert!(parse_limit("rate", value, 0.0).is_err(), "{value}");
+        }
+        assert_eq!(parse_limit("rate", "0", 0.0).unwrap(), 0.0);
+        assert_eq!(parse_limit("rate", "0.5", 0.0).unwrap(), 0.5);
+        assert!(parse_limit("burst", "0.5", 1.0).is_err());
+        assert_eq!(parse_limit("burst", "2", 1.0).unwrap(), 2.0);
+    }
+
+    #[tokio::test]
+    async fn zero_refill_bucket_stays_exhausted_and_other_tokens_are_independent() {
+        let limiter = CsRateLimiter::new(0.0, 2.0, 10.0, 20.0);
+        assert!(limiter.try_consume("tok:a", true).await);
+        assert!(limiter.try_consume("tok:a", true).await);
+        for _ in 0..10 {
+            assert!(!limiter.try_consume("tok:a", true).await);
+        }
+        assert!(limiter.try_consume("tok:b", true).await);
+    }
 
     #[tokio::test]
     async fn authed_and_anon_have_separate_limits() {

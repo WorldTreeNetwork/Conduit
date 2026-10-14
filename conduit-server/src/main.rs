@@ -706,7 +706,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             conduit_server::api::client::appservice_auth::ts_massaging::<AppState>,
         ))
         .route_layer(middleware::from_fn_with_state(
-            CsRateLimiter::default_cs().with_appservices(&state.app_services, &state.server_name),
+            CsRateLimiter::from_env()?.with_appservices(&state.app_services, &state.server_name),
             cs_rate_limit,
         ))
         // Federation inbound (E09)

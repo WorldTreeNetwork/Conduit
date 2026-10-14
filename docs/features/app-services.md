@@ -144,6 +144,13 @@ Code: `conduit-server/src/api/client/appservice_auth.rs` (+ small hooks in
   `PUT /directory/room/{alias}` and `createRoom` `room_alias_name`.
 - **Rate limits.** `CsRateLimiter::with_appservices`: the AS sender is
   never limited; masqueraded users only when `rate_limited: true`.
+  The authenticated bucket defaults to 100 requests/second with a burst
+  of 200. `CONDUIT_CS_AUTH_RATE_PER_SECOND` (finite, at least 0) and
+  `CONDUIT_CS_AUTH_BURST` (finite, at least 1) override it; malformed
+  values fail startup. A rate of 0 never refills, so the isolated
+  production rate-limit journey uses rate 0 / burst 2 to assert real
+  `M_LIMIT_EXCEEDED` responses independently of runner speed. Anonymous
+  limits remain 10 requests/second with a burst of 20.
 - **Devices / cross-signing (v1.17).** `PUT /devices/{id}` creates a device
   for the asserted user (201, 200 on update); `DELETE /devices/{id}`,
   `POST /delete_devices` and replacement `keys/device_signing/upload` skip

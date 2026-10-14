@@ -132,7 +132,13 @@ fn registration(id: &str, url: &str, extra: &str) -> String {
 
 /// Start a server with the given registrations installed.
 async fn server_with(registrations: &[(&str, String)]) -> Server {
-    let mut server = Server::with_env(&[("CONDUIT_AS_BACKOFF_BASE_MS", "50")]).await;
+    server_with_env(registrations, &[]).await
+}
+
+async fn server_with_env(registrations: &[(&str, String)], extra_env: &[(&str, &str)]) -> Server {
+    let mut env = vec![("CONDUIT_AS_BACKOFF_BASE_MS", "50")];
+    env.extend_from_slice(extra_env);
+    let mut server = Server::with_env(&env).await;
     server.stop();
     let dir = server.files.path().join("app-services");
     std::fs::create_dir_all(&dir).unwrap();
@@ -555,32 +561,28 @@ async fn timestamp_massaging_sync_and_alias_exclusivity() {
 async fn appservice_requests_are_exempt_from_rate_limits() {
     let (url, _log) = spawn_as(false).await;
     let limited = registration("lim", &url, "").replace("rate_limited: false", "rate_limited: true");
-    let server = server_with(&[("irc", registration("irc", &url, "")), ("lim", limited)]).await;
+    let server = server_with_env(
+        &[("irc", registration("irc", &url, "")), ("lim", limited)],
+        &[("CONDUIT_CS_AUTH_RATE_PER_SECOND", "0"), ("CONDUIT_CS_AUTH_BURST", "2")],
+    ).await;
     let alice = server.register("alice").await;
     as_register(&server, "as_lim", "lim_x").await;
     let burst = |token: String, path: String| {
         let http = server.http.clone();
         let url = format!("{}{path}", server.base_url);
         async move {
-            // 8 workers x 60 requests: well past the 200-request burst
-            // before the 100/s refill can catch up.
-            let mut set = tokio::task::JoinSet::new();
-            for _ in 0..8 {
-                let (http, url, token) = (http.clone(), url.clone(), token.clone());
-                set.spawn(async move {
-                    let mut limited = 0;
-                    for _ in 0..60 {
-                        let status = http.get(&url).bearer_auth(&token).send().await.unwrap().status();
-                        if status.as_u16() == 429 {
-                            limited += 1;
-                        }
-                    }
-                    limited
-                });
-            }
+            // No refill: exhaustion depends on requests, never runner speed.
             let mut limited = 0;
-            while let Some(n) = set.join_next().await {
-                limited += n.unwrap();
+            for _ in 0..8 {
+                let response = http.get(&url).bearer_auth(&token).send().await.unwrap();
+                let status = response.status().as_u16();
+                if status == 429 {
+                    let error: Value = response.json().await.unwrap();
+                    assert_eq!(error["errcode"], "M_LIMIT_EXCEEDED");
+                    limited += 1;
+                } else {
+                    assert_eq!(status, 200);
+                }
             }
             limited
         }
