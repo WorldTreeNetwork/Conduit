@@ -16,9 +16,18 @@ storage, a typed outbound boundary, and `send_join` sender/state_key/origin
 validation. The second send-back adds U+0000-safe handling at every
 PostgreSQL sink a PDU reaches (`transactions` and outbox payloads become
 TEXT), refusal of `/invite` content-hash mismatches, per-endpoint fetch
-expectations, and the v11 depth, size and field-length limits. Pre-join
-`send_join` state, `make_join` `ver`, `/event_auth`, and EDU-sink U+0000
-handling are filed as beads `conduit-y99.22.1` to `.4`. Additional room versions,
+expectations, and the v11 depth, size and field-length limits. The third
+round adds:
+- event-time signing-key validity, including the v11 seven-day cap;
+- required authorising-server signatures on restricted joins;
+- an integrity-gated `WirePdu` for every emission, legacy outbox included;
+- separation of retained client history from redactions served over
+  federation;
+- staged migrations that rewrite no table.
+
+Pre-join `send_join` state, `make_join` `ver`, `/event_auth`, EDU-sink
+U+0000 handling, and transactions/outbox retention are filed as beads
+`conduit-y99.22.1` to `.5`. Additional room versions,
 complete event authorization/state resolution, and client UI remain separate
 required work. No new UI because this unit establishes room-event transport and
 storage contracts used by future client features.

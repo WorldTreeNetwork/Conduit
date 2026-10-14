@@ -37,7 +37,8 @@ On receipt, before signature checks, the system SHALL:
 - enforce the v11 event format:
   - `auth_events` holds at most 10 entries, and `prev_events` at most 20;
   - `depth` is an integer in `[0, 2^53-1]`, inclusive at both ends;
-  - the canonical PDU, excluding unsigned `age`, is at most 65536 bytes;
+  - the canonical PDU, including the allow-listed `unsigned` as received
+    with `age`, is at most 65536 bytes;
   - `sender`, `room_id`, `type` and `state_key` are each at most 255 bytes
     of UTF-8;
   - `state_key` is either absent or a string;
@@ -46,6 +47,11 @@ On receipt, before signature checks, the system SHALL:
   - there is no top-level `event_id` key;
 - require that re-encoding the decoded `Pdu` as canonical JSON reproduces
   the received object, minus `unsigned`.
+
+Inbound federation request bodies that contain non-canonical values
+already fail X-Matrix verification with `401 M_UNAUTHORIZED`, and that
+behaviour SHALL be kept. The canonical-value drop therefore applies to
+fetched responses and to direct decode.
 
 A PDU that fails SHALL be dropped. The drop SHALL be deterministic and
 SHALL NOT cause a 5xx. On `/send` the PDU SHALL be omitted from the `pdus`
@@ -112,6 +118,74 @@ processed. On `/send_join` and `/invite` the response SHALL be
 - WHEN it is persisted
 - THEN only the local `age_ts` derived from `age` is stored
 
+### Requirement: Required signers and event-time key validity
+
+Signature verification SHALL require a signature from each required
+server:
+- **The sender's server.** A 3rd-party-invite membership (`m.room.member`,
+  `membership` `invite`, `content.third_party_invite` present) is exempt
+  from this requirement.
+- **The authorising server.** For `m.room.member` joins whose content
+  carries `join_authorised_via_users_server`, the server of that user is
+  also required.
+
+A signing key SHALL be eligible for an event only when its effective
+validity is at least the event's `origin_server_ts`:
+- for `verify_keys`, the effective validity is
+  `min(valid_until_ts, fetched_at + 7 days)`;
+- for `old_verify_keys`, it is `expired_ts`.
+
+The system SHALL refetch a key that is unknown or not eligible before it
+decides, and wall-clock cache expiry SHALL NOT make a key eligible. For
+each required server, every signature made with an eligible key SHALL
+verify, and at least one SHALL remain. Otherwise the PDU SHALL be dropped.
+
+These rules SHALL apply equally to `/send`, `/send_join`, `/invite`, and
+every fetched PDU, auth events included. A non-join `m.room.member` event
+that carries `join_authorised_via_users_server` without a valid signature
+from that user's server SHALL be rejected by the auth rules (v11 rule 4.2),
+not dropped.
+
+#### Scenario: Key validity boundary
+
+- GIVEN a key with `valid_until_ts` T, fetched more than 7 days before T
+  was reached
+- WHEN events signed with it at `origin_server_ts` T and T+1 are received
+- THEN the event at T verifies, and the event at T+1 is dropped with no
+  eligible signature, unless a refetch renews the key
+
+#### Scenario: Seven-day cap
+
+- GIVEN a key published with `valid_until_ts` one year ahead and fetched at
+  time F
+- WHEN events signed with it at `F + 7d` and `F + 7d + 1` are received, and
+  the refetch returns no renewal
+- THEN the first verifies and the second is dropped
+
+#### Scenario: Historical event after rotation
+
+- GIVEN a server that rotated its key at R, with the old key listed in
+  `old_verify_keys` and `expired_ts` R
+- WHEN events signed with the old key at R-1 and R+1 are received
+- THEN the event at R-1 verifies and the event at R+1 is dropped
+
+#### Scenario: Restricted join signatures
+
+- GIVEN three checked-in v11 joins carrying `join_authorised_via_users_server`:
+  one signed only by the sender's server, one with an invalid authoriser
+  signature, and one validly co-signed by the authorising server
+- WHEN each is received over `/send`, and each is fetched as an auth event
+- THEN the first two are dropped and not stored in both paths, the third
+  is admitted, and each verdict equals the recorded Synapse verdict
+
+#### Scenario: Third-party invite exemption
+
+- GIVEN an `m.room.member` invite carrying `third_party_invite`, signed by a
+  server other than the sender's
+- WHEN it is received
+- THEN it passes the signature stage, and the same event without
+  `third_party_invite` is dropped
+
 ### Requirement: Cryptographic and redaction invariants
 
 Content hashing SHALL cover the `Pdu`, including its extensions, and SHALL
@@ -152,11 +226,12 @@ v11-redacted bytes and SHALL leave `hashes` and every other field unchanged.
 The system SHALL co-sign foreign PDUs only with `add_signature`. Before it
 co-signs or persists an inbound `/invite` PDU, the system SHALL require all
 of the following:
-- the inviter's signatures verify;
+- the required signatures verify under event-time key validity;
 - the content hash matches; inbound `/invite` SHALL NOT take the
   redact-on-mismatch path;
 - the derived ID equals the path `eventId`;
-- the sender's server name equals the authenticated origin.
+- the sender's server name equals the authenticated origin, except for a
+  3rd-party-invite membership.
 
 A failure SHALL return `400 M_INVALID_PARAM`, with nothing co-signed and
 nothing persisted. On success, the returned event SHALL be the received
@@ -195,22 +270,27 @@ meet its endpoint's expectation:
 
 - **`Exactly(id)`**: the derived ID equals the requested ID. This applies to
   `GET /event/{id}`, including auth-event fetches, the outbound `/invite`
-  response, and the `/send_join` response `event`. For the `/invite`
-  response, `hashes` SHALL also be unchanged and the invitee server's
-  signature SHALL verify.
+  response, and the `/send_join` response `event`. For the `/invite` and
+  `/send_join` `event` responses, `hashes` SHALL also be unchanged, and the
+  co-signing server's signature (invitee or resident) SHALL verify.
 - **`/state_ids`**: SHALL persist nothing. Its `pdu_ids ∪ auth_chain_ids`
   SHALL become the expected set for `/state` about the same room and event.
-- **`/state`**: the derived ID is in that set, and a `/state_ids` call SHALL
-  precede it.
+- **`/state`**: the derived ID is in that set, a `/state_ids` call SHALL
+  precede it, and each event SHALL be a state event whose `room_id` is the
+  requested room.
 - **`/send_join` response `state`**: no expected ID. Each event's ID is
   derived and its signatures verified. Each SHALL be a state event of the
-  joined room, with at most one event per `(type, state_key)`.
+  joined room. A duplicate `(type, state_key)` SHALL fail the whole join
+  and store nothing from the response.
 - **`/send_join` response `auth_chain`**: the derived ID is in the
   `auth_events` closure of `state ∪ {join}`.
 - **`backfill` and `get_missing_events`**: the derived ID is a requested
   seed, or is named in `prev_events` by an event already admitted from the
   same response or held locally. Admission SHALL repeat until no new event
-  is admitted, and SHALL NOT depend on response order.
+  is admitted, and SHALL NOT depend on response order. The seeds are the
+  requested `v` IDs for `backfill`, and the `prev_events` of the requested
+  `latest_events` for `get_missing_events`; those events are in hand but
+  not necessarily persisted.
 
 Response events that are outside the expectation SHALL NOT be stored. A
 fetched event whose content hash mismatches SHALL be stored in redacted form
@@ -251,9 +331,11 @@ under its derived ID.
 On `/v2/send_join`, the system SHALL require `type` `m.room.member`,
 `membership` `join`, `state_key == sender`, a sender server name equal to the
 authenticated origin, valid signatures, and a derived ID equal to the path
-`eventId`. Any failure SHALL return `400 M_INVALID_PARAM`. An auth-rule
-failure SHALL return `403 M_FORBIDDEN`. `make_join` templates SHALL NOT
-contain `event_id`.
+`eventId`. When `join_authorised_via_users_server` is present, its server
+SHALL be this server, and the system SHALL co-sign with `add_signature`
+before it verifies. Any of these failures SHALL return
+`400 M_INVALID_PARAM`. An auth-rule failure SHALL return `403 M_FORBIDDEN`.
+`make_join` templates SHALL NOT contain `event_id`.
 
 #### Scenario: Join for another user is refused
 
@@ -266,12 +348,21 @@ contain `event_id`.
 
 PostgreSQL SHALL store each event's `Pdu` as canonical JSON text, which is
 authoritative. The existing columns SHALL be projections only. Every `events`
-read SHALL go through one row decoder. The `events` migration SHALL add its
-columns without rewriting the table.
+read SHALL go through one row decoder.
+
+Migrations SHALL NOT rewrite any table:
+- the `events` column additions SHALL be metadata-only and in their own
+  migration;
+- `transactions` and `fed_outbound_queue` SHALL gain new nullable `TEXT`
+  columns, with fallback reads of their legacy JSONB columns, rather than a
+  column type change;
+- each migration SHALL set a `lock_timeout`.
 
 No spec-valid PDU SHALL fail on a U+0000 at any PostgreSQL sink:
-- `transactions.request`, `transactions.result` and
-  `fed_outbound_queue.payload` SHALL hold canonical JSON as `TEXT`;
+- new `transactions` request/result and `fed_outbound_queue` payload
+  values SHALL be written as lossless JSON text (`serde_json`), never with
+  the Matrix canonical encoder. Floats in client bodies SHALL therefore
+  round-trip;
 - the JSONB projections of `content`, `hashes` and `signatures` SHALL map
   U+0000 to U+FFFD, and reads SHALL NOT decode them;
 - an unsigned value containing U+0000 SHALL be dropped;
@@ -279,7 +370,8 @@ No spec-valid PDU SHALL fail on a U+0000 at any PostgreSQL sink:
   `prev_events` SHALL be refused at decode;
 - on `/send`, an EDU whose persistence fails with a PostgreSQL data
   exception (SQLSTATE class 22) SHALL be dropped without failing the
-  transaction.
+  transaction. Each EDU SHALL be isolated in its own statement or
+  `SAVEPOINT`.
 
 A legacy-row check SHALL recompute the reference hash and the content hash
 of every legacy row. It SHALL classify each row as `verified`,
@@ -287,7 +379,10 @@ of every legacy row. It SHALL classify each row as `verified`,
 and SHALL NOT rewrite any primary key. The check SHALL NOT block startup,
 and a federation read of an unchecked row SHALL classify that row inline.
 Over federation, `id_mismatch` rows SHALL NOT be served, and
-`content_mismatch` rows SHALL be served only as their v11 redaction.
+`content_mismatch` rows SHALL be served only as their v11 redaction. That
+redaction SHALL be computed at serve time. Classification SHALL NOT change
+what client reads return: retained history keeps the same `Pdu` before and
+after inline classification and the sweep.
 
 #### Scenario: Pool restart
 
@@ -315,6 +410,30 @@ Over federation, `id_mismatch` rows SHALL NOT be served, and
 - THEN the row is classified `content_mismatch` inline, and the response is
   its v11 redaction under the same derived ID
 
+#### Scenario: Client history survives classification
+
+- GIVEN a lossy legacy remote message row, with its ID intact and its
+  content hash mismatched
+- WHEN client reads are taken before classification, after inline
+  classification triggered by federation `/event`, and after the background
+  sweep
+- THEN all three client reads are byte-identical and still carry the body,
+  while federation `/event` returns the redaction
+
+#### Scenario: Migrations do not rewrite tables
+
+- GIVEN `events`, `transactions` and `fed_outbound_queue` holding
+  pre-migration rows
+- WHEN the migrations run
+- THEN each table's `relfilenode` is unchanged, legacy JSONB rows still
+  replay and drain, and new rows use the `TEXT` columns
+
+#### Scenario: Client float survives replay storage
+
+- GIVEN a client to-device `PUT` whose content holds `1.5`
+- WHEN it is stored and the same transaction ID is replayed
+- THEN the replay is identical and the delivered content still holds `1.5`
+
 #### Scenario: Local NUL content federates
 
 - GIVEN a local state event whose `topic` content contains `\u0000`
@@ -323,15 +442,39 @@ Over federation, `id_mismatch` rows SHALL NOT be served, and
 
 ### Requirement: Typed outbound boundary
 
-Every federation emitter SHALL take `&Pdu` or `Vec<Pdu>`, never `Event`, in
-its function signature. That covers transaction send, the outbound queue
-envelope, the `state`, `backfill`, `event`, `get_missing_events`,
-`send_join` and `invite` responses, and the outbound `invite` and
-`send_join` bodies. New outbox envelopes SHALL hold wire `Pdu`s only. Legacy
-flattened envelopes SHALL be read-only and converted to `Pdu` before sending.
+Every federation emitter SHALL take `WirePdu`, never `Event` or a bare
+`Pdu`, in its function signature. That covers transaction send, the
+outbound queue envelope, the `state`, `backfill`, `event`,
+`get_missing_events`, `send_join` and `invite` responses, and the outbound
+`invite` and `send_join` bodies.
+
+Only the following SHALL construct a `WirePdu`:
+- authoring (`sign_authored`);
+- co-signing a checked received PDU;
+- `get_wire_pdu`, which applies the integrity class;
+- `classify_legacy_snapshot`.
+
+New outbox envelopes SHALL hold wire PDUs only. Legacy flattened envelopes
+SHALL be read-only, and each snapshot SHALL be classified against its saved
+local ID before emission:
+- `verified` is sent;
+- `content_mismatch` is sent as its redaction;
+- `id_mismatch` is withheld and logged.
+
+A legacy snapshot SHALL NEVER be re-signed into a new identity.
 
 #### Scenario: No local ID on the wire
 
 - GIVEN a room with stored events
 - WHEN each federation response and outbound body listed above is serialised
 - THEN no PDU object in it has a top-level `event_id` key
+
+#### Scenario: Pending legacy outbox envelope (pre-56498e3 hashing)
+
+- GIVEN a pending outbox row in the legacy flattened layout, holding one
+  snapshot whose ID was computed with `"event_id": ""` included and one
+  verifiable snapshot
+- WHEN the queue drains it
+- THEN only the verifiable PDU is sent, the other is withheld and logged
+  with both IDs, nothing appears under a new event ID, and both events'
+  integrity classes are recorded
