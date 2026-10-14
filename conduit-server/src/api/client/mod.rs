@@ -76,6 +76,12 @@ pub trait AuthState: Clone + Send + Sync + 'static + conduit::room::RoomEventSen
     /// Broadcast sender for new stream positions.  `/sync` long-poll
     /// subscribes to this to wake up when new events arrive.
     fn events_tx(&self) -> &broadcast::Sender<i64>;
+    /// Wake sync for durable non-room data without triggering room-event workers.
+    fn sync_notify(&self) -> Arc<tokio::sync::Notify> {
+        static DEFAULT: std::sync::OnceLock<Arc<tokio::sync::Notify>> = std::sync::OnceLock::new();
+        Arc::clone(DEFAULT.get_or_init(|| Arc::new(tokio::sync::Notify::new())))
+    }
+
     /// Ephemeral in-memory typing store.
     fn typing_store(&self) -> &Arc<TypingStore>;
     /// Broadcast sender: emits room_id when typing state changes.

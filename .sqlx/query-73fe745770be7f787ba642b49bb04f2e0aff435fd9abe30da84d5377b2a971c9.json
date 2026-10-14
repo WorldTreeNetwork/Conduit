@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT algorithm FROM fallback_keys\n            WHERE user_id = $1 AND device_id = $2 AND NOT used\n            ORDER BY algorithm\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "algorithm",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "73fe745770be7f787ba642b49bb04f2e0aff435fd9abe30da84d5377b2a971c9"
+}

@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT rcs.room_id\n            FROM room_current_state rcs\n            JOIN events e ON e.event_id = rcs.event_id\n            WHERE rcs.type = 'm.room.member' AND rcs.state_key = $1\n              AND e.content->>'membership' = 'join'\n            ORDER BY rcs.room_id\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "room_id",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "b0aa9fa7c82a370f7398beb554b747f0d13583d703aa8677df2e6cc9edd05cce"
+}

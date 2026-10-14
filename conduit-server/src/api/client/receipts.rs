@@ -40,5 +40,6 @@ pub async fn post_receipt<S: AuthState>(
         return MatrixError::unknown(e.to_string()).into_response();
     }
 
+    state.sync_notify().notify_waiters();
     (StatusCode::OK, Json(json!({}))).into_response()
 }

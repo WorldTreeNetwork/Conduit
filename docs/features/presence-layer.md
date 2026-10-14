@@ -36,6 +36,37 @@ them feels broken.
 3. Account data is just opaque JSON the client owns. Don't validate
    contents; round-trip it.
 
+## Sync delivery
+
+The production long-poll subscribes before reading any streams. Room events use
+the existing broadcast channel; account-data writes, receipts, key changes, and
+to-device messages use a separate sync notification so they do not trigger push
+or application-service room-event workers. Typing and presence stores carry
+revision counters and watch notifications. A wakeup rebuilds the response and
+returns only when there is visible data or the original deadline expires.
+Durable streams are also checked every 250 ms for changes committed by another
+process; PostgreSQL notification integration remains future work.
+
+Account-data and receipt deltas include their actual row positions. PostgreSQL
+upserts assign a fresh position on every overwrite and choose the correct
+partial unique index for global versus room account data. Sync tokens advance
+to observed positions, avoiding replay from row counts or skipped updates from
+a later maximum query. Both streams have BRIN indexes.
+
+Typing start, stop, and expiry produce complete user lists, including empty
+lists that clear client state. Typing and presence cursors have a process
+generation so a restart clears stale ephemeral state. Unchanged presence is
+omitted from incremental responses; presence reads require authentication and
+self/shared joined-room visibility. Sync uses the same visibility rule.
+Private receipts are delivered only to their owner; receipts from multiple
+users for one event coexist in the response.
+
+The production journeys in `conduit-server/tests/production_e2e.rs` exercise
+these behaviors against an isolated database and the shipped binary. Threaded
+receipts, fully-read markers, federated presence/typing, and complete access-rule
+and timeout auditing remain tracked work; these tests cover the named delivery
+and privacy assertions.
+
 ## Gotchas
 
 - Presence is notoriously expensive at scale because every status

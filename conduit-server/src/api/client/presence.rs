@@ -18,7 +18,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tokio::sync::RwLock;
+use tokio::sync::{watch, RwLock};
 
 use super::{AuthState, AuthedUser, MatrixError};
 
@@ -55,9 +55,25 @@ impl PresenceEntry {
 }
 
 /// Ephemeral presence state shared via `Arc` in `AppState`.
-#[derive(Default)]
 pub struct PresenceStore {
-    inner: RwLock<HashMap<String, PresenceEntry>>,
+    inner: RwLock<PresenceState>,
+    changed: watch::Sender<i64>,
+}
+
+#[derive(Default)]
+struct PresenceState {
+    entries: HashMap<String, (i64, PresenceEntry)>,
+    position: i64,
+}
+
+impl Default for PresenceStore {
+    fn default() -> Self {
+        let (changed, _) = watch::channel(0);
+        Self {
+            inner: RwLock::new(PresenceState::default()),
+            changed,
+        }
+    }
 }
 
 impl PresenceStore {
@@ -65,28 +81,74 @@ impl PresenceStore {
         Arc::new(Self::default())
     }
 
-    pub async fn set_presence(
-        &self,
-        user_id: &str,
-        presence: String,
-        status_msg: Option<String>,
-    ) {
-        let mut inner = self.inner.write().await;
-        inner.insert(user_id.to_owned(), PresenceEntry::new(presence, status_msg));
+    pub(crate) fn subscribe(&self) -> watch::Receiver<i64> {
+        self.changed.subscribe()
+    }
+
+    pub async fn set_presence(&self, user_id: &str, presence: String, status_msg: Option<String>) {
+        let mut state = self.inner.write().await;
+        state.position += 1;
+        let position = state.position;
+        state.entries.insert(
+            user_id.to_owned(),
+            (position, PresenceEntry::new(presence, status_msg)),
+        );
+        self.changed.send_replace(position);
     }
 
     pub async fn get_presence(&self, user_id: &str) -> Option<PresenceEntry> {
-        let inner = self.inner.read().await;
-        inner.get(user_id).cloned()
+        self.inner
+            .read()
+            .await
+            .entries
+            .get(user_id)
+            .map(|(_, entry)| entry.clone())
     }
 
-    /// All known presence entries (for v0 /sync).
-    pub async fn all_entries(&self) -> Vec<(String, PresenceEntry)> {
-        let inner = self.inner.read().await;
-        inner
+    pub(crate) async fn snapshot(
+        &self,
+        since: Option<i64>,
+    ) -> (i64, Vec<(String, PresenceEntry)>, Option<Instant>) {
+        let mut state = self.inner.write().await;
+        let now = Instant::now();
+        let expired: Vec<_> = state
+            .entries
             .iter()
-            .map(|(uid, entry)| (uid.clone(), entry.clone()))
-            .collect()
+            .filter(|(_, (_, entry))| {
+                entry.presence != "offline"
+                    && now.duration_since(entry.last_changed_at)
+                        >= std::time::Duration::from_secs(300)
+            })
+            .map(|(user, _)| user.clone())
+            .collect();
+        for user in &expired {
+            state.position += 1;
+            let position = state.position;
+            if let Some((pos, entry)) = state.entries.get_mut(user) {
+                *pos = position;
+                entry.presence = "offline".into();
+            }
+        }
+        if !expired.is_empty() {
+            self.changed.send_replace(state.position);
+        }
+        let entries = state
+            .entries
+            .iter()
+            .filter(|(_, (pos, _))| since.is_none_or(|since| *pos > since))
+            .map(|(user, (_, entry))| (user.clone(), entry.clone()))
+            .collect();
+        let next_expiry = state
+            .entries
+            .values()
+            .filter(|(_, entry)| entry.presence != "offline")
+            .map(|(_, entry)| entry.last_changed_at + std::time::Duration::from_secs(300))
+            .min();
+        (state.position, entries, next_expiry)
+    }
+
+    pub async fn all_entries(&self) -> Vec<(String, PresenceEntry)> {
+        self.snapshot(None).await.1
     }
 }
 
@@ -123,10 +185,7 @@ pub async fn put_presence<S: AuthState>(
         return MatrixError::forbidden("cannot set another user's presence").into_response();
     }
 
-    let valid = matches!(
-        body.presence.as_str(),
-        "online" | "offline" | "unavailable"
-    );
+    let valid = matches!(body.presence.as_str(), "online" | "offline" | "unavailable");
     if !valid {
         return MatrixError::bad_json(format!("invalid presence: {}", body.presence))
             .into_response();
@@ -146,8 +205,34 @@ pub async fn put_presence<S: AuthState>(
 
 pub async fn get_presence<S: AuthState>(
     State(state): State<S>,
+    authed: AuthedUser,
     Path(user_id): Path<String>,
 ) -> Response {
+    if user_id != authed.user_id {
+        let rooms = match state.storage().joined_rooms(&authed.user_id).await {
+            Ok(rooms) => rooms,
+            Err(error) => return MatrixError::unknown(error.to_string()).into_response(),
+        };
+        let mut visible = false;
+        for room in rooms {
+            match state
+                .storage()
+                .get_state_entry(&room, "m.room.member", &user_id)
+                .await
+            {
+                Ok(Some(event)) if event.content["membership"] == "join" => {
+                    visible = true;
+                    break;
+                }
+                Ok(_) => {}
+                Err(error) => return MatrixError::unknown(error.to_string()).into_response(),
+            }
+        }
+        if !visible {
+            return MatrixError::forbidden("not allowed to see this user's presence")
+                .into_response();
+        }
+    }
     match state.presence_store().get_presence(&user_id).await {
         None => MatrixError::new_not_found("no presence for user").into_response(),
         Some(entry) => {
@@ -165,5 +250,39 @@ pub async fn get_presence<S: AuthState>(
             )
                 .into_response()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn idle_decay_advances_once_and_preserves_last_activity() {
+        let store = PresenceStore::default();
+        store
+            .set_presence("@a:test", "online".into(), Some("status".into()))
+            .await;
+        let (position, _, _) = store.snapshot(None).await;
+        let last_active = Instant::now() - std::time::Duration::from_secs(301);
+        store
+            .inner
+            .write()
+            .await
+            .entries
+            .get_mut("@a:test")
+            .unwrap()
+            .1
+            .last_changed_at = last_active;
+        let (next, entries, expiry) = store.snapshot(Some(position)).await;
+        assert!(next > position);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].1.presence, "offline");
+        assert_eq!(entries[0].1.last_changed_at, last_active);
+        assert_eq!(entries[0].1.status_msg.as_deref(), Some("status"));
+        assert!(expiry.is_none());
+        let (after, entries, _) = store.snapshot(Some(next)).await;
+        assert_eq!(after, next);
+        assert!(entries.is_empty());
     }
 }

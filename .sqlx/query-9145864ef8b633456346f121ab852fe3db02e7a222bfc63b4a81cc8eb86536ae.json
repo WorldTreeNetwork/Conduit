@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n            SELECT room_id, user_id, receipt_type, event_id, ts\n            FROM receipts\n            WHERE stream_pos > $1\n            ORDER BY stream_pos ASC\n            ",
+  "query": "\n            SELECT room_id, user_id, receipt_type, event_id, ts, stream_pos\n            FROM receipts\n            WHERE stream_pos > $1\n            ORDER BY stream_pos ASC\n            ",
   "describe": {
     "columns": [
       {
@@ -27,6 +27,11 @@
         "ordinal": 4,
         "name": "ts",
         "type_info": "Int8"
+      },
+      {
+        "ordinal": 5,
+        "name": "stream_pos",
+        "type_info": "Int8"
       }
     ],
     "parameters": {
@@ -39,8 +44,9 @@
       false,
       false,
       false,
+      false,
       false
     ]
   },
-  "hash": "fc22195beef050cfdfa4b798e4a87e39dd1dc24501777bf03c1e63decb58bb63"
+  "hash": "9145864ef8b633456346f121ab852fe3db02e7a222bfc63b4a81cc8eb86536ae"
 }

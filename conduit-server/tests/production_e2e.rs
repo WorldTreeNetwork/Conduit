@@ -22,6 +22,46 @@ struct Server {
 }
 
 impl Server {
+    async fn chat_pair(&self) -> (Value, Value, String, String) {
+        let alice = self.register("alice").await;
+        let bob = self.register("bob").await;
+        let alice_token = alice["access_token"].as_str().unwrap();
+        let bob_token = bob["access_token"].as_str().unwrap();
+        let room = self
+            .request(
+                Method::POST,
+                "/_matrix/client/v3/createRoom",
+                Some(alice_token),
+                Some(json!({"preset": "public_chat"})),
+                200,
+            )
+            .await;
+        let room_id = room["room_id"].as_str().unwrap().to_owned();
+        self.request(
+            Method::POST,
+            &format!("/_matrix/client/v3/join/{room_id}"),
+            Some(bob_token),
+            Some(json!({})),
+            200,
+        )
+        .await;
+        let event = self
+            .request(
+                Method::PUT,
+                &format!("/_matrix/client/v3/rooms/{room_id}/send/m.room.message/initial"),
+                Some(alice_token),
+                Some(json!({"msgtype": "m.text", "body": "Initial message"})),
+                200,
+            )
+            .await;
+        (
+            alice,
+            bob,
+            room_id,
+            event["event_id"].as_str().unwrap().to_owned(),
+        )
+    }
+
     async fn new() -> Self {
         let files = tempfile::tempdir().unwrap();
         let admin_url = std::env::var("DATABASE_URL")
@@ -457,10 +497,15 @@ async fn production_to_device_sync_retries_until_acknowledged() {
         )
         .await;
 
-    let path = format!("/_matrix/client/v3/sync?since={since}&timeout=0");
+    let path = format!("/_matrix/client/v3/sync?since={since}&timeout=4000");
+    let started = Instant::now();
     let received = server
         .request(Method::GET, &path, Some(bob_token), None, 200)
         .await;
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "pending to-device messages waited for timeout"
+    );
     let expected = json!([{"type": "m.test", "sender": alice["user_id"], "content": content}]);
     assert_eq!(received["to_device"]["events"], expected);
     let retry = server
@@ -572,4 +617,599 @@ async fn production_startup_rejects_invalid_hooks() {
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
     }
+}
+
+#[tokio::test]
+async fn production_long_poll_wakes_for_each_non_room_stream() {
+    let server = Server::new().await;
+    let (alice, bob, room, event) = server.chat_pair().await;
+    let alice_token = alice["access_token"].as_str().unwrap();
+    let bob_token = bob["access_token"].as_str().unwrap();
+    let updates = [
+        (
+            Method::PUT,
+            "/_matrix/client/v3/sendToDevice/m.test/poll".to_owned(),
+            alice_token,
+            json!({"messages": {"@bob:production.test": {"*": {"body": "Wake verification"}}}}),
+            "to_device",
+        ),
+        (
+            Method::POST,
+            "/_matrix/client/v3/keys/upload".to_owned(),
+            alice_token,
+            json!({"device_keys": {"user_id": alice["user_id"], "device_id": alice["device_id"], "algorithms": [], "keys": {}, "signatures": {}}}),
+            "device_lists",
+        ),
+        (
+            Method::PUT,
+            "/_matrix/client/v3/user/@bob:production.test/account_data/m.test".to_owned(),
+            bob_token,
+            json!({"value": "global"}),
+            "account_data",
+        ),
+        (
+            Method::PUT,
+            format!(
+                "/_matrix/client/v3/user/@bob:production.test/rooms/{room}/account_data/m.test"
+            ),
+            bob_token,
+            json!({"value": "room"}),
+            "room_account_data",
+        ),
+        (
+            Method::POST,
+            format!("/_matrix/client/v3/rooms/{room}/receipt/m.read/{event}"),
+            alice_token,
+            json!({}),
+            "receipt",
+        ),
+        (
+            Method::PUT,
+            format!("/_matrix/client/v3/rooms/{room}/typing/@alice:production.test"),
+            alice_token,
+            json!({"typing": true, "timeout": 10_000}),
+            "typing_start",
+        ),
+        (
+            Method::PUT,
+            format!("/_matrix/client/v3/rooms/{room}/typing/@alice:production.test"),
+            alice_token,
+            json!({"typing": false}),
+            "typing_stop",
+        ),
+        (
+            Method::PUT,
+            "/_matrix/client/v3/presence/@alice:production.test/status".to_owned(),
+            alice_token,
+            json!({"presence": "online", "status_msg": "Available"}),
+            "presence",
+        ),
+    ];
+    for (method, path, token, body, stream) in updates {
+        let baseline = server
+            .request(
+                Method::GET,
+                "/_matrix/client/v3/sync",
+                Some(bob_token),
+                None,
+                200,
+            )
+            .await;
+        let since = baseline["next_batch"].as_str().unwrap();
+        let http = server.http.clone();
+        let url = format!(
+            "{}/_matrix/client/v3/sync?since={since}&timeout=4000",
+            server.base_url
+        );
+        let access_token = bob_token.to_owned();
+        let poll = tokio::spawn(async move {
+            let response = http
+                .get(url)
+                .bearer_auth(access_token)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status().as_u16(), 200);
+            response.json::<Value>().await.unwrap()
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            !poll.is_finished(),
+            "{stream}: unchanged data must not finish the poll"
+        );
+        server
+            .request(method, &path, Some(token), Some(body), 200)
+            .await;
+        let sync = tokio::time::timeout(Duration::from_secs(2), poll)
+            .await
+            .unwrap_or_else(|_| panic!("{stream}: update did not wake the production long-poll"))
+            .unwrap();
+        let block = &sync["rooms"]["join"][&room];
+        match stream {
+            "to_device" => assert_eq!(
+                sync["to_device"]["events"][0]["content"]["body"],
+                "Wake verification"
+            ),
+            "device_lists" => assert!(sync["device_lists"]["changed"]
+                .as_array()
+                .unwrap()
+                .contains(&alice["user_id"])),
+            "account_data" => assert_eq!(
+                sync["account_data"]["events"][0]["content"]["value"],
+                "global"
+            ),
+            "room_account_data" => assert_eq!(
+                block["account_data"]["events"][0]["content"]["value"],
+                "room"
+            ),
+            "receipt" => assert!(block["ephemeral"]["events"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|event| event["type"] == "m.receipt")),
+            "typing_start" | "typing_stop" => {
+                let event = block["ephemeral"]["events"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|event| event["type"] == "m.typing")
+                    .unwrap();
+                let expected = if stream == "typing_start" {
+                    json!([alice["user_id"]])
+                } else {
+                    json!([])
+                };
+                assert_eq!(event["content"]["user_ids"], expected);
+            }
+            "presence" => assert_eq!(
+                sync["presence"]["events"][0]["content"]["status_msg"],
+                "Available"
+            ),
+            _ => unreachable!(),
+        }
+        assert_ne!(
+            sync["next_batch"], baseline["next_batch"],
+            "{stream}: independent cursor must advance"
+        );
+    }
+}
+
+#[tokio::test]
+async fn production_account_data_overwrites_advance_real_cursors_without_replay() {
+    let server = Server::new().await;
+    let (alice, bob, room, _) = server.chat_pair().await;
+    let alice_token = alice["access_token"].as_str().unwrap();
+    let bob_token = bob["access_token"].as_str().unwrap();
+    // Create stream gaps through another user's writes and updates to one row.
+    for value in 0..5 {
+        server
+            .request(
+                Method::PUT,
+                "/_matrix/client/v3/user/@alice:production.test/account_data/m.test",
+                Some(alice_token),
+                Some(json!({"value": value})),
+                200,
+            )
+            .await;
+    }
+    let baseline = server
+        .request(
+            Method::GET,
+            "/_matrix/client/v3/sync",
+            Some(bob_token),
+            None,
+            200,
+        )
+        .await;
+    let mut since = baseline["next_batch"].as_str().unwrap().to_owned();
+    for (scope, path) in [
+        (
+            "global",
+            "/_matrix/client/v3/user/@bob:production.test/account_data/m.test".to_owned(),
+        ),
+        (
+            "room",
+            format!(
+                "/_matrix/client/v3/user/@bob:production.test/rooms/{room}/account_data/m.test"
+            ),
+        ),
+    ] {
+        for value in 1..=2 {
+            server
+                .request(
+                    Method::PUT,
+                    &path,
+                    Some(bob_token),
+                    Some(json!({"scope": scope, "value": value})),
+                    200,
+                )
+                .await;
+            let response = server
+                .request(
+                    Method::GET,
+                    &format!("/_matrix/client/v3/sync?since={since}"),
+                    Some(bob_token),
+                    None,
+                    200,
+                )
+                .await;
+            let events = if scope == "global" {
+                &response["account_data"]["events"]
+            } else {
+                &response["rooms"]["join"][&room]["account_data"]["events"]
+            };
+            assert_eq!(
+                events,
+                &json!([{"type": "m.test", "content": {"scope": scope, "value": value}}])
+            );
+            since = response["next_batch"].as_str().unwrap().to_owned();
+            let quiet = server
+                .request(
+                    Method::GET,
+                    &format!("/_matrix/client/v3/sync?since={since}"),
+                    Some(bob_token),
+                    None,
+                    200,
+                )
+                .await;
+            assert_eq!(quiet["account_data"]["events"], json!([]));
+            assert!(
+                quiet["rooms"]["join"].as_object().unwrap().is_empty(),
+                "unchanged room account data was replayed: {quiet}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn production_typing_expiry_and_restart_clear_client_state() {
+    let mut server = Server::new().await;
+    let (alice, bob, room, _) = server.chat_pair().await;
+    let alice_token = alice["access_token"].as_str().unwrap();
+    let bob_token = bob["access_token"].as_str().unwrap();
+    let path = format!("/_matrix/client/v3/rooms/{room}/typing/@alice:production.test");
+    for timeout in [500, 10_000] {
+        server
+            .request(
+                Method::PUT,
+                &path,
+                Some(alice_token),
+                Some(json!({"typing": true, "timeout": timeout})),
+                200,
+            )
+            .await;
+        let initial = server
+            .request(
+                Method::GET,
+                "/_matrix/client/v3/sync",
+                Some(bob_token),
+                None,
+                200,
+            )
+            .await;
+        let typing = initial["rooms"]["join"][&room]["ephemeral"]["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|event| event["type"] == "m.typing")
+            .unwrap();
+        assert_eq!(typing["content"]["user_ids"], json!([alice["user_id"]]));
+        let since = initial["next_batch"].as_str().unwrap();
+        if timeout == 10_000 {
+            server.stop();
+            server.start().await;
+        }
+        let response = tokio::time::timeout(
+            Duration::from_secs(2),
+            server.request(
+                Method::GET,
+                &format!("/_matrix/client/v3/sync?since={since}&timeout=4000"),
+                Some(bob_token),
+                None,
+                200,
+            ),
+        )
+        .await
+        .expect("expiry/restart must promptly clear typing state");
+        let typing = response["rooms"]["join"][&room]["ephemeral"]["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|event| event["type"] == "m.typing")
+            .unwrap();
+        assert_eq!(typing["content"]["user_ids"], json!([]));
+    }
+}
+
+#[tokio::test]
+async fn production_receipt_overwrites_and_presence_respect_privacy() {
+    let server = Server::new().await;
+    let (alice, bob, room, first) = server.chat_pair().await;
+    let outsider = server.register("outsider").await;
+    let alice_token = alice["access_token"].as_str().unwrap();
+    let bob_token = bob["access_token"].as_str().unwrap();
+    let outsider_token = outsider["access_token"].as_str().unwrap();
+    for (user, token) in [(&alice, alice_token), (&outsider, outsider_token)] {
+        server
+            .request(
+                Method::PUT,
+                &format!(
+                    "/_matrix/client/v3/presence/{}/status",
+                    user["user_id"].as_str().unwrap()
+                ),
+                Some(token),
+                Some(json!({"presence": "online", "status_msg": "Private status"})),
+                200,
+            )
+            .await;
+    }
+    let presence_path = "/_matrix/client/v3/presence/@alice:production.test/status";
+    server
+        .request(Method::GET, presence_path, None, None, 401)
+        .await;
+    server
+        .request(Method::GET, presence_path, Some(outsider_token), None, 403)
+        .await;
+    let allowed = server
+        .request(Method::GET, presence_path, Some(bob_token), None, 200)
+        .await;
+    assert_eq!(allowed["presence"], "online");
+    server
+        .request(
+            Method::GET,
+            "/_matrix/client/v3/presence/@outsider:production.test/status",
+            Some(outsider_token),
+            None,
+            200,
+        )
+        .await;
+    let second = server
+        .request(
+            Method::PUT,
+            &format!("/_matrix/client/v3/rooms/{room}/send/m.room.message/second"),
+            Some(alice_token),
+            Some(json!({"msgtype": "m.text", "body": "Second"})),
+            200,
+        )
+        .await;
+    let initial = server
+        .request(
+            Method::GET,
+            "/_matrix/client/v3/sync",
+            Some(bob_token),
+            None,
+            200,
+        )
+        .await;
+    let presence = initial["presence"]["events"].as_array().unwrap();
+    assert!(presence
+        .iter()
+        .any(|event| event["sender"] == alice["user_id"]));
+    assert!(!presence
+        .iter()
+        .any(|event| event["sender"] == outsider["user_id"]));
+    // An unrelated presence change is a wake hint, not visible sync data, and
+    // must not reset the requested deadline or return another user's status.
+    let http = server.http.clone();
+    let url = format!(
+        "{}/_matrix/client/v3/sync?since={}&timeout=500",
+        server.base_url,
+        initial["next_batch"].as_str().unwrap()
+    );
+    let token = bob_token.to_owned();
+    let started = Instant::now();
+    let poll = tokio::spawn(async move {
+        http.get(url)
+            .bearer_auth(token)
+            .send()
+            .await
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap()
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        !poll.is_finished(),
+        "unchanged visible presence must not complete the poll"
+    );
+    server
+        .request(
+            Method::PUT,
+            "/_matrix/client/v3/presence/@outsider:production.test/status",
+            Some(outsider_token),
+            Some(json!({"presence": "unavailable"})),
+            200,
+        )
+        .await;
+    let quiet = tokio::time::timeout(Duration::from_secs(2), poll)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(started.elapsed() >= Duration::from_millis(400));
+    assert_eq!(quiet["presence"]["events"], json!([]));
+    let mut since = initial["next_batch"].as_str().unwrap().to_owned();
+    for event_id in [&first, second["event_id"].as_str().unwrap()] {
+        // Multiple users reading one event must coexist in the receipt map.
+        for token in [alice_token, bob_token] {
+            server
+                .request(
+                    Method::POST,
+                    &format!("/_matrix/client/v3/rooms/{room}/receipt/m.read/{event_id}"),
+                    Some(token),
+                    Some(json!({})),
+                    200,
+                )
+                .await;
+        }
+        server
+            .request(
+                Method::POST,
+                &format!("/_matrix/client/v3/rooms/{room}/receipt/m.read.private/{event_id}"),
+                Some(alice_token),
+                Some(json!({})),
+                200,
+            )
+            .await;
+        let response = server
+            .request(
+                Method::GET,
+                &format!("/_matrix/client/v3/sync?since={since}"),
+                Some(bob_token),
+                None,
+                200,
+            )
+            .await;
+        let receipt = response["rooms"]["join"][&room]["ephemeral"]["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|event| event["type"] == "m.receipt")
+            .unwrap();
+        assert!(receipt["content"][event_id]["m.read"]
+            .get("@alice:production.test")
+            .is_some());
+        assert!(receipt["content"][event_id]["m.read"]
+            .get("@bob:production.test")
+            .is_some());
+        assert!(
+            receipt["content"][event_id].get("m.read.private").is_none(),
+            "private receipt was exposed: {receipt}"
+        );
+        since = response["next_batch"].as_str().unwrap().to_owned();
+        let quiet = server
+            .request(
+                Method::GET,
+                &format!("/_matrix/client/v3/sync?since={since}"),
+                Some(bob_token),
+                None,
+                200,
+            )
+            .await;
+        assert!(
+            quiet["rooms"]["join"].as_object().unwrap().is_empty(),
+            "unchanged receipts replayed: {quiet}"
+        );
+        assert_eq!(
+            quiet["presence"]["events"],
+            json!([]),
+            "unchanged presence replayed"
+        );
+    }
+    let own = server
+        .request(
+            Method::GET,
+            "/_matrix/client/v3/sync",
+            Some(alice_token),
+            None,
+            200,
+        )
+        .await;
+    assert!(own["rooms"]["join"][&room]["ephemeral"]["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|event| event["type"] == "m.receipt"
+            && event["content"][second["event_id"].as_str().unwrap()]["m.read.private"]
+                .get("@alice:production.test")
+                .is_some()));
+}
+
+#[tokio::test]
+async fn production_key_inventory_wakes_sync_and_quiets_after_acknowledgement() {
+    let server = Server::new().await;
+    let (alice, bob, _, _) = server.chat_pair().await;
+    let alice_token = alice["access_token"].as_str().unwrap();
+    let bob_token = bob["access_token"].as_str().unwrap();
+    let device = bob["device_id"].as_str().unwrap();
+    let initial = server
+        .request(
+            Method::GET,
+            "/_matrix/client/v3/sync",
+            Some(bob_token),
+            None,
+            200,
+        )
+        .await;
+    let mut since = initial["next_batch"].as_str().unwrap().to_owned();
+    server.request(Method::POST, "/_matrix/client/v3/keys/upload", Some(bob_token), Some(json!({
+        "one_time_keys": {"signed_curve25519:one": {"key": "one", "signatures": {}}},
+        "fallback_keys": {"signed_curve25519:fallback": {"key": "fallback", "signatures": {}}}
+    })), 200).await;
+    let uploaded = tokio::time::timeout(
+        Duration::from_secs(2),
+        server.request(
+            Method::GET,
+            &format!("/_matrix/client/v3/sync?since={since}&timeout=4000"),
+            Some(bob_token),
+            None,
+            200,
+        ),
+    )
+    .await
+    .expect("pending key inventory must return promptly");
+    assert_eq!(
+        uploaded["device_one_time_keys_count"]["signed_curve25519"],
+        1
+    );
+    assert_eq!(
+        uploaded["device_unused_fallback_key_types"],
+        json!(["signed_curve25519"])
+    );
+    since = uploaded["next_batch"].as_str().unwrap().to_owned();
+    for expected_key in ["signed_curve25519:one", "signed_curve25519:fallback"] {
+        let mut devices = serde_json::Map::new();
+        devices.insert(device.to_owned(), json!("signed_curve25519"));
+        let claimed = server
+            .request(
+                Method::POST,
+                "/_matrix/client/v3/keys/claim",
+                Some(alice_token),
+                Some(json!({"one_time_keys": {"@bob:production.test": devices}})),
+                200,
+            )
+            .await;
+        assert!(claimed["one_time_keys"]["@bob:production.test"][device]
+            .get(expected_key)
+            .is_some());
+        let response = tokio::time::timeout(
+            Duration::from_secs(2),
+            server.request(
+                Method::GET,
+                &format!("/_matrix/client/v3/sync?since={since}&timeout=4000"),
+                Some(bob_token),
+                None,
+                200,
+            ),
+        )
+        .await
+        .expect("key claim must change own-device inventory promptly");
+        assert_eq!(
+            response["device_one_time_keys_count"]["signed_curve25519"]
+                .as_i64()
+                .unwrap_or(0),
+            0
+        );
+        if expected_key.ends_with("fallback") {
+            assert_eq!(response["device_unused_fallback_key_types"], json!([]));
+        }
+        since = response["next_batch"].as_str().unwrap().to_owned();
+    }
+    let start = Instant::now();
+    let quiet = server
+        .request(
+            Method::GET,
+            &format!("/_matrix/client/v3/sync?since={since}&timeout=300"),
+            Some(bob_token),
+            None,
+            200,
+        )
+        .await;
+    assert!(
+        start.elapsed() >= Duration::from_millis(250),
+        "unchanged key inventory caused busy polling"
+    );
+    assert_eq!(quiet["to_device"]["events"], json!([]));
+    assert_eq!(quiet["presence"]["events"], json!([]));
+    assert!(quiet["rooms"]["join"].as_object().unwrap().is_empty());
 }

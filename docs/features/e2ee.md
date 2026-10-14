@@ -72,6 +72,13 @@ delivery independently of the `d` device-list cursor. Repeating a sync after a
 lost response or process restart preserves unacknowledged messages. Older sync
 tokens without `t` acknowledge no to-device messages.
 
+Device-list changes are read through the captured batch boundary. The owning
+device's one-time-key counts and `device_unused_fallback_key_types` are included
+in sync, with an inventory fingerprint in the opaque token. Uploading keys or
+claiming one-time/fallback keys wakes a sync when the inventory changes; an
+unchanged inventory does not cause repeated immediate responses. Production
+tests verify upload, depletion, fallback use, and acknowledgement.
+
 Remote: the same `PUT /sendToDevice` handler groups any
 remote-targeted user IDs by destination server and dispatches each
 batch via the outbound federation client's

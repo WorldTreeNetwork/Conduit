@@ -733,6 +733,24 @@ impl Storage for PostgresStorage {
         Ok(events)
     }
 
+    async fn joined_rooms(&self, user_id: &str) -> Result<Vec<String>> {
+        let rows = sqlx::query!(
+            r#"
+            SELECT rcs.room_id
+            FROM room_current_state rcs
+            JOIN events e ON e.event_id = rcs.event_id
+            WHERE rcs.type = 'm.room.member' AND rcs.state_key = $1
+              AND e.content->>'membership' = 'join'
+            ORDER BY rcs.room_id
+            "#,
+            user_id
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(rows.into_iter().map(|row| row.room_id).collect())
+    }
+
     async fn room_events_paginated(
         &self,
         room_id: &str,
@@ -1259,6 +1277,19 @@ impl Storage for PostgresStorage {
     // Cross-signing (mrm.8, mrm.9)
     // -----------------------------------------------------------------------
 
+    async fn unused_fallback_key_types(&self, user_id: &str, device_id: &str) -> Result<Vec<String>> {
+        let rows = sqlx::query!(
+            r#"
+            SELECT algorithm FROM fallback_keys
+            WHERE user_id = $1 AND device_id = $2 AND NOT used
+            ORDER BY algorithm
+            "#,
+            user_id,
+            device_id
+        ).fetch_all(&self.pool).await.map_err(map_sqlx)?;
+        Ok(rows.into_iter().map(|row| row.algorithm).collect())
+    }
+
     async fn upsert_cross_signing_key(
         &self,
         user_id: &str,
@@ -1425,15 +1456,16 @@ impl Storage for PostgresStorage {
         Ok(row.id)
     }
 
-    async fn device_list_changes_since(&self, since_pos: i64) -> Result<Vec<String>> {
+    async fn device_list_changes_between(&self, since_pos: i64, through_pos: i64) -> Result<Vec<String>> {
         let rows = sqlx::query!(
             r#"
             SELECT DISTINCT user_id
             FROM device_list_changes
-            WHERE id > $1
+            WHERE id > $1 AND id <= $2
             ORDER BY user_id
             "#,
-            since_pos
+            since_pos,
+            through_pos
         )
         .fetch_all(&self.pool)
         .await
@@ -1731,28 +1763,26 @@ impl Storage for PostgresStorage {
         event_type: &str,
         content: &Value,
     ) -> Result<i64> {
-        // PostgreSQL partial unique indexes cannot be referenced by name in
-        // ON CONFLICT clauses — we must use the DELETE + INSERT pattern or
-        // a direct UPDATE + INSERT dance instead.
-        let row = sqlx::query!(
-            r#"
-            INSERT INTO account_data (user_id, room_id, event_type, content, updated_at)
-            VALUES ($1, $2, $3, $4, now())
-            ON CONFLICT (user_id, event_type) WHERE room_id IS NULL
-                DO UPDATE SET content = EXCLUDED.content, updated_at = now()
-            RETURNING stream_pos
-            "#,
-            user_id,
-            room_id as Option<&str>,
-            event_type,
-            content
-        )
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(map_sqlx)?;
-
-        if let Some(r) = row {
-            return Ok(r.stream_pos);
+        // Select the matching partial unique index before inserting.
+        if room_id.is_none() {
+            let row = sqlx::query!(
+                r#"
+                INSERT INTO account_data (user_id, room_id, event_type, content, updated_at)
+                VALUES ($1, $2, $3, $4, now())
+                ON CONFLICT (user_id, event_type) WHERE room_id IS NULL
+                    DO UPDATE SET content = EXCLUDED.content, updated_at = now(),
+                                  stream_pos = EXCLUDED.stream_pos
+                RETURNING stream_pos
+                "#,
+                user_id,
+                room_id as Option<&str>,
+                event_type,
+                content
+            )
+            .fetch_one(&self.pool)
+            .await
+            .map_err(map_sqlx)?;
+            return Ok(row.stream_pos);
         }
 
         // Per-room path (room_id IS NOT NULL).
@@ -1761,7 +1791,8 @@ impl Storage for PostgresStorage {
             INSERT INTO account_data (user_id, room_id, event_type, content, updated_at)
             VALUES ($1, $2, $3, $4, now())
             ON CONFLICT (user_id, room_id, event_type) WHERE room_id IS NOT NULL
-                DO UPDATE SET content = EXCLUDED.content, updated_at = now()
+                DO UPDATE SET content = EXCLUDED.content, updated_at = now(),
+                              stream_pos = EXCLUDED.stream_pos
             RETURNING stream_pos
             "#,
             user_id,
@@ -1804,10 +1835,10 @@ impl Storage for PostgresStorage {
         &self,
         user_id: &str,
         since_pos: i64,
-    ) -> Result<Vec<(Option<String>, String, Value)>> {
+    ) -> Result<Vec<(Option<String>, String, Value, i64)>> {
         let rows = sqlx::query!(
             r#"
-            SELECT room_id, event_type, content
+            SELECT room_id, event_type, content, stream_pos
             FROM account_data
             WHERE user_id = $1 AND stream_pos > $2
             ORDER BY stream_pos ASC
@@ -1821,7 +1852,7 @@ impl Storage for PostgresStorage {
 
         Ok(rows
             .into_iter()
-            .map(|r| (r.room_id, r.event_type, r.content))
+            .map(|r| (r.room_id, r.event_type, r.content, r.stream_pos))
             .collect())
     }
 
@@ -1842,7 +1873,8 @@ impl Storage for PostgresStorage {
             INSERT INTO receipts (room_id, user_id, receipt_type, event_id, ts)
             VALUES ($1, $2, $3, $4, $5)
             ON CONFLICT (room_id, user_id, receipt_type)
-                DO UPDATE SET event_id = EXCLUDED.event_id, ts = EXCLUDED.ts
+                DO UPDATE SET event_id = EXCLUDED.event_id, ts = EXCLUDED.ts,
+                              stream_pos = EXCLUDED.stream_pos
             RETURNING stream_pos
             "#,
             room_id,
@@ -1882,10 +1914,10 @@ impl Storage for PostgresStorage {
     async fn receipts_since(
         &self,
         since_pos: i64,
-    ) -> Result<Vec<(String, String, String, String, i64)>> {
+    ) -> Result<Vec<(String, String, String, String, i64, i64)>> {
         let rows = sqlx::query!(
             r#"
-            SELECT room_id, user_id, receipt_type, event_id, ts
+            SELECT room_id, user_id, receipt_type, event_id, ts, stream_pos
             FROM receipts
             WHERE stream_pos > $1
             ORDER BY stream_pos ASC
@@ -1898,7 +1930,7 @@ impl Storage for PostgresStorage {
 
         Ok(rows
             .into_iter()
-            .map(|r| (r.room_id, r.user_id, r.receipt_type, r.event_id, r.ts))
+            .map(|r| (r.room_id, r.user_id, r.receipt_type, r.event_id, r.ts, r.stream_pos))
             .collect())
     }
 

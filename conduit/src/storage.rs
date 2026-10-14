@@ -345,6 +345,9 @@ pub trait Storage: Send + Sync + 'static {
     /// All current-state events for a room.
     async fn get_current_state(&self, room_id: &str) -> Result<Vec<Event>>;
 
+    /// Rooms where the current membership of `user_id` is join.
+    async fn joined_rooms(&self, user_id: &str) -> Result<Vec<String>>;
+
     /// Paginated room timeline.
     ///
     /// `dir` is `'f'` (forward / chronological) or `'b'` (backward).
@@ -461,6 +464,9 @@ pub trait Storage: Send + Sync + 'static {
         algorithm: &str,
     ) -> Result<Option<(String, Value)>>;
 
+    /// Algorithms whose current fallback key has not been claimed.
+    async fn unused_fallback_key_types(&self, user_id: &str, device_id: &str) -> Result<Vec<String>>;
+
     // --- Cross-signing (mrm.8, mrm.9) ----------------------------------------
 
     async fn upsert_cross_signing_key(
@@ -517,7 +523,12 @@ pub trait Storage: Send + Sync + 'static {
     async fn record_device_list_change(&self, user_id: &str) -> Result<i64>;
 
     /// Return distinct user_ids that have changed since stream position `since_pos`.
-    async fn device_list_changes_since(&self, since_pos: i64) -> Result<Vec<String>>;
+    async fn device_list_changes_since(&self, since_pos: i64) -> Result<Vec<String>> {
+        self.device_list_changes_between(since_pos, i64::MAX).await
+    }
+
+    /// Device-list changes bounded by the position captured for this batch.
+    async fn device_list_changes_between(&self, since_pos: i64, through_pos: i64) -> Result<Vec<String>>;
 
     /// The maximum device list stream position, or 0 if none.
     async fn device_list_max_position(&self) -> Result<i64>;
@@ -604,12 +615,12 @@ pub trait Storage: Send + Sync + 'static {
     ) -> Result<Option<Value>>;
 
     /// All account data (global + per-room) changed since `since_pos`.
-    /// Returns `(room_id, event_type, content)` — `room_id` is `None` for global entries.
+    /// Returns `(room_id, event_type, content, stream_pos)`; global room IDs are `None`.
     async fn account_data_since(
         &self,
         user_id: &str,
         since_pos: i64,
-    ) -> Result<Vec<(Option<String>, String, Value)>>;
+    ) -> Result<Vec<(Option<String>, String, Value, i64)>>;
 
     // --- Media (E07) ---------------------------------------------------------
 
@@ -649,11 +660,11 @@ pub trait Storage: Send + Sync + 'static {
     ) -> Result<Vec<(String, String, String, i64)>>;
 
     /// Receipts whose stream_pos is strictly greater than `since_pos`.
-    /// Returns `(room_id, user_id, receipt_type, event_id, ts)`.
+    /// Returns `(room_id, user_id, receipt_type, event_id, ts, stream_pos)`.
     async fn receipts_since(
         &self,
         since_pos: i64,
-    ) -> Result<Vec<(String, String, String, String, i64)>>;
+    ) -> Result<Vec<(String, String, String, String, i64, i64)>>;
 
     // --- Push (E11 P1–P6) -----------------------------------------------------
 
@@ -1263,6 +1274,19 @@ impl Storage for MemoryStorage {
         Ok(events)
     }
 
+    async fn joined_rooms(&self, user_id: &str) -> Result<Vec<String>> {
+        let inner = self.inner.read().await;
+        let mut rooms: Vec<_> = inner.room_state.iter()
+            .filter(|((_, event_type, state_key), _)| event_type == "m.room.member" && state_key == user_id)
+            .filter_map(|((room_id, _, _), event_id)| {
+                inner.events.get(event_id)
+                    .filter(|event| event.content.get("membership").and_then(Value::as_str) == Some("join"))
+                    .map(|_| room_id.clone())
+            }).collect();
+        rooms.sort();
+        Ok(rooms)
+    }
+
     async fn room_events_paginated(
         &self,
         room_id: &str,
@@ -1521,6 +1545,15 @@ impl Storage for MemoryStorage {
 
     // --- Cross-signing --------------------------------------------------------
 
+    async fn unused_fallback_key_types(&self, user_id: &str, device_id: &str) -> Result<Vec<String>> {
+        let inner = self.inner.read().await;
+        let mut algorithms: Vec<_> = inner.fallback_keys.iter()
+            .filter(|((user, device, _), (_, _, used))| user == user_id && device == device_id && !used)
+            .map(|((_, _, algorithm), _)| algorithm.clone()).collect();
+        algorithms.sort();
+        Ok(algorithms)
+    }
+
     async fn upsert_cross_signing_key(
         &self,
         user_id: &str,
@@ -1638,12 +1671,12 @@ impl Storage for MemoryStorage {
         Ok(id)
     }
 
-    async fn device_list_changes_since(&self, since_pos: i64) -> Result<Vec<String>> {
+    async fn device_list_changes_between(&self, since_pos: i64, through_pos: i64) -> Result<Vec<String>> {
         let inner = self.inner.read().await;
         let mut users: Vec<String> = inner
             .device_list_changes
             .iter()
-            .filter(|(id, _)| *id > since_pos)
+            .filter(|(id, _)| *id > since_pos && *id <= through_pos)
             .map(|(_, u)| u.clone())
             .collect();
         users.dedup();
@@ -1878,7 +1911,7 @@ impl Storage for MemoryStorage {
         &self,
         user_id: &str,
         since_pos: i64,
-    ) -> Result<Vec<(Option<String>, String, Value)>> {
+    ) -> Result<Vec<(Option<String>, String, Value, i64)>> {
         let inner = self.inner.read().await;
         let mut results: Vec<(Option<String>, String, Value, i64)> = inner
             .account_data
@@ -1889,7 +1922,7 @@ impl Storage for MemoryStorage {
             })
             .collect();
         results.sort_by_key(|(_, _, _, pos)| *pos);
-        Ok(results.into_iter().map(|(r, e, c, _)| (r, e, c)).collect())
+        Ok(results)
     }
 
     // --- Receipts -------------------------------------------------------------
@@ -1930,7 +1963,7 @@ impl Storage for MemoryStorage {
     async fn receipts_since(
         &self,
         since_pos: i64,
-    ) -> Result<Vec<(String, String, String, String, i64)>> {
+    ) -> Result<Vec<(String, String, String, String, i64, i64)>> {
         let inner = self.inner.read().await;
         let mut results: Vec<(String, String, String, String, i64, i64)> = inner
             .receipts
@@ -1941,7 +1974,7 @@ impl Storage for MemoryStorage {
             })
             .collect();
         results.sort_by_key(|(_, _, _, _, _, pos)| *pos);
-        Ok(results.into_iter().map(|(r, u, t, e, ts, _)| (r, u, t, e, ts)).collect())
+        Ok(results)
     }
 
     // --- Media (E07) ----------------------------------------------------------
@@ -2490,6 +2523,41 @@ impl Storage for MemoryStorage {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn account_data_cursor_uses_observed_positions_across_overwrites_and_gaps() {
+        let store = MemoryStorage::default();
+        store.set_account_data("@other:test", None, "m.test", &json!({"v": 1})).await.unwrap();
+        store.set_account_data("@a:test", None, "m.test", &json!({"v": 1})).await.unwrap();
+        store.set_account_data("@other:test", None, "m.test", &json!({"v": 2})).await.unwrap();
+        let position = store.set_account_data("@a:test", None, "m.test", &json!({"v": 2})).await.unwrap();
+        let rows = store.account_data_since("@a:test", 0).await.unwrap();
+        assert_eq!(rows, vec![(None, "m.test".into(), json!({"v": 2}), position)]);
+        assert!(position > rows.len() as i64);
+        assert!(store.account_data_since("@a:test", position).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn receipt_cursor_advances_on_overwrite_and_preserves_other_users() {
+        let store = MemoryStorage::default();
+        store.set_receipt("!room:test", "@a:test", "m.read", "$first", 1).await.unwrap();
+        store.set_receipt("!room:test", "@b:test", "m.read", "$first", 1).await.unwrap();
+        let position = store.set_receipt("!room:test", "@a:test", "m.read", "$second", 2).await.unwrap();
+        let rows = store.receipts_since(0).await.unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows.last().unwrap().3, "$second");
+        assert_eq!(rows.last().unwrap().5, position);
+        assert!(store.receipts_since(position).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn device_list_boundary_excludes_later_changes() {
+        let store = MemoryStorage::default();
+        let boundary = store.record_device_list_change("@a:test").await.unwrap();
+        store.record_device_list_change("@b:test").await.unwrap();
+        assert_eq!(store.device_list_changes_between(0, boundary).await.unwrap(), vec!["@a:test"]);
+        assert_eq!(store.device_list_changes_since(boundary).await.unwrap(), vec!["@b:test"]);
+    }
 
     #[tokio::test]
     async fn aliases_round_trip() {

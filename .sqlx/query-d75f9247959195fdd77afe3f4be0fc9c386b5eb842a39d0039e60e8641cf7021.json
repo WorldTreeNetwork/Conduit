@@ -1,0 +1,25 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                INSERT INTO account_data (user_id, room_id, event_type, content, updated_at)\n                VALUES ($1, $2, $3, $4, now())\n                ON CONFLICT (user_id, event_type) WHERE room_id IS NULL\n                    DO UPDATE SET content = EXCLUDED.content, updated_at = now(),\n                                  stream_pos = EXCLUDED.stream_pos\n                RETURNING stream_pos\n                ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "stream_pos",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "Jsonb"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "d75f9247959195fdd77afe3f4be0fc9c386b5eb842a39d0039e60e8641cf7021"
+}

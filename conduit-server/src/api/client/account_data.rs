@@ -35,6 +35,7 @@ pub async fn put_account_data<S: AuthState>(
     {
         return MatrixError::unknown(e.to_string()).into_response();
     }
+    state.sync_notify().notify_waiters();
     (StatusCode::OK, Json(json!({}))).into_response()
 }
 
@@ -77,6 +78,7 @@ pub async fn put_room_account_data<S: AuthState>(
     {
         return MatrixError::unknown(e.to_string()).into_response();
     }
+    state.sync_notify().notify_waiters();
     (StatusCode::OK, Json(json!({}))).into_response()
 }
 

@@ -86,7 +86,8 @@
         "Repeated sync and process restart preserve unacknowledged messages",
         "Acknowledging an earlier batch retains later messages",
         "Wildcard targets expand to actual devices",
-        "Acknowledgement by one device preserves other device queues"
+        "Acknowledgement by one device preserves other device queues",
+        "Pending and newly queued messages complete long-polls promptly"
       ],
       "implementation": [
         "conduit-server/src/api/client/keys.rs",
@@ -96,14 +97,14 @@
       "tests": [
         "conduit-server/src/api/client/keys.rs::fanout_tests::wildcard_delivery_preserves_each_device_queue",
         "conduit-server/src/api/client/sync.rs::token_tests",
-        "conduit-server/tests/production_e2e.rs::production_to_device_sync_retries_until_acknowledged"
+        "conduit-server/tests/production_e2e.rs::production_to_device_sync_retries_until_acknowledged",
+        "conduit-server/tests/production_e2e.rs::production_long_poll_wakes_for_each_non_room_stream"
       ],
       "status": "covered_assertions_only",
       "limitations": [
-        "Prompt long-poll wakeups, durable transaction deduplication, and standard remote EDUs remain open"
+        "Durable transaction deduplication and standard remote EDUs remain open"
       ],
       "gap_issues": [
-        "conduit-y99.8",
         "conduit-y99.10"
       ]
     },
@@ -192,6 +193,103 @@
         "Independent Matrix peer conformance",
         "CI execution and prerequisite provisioning",
         "Client UX/accessibility automation"
+      ]
+    },
+    {
+      "id": "sync-stream-wakeups-and-cursors",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#get_matrixclientv3sync",
+      "status": "covered_assertions_only",
+      "assertions": [
+        "Subscribe before observing pending streams",
+        "Non-room wake hints do not trigger push/AS room-event workers",
+        "To-device, device-list, account-data, receipt, typing and presence updates end a long-poll",
+        "Typing stop and expiry emit empty replacement lists",
+        "Restart resets ephemeral cursors without resetting durable cursors",
+        "Account-data and receipt overwrites use real observed stream positions",
+        "Room-only account data and ephemeral updates appear without new timeline events",
+        "Unchanged visible data waits until the original deadline"
+      ],
+      "implementation": [
+        "conduit-server/src/api/client/sync.rs",
+        "conduit-server/src/api/client/typing.rs",
+        "conduit-server/src/api/client/presence.rs",
+        "conduit-server/src/storage_pg.rs",
+        "conduit/src/storage.rs"
+      ],
+      "tests": [
+        "conduit-server/tests/production_e2e.rs::production_long_poll_wakes_for_each_non_room_stream",
+        "conduit-server/tests/production_e2e.rs::production_account_data_overwrites_advance_real_cursors_without_replay",
+        "conduit-server/tests/production_e2e.rs::production_typing_expiry_and_restart_clear_client_state",
+        "conduit/src/storage.rs::tests::device_list_boundary_excludes_later_changes",
+        "conduit-server/src/api/client/sync.rs::token_tests"
+      ],
+      "limitations": [
+        "Complete membership/state/full_state/filter/pagination semantics remain open",
+        "Commit-order and concurrent snapshot consistency need an independent audit",
+        "Durable changes from other processes currently use periodic polling"
+      ],
+      "gap_issues": [
+        "conduit-y99.13",
+        "conduit-y99.3"
+      ]
+    },
+    {
+      "id": "presence-and-private-receipt-visibility",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#private-read-receipts",
+      "status": "covered_assertions_only",
+      "assertions": [
+        "Private receipts are returned only to their owner",
+        "Multiple public receipt users coexist for the same event",
+        "Presence sync is restricted to self and shared joined-room users",
+        "Presence status reads require authentication and enforce visibility",
+        "Unrelated presence updates do not expose status or finish a poll early"
+      ],
+      "implementation": [
+        "conduit-server/src/api/client/sync.rs",
+        "conduit-server/src/api/client/presence.rs"
+      ],
+      "tests": [
+        "conduit-server/tests/production_e2e.rs::production_receipt_overwrites_and_presence_respect_privacy"
+      ],
+      "limitations": [
+        "Threaded and fully-read receipts and complete room/event authorization remain open",
+        "Federated presence is still missing"
+      ],
+      "gap_issues": [
+        "conduit-y99.15",
+        "conduit-7pk"
+      ]
+    },
+    {
+      "id": "device-key-inventory-sync",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#get_matrixclientv3sync",
+      "status": "covered_assertions_only",
+      "assertions": [
+        "Sync reports own-device OTK counts and unused fallback algorithms",
+        "Pending upload and claim changes bypass the long-poll timeout",
+        "Fallback usage advances the inventory summary independently of device-list changes",
+        "Unchanged inventory does not cause busy polling",
+        "Inventory fingerprint uses canonical JSON"
+      ],
+      "implementation": [
+        "conduit-server/src/api/client/sync.rs",
+        "conduit-server/src/api/client/keys.rs",
+        "conduit-server/src/storage_pg.rs",
+        "conduit/src/storage.rs"
+      ],
+      "tests": [
+        "conduit-server/tests/production_e2e.rs::production_key_inventory_wakes_sync_and_quiets_after_acknowledgement",
+        "conduit-server/src/api/client/sync.rs::token_tests::extended_tokens_keep_ephemeral_and_key_cursors_independent"
+      ],
+      "limitations": [
+        "Key identity validation, encrypted-room device-list visibility and independent encrypted clients remain open"
+      ],
+      "gap_issues": [
+        "conduit-y99.14",
+        "conduit-y99.9"
       ]
     }
   ]

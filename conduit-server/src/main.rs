@@ -59,6 +59,7 @@ struct AppState {
     /// Broadcast channel: sends the new global stream_position after each
     /// persisted event so `/sync` long-pollers can wake up.
     events_tx: broadcast::Sender<i64>,
+    sync_notify: Arc<tokio::sync::Notify>,
     /// Outbound federation HTTP client (E08).
     federation: Arc<federation::Client>,
     /// Per-destination outbound send queue (E08).
@@ -99,10 +100,8 @@ impl conduit::room::RoomEventSender for AppState {
             state_key,
             content,
         ).await {
-            Ok(event_id) => {
-                let _ = self.events_tx.send(0);
-                Ok(event_id)
-            }
+            // The pipeline already broadcasts the persisted event position.
+            Ok(event_id) => Ok(event_id),
             Err((_code, err)) => Err(conduit::Error::InvalidEvent(
                 err.0 .errcode.to_string()
             )),
@@ -143,6 +142,9 @@ impl AuthState for AppState {
     }
     fn events_tx(&self) -> &broadcast::Sender<i64> {
         &self.events_tx
+    }
+    fn sync_notify(&self) -> Arc<tokio::sync::Notify> {
+        Arc::clone(&self.sync_notify)
     }
     fn typing_store(&self) -> &Arc<TypingStore> {
         &self.typing_store
@@ -416,6 +418,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         remote_keys,
         txn_cache: Arc::new(RwLock::new(HashMap::new())),
         events_tx,
+        sync_notify: Arc::new(tokio::sync::Notify::new()),
         federation: federation_client,
         federation_queue,
         typing_store,

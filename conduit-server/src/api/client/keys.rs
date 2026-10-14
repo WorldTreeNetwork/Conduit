@@ -104,6 +104,7 @@ pub async fn keys_upload<S: AuthState>(
         .map(|(k, v)| (k, json!(v)))
         .collect();
 
+    state.sync_notify().notify_waiters();
     (
         StatusCode::OK,
         Json(json!({ "one_time_key_counts": counts_json })),
@@ -306,6 +307,7 @@ pub async fn keys_claim<S: AuthState>(
         }
     }
 
+    state.sync_notify().notify_waiters();
     (StatusCode::OK, Json(json!({ "one_time_keys": claimed }))).into_response()
 }
 
@@ -413,6 +415,7 @@ pub async fn send_to_device<S: AuthState>(
     // by the queue per row.
     let _ = txn_id;
 
+    state.sync_notify().notify_waiters();
     (StatusCode::OK, Json(json!({}))).into_response()
 }
 
@@ -488,6 +491,7 @@ pub async fn device_signing_upload<S: AuthState>(
     // device_id-specific keys field — remotes re-query). (conduit-6r1)
     broadcast_device_list_update(&state, user_id, "", stream_id, None).await;
 
+    state.sync_notify().notify_waiters();
     (StatusCode::OK, Json(json!({}))).into_response()
 }
 
