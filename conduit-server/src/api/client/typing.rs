@@ -58,7 +58,11 @@ impl TypingStore {
     }
 
     pub async fn set_typing(&self, room_id: &str, user_id: &str, timeout_ms: u64) {
-        let expires_at = Instant::now() + std::time::Duration::from_millis(timeout_ms.min(30_000));
+        // The requested expiry is honoured up to the server's cap; the
+        // checked addition cannot overflow `Instant` for any input.
+        let duration = std::time::Duration::from_millis(timeout_ms.min(MAX_TYPING_TIMEOUT_MS));
+        let now = Instant::now();
+        let expires_at = now.checked_add(duration).unwrap_or(now);
         let mut state = self.inner.write().await;
         state
             .users
@@ -133,28 +137,77 @@ impl TypingStore {
 // PUT /rooms/:roomId/typing/:userId
 // ---------------------------------------------------------------------------
 
+/// Server cap on a requested typing timeout. The spec's 20–30 s figure is a
+/// client refresh recommendation, not a protocol maximum, so longer requests
+/// are honoured up to this bound (conduit-y99.15).
+pub const MAX_TYPING_TIMEOUT_MS: u64 = 120_000;
+
+/// Expiry used when `typing: true` omits `timeout`.
+pub const DEFAULT_TYPING_TIMEOUT_MS: u64 = 30_000;
+
 #[derive(Debug, Deserialize)]
 pub struct TypingRequest {
     pub typing: bool,
-    /// Timeout in milliseconds. Default 10 000, clamped to 30 000.
+    /// Timeout in milliseconds; capped at [`MAX_TYPING_TIMEOUT_MS`].
     pub timeout: Option<u64>,
+}
+
+impl TypingRequest {
+    /// Validate a raw body: `typing` must be a boolean and `timeout`, when
+    /// present, a non-negative integer. Oversized integers saturate.
+    fn parse(body: &serde_json::Value) -> Result<Self, String> {
+        let typing = body
+            .get("typing")
+            .and_then(serde_json::Value::as_bool)
+            .ok_or_else(|| "typing must be a boolean".to_owned())?;
+        let timeout = match body.get("timeout") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(value) => match value.as_u64() {
+                Some(timeout) => Some(timeout),
+                None if value.as_f64().is_some_and(|n| n.is_finite() && n >= 0.0 && n.fract() == 0.0) => {
+                    Some(u64::MAX)
+                }
+                None => return Err("timeout must be a non-negative integer".to_owned()),
+            },
+        };
+        Ok(Self { typing, timeout })
+    }
 }
 
 pub async fn put_typing<S: AuthState>(
     State(state): State<S>,
     authed: AuthedUser,
     Path((room_id, user_id)): Path<(String, String)>,
-    Json(body): Json<TypingRequest>,
+    body: axum::body::Bytes,
 ) -> Response {
     if authed.user_id != user_id {
         return MatrixError::forbidden("cannot set typing for another user").into_response();
+    }
+    let body = match serde_json::from_slice::<serde_json::Value>(&body)
+        .map_err(|error| error.to_string())
+        .and_then(|value| TypingRequest::parse(&value))
+    {
+        Ok(body) => body,
+        Err(error) => return MatrixError::bad_json(error).into_response(),
+    };
+    // Only current members may announce typing in a room.
+    let joined = match state
+        .storage()
+        .get_state_entry(&room_id, "m.room.member", &user_id)
+        .await
+    {
+        Ok(member) => member.is_some_and(|event| event.content["membership"] == "join"),
+        Err(e) => return MatrixError::unknown(e.to_string()).into_response(),
+    };
+    if !joined {
+        return MatrixError::forbidden("you are not joined to this room").into_response();
     }
 
     let typing_store = state.typing_store();
     let typing_tx = state.typing_tx();
 
     if body.typing {
-        let timeout_ms = body.timeout.unwrap_or(10_000);
+        let timeout_ms = body.timeout.unwrap_or(DEFAULT_TYPING_TIMEOUT_MS);
         typing_store
             .set_typing(&room_id, &user_id, timeout_ms)
             .await;
@@ -182,6 +235,28 @@ mod tests {
         let (next, rooms, _) = store.snapshot(Some(position)).await;
         assert_eq!(next, position);
         assert!(rooms.is_empty());
+    }
+
+    #[tokio::test]
+    async fn extreme_timeouts_cannot_panic_and_are_capped() {
+        let store = TypingStore::default();
+        store.set_typing("!room:test", "@a:test", u64::MAX).await;
+        let (_, rooms, expiry) = store.snapshot(None).await;
+        assert_eq!(rooms["!room:test"], vec!["@a:test".to_owned()]);
+        let remaining = expiry.unwrap() - Instant::now();
+        assert!(remaining <= std::time::Duration::from_millis(MAX_TYPING_TIMEOUT_MS));
+        assert!(remaining > std::time::Duration::from_millis(60_000), "a long request is honoured past 30s");
+    }
+
+    #[test]
+    fn typing_bodies_are_validated() {
+        use serde_json::json;
+        assert!(TypingRequest::parse(&json!({"typing": "yes"})).is_err());
+        assert!(TypingRequest::parse(&json!({"timeout": 5})).is_err());
+        assert!(TypingRequest::parse(&json!({"typing": true, "timeout": -1})).is_err());
+        assert!(TypingRequest::parse(&json!({"typing": true, "timeout": 1.5})).is_err());
+        assert_eq!(TypingRequest::parse(&json!({"typing": true, "timeout": 1e30})).unwrap().timeout, Some(u64::MAX));
+        assert_eq!(TypingRequest::parse(&json!({"typing": false})).unwrap().timeout, None);
     }
 
     #[tokio::test]

@@ -62,6 +62,54 @@ fn map_sqlx(e: sqlx::Error) -> Error {
 }
 
 // ---------------------------------------------------------------------------
+// Commit-ordered stream positions (conduit-y99.16)
+// ---------------------------------------------------------------------------
+
+/// A sync stream whose cursor is a PostgreSQL sequence position.
+///
+/// A `BIGSERIAL` value is allocated when the row is inserted, not when the
+/// transaction commits: position N+1 can become visible while N is still in
+/// flight, and a reader that advances its cursor to N+1 would skip N forever.
+/// Every writer therefore takes the stream's transaction-scoped advisory lock
+/// before allocating a position and holds it through commit. PostgreSQL makes
+/// a commit visible before it releases the transaction's locks, so the next
+/// writer allocates only after every lower position is visible: the highest
+/// position a reader observes is a safe watermark. Each transaction takes at
+/// most one stream lock, so the locks cannot deadlock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stream {
+    Events,
+    AccountData,
+    Receipts,
+    DeviceLists,
+    ToDevice,
+}
+
+impl Stream {
+    /// The advisory lock key (ASCII "cndt" + a per-stream discriminator).
+    pub fn lock_key(self) -> i64 {
+        0x636e_6474_0000_0000
+            + match self {
+                Stream::Events => 1,
+                Stream::AccountData => 2,
+                Stream::Receipts => 3,
+                Stream::DeviceLists => 4,
+                Stream::ToDevice => 5,
+            }
+    }
+}
+
+/// Serialise position allocation for `stream` with this transaction's commit.
+pub async fn lock_stream(connection: &mut sqlx::PgConnection, stream: Stream) -> Result<()> {
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(stream.lock_key())
+        .execute(connection)
+        .await
+        .map_err(map_sqlx)?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Storage impl
 // ---------------------------------------------------------------------------
 
@@ -150,6 +198,7 @@ impl Storage for PostgresStorage {
         if event.state_key.is_some() {
             return Err(Error::InvalidEvent("put_event_once accepts non-state events only".into()));
         }
+        lock_stream(&mut transaction, Stream::Events).await?;
         sqlx::query!(
             r#"
             INSERT INTO events
@@ -181,6 +230,9 @@ impl Storage for PostgresStorage {
             if row.result.is_some() { transaction.commit().await.map_err(map_sqlx)?; return Ok(false); }
             sqlx::query!("UPDATE transactions SET result = $5 WHERE scope = $1 AND owner = $2 AND endpoint = $3 AND txn_id = $4",
                 key.scope, key.owner, key.endpoint, key.txn_id, result).execute(&mut *transaction).await.map_err(map_sqlx)?;
+        }
+        if !local.is_empty() {
+            lock_stream(&mut transaction, Stream::ToDevice).await?;
         }
         for message in local {
             sqlx::query!(
@@ -245,6 +297,8 @@ impl Storage for PostgresStorage {
     }
 
     async fn put_event(&self, event: &Event) -> Result<()> {
+        let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
+        lock_stream(&mut transaction, Stream::Events).await?;
         sqlx::query!(
             r#"
             INSERT INTO events
@@ -268,10 +322,10 @@ impl Storage for PostgresStorage {
             event.origin_server_ts as i64,
             event.depth
         )
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await
         .map_err(map_sqlx)?;
-
+        transaction.commit().await.map_err(map_sqlx)?;
         Ok(())
     }
 
@@ -1536,6 +1590,8 @@ impl Storage for PostgresStorage {
         event_type: &str,
         content: &Value,
     ) -> Result<i64> {
+        let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
+        lock_stream(&mut transaction, Stream::ToDevice).await?;
         let row = sqlx::query!(
             r#"
             INSERT INTO to_device_queue (target_user, target_device, sender, event_type, content)
@@ -1548,9 +1604,10 @@ impl Storage for PostgresStorage {
             event_type,
             content
         )
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *transaction)
         .await
         .map_err(map_sqlx)?;
+        transaction.commit().await.map_err(map_sqlx)?;
         Ok(row.id)
     }
 
@@ -1614,6 +1671,8 @@ impl Storage for PostgresStorage {
     // -----------------------------------------------------------------------
 
     async fn record_device_list_change(&self, user_id: &str) -> Result<i64> {
+        let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
+        lock_stream(&mut transaction, Stream::DeviceLists).await?;
         let row = sqlx::query!(
             r#"
             INSERT INTO device_list_changes (user_id)
@@ -1622,9 +1681,10 @@ impl Storage for PostgresStorage {
             "#,
             user_id
         )
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *transaction)
         .await
         .map_err(map_sqlx)?;
+        transaction.commit().await.map_err(map_sqlx)?;
         Ok(row.id)
     }
 
@@ -1935,6 +1995,8 @@ impl Storage for PostgresStorage {
         event_type: &str,
         content: &Value,
     ) -> Result<i64> {
+        let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
+        lock_stream(&mut transaction, Stream::AccountData).await?;
         // Select the matching partial unique index before inserting.
         if room_id.is_none() {
             let row = sqlx::query!(
@@ -1951,9 +2013,10 @@ impl Storage for PostgresStorage {
                 event_type,
                 content
             )
-            .fetch_one(&self.pool)
+            .fetch_one(&mut *transaction)
             .await
             .map_err(map_sqlx)?;
+            transaction.commit().await.map_err(map_sqlx)?;
             return Ok(row.stream_pos);
         }
 
@@ -1972,10 +2035,10 @@ impl Storage for PostgresStorage {
             event_type,
             content
         )
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *transaction)
         .await
         .map_err(map_sqlx)?;
-
+        transaction.commit().await.map_err(map_sqlx)?;
         Ok(row2.stream_pos)
     }
 
@@ -2040,25 +2103,7 @@ impl Storage for PostgresStorage {
         event_id: &str,
         ts: i64,
     ) -> Result<i64> {
-        let row = sqlx::query!(
-            r#"
-            INSERT INTO receipts (room_id, user_id, receipt_type, event_id, ts)
-            VALUES ($1, $2, $3, $4, $5)
-            ON CONFLICT (room_id, user_id, receipt_type)
-                DO UPDATE SET event_id = EXCLUDED.event_id, ts = EXCLUDED.ts,
-                              stream_pos = EXCLUDED.stream_pos
-            RETURNING stream_pos
-            "#,
-            room_id,
-            user_id,
-            receipt_type,
-            event_id,
-            ts
-        )
-        .fetch_one(&self.pool)
-        .await
-        .map_err(map_sqlx)?;
-        Ok(row.stream_pos)
+        self.set_threaded_receipt(room_id, user_id, receipt_type, None, event_id, ts).await
     }
 
     async fn receipts_for_room(
@@ -2069,7 +2114,7 @@ impl Storage for PostgresStorage {
             r#"
             SELECT user_id, receipt_type, event_id, ts
             FROM receipts
-            WHERE room_id = $1
+            WHERE room_id = $1 AND thread_id = ''
             "#,
             room_id
         )
@@ -2091,7 +2136,7 @@ impl Storage for PostgresStorage {
             r#"
             SELECT room_id, user_id, receipt_type, event_id, ts, stream_pos
             FROM receipts
-            WHERE stream_pos > $1
+            WHERE stream_pos > $1 AND thread_id = ''
             ORDER BY stream_pos ASC
             "#,
             since_pos
@@ -3970,6 +4015,150 @@ impl Storage for PostgresStorage {
             .await
             .map_err(map_sqlx)?;
         Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Sync & E2EE semantics (conduit-y99.14 / .15 / .16)
+    // -----------------------------------------------------------------------
+
+    async fn cross_signing_signatures_for(
+        &self,
+        target_user: &str,
+    ) -> Result<Vec<(String, String, String, String)>> {
+        let rows = sqlx::query!(
+            r#"SELECT signer_user_id, signer_key_id, target_key_id, signature
+               FROM cross_signing_signatures WHERE target_user_id = $1
+               ORDER BY signer_user_id, signer_key_id, target_key_id"#,
+            target_user
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(rows
+            .into_iter()
+            .map(|r| (r.signer_user_id, r.signer_key_id, r.target_key_id, r.signature))
+            .collect())
+    }
+
+    async fn device_key_inventory(
+        &self,
+        user_id: &str,
+        device_id: &str,
+    ) -> Result<(HashMap<String, i64>, Vec<String>)> {
+        // One statement is one snapshot: counts and fallback usage agree.
+        let row = sqlx::query!(
+            r#"SELECT
+                 COALESCE((SELECT jsonb_object_agg(algorithm, n) FROM (
+                     SELECT algorithm, COUNT(*) AS n FROM one_time_keys
+                     WHERE user_id = $1 AND device_id = $2 GROUP BY algorithm) counts),
+                   '{}'::jsonb) AS "counts!",
+                 COALESCE((SELECT array_agg(algorithm ORDER BY algorithm) FROM fallback_keys
+                     WHERE user_id = $1 AND device_id = $2 AND NOT used), '{}') AS "fallback!""#,
+            user_id,
+            device_id
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        let counts = row
+            .counts
+            .as_object()
+            .map(|object| {
+                object
+                    .iter()
+                    .filter_map(|(algorithm, n)| n.as_i64().map(|n| (algorithm.clone(), n)))
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok((counts, row.fallback))
+    }
+
+    async fn set_threaded_receipt(
+        &self,
+        room_id: &str,
+        user_id: &str,
+        receipt_type: &str,
+        thread_id: Option<&str>,
+        event_id: &str,
+        ts: i64,
+    ) -> Result<i64> {
+        let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
+        lock_stream(&mut transaction, Stream::Receipts).await?;
+        let row = sqlx::query!(
+            r#"
+            INSERT INTO receipts (room_id, user_id, receipt_type, thread_id, event_id, ts)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            ON CONFLICT (room_id, user_id, receipt_type, thread_id)
+                DO UPDATE SET event_id = EXCLUDED.event_id, ts = EXCLUDED.ts,
+                              stream_pos = EXCLUDED.stream_pos
+            RETURNING stream_pos
+            "#,
+            room_id,
+            user_id,
+            receipt_type,
+            thread_id.unwrap_or_default(),
+            event_id,
+            ts
+        )
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(map_sqlx)?;
+        transaction.commit().await.map_err(map_sqlx)?;
+        Ok(row.stream_pos)
+    }
+
+    async fn threaded_receipts_since(
+        &self,
+        since_pos: i64,
+    ) -> Result<Vec<conduit::storage::ReceiptRecord>> {
+        let rows = sqlx::query!(
+            r#"SELECT room_id, user_id, receipt_type, thread_id, event_id, ts, stream_pos
+               FROM receipts WHERE stream_pos > $1 ORDER BY stream_pos ASC"#,
+            since_pos
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(rows
+            .into_iter()
+            .map(|r| conduit::storage::ReceiptRecord {
+                room_id: r.room_id,
+                user_id: r.user_id,
+                receipt_type: r.receipt_type,
+                thread_id: (!r.thread_id.is_empty()).then_some(r.thread_id),
+                event_id: r.event_id,
+                ts: r.ts,
+                stream_pos: r.stream_pos,
+            })
+            .collect())
+    }
+
+    async fn user_receipts_in_room(
+        &self,
+        room_id: &str,
+        user_id: &str,
+    ) -> Result<Vec<conduit::storage::ReceiptRecord>> {
+        let rows = sqlx::query!(
+            r#"SELECT room_id, user_id, receipt_type, thread_id, event_id, ts, stream_pos
+               FROM receipts WHERE room_id = $1 AND user_id = $2 ORDER BY stream_pos ASC"#,
+            room_id,
+            user_id
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(rows
+            .into_iter()
+            .map(|r| conduit::storage::ReceiptRecord {
+                room_id: r.room_id,
+                user_id: r.user_id,
+                receipt_type: r.receipt_type,
+                thread_id: (!r.thread_id.is_empty()).then_some(r.thread_id),
+                event_id: r.event_id,
+                ts: r.ts,
+                stream_pos: r.stream_pos,
+            })
+            .collect())
     }
 }
 

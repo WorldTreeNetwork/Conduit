@@ -41,9 +41,9 @@ use super::{AuthState, AuthedUser, MatrixError};
 /// Old formats (`s{e}` and `s{e}_d{d}`) are accepted on parse and
 /// extended with default zero cursors.
 #[derive(Clone)]
-struct SyncToken {
-    events_pos: i64,
-    device_pos: i64,
+pub(crate) struct SyncToken {
+    pub(crate) events_pos: i64,
+    pub(crate) device_pos: i64,
     account_data_pos: i64,
     receipts_pos: i64,
     to_device_pos: i64,
@@ -77,7 +77,7 @@ impl SyncToken {
 ///   - `"s{events}_d{device}_a{acct}_r{rcpts}"` (previous format)
 ///   - `"s{events}_d{device}_a{acct}_r{rcpts}_t{to_device}"` (previous format)
 ///   - optional `y`, `p`, `e`, `k` fields for ephemeral streams and key inventory
-fn parse_since(raw: &str) -> Result<SyncToken, Response> {
+pub(crate) fn parse_since(raw: &str) -> Result<SyncToken, Response> {
     let bad = || {
         (
             StatusCode::BAD_REQUEST,
@@ -491,29 +491,24 @@ async fn build_sync_response<S: AuthState>(
     }
 
     // --- Receipts EDU (1mo.8) ---
-    let receipt_changes = match storage.receipts_since(receipts_since).await {
+    let receipt_changes = match storage.threaded_receipts_since(receipts_since).await {
         Ok(v) => v,
         Err(error) => return Err(MatrixError::unknown(error.to_string()).into_response()),
     };
     let mut next_receipts_pos = receipt_changes
         .iter()
-        .map(|(_, _, _, _, _, position)| *position)
+        .map(|receipt| receipt.stream_pos)
         .max()
         .unwrap_or(receipts_since);
 
     // Group receipts by room.
-    let mut receipts_by_room: HashMap<String, Vec<(String, String, String, i64)>> = HashMap::new();
-    for (room_id, uid, receipt_type, event_id, ts, _) in &receipt_changes {
+    let mut receipts_by_room: HashMap<String, Vec<conduit::storage::ReceiptRecord>> = HashMap::new();
+    for receipt in receipt_changes {
         // Private read receipts must never be shown to another user.
-        if receipt_type == "m.read.private" && uid != user_id {
+        if receipt.receipt_type == "m.read.private" && receipt.user_id != user_id {
             continue;
         }
-        receipts_by_room.entry(room_id.clone()).or_default().push((
-            uid.clone(),
-            receipt_type.clone(),
-            event_id.clone(),
-            *ts,
-        ));
+        receipts_by_room.entry(receipt.room_id.clone()).or_default().push(receipt);
     }
 
     // Collect all new events since `since` (large limit for correctness; v0).
@@ -627,6 +622,9 @@ async fn build_sync_response<S: AuthState>(
 
     // For each room, check if user is currently joined.
     let mut joined_rooms: HashMap<String, JoinedRoomBlock> = HashMap::new();
+    let room_index = super::device_lists::JoinedRoomIndex::load(storage.as_ref(), user_id)
+        .await
+        .map_err(|error| MatrixError::unknown(error.to_string()).into_response())?;
 
     for room_id in &rooms_to_check {
         // Check current membership.
@@ -690,6 +688,12 @@ async fn build_sync_response<S: AuthState>(
         // Inject ephemeral EDUs: typing + receipts.
         // Typing (m.typing):
         if let Some(typers) = typing_changes.get(room_id) {
+            // A typer who has since left is no longer typing here.
+            let members = room_index.rooms.get(room_id).map(|room| &room.members);
+            let typers: Vec<_> = typers
+                .iter()
+                .filter(|typer| members.is_some_and(|members| members.contains(*typer)))
+                .collect();
             block.ephemeral.events.push(json!({
                 "type": "m.typing", "content": { "user_ids": typers }
             }));
@@ -700,23 +704,10 @@ async fn build_sync_response<S: AuthState>(
                 .push(json!({"type": "m.typing", "content": {"user_ids": []}}));
         }
 
-        // Receipts (m.receipt):
+        // Receipts (m.receipt), batched into one event per thread scope so
+        // a user's unthreaded and threaded receipts never collide.
         if let Some(room_receipts) = receipts_by_room.get(room_id) {
-            let mut receipt_content: serde_json::Map<String, Value> = serde_json::Map::new();
-            for (uid, receipt_type, event_id, ts) in room_receipts {
-                let ev_entry = receipt_content
-                    .entry(event_id.clone())
-                    .or_insert_with(|| json!({}));
-                if ev_entry.get(receipt_type).is_none() {
-                    ev_entry[receipt_type] = json!({});
-                }
-                ev_entry[receipt_type][uid] = json!({ "ts": ts });
-            }
-            block.ephemeral.events.push(json!({
-                "type": "m.receipt",
-                "room_id": room_id,
-                "content": receipt_content
-            }));
+            block.ephemeral.events.extend(receipt_events(room_id, room_receipts));
         }
 
         decorate_block(state.storage().as_ref(), user_id, filter, &mut block).await?;
@@ -757,20 +748,8 @@ async fn build_sync_response<S: AuthState>(
 
     // --- Presence EDU (1mo.8) ---
     // Presence is visible to the user and users sharing a joined room.
-    let mut visible_users = std::collections::HashSet::from([user_id.to_owned()]);
-    for room in &joined {
-        let members = storage
-            .get_current_state(room)
-            .await
-            .map_err(|error| MatrixError::unknown(error.to_string()).into_response())?;
-        for event in members {
-            if event.event_type == "m.room.member" && event.content["membership"] == "join" {
-                if let Some(user) = event.state_key {
-                    visible_users.insert(user);
-                }
-            }
-        }
-    }
+    let mut visible_users = room_index.peers();
+    visible_users.insert(user_id.to_owned());
     let mut selected_presence = Vec::new();
     for (uid, entry) in presence_changes {
         let event = json!({"type": "m.presence", "sender": uid});
@@ -846,30 +825,40 @@ async fn build_sync_response<S: AuthState>(
         })
         .collect();
 
-    // --- Device list changes (mrm.12) ---
-    let device_list_changed = match storage
-        .device_list_changes_between(device_since, next_device_pos)
-        .await
-    {
-        Ok(v) => v,
-        Err(error) => return Err(MatrixError::unknown(error.to_string()).into_response()),
-    };
-
-    // --- OTK counts ---
-    let otk_counts = match storage
-        .one_time_key_counts(user_id, &authed_device_id)
-        .await
-    {
-        Ok(c) => c,
-        Err(error) => return Err(MatrixError::unknown(error.to_string()).into_response()),
-    };
-    let otk_counts_json: serde_json::Map<String, Value> =
-        otk_counts.into_iter().map(|(k, v)| (k, json!(v))).collect();
-
-    let unused_fallback_key_types = storage
-        .unused_fallback_key_types(user_id, authed_device_id)
+    // --- Device list changes (mrm.12, conduit-y99.14) ---
+    // Only users sharing a room (or the user themself) are
+    // reported, and only on incremental sync.
+    let device_lists = if since_token.is_some() {
+        let key_updates = storage
+            .device_list_changes_between(device_since, next_device_pos)
+            .await
+            .map_err(|error| MatrixError::unknown(error.to_string()).into_response())?;
+        let window: Vec<_> = new_events
+            .iter()
+            .filter(|event| matches!(event.event_type.as_str(), "m.room.member" | "m.room.encryption"))
+            .cloned()
+            .collect();
+        let (changed, left) = super::device_lists::device_list_delta(
+            storage.as_ref(),
+            user_id,
+            &room_index,
+            &key_updates,
+            &window,
+        )
         .await
         .map_err(|error| MatrixError::unknown(error.to_string()).into_response())?;
+        Some(json!({"changed": changed, "left": left}))
+    } else {
+        None
+    };
+
+    // --- OTK counts and fallback usage, observed in one snapshot ---
+    let (otk_counts, unused_fallback_key_types) = storage
+        .device_key_inventory(user_id, authed_device_id)
+        .await
+        .map_err(|error| MatrixError::unknown(error.to_string()).into_response())?;
+    let otk_counts_json: serde_json::Map<String, Value> =
+        otk_counts.into_iter().map(|(k, v)| (k, json!(v))).collect();
     let key_summary = hex::encode(Sha256::digest(
         conduit::canonical_json::to_canonical_bytes(&json!({
             "counts": otk_counts_json, "fallback": unused_fallback_key_types
@@ -908,20 +897,46 @@ async fn build_sync_response<S: AuthState>(
         "knock": knocked_rooms
     });
 
+    let mut body = json!({
+        "next_batch": next_batch,
+        "rooms": rooms_obj,
+        "presence":     { "events": presence_events },
+        "account_data": { "events": global_account_data_events },
+        "to_device":    { "events": to_device_json },
+        "device_one_time_keys_count": otk_counts_json,
+        "device_unused_fallback_key_types": unused_fallback_key_types,
+    });
+    if let Some(device_lists) = device_lists {
+        body["device_lists"] = device_lists;
+    }
     Ok(SyncResponse {
         has_key_changes,
         next_expiry,
-        body: json!({
-            "next_batch": next_batch,
-            "rooms": rooms_obj,
-            "presence":     { "events": presence_events },
-            "account_data": { "events": global_account_data_events },
-            "to_device":    { "events": to_device_json },
-            "device_lists": { "changed": device_list_changed, "left": [] },
-            "device_one_time_keys_count": otk_counts_json,
-            "device_unused_fallback_key_types": unused_fallback_key_types,
-        }),
+        body,
     })
+}
+
+/// `m.receipt` events for one room: one per thread scope (unthreaded first),
+/// each receipt carrying its `thread_id` when threaded.
+fn receipt_events(room_id: &str, receipts: &[conduit::storage::ReceiptRecord]) -> Vec<Value> {
+    let mut scopes: std::collections::BTreeMap<Option<&str>, serde_json::Map<String, Value>> =
+        std::collections::BTreeMap::new();
+    for receipt in receipts {
+        let content = scopes.entry(receipt.thread_id.as_deref()).or_default();
+        let entry = content.entry(receipt.event_id.clone()).or_insert_with(|| json!({}));
+        if entry.get(&receipt.receipt_type).is_none() {
+            entry[&receipt.receipt_type] = json!({});
+        }
+        let mut body = json!({"ts": receipt.ts});
+        if let Some(thread) = &receipt.thread_id {
+            body["thread_id"] = json!(thread);
+        }
+        entry[&receipt.receipt_type][&receipt.user_id] = body;
+    }
+    scopes
+        .into_values()
+        .map(|content| json!({"type": "m.receipt", "room_id": room_id, "content": content}))
+        .collect()
 }
 
 async fn stripped_membership_preview(

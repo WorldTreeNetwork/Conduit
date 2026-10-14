@@ -205,16 +205,15 @@ async fn production_to_device_sync_retries_until_acknowledged() {
     let bob_token = bob["access_token"].as_str().unwrap();
 
     // Advance the independent key-change stream beyond the first queue ID.
+    // Each upload is a fresh self-signed identity, so each is a change.
     for _ in 0..3 {
+        let device = common::keys::Device::from_login(&alice);
         server
             .request(
                 Method::POST,
                 "/_matrix/client/v3/keys/upload",
                 Some(alice_token),
-                Some(json!({"device_keys": {
-                    "user_id": alice["user_id"], "device_id": alice["device_id"],
-                    "algorithms": [], "keys": {}, "signatures": {}
-                }})),
+                Some(json!({"device_keys": device.keys})),
                 200,
             )
             .await;
@@ -390,7 +389,7 @@ async fn production_long_poll_wakes_for_each_non_room_stream() {
             Method::POST,
             "/_matrix/client/v3/keys/upload".to_owned(),
             alice_token,
-            json!({"device_keys": {"user_id": alice["user_id"], "device_id": alice["device_id"], "algorithms": [], "keys": {}, "signatures": {}}}),
+            json!({"device_keys": common::keys::Device::from_login(&alice).keys}),
             "device_lists",
         ),
         (

@@ -527,13 +527,13 @@
       ],
       "tests": [
         "conduit-server/tests/production_e2e.rs::production_key_inventory_wakes_sync_and_quiets_after_acknowledgement",
-        "conduit-server/src/api/client/sync.rs::token_tests::extended_tokens_keep_ephemeral_and_key_cursors_independent"
+        "conduit-server/src/api/client/sync.rs::token_tests::extended_tokens_keep_ephemeral_and_key_cursors_independent",
+        "conduit-server/tests/production_sync.rs::key_uploads_must_match_and_be_signed_by_the_authenticated_device"
       ],
       "limitations": [
-        "Key identity validation, encrypted-room device-list visibility and independent encrypted clients remain open"
+        "Independent encrypted clients (vodozemac/libolm) are not yet exercised end to end"
       ],
       "gap_issues": [
-        "conduit-y99.14",
         "conduit-y99.9"
       ]
     },
@@ -1673,6 +1673,131 @@
       "limitations": [
         "No email/SMS validation or identity-server integration exists"
       ]
+    },
+    {
+      "id": "e2ee-key-identity-authentication",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#post_matrixclientv3keysupload",
+      "status": "covered_assertions_only",
+      "assertions": [
+        "Device keys naming another user or device are rejected with 400 M_INVALID_PARAM",
+        "Device keys must include ed25519:<device_id> and be signed by it, else 400 M_INVALID_SIGNATURE",
+        "Signed one-time and fallback keys must verify against the device key; malformed key names are M_BAD_JSON",
+        "At most one fallback key per algorithm (M_INVALID_PARAM)",
+        "A rejected upload persists nothing; an identical re-upload is not a device-list change",
+        "keys/query withholds stored device keys that are not self-signed or name another device",
+        "keys/query adds unsigned.device_display_name and merges self-signing signatures",
+        "Cross-signing keys must name the user, carry the usage, and have exactly one ed25519:<public> key",
+        "Self- and user-signing keys must be signed by the accompanying or stored master key (M_INVALID_SIGNATURE)",
+        "A cross-signing public key equal to a device ID is 403 M_FORBIDDEN 'Key ID in use'",
+        "Replacing cross-signing keys requires m.login.password UIA; exact retries and first uploads do not",
+        "keys/signatures/upload verifies each signature against the permitted signer and reports failures per user and key ID",
+        "user-signing keys and user-signing signatures are visible only to their owner"
+      ],
+      "implementation": [
+        "conduit-server/src/api/client/key_identity.rs",
+        "conduit-server/src/api/client/keys.rs",
+        "conduit-server/src/storage_pg.rs",
+        "conduit/src/storage.rs"
+      ],
+      "tests": [
+        "conduit-server/tests/production_sync.rs::key_uploads_must_match_and_be_signed_by_the_authenticated_device",
+        "conduit-server/tests/production_sync.rs::key_query_withholds_forged_device_keys_and_reports_display_names",
+        "conduit-server/tests/production_sync.rs::cross_signing_keys_are_validated_and_replacement_requires_uia",
+        "conduit-server/tests/production_sync.rs::cross_signing_key_ids_may_not_collide_with_device_ids",
+        "conduit-server/tests/production_sync.rs::signature_uploads_verify_signers_and_respect_visibility",
+        "conduit-server/src/api/client/key_identity.rs::tests"
+      ],
+      "limitations": [
+        "The application-service exemption from cross-signing UIA and the m.oauth stage are not implemented",
+        "Accounts without a password cannot complete replacement UIA"
+      ],
+      "gap_issues": [
+        "conduit-y99.14.1"
+      ]
+    },
+    {
+      "id": "e2ee-device-list-visibility",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#extensions-to-sync-1",
+      "status": "covered_assertions_only",
+      "assertions": [
+        "device_lists is only present on incremental sync",
+        "Key updates appear only for the requester and users sharing a joined room",
+        "Joining an encrypted room, or encryption being enabled, marks newly shared members changed",
+        "Users no longer sharing any encrypted room appear in left, for both the leaver and the remaining members",
+        "/keys/changes applies the same visibility between from and to; from is required (M_MISSING_PARAM) and validated (M_INVALID_PARAM)"
+      ],
+      "implementation": [
+        "conduit-server/src/api/client/device_lists.rs",
+        "conduit-server/src/api/client/sync.rs",
+        "conduit-server/src/api/client/keys.rs"
+      ],
+      "tests": [
+        "conduit-server/tests/production_sync.rs::device_lists_report_only_shared_users_and_departures",
+        "conduit-server/tests/production_sync.rs::enabling_encryption_marks_existing_members_changed",
+        "conduit-server/tests/e2ee.rs::device_list_changes_appear_in_sync"
+      ],
+      "limitations": [
+        "Remote users' membership is evaluated from local room state only"
+      ],
+      "gap_issues": []
+    },
+    {
+      "id": "threaded-receipts",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#threaded-read-receipts",
+      "status": "covered_assertions_only",
+      "assertions": [
+        "Unthreaded, main-timeline and per-thread receipts coexist per (user, type, thread)",
+        "A new receipt replaces only its own scope",
+        "Sync batches one m.receipt event per room and thread scope, with thread_id on threaded receipts",
+        "thread_id must be a non-empty string naming the event's thread (main, or the thread root), else 400 M_INVALID_PARAM",
+        "Unknown receipt types are 400 M_INVALID_PARAM; a non-object body is M_BAD_JSON",
+        "Only joined members may send receipts (403 M_FORBIDDEN); the event must be in the room (404 M_NOT_FOUND)",
+        "m.read.private receipts, threaded or not, reach only their sender"
+      ],
+      "implementation": [
+        "conduit-server/src/api/client/receipts.rs",
+        "conduit-server/src/api/client/sync.rs",
+        "conduit-server/migrations/0050_threaded_receipts.sql",
+        "conduit-server/src/storage_pg.rs",
+        "conduit/src/storage.rs"
+      ],
+      "tests": [
+        "conduit-server/tests/production_sync.rs::threaded_and_unthreaded_receipts_coexist"
+      ],
+      "limitations": [
+        "m.fully_read via the receipt endpoint belongs to the read-markers handler",
+        "Receipts are not yet sent over federation as m.receipt EDUs"
+      ],
+      "gap_issues": []
+    },
+    {
+      "id": "typing-authorization-and-timeouts",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#put_matrixclientv3roomsroomidtypinguserid",
+      "status": "covered_assertions_only",
+      "assertions": [
+        "Only the authenticated user, joined to the room, may set typing (403 M_FORBIDDEN)",
+        "typing must be a boolean and timeout a non-negative integer (M_BAD_JSON)",
+        "Requested timeouts beyond the 30 s refresh recommendation are honoured up to a 120 s server cap",
+        "Oversized timeouts saturate without overflow or panic",
+        "Users who have left are not reported as typing"
+      ],
+      "implementation": [
+        "conduit-server/src/api/client/typing.rs",
+        "conduit-server/src/api/client/sync.rs"
+      ],
+      "tests": [
+        "conduit-server/tests/production_sync.rs::typing_requires_membership_and_validates_timeouts",
+        "conduit-server/src/api/client/typing.rs::tests::extreme_timeouts_cannot_panic_and_are_capped",
+        "conduit-server/src/api/client/typing.rs::tests::typing_bodies_are_validated"
+      ],
+      "limitations": [
+        "Typing is not federated as m.typing EDUs"
+      ],
+      "gap_issues": []
     }
   ]
 }

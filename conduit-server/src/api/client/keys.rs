@@ -33,14 +33,13 @@ use super::{AuthState, AuthedUser, MatrixError};
 
 #[derive(Debug, Deserialize)]
 pub struct KeysUploadRequest {
-    /// device_keys: the full DeviceKeys object (opaque blob, stored as-is).
+    /// The device's identity keys, signed by its own Ed25519 key.
     #[serde(default)]
     pub device_keys: Option<Value>,
-    /// one_time_keys: { "algorithm:key_id": key_json, ... }
+    /// one_time_keys: { "algorithm:key_id": string | KeyObject, ... }
     #[serde(default)]
     pub one_time_keys: HashMap<String, Value>,
-    /// fallback_keys: { "algorithm:key_id": key_json, ... }
-    /// May also contain "algorithm": bool (the "unused_fallback_key_types" signal).
+    /// fallback_keys: at most one { "algorithm:key_id": string | KeyObject } per algorithm.
     #[serde(default)]
     pub fallback_keys: HashMap<String, Value>,
 }
@@ -50,46 +49,72 @@ pub async fn keys_upload<S: AuthState>(
     authed: AuthedUser,
     Json(body): Json<KeysUploadRequest>,
 ) -> Response {
+    use super::key_identity::{
+        device_ed25519, validate_device_keys, validate_one_time_key, KeyError,
+    };
     let storage = state.storage();
     let user_id = &authed.user_id;
     let device_id = &authed.device_id;
 
-    // Store device keys if provided.
-    if let Some(dk) = &body.device_keys {
-        if let Err(e) = storage.upsert_device_keys(user_id, device_id, dk).await {
-            return MatrixError::unknown(e.to_string()).into_response();
-        }
-        // Record device list change so other users' /sync sees the update.
-        let stream_id = storage.record_device_list_change(user_id).await.unwrap_or(0);
-        // Federate an m.device_list_update EDU to remote servers sharing a
-        // room with this user (conduit-6r1).
-        broadcast_device_list_update(&state, user_id, device_id, stream_id, Some(dk.clone()))
-            .await;
-    }
-
-    // Store one-time keys.
-    if !body.one_time_keys.is_empty() {
-        let mut parsed: Vec<(String, String, Value)> = Vec::new();
-        for (kid, key_json) in &body.one_time_keys {
-            // key_id format: "algorithm:key_id" e.g. "signed_curve25519:AAAABg"
-            let algorithm = kid.split(':').next().unwrap_or(kid).to_owned();
-            parsed.push((kid.clone(), algorithm, key_json.clone()));
-        }
-        if let Err(e) = storage.insert_one_time_keys(user_id, device_id, parsed).await {
-            return MatrixError::unknown(e.to_string()).into_response();
+    // Validate everything before persisting anything (conduit-y99.14).
+    let new_device_keys = match body.device_keys.as_ref().map(|keys| validate_device_keys(keys, user_id, device_id)) {
+        None => None,
+        Some(Ok(keys)) => Some(keys),
+        Some(Err(error)) => return error.into_response(),
+    };
+    let stored = match storage.get_device_keys(user_id, device_id).await {
+        Ok(stored) => stored,
+        Err(e) => return MatrixError::unknown(e.to_string()).into_response(),
+    };
+    let ed25519 = new_device_keys
+        .as_ref()
+        .or(stored.as_ref())
+        .and_then(|keys| device_ed25519(keys, device_id));
+    let mut one_time = Vec::new();
+    for (kid, key_json) in &body.one_time_keys {
+        match validate_one_time_key(kid, key_json, user_id, device_id, ed25519.as_deref()) {
+            Ok(algorithm) => one_time.push((kid.clone(), algorithm, key_json.clone())),
+            Err(error) => return error.into_response(),
         }
     }
-
-    // Store fallback keys (values that are objects, not booleans).
+    let mut fallback: HashMap<String, (String, Value)> = HashMap::new();
     for (kid, key_json) in &body.fallback_keys {
-        if key_json.is_object() {
-            let algorithm = kid.split(':').next().unwrap_or(kid).to_owned();
-            if let Err(e) = storage
-                .upsert_fallback_key(user_id, device_id, &algorithm, kid, key_json)
-                .await
-            {
+        let algorithm = match validate_one_time_key(kid, key_json, user_id, device_id, ed25519.as_deref()) {
+            Ok(algorithm) => algorithm,
+            Err(error) => return error.into_response(),
+        };
+        if fallback.insert(algorithm.clone(), (kid.clone(), key_json.clone())).is_some() {
+            return KeyError::invalid_param(format!("at most one fallback key per algorithm ({algorithm})"))
+                .into_response();
+        }
+    }
+
+    if let Some(dk) = &new_device_keys {
+        // An identical re-upload is not a device-list change.
+        let changed = stored.as_ref() != Some(dk);
+        if changed {
+            if let Err(e) = storage.upsert_device_keys(user_id, device_id, dk).await {
                 return MatrixError::unknown(e.to_string()).into_response();
             }
+            let stream_id = match storage.record_device_list_change(user_id).await {
+                Ok(id) => id,
+                Err(e) => return MatrixError::unknown(e.to_string()).into_response(),
+            };
+            broadcast_device_list_update(&state, user_id, device_id, stream_id, Some(dk.clone())).await;
+        }
+    }
+
+    if !one_time.is_empty() {
+        if let Err(e) = storage.insert_one_time_keys(user_id, device_id, one_time).await {
+            return MatrixError::unknown(e.to_string()).into_response();
+        }
+    }
+    for (algorithm, (kid, key_json)) in &fallback {
+        if let Err(e) = storage
+            .upsert_fallback_key(user_id, device_id, algorithm, kid, key_json)
+            .await
+        {
+            return MatrixError::unknown(e.to_string()).into_response();
         }
     }
 
@@ -195,56 +220,104 @@ pub struct KeysQueryRequest {
     pub timeout: Option<u64>,
 }
 
+/// Merge stored cross-signing signatures into a key object.
+fn merge_signatures<'a>(
+    key: &mut Value,
+    signatures: impl Iterator<Item = &'a (String, String, String, String)>,
+) {
+    for (signer, signer_key, _, signature) in signatures {
+        if !key["signatures"].is_object() {
+            key["signatures"] = json!({});
+        }
+        if !key["signatures"][signer].is_object() {
+            key["signatures"][signer] = json!({});
+        }
+        key["signatures"][signer][signer_key] = json!(signature);
+    }
+}
+
 pub async fn keys_query<S: AuthState>(
     State(state): State<S>,
-    _authed: AuthedUser,
+    authed: AuthedUser,
     Json(body): Json<KeysQueryRequest>,
 ) -> Response {
+    use super::key_identity::{cross_signing_public, device_keys_are_authentic};
     let storage = state.storage();
+    let requester = &authed.user_id;
     let mut result_device_keys: HashMap<String, Value> = HashMap::new();
     let mut result_master_keys: HashMap<String, Value> = HashMap::new();
     let mut result_self_signing: HashMap<String, Value> = HashMap::new();
     let mut result_user_signing: HashMap<String, Value> = HashMap::new();
 
     for (uid, device_filter) in &body.device_keys {
-        // Fetch device identity keys.
         let all_device_keys = match storage.get_device_keys_for_user(uid).await {
             Ok(m) => m,
             Err(e) => return MatrixError::unknown(e.to_string()).into_response(),
         };
-
-        let user_keys: HashMap<String, Value> = if device_filter.is_empty() {
-            all_device_keys
-        } else {
-            all_device_keys
-                .into_iter()
-                .filter(|(did, _)| device_filter.contains(did))
-                .collect()
+        let devices = match storage.list_devices_for_user(uid).await {
+            Ok(devices) => devices,
+            Err(e) => return MatrixError::unknown(e.to_string()).into_response(),
+        };
+        let signatures = match storage.cross_signing_signatures_for(uid).await {
+            Ok(signatures) => signatures,
+            Err(e) => return MatrixError::unknown(e.to_string()).into_response(),
         };
 
-        // Attach cross-signing signatures to device keys.
-        // (Spec: server merges uploaded signatures into the device key objects.)
-        // For simplicity we return device keys as-is; signatures endpoint (mrm.9)
-        // stores them separately. A full implementation would merge here.
-        // TODO: merge cross-signing signatures into returned device keys.
-
+        // Only serve device keys that name this user/device and are
+        // self-signed by the device's own Ed25519 key (conduit-y99.14).
+        let mut user_keys = serde_json::Map::new();
+        for (did, keys) in all_device_keys {
+            if !device_filter.is_empty() && !device_filter.contains(&did) {
+                continue;
+            }
+            if !device_keys_are_authentic(&keys, uid, &did) {
+                tracing::warn!(user = %uid, device = %did, "withholding unauthenticated device keys");
+                continue;
+            }
+            let mut keys = keys;
+            // Device signatures come from the owner's self-signing key.
+            merge_signatures(
+                &mut keys,
+                signatures.iter().filter(|(signer, _, target, _)| signer == uid && *target == did),
+            );
+            if let Some(name) = devices
+                .iter()
+                .find(|device| device.device_id == did)
+                .and_then(|device| device.display_name.clone())
+            {
+                keys["unsigned"] = json!({"device_display_name": name});
+            }
+            user_keys.insert(did, keys);
+        }
         if !user_keys.is_empty() {
-            result_device_keys.insert(uid.clone(), json!(user_keys));
+            result_device_keys.insert(uid.clone(), Value::Object(user_keys));
         }
 
-        // Fetch cross-signing keys.
         let xsk = match storage.get_cross_signing_keys(uid).await {
             Ok(m) => m,
             Err(e) => return MatrixError::unknown(e.to_string()).into_response(),
         };
         if let Some(mk) = xsk.get("master") {
-            result_master_keys.insert(uid.clone(), mk.clone());
+            let mut master = mk.clone();
+            if let Some(public) = cross_signing_public(mk) {
+                // The owner's device signatures are public; a user-signing
+                // signature is visible only to the user who made it.
+                merge_signatures(
+                    &mut master,
+                    signatures.iter().filter(|(signer, _, target, _)| {
+                        *target == public && (signer == uid || signer == requester)
+                    }),
+                );
+            }
+            result_master_keys.insert(uid.clone(), master);
         }
         if let Some(ss) = xsk.get("self_signing") {
             result_self_signing.insert(uid.clone(), ss.clone());
         }
-        if let Some(us) = xsk.get("user_signing") {
-            result_user_signing.insert(uid.clone(), us.clone());
+        if uid == requester {
+            if let Some(us) = xsk.get("user_signing") {
+                result_user_signing.insert(uid.clone(), us.clone());
+            }
         }
     }
 
@@ -323,28 +396,80 @@ pub struct KeysChangesQuery {
 
 pub async fn keys_changes<S: AuthState>(
     State(state): State<S>,
-    _authed: AuthedUser,
+    authed: AuthedUser,
     Query(query): Query<KeysChangesQuery>,
 ) -> Response {
+    use super::device_lists::{device_list_delta, JoinedRoomIndex};
     let storage = state.storage();
 
-    // Parse device-list stream position from token.
-    let since_pos: i64 = query
-        .from
-        .as_deref()
-        .and_then(parse_device_pos_from_token)
-        .unwrap_or(0);
-
-    let changed = match storage.device_list_changes_since(since_pos).await {
+    let Some(from) = query.from.as_deref() else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"errcode": "M_MISSING_PARAM", "error": "from is required"})),
+        )
+            .into_response();
+    };
+    let from = match super::sync::parse_since(from) {
+        Ok(token) => token,
+        Err(response) => return response,
+    };
+    // `to` is a hint (the client's latest next_batch); an absent or
+    // unrecognised value means "now".
+    let to = query.to.as_deref().and_then(|raw| super::sync::parse_since(raw).ok());
+    let device_to = match to.as_ref() {
+        Some(token) => token.device_pos,
+        None => match storage.device_list_max_position().await {
+            Ok(position) => position,
+            Err(e) => return MatrixError::unknown(e.to_string()).into_response(),
+        },
+    };
+    let events_to = match to.as_ref() {
+        Some(token) => token.events_pos,
+        None => i64::MAX,
+    };
+    let key_updates = match storage.device_list_changes_between(from.device_pos, device_to).await {
         Ok(v) => v,
         Err(e) => return MatrixError::unknown(e.to_string()).into_response(),
     };
+    let window = match membership_window(storage.as_ref(), from.events_pos, events_to).await {
+        Ok(window) => window,
+        Err(e) => return MatrixError::unknown(e.to_string()).into_response(),
+    };
+    let result = async {
+        let index = JoinedRoomIndex::load(storage.as_ref(), &authed.user_id).await?;
+        device_list_delta(storage.as_ref(), &authed.user_id, &index, &key_updates, &window).await
+    }
+    .await;
+    match result {
+        Ok((changed, left)) => {
+            (StatusCode::OK, Json(json!({ "changed": changed, "left": left }))).into_response()
+        }
+        Err(e) => MatrixError::unknown(e.to_string()).into_response(),
+    }
+}
 
-    (
-        StatusCode::OK,
-        Json(json!({ "changed": changed, "left": [] })),
-    )
-        .into_response()
+/// Membership and encryption state events with stream positions in
+/// `(after, through]`, in stream order.
+pub(crate) async fn membership_window(
+    storage: &dyn Storage,
+    after: i64,
+    through: i64,
+) -> conduit::Result<Vec<conduit::event::Event>> {
+    let events: Vec<_> = storage
+        .events_since(after, i64::MAX)
+        .await?
+        .into_iter()
+        .filter(|event| matches!(event.event_type.as_str(), "m.room.member" | "m.room.encryption"))
+        .collect();
+    if through == i64::MAX {
+        return Ok(events);
+    }
+    let ids: Vec<_> = events.iter().map(|event| event.event_id.clone()).collect();
+    let positions = storage.event_stream_positions(&ids).await?;
+    Ok(events
+        .into_iter()
+        .filter(|event| positions.get(&event.event_id).is_some_and(|position| *position <= through))
+        .collect())
 }
 
 // ---------------------------------------------------------------------------
@@ -509,6 +634,8 @@ pub(crate) async fn enqueue_local_to_device(
 #[derive(Debug, Deserialize)]
 pub struct DeviceSigningUploadRequest {
     #[serde(default)]
+    pub auth: Option<Value>,
+    #[serde(default)]
     pub master_key: Option<Value>,
     #[serde(default)]
     pub self_signing_key: Option<Value>,
@@ -516,35 +643,150 @@ pub struct DeviceSigningUploadRequest {
     pub user_signing_key: Option<Value>,
 }
 
+/// User-interactive authentication for replacing cross-signing keys.
+/// Returns `None` when the request carries a valid `m.login.password` stage.
+async fn require_password_uia<S: AuthState>(state: &S, user_id: &str, auth: Option<&Value>) -> Option<Response> {
+    let challenge = |error: Option<&str>| {
+        let mut body = json!({
+            "flows": [{"stages": ["m.login.password"]}],
+            "params": {},
+            "session": auth.and_then(|auth| auth["session"].as_str()).map(str::to_owned)
+                .unwrap_or_else(super::uia::new_session_id),
+        });
+        if let Some(error) = error {
+            body["errcode"] = json!("M_FORBIDDEN");
+            body["error"] = json!(error);
+        }
+        (StatusCode::UNAUTHORIZED, Json(body)).into_response()
+    };
+    let Some(auth) = auth.filter(|auth| auth["type"] == "m.login.password") else {
+        return Some(challenge(None));
+    };
+    let identified = auth["identifier"]["user"]
+        .as_str()
+        .or_else(|| auth["user"].as_str())
+        .map(|user| {
+            if user.starts_with('@') {
+                user.to_owned()
+            } else {
+                format!("@{user}:{}", state.server_name())
+            }
+        });
+    if identified.as_deref().is_some_and(|user| user != user_id) {
+        return Some(challenge(Some("identifier does not match the authenticated user")));
+    }
+    let Some(password) = auth["password"].as_str() else {
+        return Some(challenge(Some("password is required")));
+    };
+    let hash = match state.storage().get_account(user_id).await {
+        Ok(Some(account)) => account.password_hash,
+        Ok(None) => None,
+        Err(e) => return Some(MatrixError::unknown(e.to_string()).into_response()),
+    };
+    let Some(hash) = hash else {
+        return Some(challenge(Some("account has no password")));
+    };
+    match super::verify_password(password.to_owned(), hash).await {
+        Ok(true) => {
+            if let Some(session) = auth["session"].as_str() {
+                super::uia::mark_session_used(session);
+            }
+            None
+        }
+        Ok(false) => Some(challenge(Some("invalid password"))),
+        Err(error) => Some(MatrixError::unknown(error).into_response()),
+    }
+}
+
 pub async fn device_signing_upload<S: AuthState>(
     State(state): State<S>,
     authed: AuthedUser,
     Json(body): Json<DeviceSigningUploadRequest>,
 ) -> Response {
+    use super::key_identity::{cross_signing_public, validate_cross_signing_key, verify_signature, KeyError};
     let storage = state.storage();
     let user_id = &authed.user_id;
 
-    if let Some(mk) = &body.master_key {
-        if let Err(e) = storage.upsert_cross_signing_key(user_id, "master", mk).await {
-            return MatrixError::unknown(e.to_string()).into_response();
+    let existing = match storage.get_cross_signing_keys(user_id).await {
+        Ok(keys) => keys,
+        Err(e) => return MatrixError::unknown(e.to_string()).into_response(),
+    };
+    let provided: Vec<(&str, &str, &Value)> = [
+        ("master", "master", body.master_key.as_ref()),
+        ("self_signing", "self_signing", body.self_signing_key.as_ref()),
+        ("user_signing", "user_signing", body.user_signing_key.as_ref()),
+    ]
+    .into_iter()
+    .filter_map(|(slot, usage, key)| key.map(|key| (slot, usage, key)))
+    .collect();
+    let mut identities = Vec::new();
+    for (_, usage, key) in &provided {
+        match validate_cross_signing_key(key, user_id, usage) {
+            Ok(identity) => identities.push(identity),
+            Err(error) => return error.into_response(),
         }
     }
-    if let Some(ss) = &body.self_signing_key {
-        if let Err(e) = storage.upsert_cross_signing_key(user_id, "self_signing", ss).await {
-            return MatrixError::unknown(e.to_string()).into_response();
+    // Self- and user-signing keys must be signed by the accompanying master
+    // key, or else by the most recently uploaded one.
+    let master_public = body
+        .master_key
+        .as_ref()
+        .and_then(cross_signing_public)
+        .or_else(|| existing.get("master").and_then(cross_signing_public));
+    for (slot, _, key) in &provided {
+        if *slot == "master" {
+            continue;
+        }
+        let Some(master) = master_public.as_deref() else {
+            return KeyError::invalid_signature(format!("{slot} key requires a master key to verify it")).into_response();
+        };
+        if !verify_signature(key, user_id, &format!("ed25519:{master}"), master) {
+            return KeyError::invalid_signature(format!("{slot} key is not signed by the master key")).into_response();
         }
     }
-    if let Some(us) = &body.user_signing_key {
-        if let Err(e) = storage.upsert_cross_signing_key(user_id, "user_signing", us).await {
+    // Cross-signing key IDs share a namespace with device IDs in
+    // /keys/signatures/upload, so a public key may not equal a device ID.
+    let devices = match storage.list_devices_for_user(user_id).await {
+        Ok(devices) => devices,
+        Err(e) => return MatrixError::unknown(e.to_string()).into_response(),
+    };
+    if identities
+        .iter()
+        .any(|identity| devices.iter().any(|device| device.device_id == identity.public_key))
+    {
+        return KeyError::forbidden("Key ID in use").into_response();
+    }
+
+    // UIA is required unless no master key exists yet, or the request
+    // re-uploads exactly the stored keys (an idempotent retry).
+    let unchanged = provided
+        .iter()
+        .all(|(slot, _, key)| existing.get(*slot).is_some_and(|stored| stored == *key));
+    if existing.contains_key("master") {
+        let exact_retry = body.master_key.is_some() && unchanged;
+        if !exact_retry {
+            if let Some(response) = require_password_uia(&state, user_id, body.auth.as_ref()).await {
+                return response;
+            }
+        }
+    }
+    if unchanged {
+        return (StatusCode::OK, Json(json!({}))).into_response();
+    }
+
+    for (slot, _, key) in &provided {
+        if let Err(e) = storage.upsert_cross_signing_key(user_id, slot, key).await {
             return MatrixError::unknown(e.to_string()).into_response();
         }
     }
 
     // Record device list change so peers see updated cross-signing keys.
-    let stream_id = storage.record_device_list_change(user_id).await.unwrap_or(0);
+    let stream_id = match storage.record_device_list_change(user_id).await {
+        Ok(id) => id,
+        Err(e) => return MatrixError::unknown(e.to_string()).into_response(),
+    };
     // Federate an m.device_list_update EDU. Cross-signing key changes
-    // surface as a device-less device_list_update (the EDU carries no
-    // device_id-specific keys field — remotes re-query). (conduit-6r1)
+    // surface as a device-less device_list_update (remotes re-query).
     broadcast_device_list_update(&state, user_id, "", stream_id, None).await;
 
     state.sync_notify().notify_waiters();
@@ -555,67 +797,143 @@ pub async fn device_signing_upload<S: AuthState>(
 // POST /_matrix/client/v3/keys/signatures/upload  (mrm.9)
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Deserialize)]
-pub struct SignaturesUploadRequest {
-    /// { user_id: { key_id: { ...key with signatures } } }
-    #[serde(default)]
-    pub signatures: HashMap<String, HashMap<String, Value>>,
-}
+/// Request body: `{ user_id: { key_id: signed JSON object } }`.
+pub type SignaturesUploadRequest = HashMap<String, HashMap<String, Value>>;
 
 pub async fn signatures_upload<S: AuthState>(
     State(state): State<S>,
     authed: AuthedUser,
     Json(body): Json<SignaturesUploadRequest>,
 ) -> Response {
+    use super::key_identity::{
+        cross_signing_public, device_ed25519, device_keys_are_authentic, same_signed_content,
+        verify_signature, KeyError,
+    };
     let storage = state.storage();
-    let _signer_user = &authed.user_id;
+    let me = &authed.user_id;
+    let mine = match storage.get_cross_signing_keys(me).await {
+        Ok(keys) => keys,
+        Err(e) => return MatrixError::unknown(e.to_string()).into_response(),
+    };
+    let my_self_signing = mine.get("self_signing").and_then(cross_signing_public);
+    let my_user_signing = mine.get("user_signing").and_then(cross_signing_public);
 
-    let mut failures: HashMap<String, Value> = HashMap::new();
-
-    for (target_user, keys) in &body.signatures {
-        for (target_key_id, key_obj) in keys {
-            // Extract signatures from the key object.
-            let sigs = match key_obj.get("signatures").and_then(|s| s.as_object()) {
-                Some(s) => s.clone(),
-                None => {
-                    failures.insert(
-                        format!("{target_user}/{target_key_id}"),
-                        json!({ "errcode": "M_INVALID_SIGNATURE", "error": "no signatures field" }),
-                    );
-                    continue;
-                }
+    let mut failures: HashMap<String, HashMap<String, Value>> = HashMap::new();
+    let mut changed_users = std::collections::BTreeSet::new();
+    for (target_user, keys) in &body {
+        for (target_key_id, signed) in keys {
+            let mut fail = |error: KeyError| {
+                failures
+                    .entry(target_user.clone())
+                    .or_default()
+                    .insert(target_key_id.clone(), error.to_json());
             };
-
-            for (signer_user_id, signer_keys) in &sigs {
-                let signer_keys = match signer_keys.as_object() {
-                    Some(s) => s.clone(),
-                    None => continue,
+            let Some(new_signatures) = signed["signatures"][me.as_str()].as_object() else {
+                fail(KeyError::invalid_signature("no signatures by the uploading user"));
+                continue;
+            };
+            // Resolve the target key and which of my keys may sign it.
+            let (target, signers): (Value, HashMap<String, String>) = if target_user == me {
+                match storage.get_device_keys(me, target_key_id).await {
+                    Ok(Some(device_keys)) => {
+                        // My own device, signed by my self-signing key.
+                        let signers = my_self_signing
+                            .iter()
+                            .map(|public| (format!("ed25519:{public}"), public.clone()))
+                            .collect();
+                        (device_keys, signers)
+                    }
+                    Ok(None) => match mine.get("master") {
+                        Some(master) if cross_signing_public(master).as_deref() == Some(target_key_id.as_str()) => {
+                            // My master key, signed by one of my devices.
+                            let devices = match storage.get_device_keys_for_user(me).await {
+                                Ok(devices) => devices,
+                                Err(e) => return MatrixError::unknown(e.to_string()).into_response(),
+                            };
+                            let signers = devices
+                                .iter()
+                                .filter(|(did, keys)| device_keys_are_authentic(keys, me, did))
+                                .filter_map(|(did, keys)| {
+                                    device_ed25519(keys, did).map(|public| (format!("ed25519:{did}"), public))
+                                })
+                                .collect();
+                            (master.clone(), signers)
+                        }
+                        _ => {
+                            fail(KeyError::not_found("unknown key"));
+                            continue;
+                        }
+                    },
+                    Err(e) => return MatrixError::unknown(e.to_string()).into_response(),
+                }
+            } else {
+                // Another user's master key, signed by my user-signing key.
+                let theirs = match storage.get_cross_signing_keys(target_user).await {
+                    Ok(keys) => keys,
+                    Err(e) => return MatrixError::unknown(e.to_string()).into_response(),
                 };
-                for (signer_key_id, sig_val) in &signer_keys {
-                    let sig = match sig_val.as_str() {
-                        Some(s) => s.to_owned(),
-                        None => continue,
-                    };
-                    if let Err(e) = storage
-                        .insert_cross_signing_signature(
-                            signer_user_id,
-                            signer_key_id,
-                            target_user,
-                            target_key_id,
-                            &sig,
-                        )
-                        .await
-                    {
-                        failures.insert(
-                            format!("{target_user}/{target_key_id}"),
-                            json!({ "errcode": "M_UNKNOWN", "error": e.to_string() }),
-                        );
+                match theirs.get("master") {
+                    Some(master) if cross_signing_public(master).as_deref() == Some(target_key_id.as_str()) => {
+                        let signers = my_user_signing
+                            .iter()
+                            .map(|public| (format!("ed25519:{public}"), public.clone()))
+                            .collect();
+                        (master.clone(), signers)
+                    }
+                    _ => {
+                        fail(KeyError::not_found("unknown master key"));
+                        continue;
                     }
                 }
+            };
+            if !same_signed_content(signed, &target) {
+                fail(KeyError::invalid_signature("signed object does not match the stored key"));
+                continue;
+            }
+            let mut stored_any = false;
+            let mut rejected = None;
+            for (signer_key_id, signature) in new_signatures {
+                // Existing signatures on the object are carried, not re-added.
+                if target["signatures"][me.as_str()][signer_key_id] == *signature {
+                    continue;
+                }
+                let Some(public) = signers.get(signer_key_id) else {
+                    rejected = Some(KeyError::invalid_signature(format!("{signer_key_id} may not sign this key")));
+                    continue;
+                };
+                let Some(signature) = signature.as_str() else {
+                    rejected = Some(KeyError::invalid_signature("signature must be a string"));
+                    continue;
+                };
+                if !verify_signature(signed, me, signer_key_id, public) {
+                    rejected = Some(KeyError::invalid_signature("Invalid signature"));
+                    continue;
+                }
+                if let Err(e) = storage
+                    .insert_cross_signing_signature(me, signer_key_id, target_user, target_key_id, signature)
+                    .await
+                {
+                    return MatrixError::unknown(e.to_string()).into_response();
+                }
+                stored_any = true;
+            }
+            if let Some(error) = rejected {
+                fail(error);
+            }
+            if stored_any {
+                // Signatures on my own keys are public; a user-signing
+                // signature is only visible to me.
+                changed_users.insert(me.clone());
             }
         }
     }
-
+    for user in changed_users {
+        match storage.record_device_list_change(&user).await {
+            Ok(stream_id) => broadcast_device_list_update(&state, &user, "", stream_id, None).await,
+            Err(e) => return MatrixError::unknown(e.to_string()).into_response(),
+        }
+    }
+    state.sync_notify().notify_waiters();
     (StatusCode::OK, Json(json!({ "failures": failures }))).into_response()
 }
 

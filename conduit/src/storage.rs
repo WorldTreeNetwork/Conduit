@@ -1262,6 +1262,56 @@ pub trait Storage: Send + Sync + 'static {
 
     /// Revoke every token issued in exchange for `parent_hash`.
     async fn delete_refresh_token_children(&self, parent_hash: &str) -> Result<()>;
+    // --- Sync & E2EE semantics (conduit-y99.14 / .15 / .16) ----------------
+
+    /// Cross-signing signatures whose target belongs to `target_user`, as
+    /// `(signer_user, signer_key_id, target_key_id, signature)`.
+    async fn cross_signing_signatures_for(
+        &self,
+        target_user: &str,
+    ) -> Result<Vec<(String, String, String, String)>>;
+
+    /// One-time-key counts and unused fallback algorithms for a device,
+    /// observed in one consistent snapshot so a concurrent claim cannot
+    /// split them.
+    async fn device_key_inventory(
+        &self,
+        user_id: &str,
+        device_id: &str,
+    ) -> Result<(HashMap<String, i64>, Vec<String>)>;
+
+    /// Upsert a receipt in one thread scope. `thread_id = None` is the
+    /// unthreaded receipt; `Some("main")` is the main timeline. Scopes
+    /// coexist: each `(room, user, type, thread)` holds one receipt.
+    async fn set_threaded_receipt(
+        &self,
+        room_id: &str,
+        user_id: &str,
+        receipt_type: &str,
+        thread_id: Option<&str>,
+        event_id: &str,
+        ts: i64,
+    ) -> Result<i64>;
+
+    /// Receipts of every scope whose stream position is after `since_pos`,
+    /// in ascending position order.
+    async fn threaded_receipts_since(&self, since_pos: i64) -> Result<Vec<ReceiptRecord>>;
+
+    /// The current receipts `user_id` holds in `room_id` (every scope).
+    async fn user_receipts_in_room(&self, room_id: &str, user_id: &str) -> Result<Vec<ReceiptRecord>>;
+}
+
+/// One stored receipt (conduit-y99.15).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReceiptRecord {
+    pub room_id: String,
+    pub user_id: String,
+    pub receipt_type: String,
+    /// `None` for an unthreaded receipt.
+    pub thread_id: Option<String>,
+    pub event_id: String,
+    pub ts: i64,
+    pub stream_pos: i64,
 }
 
 // ---------------------------------------------------------------------------
@@ -1322,6 +1372,9 @@ struct MemoryOutbound {
     next_id: i64,
 }
 
+/// (room_id, user_id, receipt_type, thread_id or "")
+type ReceiptKey = (String, String, String, String);
+
 struct MemoryInner {
     filters: HashMap<(String, String), Value>,
     requests: HashMap<TransactionKey, Value>,
@@ -1367,8 +1420,8 @@ struct MemoryInner {
     /// (user_id, room_id_or_empty, event_type) → (stream_pos, content)
     account_data: HashMap<(String, Option<String>, String), (i64, Value)>,
     account_data_next_pos: i64,
-    /// (room_id, user_id, receipt_type) → (event_id, ts, stream_pos)
-    receipts: HashMap<(String, String, String), (String, i64, i64)>,
+    /// (room_id, user_id, receipt_type, thread_id or "") → (event_id, ts, stream_pos)
+    receipts: HashMap<ReceiptKey, (String, i64, i64)>,
     receipts_next_pos: i64,
     // Media (E07)
     media: HashMap<(String, String), MediaMetadata>,
@@ -2481,14 +2534,7 @@ impl Storage for MemoryStorage {
         event_id: &str,
         ts: i64,
     ) -> Result<i64> {
-        let mut inner = self.inner.write().await;
-        inner.receipts_next_pos += 1;
-        let pos = inner.receipts_next_pos;
-        inner.receipts.insert(
-            (room_id.to_owned(), user_id.to_owned(), receipt_type.to_owned()),
-            (event_id.to_owned(), ts, pos),
-        );
-        Ok(pos)
+        self.set_threaded_receipt(room_id, user_id, receipt_type, None, event_id, ts).await
     }
 
     async fn receipts_for_room(
@@ -2499,8 +2545,8 @@ impl Storage for MemoryStorage {
         Ok(inner
             .receipts
             .iter()
-            .filter(|((r, _, _), _)| r == room_id)
-            .map(|((_, user_id, receipt_type), (event_id, ts, _))| {
+            .filter(|((r, _, _, thread), _)| r == room_id && thread.is_empty())
+            .map(|((_, user_id, receipt_type, _), (event_id, ts, _))| {
                 (user_id.clone(), receipt_type.clone(), event_id.clone(), *ts)
             })
             .collect())
@@ -2514,8 +2560,8 @@ impl Storage for MemoryStorage {
         let mut results: Vec<(String, String, String, String, i64, i64)> = inner
             .receipts
             .iter()
-            .filter(|(_, (_, _, pos))| *pos > since_pos)
-            .map(|((room_id, user_id, receipt_type), (event_id, ts, pos))| {
+            .filter(|((_, _, _, thread), (_, _, pos))| *pos > since_pos && thread.is_empty())
+            .map(|((room_id, user_id, receipt_type, _), (event_id, ts, pos))| {
                 (room_id.clone(), user_id.clone(), receipt_type.clone(), event_id.clone(), *ts, *pos)
             })
             .collect();
@@ -3513,6 +3559,109 @@ impl Storage for MemoryStorage {
             .refresh_tokens
             .retain(|_, r| r.parent_hash.as_deref() != Some(parent_hash));
         Ok(())
+    }
+
+    // --- Sync & E2EE semantics (conduit-y99.14 / .15 / .16) ----------------
+
+    async fn cross_signing_signatures_for(
+        &self,
+        target_user: &str,
+    ) -> Result<Vec<(String, String, String, String)>> {
+        let inner = self.inner.read().await;
+        let mut rows: Vec<_> = inner
+            .cross_signing_sigs
+            .iter()
+            .filter(|((_, _, target, _), _)| target == target_user)
+            .map(|((signer, signer_key, _, target_key), signature)| {
+                (signer.clone(), signer_key.clone(), target_key.clone(), signature.clone())
+            })
+            .collect();
+        rows.sort();
+        Ok(rows)
+    }
+
+    async fn device_key_inventory(
+        &self,
+        user_id: &str,
+        device_id: &str,
+    ) -> Result<(HashMap<String, i64>, Vec<String>)> {
+        let inner = self.inner.read().await;
+        let mut counts: HashMap<String, i64> = HashMap::new();
+        for ((user, device, _), (algorithm, _)) in &inner.one_time_keys {
+            if user == user_id && device == device_id {
+                *counts.entry(algorithm.clone()).or_default() += 1;
+            }
+        }
+        let mut fallback: Vec<_> = inner
+            .fallback_keys
+            .iter()
+            .filter(|((user, device, _), (_, _, used))| user == user_id && device == device_id && !used)
+            .map(|((_, _, algorithm), _)| algorithm.clone())
+            .collect();
+        fallback.sort();
+        Ok((counts, fallback))
+    }
+
+    async fn set_threaded_receipt(
+        &self,
+        room_id: &str,
+        user_id: &str,
+        receipt_type: &str,
+        thread_id: Option<&str>,
+        event_id: &str,
+        ts: i64,
+    ) -> Result<i64> {
+        let mut inner = self.inner.write().await;
+        inner.receipts_next_pos += 1;
+        let pos = inner.receipts_next_pos;
+        inner.receipts.insert(
+            (
+                room_id.to_owned(),
+                user_id.to_owned(),
+                receipt_type.to_owned(),
+                thread_id.unwrap_or_default().to_owned(),
+            ),
+            (event_id.to_owned(), ts, pos),
+        );
+        Ok(pos)
+    }
+
+    async fn threaded_receipts_since(&self, since_pos: i64) -> Result<Vec<ReceiptRecord>> {
+        let inner = self.inner.read().await;
+        let mut rows: Vec<_> = inner
+            .receipts
+            .iter()
+            .filter(|(_, (_, _, pos))| *pos > since_pos)
+            .map(memory_receipt)
+            .collect();
+        rows.sort_by_key(|row| row.stream_pos);
+        Ok(rows)
+    }
+
+    async fn user_receipts_in_room(&self, room_id: &str, user_id: &str) -> Result<Vec<ReceiptRecord>> {
+        let inner = self.inner.read().await;
+        let mut rows: Vec<_> = inner
+            .receipts
+            .iter()
+            .filter(|((room, user, _, _), _)| room == room_id && user == user_id)
+            .map(memory_receipt)
+            .collect();
+        rows.sort_by_key(|row| row.stream_pos);
+        Ok(rows)
+    }
+}
+
+fn memory_receipt(
+    ((room_id, user_id, receipt_type, thread), (event_id, ts, pos)): (&ReceiptKey, &(String, i64, i64)),
+) -> ReceiptRecord {
+    ReceiptRecord {
+        room_id: room_id.clone(),
+        user_id: user_id.clone(),
+        receipt_type: receipt_type.clone(),
+        thread_id: (!thread.is_empty()).then(|| thread.clone()),
+        event_id: event_id.clone(),
+        ts: *ts,
+        stream_pos: *pos,
     }
 }
 

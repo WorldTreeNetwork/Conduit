@@ -119,6 +119,49 @@ Outbound device list churn (`keys/upload`,
 `m.device_list_update` EDUs to every remote server sharing a room
 with the affected local user (conduit-6r1).
 
+## Authenticated key identities (conduit-y99.14)
+
+`key_identity.rs` holds the checks; `keys.rs` applies them before anything is
+persisted.
+
+- `keys/upload`: `device_keys.user_id`/`device_id` must be the authenticated
+  user and device (`M_INVALID_PARAM`); the object must include
+  `ed25519:<device_id>` and be signed by it (`M_INVALID_SIGNATURE`). Signed
+  one-time and fallback keys must verify against the device key once it is
+  known; key names must be `<algorithm>:<key_id>`; one fallback per algorithm.
+  An identical re-upload records no device-list change.
+- `keys/query` serves only device keys that name their own user/device and
+  carry a valid self-signature, adds `unsigned.device_display_name`, and merges
+  self-signing signatures into device keys and the owner's device signatures
+  into the master key. User-signing keys, and signatures made with them, are
+  returned only to their owner.
+- `keys/device_signing/upload`: each key names the user, carries its usage,
+  and has exactly one `ed25519:<public>` key whose ID is that key. Self- and
+  user-signing keys must be signed by the accompanying (or stored) master key.
+  A public key equal to one of the user's device IDs is `403 Key ID in use`.
+  Replacing stored keys requires `m.login.password` UIA; first uploads and
+  exact retries do not.
+- `keys/signatures/upload` (body is `{user: {key_id: object}}`) accepts only
+  signatures by the uploader: their self-signing key on their devices, their
+  devices on their master key, their user-signing key on another user's master
+  key. The signed object must equal the stored key; failures are reported per
+  user and key ID.
+
+## Device-list visibility (conduit-y99.14)
+
+`device_lists.rs` computes `(changed, left)` from the device-list stream window
+and the membership/encryption events committed in the same event window:
+
+- Key updates are visible to the user themself and to users sharing a joined
+  room (the `/keys/changes` rule).
+- Joining an encrypted room, or encryption being enabled in a shared room,
+  marks the newly shared members changed.
+- A leave/ban in an encrypted room puts users who no longer share any
+  encrypted room into `left`, for both the leaver and the remaining members.
+- `device_lists` is only present on incremental syncs. `/keys/changes`
+  requires `from`, treats `to` as a hint (unparsable means now) and applies
+  the same rules.
+
 ## Gotchas
 
 - One-time keys are **consumed**. Atomically check-and-decrement;

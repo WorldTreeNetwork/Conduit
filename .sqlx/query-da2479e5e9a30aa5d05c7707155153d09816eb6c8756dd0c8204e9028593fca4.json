@@ -1,0 +1,59 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT room_id, user_id, receipt_type, thread_id, event_id, ts, stream_pos\n               FROM receipts WHERE room_id = $1 AND user_id = $2 ORDER BY stream_pos ASC",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "room_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "user_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "receipt_type",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "thread_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "event_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "ts",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 6,
+        "name": "stream_pos",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "da2479e5e9a30aa5d05c7707155153d09816eb6c8756dd0c8204e9028593fca4"
+}

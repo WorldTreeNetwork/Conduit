@@ -67,6 +67,23 @@ receipts, fully-read markers, federated presence/typing, and complete access-rul
 and timeout auditing remain tracked work; these tests cover the named delivery
 and privacy assertions.
 
+### Threaded receipts and typing rules (conduit-y99.15)
+
+Receipts are keyed by `(room, user, type, thread)`, where the thread is absent
+(unthreaded), `main`, or a thread root; scopes coexist and a new receipt only
+replaces its own scope. `thread_id` must be a non-empty string naming the
+event's actual thread (relations followed up to three hops; a thread root is
+in `main` and may also anchor its own thread). Sync emits one `m.receipt` per
+room and thread scope with `thread_id` on threaded receipts. Senders must be
+joined (403) and the event must be in the room (404). `m.fully_read` belongs
+to the read-markers handler.
+
+Typing requires the path user to be the authenticated user and joined to the
+room. The 20-30 s figure in the spec is a client refresh recommendation, not
+a maximum: requested timeouts are honoured up to a 120 s server cap, oversized
+values saturate, and the expiry uses checked arithmetic. Users who have left
+are filtered out of `m.typing`. Journeys: `tests/production_sync.rs`.
+
 ## Gotchas
 
 - Presence is notoriously expensive at scale because every status

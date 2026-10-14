@@ -1,0 +1,27 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO receipts (room_id, user_id, receipt_type, thread_id, event_id, ts)\n            VALUES ($1, $2, $3, $4, $5, $6)\n            ON CONFLICT (room_id, user_id, receipt_type, thread_id)\n                DO UPDATE SET event_id = EXCLUDED.event_id, ts = EXCLUDED.ts,\n                              stream_pos = EXCLUDED.stream_pos\n            RETURNING stream_pos\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "stream_pos",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "d12a85c66dd96cbc4beceb356cb145598b1673f3e6394fe63aafd77fb151ed48"
+}

@@ -632,12 +632,16 @@ async fn read_receipt_round_trip() {
 
     let room_id = do_create_room(&app, token).await;
 
-    // Use a synthetic event_id (no special chars to avoid URL encoding issues).
-    let event_id = "$someeventidlocalhost";
-
-    // Initial sync to get a since token.
+    // Initial sync to get a since token and a real event to acknowledge
+    // (receipts must target an event in the room, conduit-y99.15).
     let sync1 = do_sync(&app, token, None).await;
     let since = sync1["next_batch"].as_str().unwrap();
+    let event_id = sync1["rooms"]["join"][room_id.as_str()]["timeline"]["events"]
+        .as_array()
+        .and_then(|events| events.last())
+        .and_then(|event| event["event_id"].as_str())
+        .expect("room timeline has an event")
+        .to_owned();
 
     // POST receipt.
     let req = Request::builder()

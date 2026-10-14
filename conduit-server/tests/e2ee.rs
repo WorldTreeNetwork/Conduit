@@ -22,6 +22,9 @@ use sqlx::postgres::PgPoolOptions;
 use tokio::sync::{RwLock, broadcast};
 use tower::util::ServiceExt as _;
 
+mod common;
+
+use common::keys::{CrossSigning, Device};
 use conduit::keys::ServerKey;
 use conduit::storage::Storage;
 use conduit_server::{
@@ -341,16 +344,8 @@ async fn keys_upload_persists() {
 
     let (user_id, token, device_id) = register_user(&app, "keysuploaduser").await;
 
-    let device_keys = json!({
-        "user_id": user_id,
-        "device_id": device_id,
-        "algorithms": ["m.olm.v1.curve25519-aes-sha2", "m.megolm.v1.aes-sha2"],
-        "keys": {
-            format!("curve25519:{device_id}"): "AAAAAAAAAAAAAAAAAAAAAA",
-            format!("ed25519:{device_id}"): "BBBBBBBBBBBBBBBBBBBBBBB",
-        },
-        "signatures": {}
-    });
+    let device = Device::new(&user_id, &device_id);
+    let device_keys = device.keys.clone();
 
     let (status, body) = post_json(
         &app,
@@ -359,8 +354,8 @@ async fn keys_upload_persists() {
         json!({
             "device_keys": device_keys,
             "one_time_keys": {
-                "signed_curve25519:AAAAA": { "key": "abc123", "signatures": {} },
-                "signed_curve25519:BBBBB": { "key": "def456", "signatures": {} },
+                "signed_curve25519:AAAAA": device.signed_key("abc123", false),
+                "signed_curve25519:BBBBB": device.signed_key("def456", false),
             }
         }),
     )
@@ -379,6 +374,8 @@ async fn keys_upload_persists() {
     assert_eq!(qstatus, StatusCode::OK, "query failed: {qbody}");
     let returned = &qbody["device_keys"][&user_id][&device_id];
     assert!(returned.is_object(), "device keys not returned: {qbody}");
+    assert_eq!(returned["keys"], device.keys["keys"]);
+    assert_eq!(returned["signatures"], device.keys["signatures"]);
 }
 
 // ---------------------------------------------------------------------------
@@ -522,9 +519,7 @@ async fn keys_changes_returns_delta() {
         &app,
         "/_matrix/client/v3/keys/upload",
         &token,
-        json!({
-            "device_keys": { "user_id": user_id, "device_id": device_id, "algorithms": [], "keys": {}, "signatures": {} }
-        }),
+        json!({ "device_keys": Device::new(&user_id, &device_id).keys }),
     )
     .await;
 
@@ -670,12 +665,7 @@ async fn cross_signing_upload_round_trip() {
 
     let (user_id, token, _) = register_user(&app, "xsignuser").await;
 
-    let master_key = json!({
-        "user_id": user_id,
-        "usage": ["master"],
-        "keys": { format!("ed25519:MASTERKEY"): "MASTERKEYPUBLIC" },
-        "signatures": {}
-    });
+    let master_key = CrossSigning::new(&user_id).master_key;
 
     let (status, _) = post_json(
         &app,
@@ -718,24 +708,21 @@ async fn device_list_changes_appear_in_sync() {
     let (_, sync0) = get_req(&app, "/_matrix/client/v3/sync", &token_b).await;
     let since = sync0["next_batch"].as_str().unwrap().to_owned();
 
+    let (_, own0) = get_req(&app, "/_matrix/client/v3/sync", &token_a).await;
+    let own_since = own0["next_batch"].as_str().unwrap().to_owned();
+
     // A uploads device keys → records device_list_change.
-    post_json(
+    let (status, _) = post_json(
         &app,
         "/_matrix/client/v3/keys/upload",
         &token_a,
-        json!({
-            "device_keys": {
-                "user_id": user_a,
-                "device_id": device_a,
-                "algorithms": [],
-                "keys": {},
-                "signatures": {}
-            }
-        }),
+        json!({ "device_keys": Device::new(&user_a, &device_a).keys }),
     )
     .await;
+    assert_eq!(status, StatusCode::OK);
 
-    // B's incremental /sync should show A in device_lists.changed.
+    // B shares no room with A: the change must not leak to B
+    // (conduit-y99.14). A always sees its own device-list change.
     let (_, sync1) = get_req(
         &app,
         &format!("/_matrix/client/v3/sync?since={}", since),
@@ -744,9 +731,16 @@ async fn device_list_changes_appear_in_sync() {
     .await;
     let changed = sync1["device_lists"]["changed"].as_array().unwrap();
     assert!(
-        changed.iter().any(|u| u.as_str() == Some(&user_a)),
-        "expected {user_a} in device_lists.changed: {sync1}"
+        !changed.iter().any(|u| u.as_str() == Some(&user_a)),
+        "unrelated user leaked into device_lists.changed: {sync1}"
     );
+    let (_, own1) = get_req(
+        &app,
+        &format!("/_matrix/client/v3/sync?since={}", own_since),
+        &token_a,
+    )
+    .await;
+    assert_eq!(own1["device_lists"]["changed"], json!([user_a]));
 }
 
 // ---------------------------------------------------------------------------

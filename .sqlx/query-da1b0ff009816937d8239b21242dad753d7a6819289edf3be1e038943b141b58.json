@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT\n                 COALESCE((SELECT jsonb_object_agg(algorithm, n) FROM (\n                     SELECT algorithm, COUNT(*) AS n FROM one_time_keys\n                     WHERE user_id = $1 AND device_id = $2 GROUP BY algorithm) counts),\n                   '{}'::jsonb) AS \"counts!\",\n                 COALESCE((SELECT array_agg(algorithm ORDER BY algorithm) FROM fallback_keys\n                     WHERE user_id = $1 AND device_id = $2 AND NOT used), '{}') AS \"fallback!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "counts!",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 1,
+        "name": "fallback!",
+        "type_info": "TextArray"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      null,
+      null
+    ]
+  },
+  "hash": "da1b0ff009816937d8239b21242dad753d7a6819289edf3be1e038943b141b58"
+}
