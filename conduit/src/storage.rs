@@ -1043,6 +1043,142 @@ pub trait Storage: Send + Sync + 'static {
         term: &str,
         limit: i64,
     ) -> Result<Vec<UserDirectoryEntry>>;
+
+    // --- Room content (conduit-y99.19) --------------------------------------
+    //
+    // Defaults derive everything from the event log so any backend is
+    // correct; PostgreSQL overrides the scans with indexed queries.
+
+    /// Every event in a room with its stream position, ascending.
+    async fn room_events_with_positions(&self, room_id: &str) -> Result<Vec<(i64, Event)>> {
+        let events = self.room_events(room_id).await?;
+        let ids: Vec<String> = events.iter().map(|event| event.event_id.clone()).collect();
+        let positions = self.event_stream_positions(&ids).await?;
+        let mut rows: Vec<_> = events
+            .into_iter()
+            .filter_map(|event| positions.get(&event.event_id).map(|position| (*position, event)))
+            .collect();
+        rows.sort_by_key(|(position, _)| *position);
+        Ok(rows)
+    }
+
+    /// State events at or before stream position `through`, ascending.
+    /// Folding them yields the room state as of that position.
+    async fn state_events_through(&self, room_id: &str, through: i64) -> Result<Vec<(i64, Event)>> {
+        Ok(self
+            .room_events_with_positions(room_id)
+            .await?
+            .into_iter()
+            .filter(|(position, event)| *position <= through && event.state_key.is_some())
+            .collect())
+    }
+
+    /// `m.room.redaction` events in `room_id` whose target is in `event_ids`.
+    async fn redactions_targeting(&self, room_id: &str, event_ids: &[String]) -> Result<Vec<Event>> {
+        Ok(self
+            .room_events(room_id)
+            .await?
+            .into_iter()
+            .filter(|event| {
+                crate::room_content::redaction_target(event)
+                    .is_some_and(|target| event_ids.iter().any(|id| id == target))
+            })
+            .collect())
+    }
+
+    /// Events in `room_id` whose cleartext `m.relates_to.event_id` is one of
+    /// `parent_ids`, with stream positions, ascending.
+    async fn relation_children(&self, room_id: &str, parent_ids: &[String]) -> Result<Vec<(i64, Event)>> {
+        Ok(self
+            .room_events_with_positions(room_id)
+            .await?
+            .into_iter()
+            .filter(|(_, event)| {
+                crate::room_content::relation(event)
+                    .is_some_and(|(_, parent)| parent_ids.iter().any(|id| id == parent))
+            })
+            .collect())
+    }
+
+    /// Thread roots in a room: `(root_event_id, latest_child_position,
+    /// user_sent_a_child)`, most recently active first.
+    async fn thread_roots(&self, room_id: &str, user_id: &str) -> Result<Vec<(String, i64, bool)>> {
+        let mut roots: HashMap<String, (i64, bool)> = HashMap::new();
+        for (position, event) in self.room_events_with_positions(room_id).await? {
+            if let Some(("m.thread", parent)) = crate::room_content::relation(&event) {
+                let entry = roots.entry(parent.to_owned()).or_insert((position, false));
+                entry.0 = entry.0.max(position);
+                entry.1 |= event.sender == user_id;
+            }
+        }
+        let mut roots: Vec<_> = roots.into_iter().map(|(id, (pos, mine))| (id, pos, mine)).collect();
+        roots.sort_by_key(|root| std::cmp::Reverse(root.1));
+        Ok(roots)
+    }
+
+    /// Up to `limit` events nearest `ts`: at or after it ascending when
+    /// `forward`, at or before it descending otherwise. Ties on timestamp
+    /// follow stream order.
+    async fn events_near_timestamp(&self, room_id: &str, ts: i64, forward: bool, limit: i64) -> Result<Vec<Event>> {
+        let mut rows: Vec<_> = self
+            .room_events_with_positions(room_id)
+            .await?
+            .into_iter()
+            .filter(|(_, event)| {
+                let at = event.origin_server_ts as i64;
+                if forward { at >= ts } else { at <= ts }
+            })
+            .collect();
+        rows.sort_by_key(|(position, event)| (event.origin_server_ts, *position));
+        if !forward {
+            rows.reverse();
+        }
+        rows.truncate(limit.max(0) as usize);
+        Ok(rows.into_iter().map(|(_, event)| event).collect())
+    }
+
+    /// Full-text search across `rooms`, best first (`recent`: newest
+    /// first), at most `cap` hits. Visibility is the caller's job.
+    async fn search_room_events(
+        &self,
+        rooms: &[String],
+        term: &str,
+        keys: crate::room_content::SearchKeys,
+        recent: bool,
+        cap: i64,
+    ) -> Result<Vec<crate::room_content::SearchHit>> {
+        let query = crate::room_content::search_tokens(term);
+        let mut hits = Vec::new();
+        for room in rooms {
+            for (position, event) in self.room_events_with_positions(room).await? {
+                if let Some(rank) = keys.text(&event).and_then(|text| crate::room_content::naive_rank(text, &query)) {
+                    hits.push(crate::room_content::SearchHit { rank, position, event });
+                }
+            }
+        }
+        hits.sort_by(|a, b| {
+            if recent {
+                b.position.cmp(&a.position)
+            } else {
+                b.rank.total_cmp(&a.rank).then(b.position.cmp(&a.position))
+            }
+        });
+        hits.truncate(cap.max(0) as usize);
+        Ok(hits)
+    }
+
+    /// Record that `user_id` forgot `room_id` as of their departure event.
+    async fn forget_room(&self, user_id: &str, room_id: &str, membership_event_id: &str) -> Result<()>;
+
+    /// Forgotten rooms: room_id → the membership event that was forgotten.
+    /// A room stays forgotten only while that event is still current.
+    async fn forgotten_rooms(&self, user_id: &str) -> Result<HashMap<String, String>>;
+
+    /// Store a report; returns its id.
+    async fn insert_report(&self, report: &crate::room_content::ContentReport) -> Result<i64>;
+
+    /// Reports with id > `from`, ascending, at most `limit`.
+    async fn list_reports(&self, from: i64, limit: i64) -> Result<Vec<crate::room_content::ContentReport>>;
 }
 
 // ---------------------------------------------------------------------------
@@ -1085,6 +1221,7 @@ struct MemoryDirectory {
 pub struct MemoryStorage {
     transaction_locks: std::sync::Mutex<HashMap<TransactionKey, std::sync::Weak<tokio::sync::Mutex<()>>>>,
     inner: RwLock<MemoryInner>,
+    room_content: RwLock<MemoryRoomContent>,
     directory: RwLock<MemoryDirectory>,
 }
 
@@ -3066,6 +3203,56 @@ impl Storage for MemoryStorage {
             .map(|(_, entry)| entry)
             .collect())
     }
+
+    // --- Room content (conduit-y99.19) --------------------------------------
+
+    async fn forget_room(&self, user_id: &str, room_id: &str, membership_event_id: &str) -> Result<()> {
+        self.room_content.write().await.forgotten.insert(
+            (user_id.to_owned(), room_id.to_owned()),
+            membership_event_id.to_owned(),
+        );
+        Ok(())
+    }
+
+    async fn forgotten_rooms(&self, user_id: &str) -> Result<HashMap<String, String>> {
+        Ok(self
+            .room_content
+            .read()
+            .await
+            .forgotten
+            .iter()
+            .filter(|((user, _), _)| user == user_id)
+            .map(|((_, room), event)| (room.clone(), event.clone()))
+            .collect())
+    }
+
+    async fn insert_report(&self, report: &crate::room_content::ContentReport) -> Result<i64> {
+        let mut content = self.room_content.write().await;
+        let id = content.reports.len() as i64 + 1;
+        content.reports.push(crate::room_content::ContentReport { id, ..report.clone() });
+        Ok(id)
+    }
+
+    async fn list_reports(&self, from: i64, limit: i64) -> Result<Vec<crate::room_content::ContentReport>> {
+        Ok(self
+            .room_content
+            .read()
+            .await
+            .reports
+            .iter()
+            .filter(|report| report.id > from)
+            .take(limit.max(0) as usize)
+            .cloned()
+            .collect())
+    }
+}
+
+/// MemoryStorage room-content tables (conduit-y99.19).
+#[derive(Default)]
+struct MemoryRoomContent {
+    /// (user_id, room_id) → forgotten membership event id
+    forgotten: HashMap<(String, String), String>,
+    reports: Vec<crate::room_content::ContentReport>,
 }
 
 // ---------------------------------------------------------------------------

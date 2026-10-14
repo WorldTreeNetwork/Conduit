@@ -1,0 +1,35 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT content->'m.relates_to'->>'event_id' AS \"root!\",\n                   MAX(stream_position) AS \"latest!\",\n                   BOOL_OR(sender = $2) AS \"participated!\"\n            FROM events\n            WHERE room_id = $1\n              AND content->'m.relates_to'->>'rel_type' = 'm.thread'\n              AND content->'m.relates_to'->>'event_id' IS NOT NULL\n            GROUP BY 1\n            ORDER BY 2 DESC\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "root!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "latest!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "participated!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "15b08e563109256ee13036c55269052f2bd7d968bca8c611158f7164cafcdf0f"
+}

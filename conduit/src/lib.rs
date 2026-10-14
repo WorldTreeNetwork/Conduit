@@ -31,6 +31,7 @@ pub mod identity;
 pub mod keys;
 pub mod redaction;
 pub mod room;
+pub mod room_content;
 pub mod signing;
 pub mod state_events;
 pub mod storage;

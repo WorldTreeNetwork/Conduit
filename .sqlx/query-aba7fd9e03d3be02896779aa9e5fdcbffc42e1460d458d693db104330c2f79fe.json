@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO room_forgotten (user_id, room_id, membership_event_id)\n            VALUES ($1, $2, $3)\n            ON CONFLICT (user_id, room_id) DO UPDATE\n                SET membership_event_id = EXCLUDED.membership_event_id, forgotten_at = now()\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "aba7fd9e03d3be02896779aa9e5fdcbffc42e1460d458d693db104330c2f79fe"
+}

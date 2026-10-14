@@ -3393,4 +3393,355 @@ impl Storage for PostgresStorage {
             })
             .collect())
     }
+
+    // -----------------------------------------------------------------------
+    // Room content (conduit-y99.19)
+    // -----------------------------------------------------------------------
+
+    async fn room_events_with_positions(&self, room_id: &str) -> Result<Vec<(i64, Event)>> {
+        let rows = sqlx::query_as!(
+            PositionedEventRow,
+            r#"
+            SELECT event_id, room_id, sender, type AS event_type, state_key,
+                   content, auth_events, prev_events, hashes, signatures,
+                   unsigned, origin_server_ts, depth, stream_position
+            FROM events WHERE room_id = $1 ORDER BY stream_position
+            "#,
+            room_id
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(rows.into_iter().map(PositionedEventRow::into_pair).collect())
+    }
+
+    async fn state_events_through(&self, room_id: &str, through: i64) -> Result<Vec<(i64, Event)>> {
+        let rows = sqlx::query_as!(
+            PositionedEventRow,
+            r#"
+            SELECT event_id, room_id, sender, type AS event_type, state_key,
+                   content, auth_events, prev_events, hashes, signatures,
+                   unsigned, origin_server_ts, depth, stream_position
+            FROM events
+            WHERE room_id = $1 AND state_key IS NOT NULL AND stream_position <= $2
+            ORDER BY stream_position
+            "#,
+            room_id,
+            through
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(rows.into_iter().map(PositionedEventRow::into_pair).collect())
+    }
+
+    async fn redactions_targeting(&self, room_id: &str, event_ids: &[String]) -> Result<Vec<Event>> {
+        if event_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let rows = sqlx::query_as!(
+            PositionedEventRow,
+            r#"
+            SELECT event_id, room_id, sender, type AS event_type, state_key,
+                   content, auth_events, prev_events, hashes, signatures,
+                   unsigned, origin_server_ts, depth, stream_position
+            FROM events
+            WHERE room_id = $1 AND type = 'm.room.redaction'
+              AND content->>'redacts' = ANY($2)
+            ORDER BY stream_position
+            "#,
+            room_id,
+            event_ids
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(rows.into_iter().map(|row| row.into_pair().1).collect())
+    }
+
+    async fn relation_children(&self, room_id: &str, parent_ids: &[String]) -> Result<Vec<(i64, Event)>> {
+        if parent_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let rows = sqlx::query_as!(
+            PositionedEventRow,
+            r#"
+            SELECT event_id, room_id, sender, type AS event_type, state_key,
+                   content, auth_events, prev_events, hashes, signatures,
+                   unsigned, origin_server_ts, depth, stream_position
+            FROM events
+            WHERE room_id = $1 AND content ? 'm.relates_to'
+              AND content->'m.relates_to'->>'event_id' = ANY($2)
+              AND content->'m.relates_to'->>'rel_type' IS NOT NULL
+            ORDER BY stream_position
+            "#,
+            room_id,
+            parent_ids
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(rows.into_iter().map(PositionedEventRow::into_pair).collect())
+    }
+
+    async fn thread_roots(&self, room_id: &str, user_id: &str) -> Result<Vec<(String, i64, bool)>> {
+        let rows = sqlx::query!(
+            r#"
+            SELECT content->'m.relates_to'->>'event_id' AS "root!",
+                   MAX(stream_position) AS "latest!",
+                   BOOL_OR(sender = $2) AS "participated!"
+            FROM events
+            WHERE room_id = $1
+              AND content->'m.relates_to'->>'rel_type' = 'm.thread'
+              AND content->'m.relates_to'->>'event_id' IS NOT NULL
+            GROUP BY 1
+            ORDER BY 2 DESC
+            "#,
+            room_id,
+            user_id
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(rows.into_iter().map(|row| (row.root, row.latest, row.participated)).collect())
+    }
+
+    async fn events_near_timestamp(&self, room_id: &str, ts: i64, forward: bool, limit: i64) -> Result<Vec<Event>> {
+        let rows = if forward {
+            sqlx::query_as!(
+                PositionedEventRow,
+                r#"
+                SELECT event_id, room_id, sender, type AS event_type, state_key,
+                       content, auth_events, prev_events, hashes, signatures,
+                       unsigned, origin_server_ts, depth, stream_position
+                FROM events
+                WHERE room_id = $1 AND origin_server_ts >= $2
+                ORDER BY origin_server_ts ASC, stream_position ASC
+                LIMIT $3
+                "#,
+                room_id,
+                ts,
+                limit
+            )
+            .fetch_all(&self.pool)
+            .await
+        } else {
+            sqlx::query_as!(
+                PositionedEventRow,
+                r#"
+                SELECT event_id, room_id, sender, type AS event_type, state_key,
+                       content, auth_events, prev_events, hashes, signatures,
+                       unsigned, origin_server_ts, depth, stream_position
+                FROM events
+                WHERE room_id = $1 AND origin_server_ts <= $2
+                ORDER BY origin_server_ts DESC, stream_position DESC
+                LIMIT $3
+                "#,
+                room_id,
+                ts,
+                limit
+            )
+            .fetch_all(&self.pool)
+            .await
+        }
+        .map_err(map_sqlx)?;
+        Ok(rows.into_iter().map(|row| row.into_pair().1).collect())
+    }
+
+    async fn search_room_events(
+        &self,
+        rooms: &[String],
+        term: &str,
+        keys: conduit::room_content::SearchKeys,
+        recent: bool,
+        cap: i64,
+    ) -> Result<Vec<conduit::room_content::SearchHit>> {
+        if rooms.is_empty() {
+            return Ok(Vec::new());
+        }
+        // websearch_to_tsquery accepts arbitrary user input without syntax
+        // errors; each key is matched only on the event type defining it.
+        let rows = sqlx::query!(
+            r#"
+            WITH q AS (SELECT websearch_to_tsquery('english', $2) AS query),
+            hits AS (
+                SELECT e.event_id, e.room_id, e.sender, e.type AS event_type, e.state_key,
+                       e.content, e.auth_events, e.prev_events, e.hashes, e.signatures,
+                       e.unsigned, e.origin_server_ts, e.depth, e.stream_position,
+                       CASE e.type
+                           WHEN 'm.room.message' THEN ts_rank(to_tsvector('english', e.content->>'body'), q.query)
+                           WHEN 'm.room.name' THEN ts_rank(to_tsvector('english', e.content->>'name'), q.query)
+                           ELSE ts_rank(to_tsvector('english', e.content->>'topic'), q.query)
+                       END AS rank
+                FROM events e, q
+                WHERE e.room_id = ANY($1)
+                  AND (
+                      ($3 AND e.type = 'm.room.message' AND to_tsvector('english', e.content->>'body') @@ q.query)
+                   OR ($4 AND e.type = 'm.room.name' AND to_tsvector('english', e.content->>'name') @@ q.query)
+                   OR ($5 AND e.type = 'm.room.topic' AND to_tsvector('english', e.content->>'topic') @@ q.query)
+                  )
+            )
+            SELECT event_id AS "event_id!", room_id AS "room_id!", sender AS "sender!",
+                   event_type AS "event_type!", state_key, content AS "content!",
+                   auth_events AS "auth_events!", prev_events AS "prev_events!",
+                   hashes AS "hashes!", signatures AS "signatures!", unsigned,
+                   origin_server_ts AS "origin_server_ts!", depth AS "depth!",
+                   stream_position AS "stream_position!", rank AS "rank!"
+            FROM hits
+            ORDER BY CASE WHEN $6 THEN 0 ELSE rank END DESC, stream_position DESC
+            LIMIT $7
+            "#,
+            rooms,
+            term,
+            keys.body,
+            keys.name,
+            keys.topic,
+            recent,
+            cap
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(rows
+            .into_iter()
+            .map(|r| conduit::room_content::SearchHit {
+                rank: f64::from(r.rank),
+                position: r.stream_position,
+                event: Event {
+                    event_id: r.event_id,
+                    room_id: r.room_id,
+                    sender: r.sender,
+                    event_type: r.event_type,
+                    state_key: r.state_key,
+                    content: r.content,
+                    origin_server_ts: r.origin_server_ts as u64,
+                    auth_events: r.auth_events,
+                    prev_events: r.prev_events,
+                    hashes: r.hashes,
+                    signatures: r.signatures,
+                    depth: r.depth,
+                    unsigned: r.unsigned,
+                },
+            })
+            .collect())
+    }
+
+    async fn forget_room(&self, user_id: &str, room_id: &str, membership_event_id: &str) -> Result<()> {
+        sqlx::query!(
+            r#"
+            INSERT INTO room_forgotten (user_id, room_id, membership_event_id)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (user_id, room_id) DO UPDATE
+                SET membership_event_id = EXCLUDED.membership_event_id, forgotten_at = now()
+            "#,
+            user_id,
+            room_id,
+            membership_event_id
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(())
+    }
+
+    async fn forgotten_rooms(&self, user_id: &str) -> Result<HashMap<String, String>> {
+        let rows = sqlx::query!(
+            "SELECT room_id, membership_event_id FROM room_forgotten WHERE user_id = $1",
+            user_id
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(rows.into_iter().map(|row| (row.room_id, row.membership_event_id)).collect())
+    }
+
+    async fn insert_report(&self, report: &conduit::room_content::ContentReport) -> Result<i64> {
+        let row = sqlx::query!(
+            r#"
+            INSERT INTO content_reports
+                (kind, reporter, room_id, event_id, target_user_id, reason, received_ts)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            RETURNING id
+            "#,
+            report.kind,
+            report.reporter,
+            report.room_id,
+            report.event_id,
+            report.target_user_id,
+            report.reason,
+            report.received_ts
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(row.id)
+    }
+
+    async fn list_reports(&self, from: i64, limit: i64) -> Result<Vec<conduit::room_content::ContentReport>> {
+        let rows = sqlx::query!(
+            r#"
+            SELECT id, kind, reporter, room_id, event_id, target_user_id, reason, received_ts
+            FROM content_reports WHERE id > $1 ORDER BY id LIMIT $2
+            "#,
+            from,
+            limit
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(rows
+            .into_iter()
+            .map(|row| conduit::room_content::ContentReport {
+                id: row.id,
+                kind: row.kind,
+                reporter: row.reporter,
+                room_id: row.room_id,
+                event_id: row.event_id,
+                target_user_id: row.target_user_id,
+                reason: row.reason,
+                received_ts: row.received_ts,
+            })
+            .collect())
+    }
+}
+
+/// An `events` row with its stream position (conduit-y99.19 queries).
+struct PositionedEventRow {
+    event_id: String,
+    room_id: String,
+    sender: String,
+    event_type: String,
+    state_key: Option<String>,
+    content: Value,
+    auth_events: Vec<String>,
+    prev_events: Vec<String>,
+    hashes: Value,
+    signatures: Value,
+    unsigned: Option<Value>,
+    origin_server_ts: i64,
+    depth: i64,
+    stream_position: i64,
+}
+
+impl PositionedEventRow {
+    fn into_pair(self) -> (i64, Event) {
+        (
+            self.stream_position,
+            Event {
+                event_id: self.event_id,
+                room_id: self.room_id,
+                sender: self.sender,
+                event_type: self.event_type,
+                state_key: self.state_key,
+                content: self.content,
+                origin_server_ts: self.origin_server_ts as u64,
+                auth_events: self.auth_events,
+                prev_events: self.prev_events,
+                hashes: self.hashes,
+                signatures: self.signatures,
+                depth: self.depth,
+                unsigned: self.unsigned,
+            },
+        )
+    }
 }

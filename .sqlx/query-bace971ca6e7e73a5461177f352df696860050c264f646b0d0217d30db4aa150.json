@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT room_id, membership_event_id FROM room_forgotten WHERE user_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "room_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "membership_event_id",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "bace971ca6e7e73a5461177f352df696860050c264f646b0d0217d30db4aa150"
+}

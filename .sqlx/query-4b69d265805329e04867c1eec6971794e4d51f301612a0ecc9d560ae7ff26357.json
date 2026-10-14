@@ -1,0 +1,65 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT id, kind, reporter, room_id, event_id, target_user_id, reason, received_ts\n            FROM content_reports WHERE id > $1 ORDER BY id LIMIT $2\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "kind",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "reporter",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "room_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "event_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "target_user_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "reason",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "received_ts",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "4b69d265805329e04867c1eec6971794e4d51f301612a0ecc9d560ae7ff26357"
+}

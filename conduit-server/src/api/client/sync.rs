@@ -229,6 +229,10 @@ fn encode_token(pos: i64) -> String {
 struct SyncFilter {
     definition: conduit::filter::Filter,
     timeline_limit: i64,
+    /// `m.ignored_user_list` of the syncing user (conduit-y99.19).
+    ignored: std::collections::HashSet<String>,
+    /// Forgotten rooms: room → the departure event that was forgotten.
+    forgotten: HashMap<String, String>,
 }
 
 impl SyncFilter {
@@ -239,6 +243,8 @@ impl SyncFilter {
         Ok(Self {
             definition,
             timeline_limit,
+            ignored: Default::default(),
+            forgotten: Default::default(),
         })
     }
 }
@@ -328,10 +334,18 @@ pub async fn sync<S: AuthState>(
             Err(error) => return MatrixError::unknown(error.to_string()).into_response(),
         },
     };
-    let filter = match SyncFilter::parse(value) {
+    let mut filter = match SyncFilter::parse(value) {
         Ok(filter) => filter,
         Err(error) => return error,
     };
+    match super::room_content::serve::ignored_users(state.storage().as_ref(), user_id).await {
+        Ok(ignored) => filter.ignored = ignored,
+        Err(error) => return MatrixError::unknown(error.to_string()).into_response(),
+    }
+    match state.storage().forgotten_rooms(user_id).await {
+        Ok(forgotten) => filter.forgotten = forgotten,
+        Err(error) => return MatrixError::unknown(error.to_string()).into_response(),
+    }
 
     // Parse `since` token.
     let since_token: Option<SyncToken> = match &query.since {
@@ -547,6 +561,13 @@ async fn build_sync_response<S: AuthState>(
         }
         let position = *member_positions.get(&membership.event_id).unwrap_or(&0);
         let changed = since_token.is_none() || position > since;
+        // Forgotten departures and invites from ignored users stay hidden.
+        if filter.forgotten.get(&membership.room_id) == Some(&membership.event_id)
+            || (membership.content["membership"] == "invite"
+                && filter.ignored.contains(&membership.sender))
+        {
+            continue;
+        }
         match membership.content["membership"].as_str() {
             Some("invite" | "knock") if changed => {
                 let preview =
@@ -577,6 +598,7 @@ async fn build_sync_response<S: AuthState>(
                     filter,
                 )
                 .await?;
+                decorate_block(storage.as_ref(), user_id, filter, &mut block).await?;
                 filter_room_block(&mut block, filter, &membership.room_id, user_id);
                 left_rooms.insert(membership.room_id.clone(), block);
             }
@@ -697,6 +719,7 @@ async fn build_sync_response<S: AuthState>(
             }));
         }
 
+        decorate_block(state.storage().as_ref(), user_id, filter, &mut block).await?;
         add_lazy_members(
             state.storage().as_ref(),
             &mut block,
@@ -1258,12 +1281,36 @@ async fn add_lazy_members(
     Ok(())
 }
 
+/// Serve redactions (`unsigned.redacted_because`) and, for limited
+/// timelines, bundled aggregations (conduit-y99.19).
+async fn decorate_block(
+    storage: &dyn conduit::storage::Storage,
+    user_id: &str,
+    filter: &SyncFilter,
+    block: &mut JoinedRoomBlock,
+) -> Result<(), Response> {
+    let viewer = super::room_content::serve::Viewer {
+        storage,
+        user_id,
+        ignored: filter.ignored.clone(),
+    };
+    let limited = block.timeline.limited;
+    for (events, bundle) in [(&mut block.timeline.events, limited), (&mut block.state.events, false)] {
+        viewer
+            .decorate_values(events, bundle)
+            .await
+            .map_err(|error| MatrixError::unknown(error.to_string()).into_response())?;
+    }
+    Ok(())
+}
+
 fn apply_type_filter(
     events: Vec<conduit::event::Event>,
     filter: &SyncFilter,
 ) -> Vec<conduit::event::Event> {
     events
         .into_iter()
+        .filter(|event| !super::room_content::serve::hidden_by_ignore(&filter.ignored, event))
         .filter(|event| {
             filter.definition.room.timeline.matches(
                 &event.room_id,
