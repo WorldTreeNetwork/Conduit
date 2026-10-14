@@ -1282,7 +1282,13 @@ async fn production_threepid_endpoints_answer_honestly() {
 
     let list = server.request(Method::GET, "/_matrix/client/v3/account/3pid", Some(t), None, 200).await;
     assert_eq!(list, json!({"threepids": []}));
-    for path in ["/_matrix/client/v3/account/3pid/add", "/_matrix/client/v3/account/3pid/bind", "/_matrix/client/v3/account/3pid"] {
+    // Binding goes through an identity server (conduit-y99.36): it needs
+    // id_server and id_access_token.
+    let r = server
+        .request(Method::POST, "/_matrix/client/v3/account/3pid/bind", Some(t), Some(json!({"client_secret": "s", "sid": "1"})), 400)
+        .await;
+    assert_eq!(r["errcode"], "M_MISSING_PARAM");
+    for path in ["/_matrix/client/v3/account/3pid/add", "/_matrix/client/v3/account/3pid"] {
         let r = server
             .request(Method::POST, path, Some(t), Some(json!({"client_secret": "s", "sid": "1"})), 403)
             .await;

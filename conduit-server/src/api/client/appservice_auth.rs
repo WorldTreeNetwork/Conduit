@@ -15,6 +15,9 @@
 //! * `m.login.application_service` login ([`login`]).
 //! * Rate-limit exemption: see `rate_limit::CsRateLimiter::with_appservices`.
 
+// Handlers answer with ready-made `Response`s on every error path.
+#![allow(clippy::result_large_err)]
+
 use std::sync::Arc;
 
 use axum::{

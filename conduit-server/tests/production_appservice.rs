@@ -594,3 +594,331 @@ async fn appservice_requests_are_exempt_from_rate_limits() {
         "masqueraded users of a rate_limited AS are limited"
     );
 }
+
+// ---------------------------------------------------------------------------
+// conduit-y99.36 — third-party invites and identity-server integration
+// ---------------------------------------------------------------------------
+
+const IS_TOKEN: &str = "is-access-token";
+const PEPPER: &str = "matrixrocks";
+
+/// One request the mock identity server received.
+#[derive(Clone, Debug)]
+struct IsSeen {
+    path: String,
+    authorization: Option<String>,
+    body: Value,
+}
+
+struct MockIs {
+    url: String,
+    /// `host:port`, the `id_server` clients name.
+    host: String,
+    key: ed25519_dalek::SigningKey,
+    seen: Arc<Mutex<Vec<IsSeen>>>,
+}
+
+impl MockIs {
+    fn public_key(&self) -> String {
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD_NO_PAD.encode(self.key.verifying_key().to_bytes())
+    }
+
+    /// `signed` for an onbind invite, signed like an identity server.
+    fn sign(&self, mxid: &str, token: &str, key: &ed25519_dalek::SigningKey) -> Value {
+        use base64::Engine as _;
+        use ed25519_dalek::Signer as _;
+        let unsigned = json!({"mxid": mxid, "token": token});
+        let bytes = conduit::canonical_json::to_canonical_bytes(&unsigned).unwrap();
+        let sig = base64::engine::general_purpose::STANDARD_NO_PAD.encode(key.sign(&bytes).to_bytes());
+        json!({"mxid": mxid, "token": token, "signatures": {self.host.clone(): {"ed25519:0": sig}}})
+    }
+
+    fn seen(&self, suffix: &str) -> Vec<IsSeen> {
+        self.seen.lock().unwrap().iter().filter(|s| s.path.ends_with(suffix)).cloned().collect()
+    }
+}
+
+fn lookup_hash(address: &str, medium: &str) -> String {
+    use base64::Engine as _;
+    use sha2::Digest as _;
+    let digest = sha2::Sha256::digest(format!("{address} {medium} {PEPPER}").as_bytes());
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest)
+}
+
+async fn spawn_is() -> MockIs {
+    use axum::{body::to_bytes, extract::Request, http::StatusCode, Json, Router};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let host = listener.local_addr().unwrap().to_string();
+    let url = format!("http://{host}");
+    let key = ed25519_dalek::SigningKey::from_bytes(&[42u8; 32]);
+    let public = {
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD_NO_PAD.encode(key.verifying_key().to_bytes())
+    };
+    let seen: Arc<Mutex<Vec<IsSeen>>> = Arc::default();
+    let log = Arc::clone(&seen);
+    let validity = format!("{url}/_matrix/identity/v2/pubkey/isvalid");
+    let app = Router::new().fallback(move |req: Request| {
+        let log = Arc::clone(&log);
+        let (public, validity) = (public.clone(), validity.clone());
+        async move {
+            let path = req.uri().path().to_owned();
+            let authorization = req.headers().get("authorization").and_then(|v| v.to_str().ok()).map(str::to_owned);
+            let bytes = to_bytes(req.into_body(), 1 << 20).await.unwrap();
+            let body: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+            log.lock().unwrap().push(IsSeen { path: path.clone(), authorization: authorization.clone(), body: body.clone() });
+            let bearer = authorization.as_deref().and_then(|a| a.strip_prefix("Bearer "));
+            let reply = |status: u16, value: Value| (StatusCode::from_u16(status).unwrap(), Json(value));
+            if path.ends_with("/3pid/unbind") {
+                return reply(200, json!({}));
+            }
+            match bearer {
+                Some(IS_TOKEN) => {}
+                Some("unsigned-terms") => {
+                    return reply(403, json!({"errcode": "M_TERMS_NOT_SIGNED", "error": "Terms not signed"}))
+                }
+                _ => return reply(401, json!({"errcode": "M_UNAUTHORIZED", "error": "no token"})),
+            }
+            match path.as_str() {
+                "/_matrix/identity/v2/hash_details" => {
+                    reply(200, json!({"lookup_pepper": PEPPER, "algorithms": ["none", "sha256"]}))
+                }
+                "/_matrix/identity/v2/lookup" => {
+                    let bound = lookup_hash("bound@example.org", "email");
+                    let mut mappings = serde_json::Map::new();
+                    if body["algorithm"] == "sha256" && body["pepper"] == PEPPER
+                        && body["addresses"].as_array().unwrap().iter().any(|a| a == bound.as_str())
+                    {
+                        mappings.insert(bound, json!(format!("@bob:{HS}")));
+                    }
+                    reply(200, json!({"mappings": mappings}))
+                }
+                "/_matrix/identity/v2/store-invite" => reply(
+                    200,
+                    json!({
+                        "token": format!("tok_{}", body["address"].as_str().unwrap().split('@').next().unwrap()),
+                        "display_name": "c...@e...",
+                        "public_keys": [
+                            {"public_key": public, "key_validity_url": validity},
+                            {"public_key": "ZXBoZW1lcmFsa2V5MDEyMzQ1Njc4OTAxMjM0NTY3ODk", "key_validity_url": format!("{validity}/ephemeral")}
+                        ]
+                    }),
+                ),
+                "/_matrix/identity/v2/3pid/bind" => reply(
+                    200,
+                    json!({"address": "carol@example.org", "medium": "email", "mxid": body["mxid"],
+                           "not_before": 1, "not_after": 2, "ts": 1, "signatures": {}}),
+                ),
+                _ => reply(404, json!({"errcode": "M_UNRECOGNIZED"})),
+            }
+        }
+    });
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    MockIs { url, host, key, seen }
+}
+
+async fn is_server() -> Server {
+    Server::with_env(&[("CONDUIT_IS_INSECURE_HTTP", "1"), ("CONDUIT_IS_ALLOW_CIDRS", "127.0.0.0/8")]).await
+}
+
+async fn member(server: &Server, token: &str, room: &str, user: &str) -> Option<Value> {
+    let response = server
+        .http
+        .get(format!("{}/_matrix/client/v3/rooms/{room}/state/m.room.member/{user}", server.base_url))
+        .bearer_auth(token)
+        .send()
+        .await
+        .unwrap();
+    if response.status() != 200 {
+        return None;
+    }
+    Some(response.json().await.unwrap())
+}
+
+#[tokio::test]
+async fn third_party_invites_lookup_store_invite_and_onbind() {
+    let is = spawn_is().await;
+    let server = is_server().await;
+    let alice = server.register("alice").await;
+    let bob = server.register("bob").await;
+    let room = create_room(&server, token(&alice), json!({"preset": "private_chat", "name": "Book club"})).await;
+    let invite_path = format!("/_matrix/client/v3/rooms/{room}/invite");
+    let invite = |address: &str, id_token: &str| {
+        json!({"id_server": is.host, "id_access_token": id_token, "medium": "email", "address": address})
+    };
+
+    // Bound 3PID: hashed sha256 lookup (address canonicalised), then a plain invite.
+    server.request(Method::POST, &invite_path, Some(token(&alice)), Some(invite("Bound@EXAMPLE.org", IS_TOKEN)), 200).await;
+    let lookup = is.seen("/lookup");
+    assert_eq!(lookup[0].authorization.as_deref(), Some(format!("Bearer {IS_TOKEN}").as_str()));
+    assert_eq!(lookup[0].body["algorithm"], "sha256");
+    assert_eq!(lookup[0].body["pepper"], PEPPER);
+    assert_eq!(lookup[0].body["addresses"], json!([lookup_hash("bound@example.org", "email")]));
+    let bob_member = member(&server, token(&alice), &room, &format!("@bob:{HS}")).await.unwrap();
+    assert_eq!(bob_member["membership"], "invite");
+    assert!(is.seen("/store-invite").is_empty());
+
+    // Unbound 3PID: store-invite, then m.room.third_party_invite.
+    server.request(Method::POST, &invite_path, Some(token(&alice)), Some(invite("carol@example.org", IS_TOKEN)), 200).await;
+    let stored = is.seen("/store-invite");
+    assert_eq!(stored.len(), 1);
+    let request = &stored[0].body;
+    assert_eq!(request["medium"], "email");
+    assert_eq!(request["address"], "carol@example.org");
+    assert_eq!(request["room_id"], room.as_str());
+    assert_eq!(request["sender"], format!("@alice:{HS}"));
+    assert_eq!(request["room_name"], "Book club");
+    assert_eq!(request["room_join_rules"], "invite");
+    let tpi = server
+        .request(
+            Method::GET,
+            &format!("/_matrix/client/v3/rooms/{room}/state/m.room.third_party_invite/tok_carol"),
+            Some(token(&alice)),
+            None,
+            200,
+        )
+        .await;
+    assert_eq!(tpi["display_name"], "c...@e...");
+    assert_eq!(tpi["public_key"], is.public_key());
+    assert_eq!(tpi["key_validity_url"], format!("{}/_matrix/identity/v2/pubkey/isvalid", is.url));
+    assert_eq!(tpi["public_keys"].as_array().unwrap().len(), 2);
+
+    // Errors.
+    let mut missing = invite("x@example.org", IS_TOKEN);
+    missing.as_object_mut().unwrap().remove("id_access_token");
+    let r = server.request(Method::POST, &invite_path, Some(token(&alice)), Some(missing), 400).await;
+    assert_eq!(r["errcode"], "M_MISSING_PARAM");
+    let mut bad_server = invite("x@example.org", IS_TOKEN);
+    bad_server["id_server"] = json!("evil.example/steal");
+    let r = server.request(Method::POST, &invite_path, Some(token(&alice)), Some(bad_server), 400).await;
+    assert_eq!(r["errcode"], "M_INVALID_PARAM");
+    let r = server.request(Method::POST, &invite_path, Some(token(&alice)), Some(invite("not-an-email", IS_TOKEN)), 400).await;
+    assert_eq!(r["errcode"], "M_INVALID_PARAM");
+    let r = server.request(Method::POST, &invite_path, Some(token(&alice)), Some(invite("x@example.org", "unsigned-terms")), 403).await;
+    assert_eq!(r["errcode"], "M_TERMS_NOT_SIGNED", "identity-server errors pass through");
+    let r = server.request(Method::POST, &invite_path, Some(token(&bob)), Some(invite("x@example.org", IS_TOKEN)), 403).await;
+    assert_eq!(r["errcode"], "M_FORBIDDEN", "only joined members may invite");
+
+    // onbind: carol binds carol@example.org; a forged proof is ignored, a
+    // genuine one becomes a membership invite carrying the signed proof.
+    let carol = server.register("carol").await;
+    let carol_id = format!("@carol:{HS}");
+    let onbind = |signed: Value| {
+        json!({
+            "address": "carol@example.org", "medium": "email", "mxid": carol_id,
+            "invites": [{"address": "carol@example.org", "medium": "email", "mxid": carol_id,
+                         "room_id": room, "sender": format!("@alice:{HS}"), "signed": signed}]
+        })
+    };
+    let forger = ed25519_dalek::SigningKey::from_bytes(&[1u8; 32]);
+    server
+        .request(Method::PUT, "/_matrix/federation/v1/3pid/onbind", None, Some(onbind(is.sign(&carol_id, "tok_carol", &forger))), 200)
+        .await;
+    assert!(member(&server, token(&alice), &room, &carol_id).await.is_none(), "forged proof must not invite");
+    server
+        .request(Method::PUT, "/_matrix/federation/v1/3pid/onbind", None, Some(onbind(is.sign(&carol_id, "tok_carol", &is.key))), 200)
+        .await;
+    let carol_member = member(&server, token(&alice), &room, &carol_id).await.expect("invited");
+    assert_eq!(carol_member["membership"], "invite");
+    assert_eq!(carol_member["third_party_invite"]["display_name"], "c...@e...");
+    assert_eq!(carol_member["third_party_invite"]["signed"]["token"], "tok_carol");
+    // The invitee can now join the invite-only room.
+    server.request(Method::POST, &format!("/_matrix/client/v3/join/{room}"), Some(token(&carol)), Some(json!({})), 200).await;
+
+    // createRoom invite_3pid.
+    let created = create_room(
+        &server,
+        token(&alice),
+        json!({"preset": "private_chat", "invite_3pid": [invite("dave@example.org", IS_TOKEN)]}),
+    )
+    .await;
+    assert!(is.seen("/store-invite").iter().any(|s| s.body["room_id"] == created.as_str() && s.body["address"] == "dave@example.org"));
+    server
+        .request(
+            Method::GET,
+            &format!("/_matrix/client/v3/rooms/{created}/state/m.room.third_party_invite/tok_dave"),
+            Some(token(&alice)),
+            None,
+            200,
+        )
+        .await;
+}
+
+/// Verify the X-Matrix signature the homeserver put on an unbind request.
+async fn assert_signed_by_homeserver(server: &Server, is: &MockIs, seen: &IsSeen) {
+    use base64::Engine as _;
+    let header = seen.authorization.as_deref().expect("unbind is signed");
+    let field = |name: &str| {
+        header
+            .split(&format!("{name}=\""))
+            .nth(1)
+            .and_then(|rest| rest.split('"').next())
+            .unwrap_or_else(|| panic!("{name} in {header}"))
+            .to_owned()
+    };
+    assert!(header.starts_with("X-Matrix "), "{header}");
+    assert_eq!(field("origin"), HS);
+    assert_eq!(field("destination"), is.host);
+    let keys = server.request(Method::GET, "/_matrix/key/v2/server", None, None, 200).await;
+    let public = keys["verify_keys"][field("key")]["key"].as_str().unwrap().to_owned();
+    let public = base64::engine::general_purpose::STANDARD_NO_PAD.decode(public).unwrap();
+    let verifying = ed25519_dalek::VerifyingKey::from_bytes(&public.try_into().unwrap()).unwrap();
+    let signed = json!({
+        "method": "POST", "uri": "/_matrix/identity/v2/3pid/unbind",
+        "origin": HS, "destination": is.host, "content": seen.body,
+    });
+    let bytes = conduit::canonical_json::to_canonical_bytes(&signed).unwrap();
+    let sig = base64::engine::general_purpose::STANDARD_NO_PAD.decode(field("sig")).unwrap();
+    let sig = ed25519_dalek::Signature::from_slice(&sig).unwrap();
+    verifying.verify_strict(&bytes, &sig).expect("unbind signature verifies with the server key");
+}
+
+#[tokio::test]
+async fn account_3pid_bind_unbind_delete_and_deactivate_use_the_identity_server() {
+    let is = spawn_is().await;
+    let server = is_server().await;
+    let carol = server.register("carol").await;
+    let carol_id = format!("@carol:{HS}");
+    let bind = json!({"client_secret": "secret", "id_server": is.host, "id_access_token": IS_TOKEN, "sid": "sid1"});
+    server.request(Method::POST, "/_matrix/client/v3/account/3pid/bind", Some(token(&carol)), Some(bind.clone()), 200).await;
+    let binds = is.seen("/3pid/bind");
+    assert_eq!(binds[0].authorization.as_deref(), Some(format!("Bearer {IS_TOKEN}").as_str()));
+    assert_eq!(binds[0].body, json!({"sid": "sid1", "client_secret": "secret", "mxid": carol_id}));
+
+    // Unbind without id_server uses the server it was bound on.
+    let unbind = json!({"medium": "email", "address": "carol@example.org"});
+    let r = server.request(Method::POST, "/_matrix/client/v3/account/3pid/unbind", Some(token(&carol)), Some(unbind.clone()), 200).await;
+    assert_eq!(r, json!({"id_server_unbind_result": "success"}));
+    let unbinds = is.seen("/3pid/unbind");
+    assert_eq!(unbinds[0].body, json!({"mxid": carol_id, "threepid": {"medium": "email", "address": "carol@example.org"}}));
+    assert_signed_by_homeserver(&server, &is, &unbinds[0]).await;
+    // Nothing remembered any more.
+    let r = server.request(Method::POST, "/_matrix/client/v3/account/3pid/unbind", Some(token(&carol)), Some(unbind), 200).await;
+    assert_eq!(r, json!({"id_server_unbind_result": "no-support"}));
+
+    // Delete with an explicit id_server unbinds there.
+    let delete = json!({"medium": "email", "address": "carol@example.org", "id_server": is.host});
+    let r = server.request(Method::POST, "/_matrix/client/v3/account/3pid/delete", Some(token(&carol)), Some(delete), 200).await;
+    assert_eq!(r, json!({"id_server_unbind_result": "success"}));
+    assert_eq!(is.seen("/3pid/unbind").len(), 2);
+
+    // Deactivation unbinds remembered bindings.
+    server.request(Method::POST, "/_matrix/client/v3/account/3pid/bind", Some(token(&carol)), Some(bind), 200).await;
+    let path = "/_matrix/client/v3/account/deactivate";
+    let challenge = server.request(Method::POST, path, Some(token(&carol)), Some(json!({})), 401).await;
+    let r = server
+        .request(
+            Method::POST,
+            path,
+            Some(token(&carol)),
+            Some(json!({"auth": {"type": "m.login.password", "session": challenge["session"],
+                                 "identifier": {"type": "m.id.user", "user": "carol"}, "password": "test-password"}})),
+            200,
+        )
+        .await;
+    assert_eq!(r, json!({"id_server_unbind_result": "success"}));
+    assert_eq!(is.seen("/3pid/unbind").len(), 3);
+}

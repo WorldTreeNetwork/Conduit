@@ -47,6 +47,7 @@ pub mod state_paths;
 pub mod standards;
 pub mod server_notices;
 pub mod sync;
+pub mod third_party;
 pub mod thirdparty;
 pub mod typing;
 pub mod uia;
@@ -385,7 +386,9 @@ impl<S: AuthState> FromRequestParts<S> for AuthedUser {
             .ok_or_else(|| MatrixError::missing_token().into_response())?;
 
         if let Some(svc) = appservice_auth::appservice_for_token(state, &token) {
-            return appservice_auth::assert_identity(state, parts, svc).await;
+            let user = appservice_auth::assert_identity(state, parts, svc).await?;
+            moderation::gate(state, parts, &user.user_id).await?;
+            return Ok(user);
         }
 
         let grant = verify_access_token(state, &token).await?;

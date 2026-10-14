@@ -69,6 +69,9 @@ pub struct CreateRoomRequest {
     /// User IDs to invite immediately after creation.
     #[serde(default)]
     pub invite: Vec<String>,
+    /// Third-party invites (`Invite3pid` objects) issued after creation.
+    #[serde(default)]
+    pub invite_3pid: Vec<Value>,
     pub room_alias_name: Option<String>,
     pub is_direct: Option<bool>,
     pub room_version: Option<String>,
@@ -196,6 +199,14 @@ pub async fn create_room<S: AuthState>(
                 error = %e,
                 "createRoom: room_alias_name binding failed"
             ),
+        }
+    }
+
+    // `invite_3pid`: third-party invites through the identity server
+    // (conduit-y99.36), after the alias so store-invite can name it.
+    for invite in &body.invite_3pid {
+        if let Err(r) = super::third_party::invite_by_3pid(&state, sender, &room_id, invite).await {
+            return r;
         }
     }
 
@@ -364,9 +375,20 @@ pub async fn invite_user<S: AuthState>(
     State(state): State<S>,
     authed: AuthedUser,
     Path(room_id): Path<String>,
-    Json(body): Json<InviteRequest>,
+    Json(raw): Json<Value>,
 ) -> Response {
     let sender = &authed.user_id;
+    // Third-party form: id_server / id_access_token / medium / address.
+    if super::third_party::is_3pid_invite(&raw) {
+        return match super::third_party::invite_by_3pid(&state, sender, &room_id, &raw).await {
+            Ok(()) => (StatusCode::OK, Json(json!({}))).into_response(),
+            Err(r) => r,
+        };
+    }
+    let body: InviteRequest = match serde_json::from_value(raw) {
+        Ok(b) => b,
+        Err(e) => return MatrixError::bad_json(e.to_string()).into_response(),
+    };
     if let Err(blocked) = super::room_membership::check_invite_allowed(&state, &body.user_id).await {
         return blocked;
     }

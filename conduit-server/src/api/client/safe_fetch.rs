@@ -258,7 +258,7 @@ async fn resolve_checked(
     Ok(addrs)
 }
 
-fn build_client(policy: &Arc<FetchPolicy>) -> Result<reqwest::Client, FetchError> {
+pub(crate) fn build_client(policy: &Arc<FetchPolicy>) -> Result<reqwest::Client, FetchError> {
     reqwest::Client::builder()
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())

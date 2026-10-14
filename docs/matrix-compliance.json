@@ -1786,7 +1786,7 @@
       "status": "covered_assertions_only",
       "assertions": [
         "m.3pid_changes is disabled and GET /account/3pid is empty",
-        "add, bind and legacy add are 403 M_FORBIDDEN; delete and unbind return no-support; requestToken endpoints are 403 M_THREEPID_DENIED"
+        "add and legacy add are 403 M_FORBIDDEN; bind without id_server/id_access_token is 400 M_MISSING_PARAM; delete and unbind with nothing bound return no-support; requestToken endpoints are 403 M_THREEPID_DENIED"
       ],
       "implementation": [
         "conduit-server/src/api/client/account.rs"
@@ -1795,7 +1795,7 @@
         "conduit-server/tests/production_account.rs::production_threepid_endpoints_answer_honestly"
       ],
       "limitations": [
-        "No email/SMS validation or identity-server integration exists"
+        "No homeserver-side email/SMS validation (conduit-y99.36.1); identity-server bind/unbind is covered by cs-identity-server-bindings"
       ]
     },
     {
@@ -2474,6 +2474,55 @@
       ],
       "limitations": [
         "No TURN server is configurable yet (TURN is MAY); OpenID tokens cannot be redeemed until federation /openid/userinfo exists (conduit-y99.22)"
+      ]
+    },
+    {
+      "id": "cs-third-party-invites",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#third-party-invites",
+      "status": "covered_assertions_only",
+      "assertions": [
+        "A 3PID invite canonicalises the address and looks it up with hash_details + sha256 lookup (pepper echoed, Bearer id_access_token); a bound 3PID becomes an ordinary m.room.member invite",
+        "An unbound 3PID is stored with store-invite (medium, address, room_id, sender, room_name, room_join_rules) and an m.room.third_party_invite with display_name, public_key, key_validity_url and public_keys is emitted under the returned token",
+        "Missing id_access_token is 400 M_MISSING_PARAM; a non-hostname id_server or invalid email is 400 M_INVALID_PARAM; identity-server M_TERMS_NOT_SIGNED passes through; non-members get 403 M_FORBIDDEN",
+        "PUT /_matrix/federation/v1/3pid/onbind with a forged signature invites nobody; with the identity server's signature it creates an m.room.member invite carrying third_party_invite, and the invitee can join",
+        "createRoom invite_3pid stores the invite and emits m.room.third_party_invite in the new room",
+        "Kernel auth: m.room.third_party_invite needs the invite power level; a signed member invite is rejected for a wrong key, mxid mismatch, unknown token, different sender, missing signed, tampering or a banned target, and accepted with either base64 alphabet"
+      ],
+      "implementation": [
+        "conduit-server/src/api/client/third_party.rs",
+        "conduit-server/src/identity_service.rs",
+        "conduit/src/auth.rs"
+      ],
+      "tests": [
+        "conduit-server/tests/production_appservice.rs::third_party_invites_lookup_store_invite_and_onbind",
+        "conduit/tests/third_party_invite_auth.rs::signed_member_invite_rejections",
+        "conduit/tests/third_party_invite_auth.rs::signed_member_invite_is_accepted_with_either_base64_alphabet",
+        "conduit/tests/third_party_invite_auth.rs::third_party_invite_event_needs_invite_power"
+      ],
+      "limitations": [
+        "Invites into rooms on other servers (exchange_third_party_invite) and key_validity_url checks on join are federation work (conduit-y99.22.6)"
+      ]
+    },
+    {
+      "id": "cs-identity-server-bindings",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#post_matrixclientv3account3pidbind",
+      "status": "covered_assertions_only",
+      "assertions": [
+        "POST /account/3pid/bind proxies {sid, client_secret, mxid} to the identity server with Bearer id_access_token",
+        "POST /account/3pid/unbind without id_server unbinds on the remembered server with an X-Matrix signature that verifies against /_matrix/key/v2/server, returns success, then no-support once nothing is remembered",
+        "POST /account/3pid/delete with id_server unbinds there; deactivation unbinds remembered bindings and reports id_server_unbind_result success"
+      ],
+      "implementation": [
+        "conduit-server/src/api/client/third_party.rs",
+        "conduit-server/src/identity_service.rs"
+      ],
+      "tests": [
+        "conduit-server/tests/production_appservice.rs::account_3pid_bind_unbind_delete_and_deactivate_use_the_identity_server"
+      ],
+      "limitations": [
+        "Homeserver-validated 3PIDs (requestToken, /account/3pid/add) remain refused (conduit-y99.36.1)"
       ]
     }
   ]

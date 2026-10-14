@@ -44,9 +44,9 @@ pub fn router<S: AuthState>() -> Router<S> {
         .route(&format!("{V3}/account/deactivate"), post(deactivate::<S>))
         .route(&format!("{V3}/account/3pid"), get(get_3pids::<S>).post(threepid_changes_disabled::<S>))
         .route(&format!("{V3}/account/3pid/add"), post(threepid_changes_disabled::<S>))
-        .route(&format!("{V3}/account/3pid/bind"), post(threepid_bind::<S>))
-        .route(&format!("{V3}/account/3pid/delete"), post(threepid_remove::<S>))
-        .route(&format!("{V3}/account/3pid/unbind"), post(threepid_remove::<S>))
+        .route(&format!("{V3}/account/3pid/bind"), post(super::third_party::account_bind::<S>))
+        .route(&format!("{V3}/account/3pid/delete"), post(super::third_party::account_unbind::<S>))
+        .route(&format!("{V3}/account/3pid/unbind"), post(super::third_party::account_unbind::<S>))
         .route(&format!("{V3}/account/3pid/email/requestToken"), post(threepid_denied))
         .route(&format!("{V3}/account/3pid/msisdn/requestToken"), post(threepid_denied))
         .route(&format!("{V3}/account/password/email/requestToken"), post(threepid_denied))
@@ -211,9 +211,11 @@ pub async fn deactivate<S: AuthState>(
     if let Err(r) = deactivate_user(&state, &user_id, erase).await {
         return r;
     }
-    // No third-party identifiers are ever bound, so there is nothing to
-    // unbind: the spec requires `success` in that case.
-    (StatusCode::OK, Json(json!({ "id_server_unbind_result": "success" }))).into_response()
+    // Unbind every identity-server binding made through this server
+    // (conduit-y99.36); `success` when there is nothing to unbind.
+    let id_server = body.get("id_server").and_then(Value::as_str);
+    let result = super::third_party::unbind_all(&state, &user_id, id_server).await;
+    (StatusCode::OK, Json(json!({ "id_server_unbind_result": result }))).into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -227,36 +229,6 @@ pub async fn get_3pids<S: AuthState>(_authed: AuthedUser) -> Response {
 pub async fn threepid_changes_disabled<S: AuthState>(_authed: AuthedUser) -> Response {
     MatrixError::forbidden("Third-party identifier changes are disabled on this homeserver (m.3pid_changes)")
         .into_response()
-}
-
-pub async fn threepid_bind<S: AuthState>(_authed: AuthedUser) -> Response {
-    MatrixError::forbidden("This homeserver does not bind third-party identifiers through an identity server")
-        .into_response()
-}
-
-/// `/3pid/delete` and `/3pid/unbind`.  Nothing is stored and no identity
-/// server is known, so the identifier is (vacuously) not associated and
-/// unbinding is `no-support`, exactly as the spec defines for an unknown
-/// `id_server`.
-pub async fn threepid_remove<S: AuthState>(
-    _authed: AuthedUser,
-    body: Option<Json<Value>>,
-) -> Response {
-    let body = body.map(|Json(v)| v).unwrap_or(Value::Null);
-    let Some(medium) = body.get("medium").and_then(Value::as_str) else {
-        return missing_param("medium");
-    };
-    if body.get("address").and_then(Value::as_str).is_none() {
-        return missing_param("address");
-    }
-    if !matches!(medium, "email" | "msisdn") {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"errcode": "M_INVALID_PARAM", "error": "medium must be email or msisdn"})),
-        )
-            .into_response();
-    }
-    (StatusCode::OK, Json(json!({ "id_server_unbind_result": "no-support" }))).into_response()
 }
 
 /// Validation-token requests: this server cannot send email or SMS and

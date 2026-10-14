@@ -7,6 +7,7 @@ pub mod api;
 pub mod app_service;
 pub mod appservice_push;
 pub mod federation;
+pub mod identity_service;
 pub mod keys;
 pub mod media_storage;
 pub mod push_worker;

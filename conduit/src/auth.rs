@@ -89,6 +89,9 @@ pub enum AuthError {
 
     #[error("join_authorised_via_users_server is not validly signed by its homeserver")]
     AuthoriserSignatureMissing,
+
+    #[error("third-party invite rejected: {0}")]
+    ThirdPartyInvite(&'static str),
 }
 
 /// v11 auth rule 4.2: "If `content` has a `join_authorised_via_users_server`
@@ -206,6 +209,13 @@ pub fn auth_event_keys(event: &Event) -> Vec<(String, String)> {
             if let Ok(mc) = parse_member(&event.content) {
                 if matches!(mc.membership, Membership::Join | Membership::Invite | Membership::Knock) {
                     keys.push(("m.room.join_rules".to_owned(), String::new()));
+                }
+                // A third-party invite is authorised by the matching
+                // m.room.third_party_invite (spec "auth events selection").
+                if matches!(mc.membership, Membership::Invite) {
+                    if let Some(token) = event.content["third_party_invite"]["signed"]["token"].as_str() {
+                        keys.push(("m.room.third_party_invite".to_owned(), token.to_owned()));
+                    }
                 }
             }
         }
@@ -377,6 +387,20 @@ pub fn check_auth(event: &Event, auth_state: &StateMap<Event>) -> Result<(), Aut
     match event.event_type.as_str() {
         "m.room.member" => check_member(event, auth_state, &sender_membership)?,
         "m.room.power_levels" => check_power_levels(event, auth_state)?,
+        // Allowed iff the sender's power level is at least the invite level.
+        "m.room.third_party_invite" => {
+            let pl = get_pl_content(auth_state);
+            let pl_event = auth_state.get(&("m.room.power_levels".to_owned(), String::new()));
+            let creator = creator_id(auth_state);
+            let sender_level = user_power_level(&event.sender, pl_event, creator.as_deref());
+            if sender_level < pl.invite {
+                return Err(AuthError::InsufficientPowerLevel {
+                    needed: pl.invite,
+                    sender_has: sender_level,
+                });
+            }
+            return Ok(());
+        }
         _ => {
             // Generic rule: sender must be joined.
             match &sender_membership {
@@ -436,6 +460,97 @@ fn check_create(event: &Event, auth_state: &StateMap<Event>) -> Result<(), AuthE
     let _ = content.room_version; // already validated by serde
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Third-party invites (conduit-y99.36)
+// ---------------------------------------------------------------------------
+
+/// Decode an Ed25519 public key in unpadded standard or URL-safe base64.
+fn decode_public_key(key: &str) -> Option<ed25519_dalek::VerifyingKey> {
+    use base64::engine::general_purpose::{STANDARD_NO_PAD, URL_SAFE_NO_PAD};
+    use base64::Engine as _;
+    let trimmed = key.trim_end_matches('=');
+    let bytes = STANDARD_NO_PAD
+        .decode(trimmed)
+        .or_else(|_| URL_SAFE_NO_PAD.decode(trimmed))
+        .ok()?;
+    ed25519_dalek::VerifyingKey::from_bytes(&bytes.try_into().ok()?).ok()
+}
+
+/// Whether any signature in `signed.signatures` verifies against `key`.
+pub fn third_party_signed_matches(signed: &serde_json::Value, key: &str) -> bool {
+    use base64::engine::general_purpose::{STANDARD_NO_PAD, URL_SAFE_NO_PAD};
+    use base64::Engine as _;
+    let Some(verifying) = decode_public_key(key) else {
+        return false;
+    };
+    let mut unsigned = signed.clone();
+    let Some(object) = unsigned.as_object_mut() else {
+        return false;
+    };
+    object.remove("signatures");
+    object.remove("unsigned");
+    let Ok(bytes) = crate::canonical_json::to_canonical_bytes(&unsigned) else {
+        return false;
+    };
+    let Some(servers) = signed["signatures"].as_object() else {
+        return false;
+    };
+    servers
+        .values()
+        .filter_map(serde_json::Value::as_object)
+        .flat_map(|keys| keys.iter())
+        .filter(|(key_id, _)| key_id.starts_with("ed25519:"))
+        .filter_map(|(_, sig)| sig.as_str())
+        .filter_map(|sig| {
+            let sig = sig.trim_end_matches('=');
+            STANDARD_NO_PAD.decode(sig).or_else(|_| URL_SAFE_NO_PAD.decode(sig)).ok()
+        })
+        .filter_map(|raw| ed25519_dalek::Signature::from_slice(&raw).ok())
+        .any(|signature| verifying.verify_strict(&bytes, &signature).is_ok())
+}
+
+/// v11 auth rule for `m.room.member` invites carrying
+/// `content.third_party_invite` (rules 4.4.1.1-4.4.1.8).
+fn check_third_party_invite(
+    event: &Event,
+    state_key: &str,
+    third_party_invite: &serde_json::Value,
+    auth_state: &StateMap<Event>,
+    target_membership: &Option<Membership>,
+) -> Result<(), AuthError> {
+    if matches!(target_membership, Some(Membership::Ban)) {
+        return Err(AuthError::InviteTargetAlreadyJoinedOrBanned);
+    }
+    let signed = third_party_invite
+        .get("signed")
+        .filter(|s| s.is_object())
+        .ok_or(AuthError::ThirdPartyInvite("no signed object"))?;
+    let (Some(mxid), Some(token)) = (signed["mxid"].as_str(), signed["token"].as_str()) else {
+        return Err(AuthError::ThirdPartyInvite("signed lacks mxid or token"));
+    };
+    if mxid != state_key {
+        return Err(AuthError::ThirdPartyInvite("signed.mxid does not match state_key"));
+    }
+    let invite = auth_state
+        .get(&("m.room.third_party_invite".to_owned(), token.to_owned()))
+        .ok_or(AuthError::ThirdPartyInvite("no m.room.third_party_invite for the token"))?;
+    if invite.sender != event.sender {
+        return Err(AuthError::ThirdPartyInvite("sender differs from the third-party invite's sender"));
+    }
+    let mut keys: Vec<&str> = Vec::new();
+    if let Some(key) = invite.content["public_key"].as_str() {
+        keys.push(key);
+    }
+    if let Some(list) = invite.content["public_keys"].as_array() {
+        keys.extend(list.iter().filter_map(|k| k["public_key"].as_str()));
+    }
+    if keys.iter().any(|key| third_party_signed_matches(signed, key)) {
+        Ok(())
+    } else {
+        Err(AuthError::ThirdPartyInvite("no signature matches the invite's public keys"))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -537,6 +652,9 @@ fn check_member(
         // Invite
         // -------------------------------------------------------------------
         Membership::Invite => {
+            if let Some(tpi) = event.content.get("third_party_invite") {
+                return check_third_party_invite(event, state_key, tpi, auth_state, &target_membership);
+            }
             // Sender must be joined.
             if sender_membership != &Some(Membership::Join) {
                 return Err(AuthError::SenderNotJoined);

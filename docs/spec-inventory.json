@@ -16,18 +16,18 @@
  "summary": {
   "cs": {
    "endpoint": {
-    "implemented+tested": 129,
+    "implemented+tested": 133,
     "implemented-untested": 0,
-    "partial": 32,
-    "missing": 2,
+    "partial": 29,
+    "missing": 1,
     "not-applicable": 1,
     "total": 164
    },
    "requirement": {
-    "implemented+tested": 42,
+    "implemented+tested": 43,
     "implemented-untested": 0,
     "partial": 30,
-    "missing": 5,
+    "missing": 4,
     "not-applicable": 9,
     "total": 86
    }
@@ -36,16 +36,16 @@
    "endpoint": {
     "implemented+tested": 6,
     "implemented-untested": 3,
-    "partial": 7,
-    "missing": 19,
+    "partial": 8,
+    "missing": 18,
     "not-applicable": 1,
     "total": 36
    },
    "requirement": {
     "implemented+tested": 7,
     "implemented-untested": 0,
-    "partial": 13,
-    "missing": 18,
+    "partial": 14,
+    "missing": 17,
     "not-applicable": 3,
     "total": 41
    }
@@ -88,18 +88,18 @@
   },
   "is": {
    "endpoint": {
-    "implemented+tested": 0,
+    "implemented+tested": 5,
     "implemented-untested": 0,
-    "partial": 0,
-    "missing": 7,
+    "partial": 2,
+    "missing": 0,
     "not-applicable": 16,
     "total": 23
    },
    "requirement": {
-    "implemented+tested": 0,
+    "implemented+tested": 1,
     "implemented-untested": 0,
     "partial": 0,
-    "missing": 1,
+    "missing": 0,
     "not-applicable": 0,
     "total": 1
    }
@@ -116,19 +116,19 @@
   },
   "app": {
    "requirement": {
-    "implemented+tested": 6,
+    "implemented+tested": 7,
     "implemented-untested": 0,
     "partial": 5,
-    "missing": 6,
+    "missing": 5,
     "not-applicable": 4,
     "total": 21
    }
   },
   "all": {
-   "implemented+tested": 220,
+   "implemented+tested": 232,
    "implemented-untested": 3,
-   "partial": 98,
-   "missing": 107,
+   "partial": 99,
+   "missing": 94,
    "not-applicable": 37,
    "total": 465
   }
@@ -614,7 +614,7 @@
    ],
    "tests_total": 1,
    "gap_beads": [
-    "conduit-y99.36",
+    "conduit-y99.36.1",
     "conduit-2c7"
    ],
    "notes": "Honest refusal (403 M_THREEPID_DENIED); no email/SMS validation."
@@ -644,7 +644,7 @@
    ],
    "tests_total": 1,
    "gap_beads": [
-    "conduit-y99.36",
+    "conduit-y99.36.1",
     "conduit-2c7"
    ],
    "notes": "Honest refusal (403 M_THREEPID_DENIED); no email/SMS validation."
@@ -703,7 +703,7 @@
    ],
    "tests_total": 1,
    "gap_beads": [
-    "conduit-y99.36",
+    "conduit-y99.36.1",
     "conduit-2c7"
    ],
    "notes": "Honest refusal (403 M_THREEPID_DENIED); no email/SMS validation."
@@ -733,7 +733,7 @@
    ],
    "tests_total": 1,
    "gap_beads": [
-    "conduit-y99.36",
+    "conduit-y99.36.1",
     "conduit-2c7"
    ],
    "notes": "Honest refusal (403 M_THREEPID_DENIED); no email/SMS validation."
@@ -845,7 +845,7 @@
    ],
    "tests_total": 1,
    "gap_beads": [
-    "conduit-y99.36"
+    "conduit-y99.36.1"
    ],
    "notes": "Deprecated but present: answers 403 M_FORBIDDEN (honest refusal)."
   },
@@ -874,9 +874,9 @@
    ],
    "tests_total": 1,
    "gap_beads": [
-    "conduit-y99.36"
+    "conduit-y99.36.1"
    ],
-   "notes": "Honest refusal / no-support result; identity-server integration is y99.36."
+   "notes": "Honest refusal (403): homeserver-validated 3PIDs are conduit-y99.36.1."
   },
   {
    "id": "cs.ep.post_matrixclientv3account3pidbind",
@@ -890,22 +890,21 @@
    "rate_limited": "Yes",
    "deprecated": false,
    "role": "homeserver",
-   "status": "partial",
+   "status": "implemented+tested",
    "code": [
     {
-     "loc": "conduit-server/src/api/client/account.rs:47",
-     "handler": "threepid_bind",
+     "loc": "conduit-server/src/api/client/third_party.rs:261",
+     "handler": "third_party::account_bind",
      "kind": "exact"
     }
    ],
    "tests": [
+    "conduit-server/tests/production_appservice.rs::account_3pid_bind_unbind_delete_and_deactivate_use_the_identity_server",
     "conduit-server/tests/production_account.rs::production_threepid_endpoints_answer_honestly"
    ],
-   "tests_total": 1,
-   "gap_beads": [
-    "conduit-y99.36"
-   ],
-   "notes": "Honest refusal / no-support result; identity-server integration is y99.36."
+   "tests_total": 2,
+   "gap_beads": [],
+   "notes": "Proxies to the identity server's /3pid/bind and remembers the binding for later unbind."
   },
   {
    "id": "cs.ep.post_matrixclientv3account3piddelete",
@@ -919,22 +918,21 @@
    "rate_limited": "No",
    "deprecated": false,
    "role": "homeserver",
-   "status": "partial",
+   "status": "implemented+tested",
    "code": [
     {
-     "loc": "conduit-server/src/api/client/account.rs:48",
-     "handler": "threepid_remove",
+     "loc": "conduit-server/src/api/client/third_party.rs:354",
+     "handler": "third_party::account_unbind",
      "kind": "exact"
     }
    ],
    "tests": [
+    "conduit-server/tests/production_appservice.rs::account_3pid_bind_unbind_delete_and_deactivate_use_the_identity_server",
     "conduit-server/tests/production_account.rs::production_threepid_endpoints_answer_honestly"
    ],
-   "tests_total": 1,
-   "gap_beads": [
-    "conduit-y99.36"
-   ],
-   "notes": "Honest refusal / no-support result; identity-server integration is y99.36."
+   "tests_total": 2,
+   "gap_beads": [],
+   "notes": "No homeserver-held 3PIDs exist (conduit-y99.36.1), so delete performs the identity-server unbind and reports id_server_unbind_result."
   },
   {
    "id": "cs.ep.post_matrixclientv3account3pidemailrequesttoken",
@@ -961,7 +959,7 @@
    ],
    "tests_total": 1,
    "gap_beads": [
-    "conduit-y99.36",
+    "conduit-y99.36.1",
     "conduit-2c7"
    ],
    "notes": "Honest refusal (403 M_THREEPID_DENIED); no email/SMS validation."
@@ -991,7 +989,7 @@
    ],
    "tests_total": 1,
    "gap_beads": [
-    "conduit-y99.36",
+    "conduit-y99.36.1",
     "conduit-2c7"
    ],
    "notes": "Honest refusal (403 M_THREEPID_DENIED); no email/SMS validation."
@@ -1008,22 +1006,21 @@
    "rate_limited": "No",
    "deprecated": false,
    "role": "homeserver",
-   "status": "partial",
+   "status": "implemented+tested",
    "code": [
     {
-     "loc": "conduit-server/src/api/client/account.rs:49",
-     "handler": "threepid_remove",
+     "loc": "conduit-server/src/api/client/third_party.rs:354",
+     "handler": "third_party::account_unbind",
      "kind": "exact"
     }
    ],
    "tests": [
+    "conduit-server/tests/production_appservice.rs::account_3pid_bind_unbind_delete_and_deactivate_use_the_identity_server",
     "conduit-server/tests/production_account.rs::production_threepid_endpoints_answer_honestly"
    ],
-   "tests_total": 1,
-   "gap_beads": [
-    "conduit-y99.36"
-   ],
-   "notes": "Honest refusal / no-support result; identity-server integration is y99.36."
+   "tests_total": 2,
+   "gap_beads": [],
+   "notes": "Signed /3pid/unbind on id_server or every remembered server; success / no-support; IS Matrix errors pass through."
   },
   {
    "id": "cs.ep.get_matrixclientv3accountwhoami",
@@ -1727,13 +1724,12 @@
     "conduit-server/tests/production_account.rs::production_guest_access_is_restricted_and_upgradable",
     "conduit-server/tests/production_account.rs::production_logout_deletes_devices",
     "conduit-server/tests/production_account.rs::production_password_change_revokes_other_devices",
-    "conduit-server/tests/production_basics.rs::invite_blocking_rejects_invites_and_hides_pending_ones"
+    "conduit-server/tests/production_basics.rs::invite_blocking_rejects_invites_and_hides_pending_ones",
+    "conduit-server/tests/production_appservice.rs::third_party_invites_lookup_store_invite_and_onbind"
    ],
-   "tests_total": 68,
-   "gap_beads": [
-    "conduit-y99.36"
-   ],
-   "notes": "Supports preset/initial_state/invite/alias/is_direct/room_version/power_level_content_override/creation_content; invitees blocking invites are 403 M_INVITE_BLOCKED before creation. No invite_3pid (y99.36)."
+   "tests_total": 69,
+   "gap_beads": [],
+   "notes": "Supports preset/initial_state/invite/invite_3pid/alias/is_direct/room_version/power_level_content_override/creation_content; invitees blocking invites are 403 M_INVITE_BLOCKED; aliases in exclusive AS namespaces are 400 M_EXCLUSIVE."
   },
   {
    "id": "cs.ep.get_matrixclientv3directoryroomroomalias",
@@ -4051,20 +4047,20 @@
    "rate_limited": "Yes",
    "deprecated": false,
    "role": "homeserver",
-   "status": "missing",
+   "status": "implemented+tested",
    "code": [
     {
-     "loc": "conduit-server/src/main.rs:540",
-     "handler": "rooms::invite_user",
+     "loc": "conduit-server/src/api/client/third_party.rs:88",
+     "handler": "third_party::invite_by_3pid",
      "kind": "exact"
     }
    ],
-   "tests": [],
-   "tests_total": 0,
-   "gap_beads": [
-    "conduit-y99.36"
+   "tests": [
+    "conduit-server/tests/production_appservice.rs::third_party_invites_lookup_store_invite_and_onbind"
    ],
-   "notes": "Same route, 3PID form (id_server/medium/address) not supported."
+   "tests_total": 1,
+   "gap_beads": [],
+   "notes": "Same route as the user_id form: canonical address, sha256 hashed lookup (bound -> plain invite), else store-invite + m.room.third_party_invite. IS Matrix errors pass through; missing params M_MISSING_PARAM; invalid id_server/address M_INVALID_PARAM; non-members 403."
   },
   {
    "id": "cs.ep.post_matrixclientv3search",
@@ -5478,14 +5474,22 @@
    "rate_limited": "No",
    "deprecated": false,
    "role": "homeserver",
-   "status": "missing",
-   "code": [],
-   "tests": [],
-   "tests_total": 0,
-   "gap_beads": [
-    "conduit-y99.36"
+   "status": "partial",
+   "code": [
+    {
+     "loc": "conduit-server/src/api/client/third_party.rs:195",
+     "handler": "third_party::onbind",
+     "kind": "exact"
+    }
    ],
-   "notes": ""
+   "tests": [
+    "conduit-server/tests/production_appservice.rs::third_party_invites_lookup_store_invite_and_onbind"
+   ],
+   "tests_total": 1,
+   "gap_beads": [
+    "conduit-y99.22.6"
+   ],
+   "notes": "Invites into rooms on this server become signed m.room.member invites (forged proofs rejected by auth rules); invites into remote rooms are logged and skipped until exchange_third_party_invite (conduit-y99.22.6)."
   },
   {
    "id": "ss.ep.put_matrixfederationv1exchange_third_party_inviteroomid",
@@ -5504,10 +5508,9 @@
    "tests": [],
    "tests_total": 0,
    "gap_beads": [
-    "conduit-y99.22",
-    "conduit-y99.36"
+    "conduit-y99.22.6"
    ],
-   "notes": ""
+   "notes": "Local construction exists (third_party::exchange_local); the federation endpoint and its outbound call are conduit-y99.22.6."
   },
   {
    "id": "ss.ep.get_matrixfederationv1publicrooms",
@@ -6301,14 +6304,22 @@
    "rate_limited": "No",
    "deprecated": false,
    "role": "homeserver as client",
-   "status": "missing",
-   "code": [],
-   "tests": [],
-   "tests_total": 0,
-   "gap_beads": [
-    "conduit-y99.36"
+   "status": "partial",
+   "code": [
+    {
+     "loc": "conduit-server/src/identity_service.rs:238",
+     "handler": "IdentityClient::key_is_valid (outbound)",
+     "kind": "client"
+    }
    ],
-   "notes": "Required: ephemeral key validity for third-party invites."
+   "tests": [
+    "conduit-server/src/identity_service.rs::key_validity_url_is_queried_as_provided"
+   ],
+   "tests_total": 1,
+   "gap_beads": [
+    "conduit-y99.22.6"
+   ],
+   "notes": "Same helper (URL comes from public_keys[].key_validity_url); used by exchange_third_party_invite (conduit-y99.22.6)."
   },
   {
    "id": "is.ep.get_matrixidentityv2pubkeyisvalid",
@@ -6322,14 +6333,22 @@
    "rate_limited": "No",
    "deprecated": false,
    "role": "homeserver as client",
-   "status": "missing",
-   "code": [],
-   "tests": [],
-   "tests_total": 0,
-   "gap_beads": [
-    "conduit-y99.36"
+   "status": "partial",
+   "code": [
+    {
+     "loc": "conduit-server/src/identity_service.rs:238",
+     "handler": "IdentityClient::key_is_valid (outbound)",
+     "kind": "client"
+    }
    ],
-   "notes": "Required: verify key_validity_url when a server joins via a third-party invite."
+   "tests": [
+    "conduit-server/src/identity_service.rs::key_validity_url_is_queried_as_provided"
+   ],
+   "tests_total": 1,
+   "gap_beads": [
+    "conduit-y99.22.6"
+   ],
+   "notes": "Client helper queries key_validity_url as provided; it is wired in when exchange_third_party_invite lands (conduit-y99.22.6)."
   },
   {
    "id": "is.ep.get_matrixidentityv2pubkeykeyid",
@@ -6362,14 +6381,20 @@
    "rate_limited": "No",
    "deprecated": false,
    "role": "homeserver as client",
-   "status": "missing",
-   "code": [],
-   "tests": [],
-   "tests_total": 0,
-   "gap_beads": [
-    "conduit-y99.36"
+   "status": "implemented+tested",
+   "code": [
+    {
+     "loc": "conduit-server/src/identity_service.rs:128",
+     "handler": "IdentityClient::lookup (outbound)",
+     "kind": "client"
+    }
    ],
-   "notes": "Required: homeserver looks up 3PIDs (hash_details + lookup) when handling a 3PID /invite."
+   "tests": [
+    "conduit-server/tests/production_appservice.rs::third_party_invites_lookup_store_invite_and_onbind"
+   ],
+   "tests_total": 1,
+   "gap_beads": [],
+   "notes": "Bearer id_access_token; picks sha256 (falls back to none)."
   },
   {
    "id": "is.ep.post_matrixidentityv2lookup",
@@ -6383,14 +6408,21 @@
    "rate_limited": "No",
    "deprecated": false,
    "role": "homeserver as client",
-   "status": "missing",
-   "code": [],
-   "tests": [],
-   "tests_total": 0,
-   "gap_beads": [
-    "conduit-y99.36"
+   "status": "implemented+tested",
+   "code": [
+    {
+     "loc": "conduit-server/src/identity_service.rs:128",
+     "handler": "IdentityClient::lookup (outbound)",
+     "kind": "client"
+    }
    ],
-   "notes": "Required for 3PID invites."
+   "tests": [
+    "conduit-server/tests/production_appservice.rs::third_party_invites_lookup_store_invite_and_onbind",
+    "conduit-server/src/identity_service.rs::lookup_hash_matches_the_spec_construction"
+   ],
+   "tests_total": 2,
+   "gap_beads": [],
+   "notes": "sha256 of \"{address} {medium} {pepper}\" as URL-safe unpadded base64, pepper echoed."
   },
   {
    "id": "is.ep.post_matrixidentityv2validateemailrequesttoken",
@@ -6518,14 +6550,20 @@
    "rate_limited": "No",
    "deprecated": false,
    "role": "homeserver as client",
-   "status": "missing",
-   "code": [],
-   "tests": [],
-   "tests_total": 0,
-   "gap_beads": [
-    "conduit-y99.36"
+   "status": "implemented+tested",
+   "code": [
+    {
+     "loc": "conduit-server/src/identity_service.rs:189",
+     "handler": "IdentityClient::bind (outbound)",
+     "kind": "client"
+    }
    ],
-   "notes": "Required if /account/3pid/bind is supported (homeserver proxies the bind)."
+   "tests": [
+    "conduit-server/tests/production_appservice.rs::account_3pid_bind_unbind_delete_and_deactivate_use_the_identity_server"
+   ],
+   "tests_total": 1,
+   "gap_beads": [],
+   "notes": "Bearer id_access_token, {sid, client_secret, mxid}."
   },
   {
    "id": "is.ep.get_matrixidentityv23pidgetvalidated3pid",
@@ -6558,14 +6596,20 @@
    "rate_limited": "No",
    "deprecated": false,
    "role": "homeserver as client",
-   "status": "missing",
-   "code": [],
-   "tests": [],
-   "tests_total": 0,
-   "gap_beads": [
-    "conduit-y99.36"
+   "status": "implemented+tested",
+   "code": [
+    {
+     "loc": "conduit-server/src/identity_service.rs:205",
+     "handler": "IdentityClient::unbind (outbound)",
+     "kind": "client"
+    }
    ],
-   "notes": "Required for /account/3pid/unbind and on 3PID delete/deactivation (id_server_unbind_result)."
+   "tests": [
+    "conduit-server/tests/production_appservice.rs::account_3pid_bind_unbind_delete_and_deactivate_use_the_identity_server"
+   ],
+   "tests_total": 1,
+   "gap_beads": [],
+   "notes": "Authenticated as the homeserver: X-Matrix signature with the server signing key (verified in the test against /_matrix/key/v2/server)."
   },
   {
    "id": "is.ep.post_matrixidentityv2store-invite",
@@ -6579,14 +6623,20 @@
    "rate_limited": "No",
    "deprecated": false,
    "role": "homeserver as client",
-   "status": "missing",
-   "code": [],
-   "tests": [],
-   "tests_total": 0,
-   "gap_beads": [
-    "conduit-y99.36"
+   "status": "implemented+tested",
+   "code": [
+    {
+     "loc": "conduit-server/src/identity_service.rs:161",
+     "handler": "IdentityClient::store_invite (outbound)",
+     "kind": "client"
+    }
    ],
-   "notes": "Required when the 3PID is unbound: store invite then emit m.room.third_party_invite."
+   "tests": [
+    "conduit-server/tests/production_appservice.rs::third_party_invites_lookup_store_invite_and_onbind"
+   ],
+   "tests_total": 1,
+   "gap_beads": [],
+   "notes": "Sends medium/address/room_id/sender plus room_alias/avatar/join_rules/name/type and sender display name/avatar when known; validates the returned token grammar and keys."
   },
   {
    "id": "is.ep.post_matrixidentityv2sign-ed25519",
@@ -7046,13 +7096,14 @@
     }
    ],
    "tests": [
-    "conduit-server/tests/production_account.rs::production_threepid_endpoints_answer_honestly"
+    "conduit-server/tests/production_account.rs::production_threepid_endpoints_answer_honestly",
+    "conduit-server/tests/production_appservice.rs::account_3pid_bind_unbind_delete_and_deactivate_use_the_identity_server"
    ],
-   "tests_total": 1,
+   "tests_total": 2,
    "gap_beads": [
-    "conduit-y99.36"
+    "conduit-y99.36.1"
    ],
-   "notes": "All 3PID endpoints answer honestly (empty list, M_FORBIDDEN / M_THREEPID_DENIED); no real 3PID support."
+   "notes": "Identity-server bind/unbind/delete and deactivation unbind implemented (conduit-y99.36); homeserver-validated 3PIDs (requestToken/add) remain honest refusals (conduit-y99.36.1)."
   },
   {
    "id": "cs.auth.whoami",
@@ -7353,12 +7404,11 @@
     }
    ],
    "tests": [
-    "conduit-server/tests/rooms.rs::create_room_creator_is_joined"
+    "conduit-server/tests/rooms.rs::create_room_creator_is_joined",
+    "conduit-server/tests/production_appservice.rs::third_party_invites_lookup_store_invite_and_onbind"
    ],
-   "tests_total": 1,
-   "gap_beads": [
-    "conduit-y99.36"
-   ],
+   "tests_total": 2,
+   "gap_beads": [],
    "notes": ""
   },
   {
@@ -7843,14 +7893,26 @@
    "title": "Third-party invites",
    "source": "https://spec.matrix.org/v1.19/client-server-api/#third-party-invites",
    "role": "homeserver",
-   "status": "missing",
-   "code": [],
-   "tests": [],
-   "tests_total": 0,
-   "gap_beads": [
-    "conduit-y99.36"
+   "status": "implemented+tested",
+   "code": [
+    {
+     "loc": "conduit-server/src/api/client/third_party.rs"
+    },
+    {
+     "loc": "conduit/src/auth.rs:490"
+    }
    ],
-   "notes": ""
+   "tests": [
+    "conduit-server/tests/production_appservice.rs::third_party_invites_lookup_store_invite_and_onbind",
+    "conduit/tests/third_party_invite_auth.rs::signed_member_invite_rejections",
+    "conduit/tests/third_party_invite_auth.rs::signed_member_invite_is_accepted_with_either_base64_alphabet",
+    "conduit/tests/third_party_invite_auth.rs::third_party_invite_event_needs_invite_power"
+   ],
+   "tests_total": 4,
+   "gap_beads": [
+    "conduit-y99.22.6"
+   ],
+   "notes": "Local rooms end to end (invite, store-invite, onbind exchange, signature-verified membership, join). Remote-room exchange and key_validity_url checks on join are federation (conduit-y99.22.6)."
   },
   {
    "id": "cs.mod.search",
@@ -8895,15 +8957,24 @@
    "title": "Third-party invites (onbind, exchange_third_party_invite, verification)",
    "source": "https://spec.matrix.org/v1.19/server-server-api/#third-party-invites",
    "role": "homeserver",
-   "status": "missing",
-   "code": [],
-   "tests": [],
-   "tests_total": 0,
-   "gap_beads": [
-    "conduit-y99.36",
-    "conduit-y99.22"
+   "status": "partial",
+   "code": [
+    {
+     "loc": "conduit/src/auth.rs:490"
+    },
+    {
+     "loc": "conduit-server/src/api/client/third_party.rs:230"
+    }
    ],
-   "notes": ""
+   "tests": [
+    "conduit/tests/third_party_invite_auth.rs::signed_member_invite_rejections",
+    "conduit-server/tests/production_appservice.rs::third_party_invites_lookup_store_invite_and_onbind"
+   ],
+   "tests_total": 2,
+   "gap_beads": [
+    "conduit-y99.22.6"
+   ],
+   "notes": "v11 auth rule for content.third_party_invite.signed (mxid/token/sender/ed25519 over public_key and public_keys, standard or URL-safe base64) implemented in the kernel; exchange_third_party_invite and key_validity_url checks pending (conduit-y99.22.6)."
   },
   {
    "id": "ss.public-rooms",
@@ -9660,14 +9731,20 @@
    "title": "Homeserver interaction model with identity servers (id_server + id_access_token supplied by clients; HS proxies bind/unbind, lookup/store-invite for 3PID invites)",
    "source": "https://spec.matrix.org/v1.19/identity-service-api/#general-principles",
    "role": "homeserver as IS client",
-   "status": "missing",
-   "code": [],
-   "tests": [],
-   "tests_total": 0,
-   "gap_beads": [
-    "conduit-y99.36"
+   "status": "implemented+tested",
+   "code": [
+    {
+     "loc": "conduit-server/src/identity_service.rs"
+    }
    ],
-   "notes": "Conduit performs no IS interactions today."
+   "tests": [
+    "conduit-server/tests/production_appservice.rs::third_party_invites_lookup_store_invite_and_onbind",
+    "conduit-server/tests/production_appservice.rs::account_3pid_bind_unbind_delete_and_deactivate_use_the_identity_server",
+    "conduit-server/src/identity_service.rs::private_identity_servers_are_refused_by_default"
+   ],
+   "tests_total": 3,
+   "gap_beads": [],
+   "notes": "Client-supplied id_server (hostname[:port], HTTPS) + id_access_token; lookup/store-invite for invites, bind/unbind proxy with remembered bindings. Requests go through the outbound SSRF policy (CONDUIT_IS_ALLOW_CIDRS to allow private ranges)."
   },
   {
    "id": "rv.v1.event-format",
@@ -11014,14 +11091,19 @@
    "title": "3PID types (email normalisation, E.164 msisdn)",
    "source": "https://spec.matrix.org/v1.19/appendices/#3pid-types",
    "role": "homeserver",
-   "status": "missing",
-   "code": [],
-   "tests": [],
-   "tests_total": 0,
-   "gap_beads": [
-    "conduit-y99.36"
+   "status": "implemented+tested",
+   "code": [
+    {
+     "loc": "conduit-server/src/identity_service.rs:264"
+    }
    ],
-   "notes": ""
+   "tests": [
+    "conduit-server/src/identity_service.rs::three_pid_canonical_forms",
+    "conduit-server/tests/production_appservice.rs::third_party_invites_lookup_store_invite_and_onbind"
+   ],
+   "tests_total": 2,
+   "gap_beads": [],
+   "notes": "email: case-folded (lowercase plus the common full foldings such as ß->ss; not the complete Unicode CaseFolding table); msisdn: E.164 digits without '+'."
   },
   {
    "id": "app.glob",

@@ -148,3 +148,37 @@ Code: `conduit-server/src/api/client/appservice_auth.rs` (+ small hooks in
   for the asserted user (201, 200 on update); `DELETE /devices/{id}`,
   `POST /delete_devices` and replacement `keys/device_signing/upload` skip
   UIA for application services.
+
+## Third-party invites and identity servers (conduit-y99.36)
+
+Code: `conduit-server/src/api/client/third_party.rs` (handlers),
+`conduit-server/src/identity_service.rs` (IS client),
+`conduit/src/auth.rs` (`check_third_party_invite`).
+Tests: `conduit-server/tests/production_appservice.rs` (mock identity
+server in-test), `conduit/tests/third_party_invite_auth.rs`.
+
+- **`POST /rooms/{id}/invite` 3PID form** (and `createRoom.invite_3pid`):
+  the address is canonicalised (email case-folded, msisdn E.164 digits),
+  then `GET /hash_details` + `POST /lookup` (sha256 of
+  `"{address} {medium} {pepper}"`, URL-safe unpadded base64) with
+  `Bearer id_access_token`. A bound 3PID gets a normal invite; otherwise
+  `POST /store-invite` and an `m.room.third_party_invite` (state key = token,
+  `display_name`, `public_key`, `key_validity_url`, `public_keys`).
+- **`PUT /_matrix/federation/v1/3pid/onbind`** (unauthenticated, called by
+  identity servers; mounted outside the federation router): for rooms on
+  this server the `signed` proof becomes an `m.room.member` invite from the
+  original inviter with `content.third_party_invite`; the v11 auth rules
+  verify mxid/token/sender and the Ed25519 signature against the
+  `m.room.third_party_invite` keys. Remote rooms need
+  `exchange_third_party_invite` (conduit-y99.22.6).
+- **Account bindings:** `/account/3pid/bind` proxies to the IS and
+  remembers `(user, medium, address, id_server)`
+  (`threepid_id_server_bindings`, migration 0080); `/unbind`, `/delete`
+  and `/account/deactivate` send a homeserver-signed (X-Matrix)
+  `/3pid/unbind` and report `id_server_unbind_result`.
+- **Safety:** `id_server` must be `hostname[:port]`; requests use HTTPS and
+  the outbound SSRF policy (`safe_fetch`), so private/loopback identity
+  servers are refused unless allow-listed (`CONDUIT_IS_ALLOW_CIDRS`).
+  `CONDUIT_IS_INSECURE_HTTP=1` switches to HTTP for local testing.
+- Still refused (conduit-y99.36.1): homeserver-validated 3PIDs —
+  `requestToken`, `/account/3pid/add`, deprecated `POST /account/3pid`.
