@@ -228,9 +228,11 @@
         "client/src/testHook.ts"
       ],
       "tests": [
+        "client/e2e/a11y.spec.ts",
+        "client/e2e/account.spec.ts",
         "client/e2e/chat.spec.ts",
-        "client/e2e/resilience.spec.ts",
-        "client/e2e/a11y.spec.ts"
+        "client/e2e/features.spec.ts",
+        "client/e2e/resilience.spec.ts"
       ],
       "scope": [
         "Complete applicable client protocol behavior",
@@ -238,8 +240,9 @@
         "Unattended unit, integration and browser e2e verification"
       ],
       "limitations": [
-        "Phase 1 only: no media, typing/receipt/presence UI, relations, device management, room settings, directory or E2EE yet (child beads of conduit-y99.9)",
-        "E2E runs Chromium only",
+        "No end-to-end encryption, device verification or key backup yet (conduit-y99.9.1-.3)",
+        "No notification settings, rich text, DMs, search, knocking or spaces UI yet (conduit-y99.9.4, .5)",
+        "E2E runs Chromium only (conduit-y99.9.6)",
         "Unread counts fall back to client-side counting while the server sends zeros (conduit-y99.24)"
       ]
     },
@@ -432,6 +435,114 @@
       "limitations": [
         "Automated checks only; no manual screen-reader audit yet"
       ]
+    },
+    {
+      "id": "client-relations",
+      "role": "client",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#forming-relationships-between-events",
+      "assertions": [
+        "Reactions are sent as m.annotation, grouped per key, de-duplicated per sender and removed by redacting your own",
+        "Edits apply only from the original sender; the latest wins; bundled m.replace is used when the edit is not loaded",
+        "Replies carry m.in_reply_to without a fallback and render a quote of the original",
+        "Thread replies are hidden from the main timeline, summarised on the root and shown in a thread panel loaded through /relations",
+        "Redactions prune the target per the redaction algorithm"
+      ],
+      "implementation": [
+        "client/src/core/relations.ts",
+        "client/src/ui/Message.tsx",
+        "client/src/ui/ThreadPanel.tsx"
+      ],
+      "tests": [
+        "client/src/core/relations.test.ts",
+        "client/e2e/features.spec.ts::reactions, replies, edits, deletions and threads between two people"
+      ],
+      "status": "covered_assertions_only",
+      "issue": "conduit-y99.9"
+    },
+    {
+      "id": "client-media",
+      "role": "client",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#content-repository",
+      "assertions": [
+        "Attachments upload through /media/v3/upload before the event is sent with the mxc URL and info",
+        "Previews and downloads use authenticated /_matrix/client/v1/media endpoints",
+        "An upload interrupted by a reload fails visibly instead of sending without a file"
+      ],
+      "implementation": [
+        "client/src/core/media.ts",
+        "client/src/core/sendQueue.ts",
+        "client/src/ui/Media.tsx"
+      ],
+      "tests": [
+        "client/src/core/session.test.ts",
+        "client/e2e/features.spec.ts::images and files upload, preview and download through authenticated media"
+      ],
+      "status": "covered_assertions_only",
+      "issue": "conduit-y99.9"
+    },
+    {
+      "id": "client-typing-receipts-presence",
+      "role": "client",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#typing-notifications",
+      "assertions": [
+        "Typing is sent while composing and cleared on send or idle; others' typing is shown",
+        "m.read receipts are sent for the visible latest event and other people's receipts are shown",
+        "Presence from sync is shown in the member panel"
+      ],
+      "implementation": [
+        "client/src/core/client.ts",
+        "client/src/ui/Presence.tsx",
+        "client/src/ui/Message.tsx"
+      ],
+      "tests": [
+        "client/e2e/features.spec.ts::typing indicators and read receipts"
+      ],
+      "status": "covered_assertions_only",
+      "issue": "conduit-y99.9",
+      "limitations": [
+        "Presence is asserted only through screenshots, not a journey"
+      ]
+    },
+    {
+      "id": "client-room-settings-and-directory",
+      "role": "client",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#room-directory",
+      "assertions": [
+        "Name, topic, join rule, history visibility and roles are changed through state events and seen by other members",
+        "Public rooms can be searched and joined from the directory; users can be found through the user directory when inviting"
+      ],
+      "implementation": [
+        "client/src/ui/RoomSettings.tsx",
+        "client/src/ui/Directory.tsx"
+      ],
+      "tests": [
+        "client/e2e/features.spec.ts::room settings: rename, topic, history and roles",
+        "client/e2e/features.spec.ts::public room directory and user search"
+      ],
+      "status": "covered_assertions_only",
+      "issue": "conduit-y99.9"
+    },
+    {
+      "id": "client-tokens-and-sessions",
+      "role": "client",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#soft-logout",
+      "assertions": [
+        "Login and registration request refresh tokens; a soft-logout 401 triggers one shared /refresh and a single retry",
+        "When refresh is impossible the client keeps local data and re-authenticates on the same device",
+        "A hard logout (device deleted) wipes local state",
+        "Devices can be listed, renamed and signed out with UIA; the password can be changed and the account deactivated"
+      ],
+      "implementation": [
+        "client/src/core/http.ts",
+        "client/src/core/client.ts",
+        "client/src/ui/Account.tsx"
+      ],
+      "tests": [
+        "client/src/core/session.test.ts",
+        "client/e2e/account.spec.ts"
+      ],
+      "status": "covered_assertions_only",
+      "issue": "conduit-y99.9"
     },
     {
       "id": "independent-conformance-and-ci",

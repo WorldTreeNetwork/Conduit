@@ -32,7 +32,28 @@ client/
 | `room.ts` | Room model: state map folded from `state` then timeline state events; historical events (`/messages`) never change current state; de-duplication by event ID; a `limited` timeline resets the window and restarts history at `prev_batch`; room name per spec (name → canonical alias → heroes, "Empty room (was …)"); member display-name disambiguation; power levels; snapshots for persistence. | [Room display name](https://spec.matrix.org/v1.19/client-server-api/#calculating-the-display-name-for-a-room), [user display name](https://spec.matrix.org/v1.19/client-server-api/#calculating-the-display-name-for-a-user) |
 | `sendQueue.ts` | Local echo. Each send gets a transaction ID once and keeps it across retries, failures and restarts (server idempotency makes retries safe). Sends are serialized per room. Echoes are reconciled by event ID (or `unsigned.transaction_id`), including when the remote echo arrives before the PUT response. Failed sends stay with their error until retried or discarded; the queue is persisted. | [Transaction identifiers](https://spec.matrix.org/v1.19/client-server-api/#transaction-identifiers) |
 | `client.ts` | `MatrixClient` facade: owns HTTP, sync, rooms and queue; `subscribe`/`getVersion` for `useSyncExternalStore`; actions (create/join/leave/invite/accept/decline, paginate, receipts, profile); persistence of the session, the since token plus a room snapshot (last 50 events per room) and pending sends; `awaitIdle()`. | — |
+| `relations.ts` | Aggregates edits (`m.replace`, valid only from the original sender; bundled `unsigned.m.relations` fill gaps), reactions (`m.annotation`, grouped per key, de-duplicated per sender, own event kept for un-reacting), threads (`m.thread` replies hidden from the main timeline, summaries merged with bundled counts) and redactions (client-side redaction algorithm applied to timeline, thread history and state); strips legacy reply fallbacks. | [Relationships](https://spec.matrix.org/v1.19/client-server-api/#forming-relationships-between-events), [redactions](https://spec.matrix.org/v1.19/client-server-api/#redactions) |
+| `media.ts` | `POST /_matrix/media/v3/upload`, authenticated `GET /_matrix/client/v1/media/download|thumbnail` as blobs (object URLs cached per URI/size, revoked on logout), mxc parsing, msgtype from MIME type. Attachments go through the send queue: upload, then send with `content.url`, same txn ID. | [Content repository](https://spec.matrix.org/v1.19/client-server-api/#content-repository) |
 | `crypto.ts` | `CryptoBackend` seam for `@matrix-org/matrix-sdk-crypto-wasm`'s `OlmMachine` (phase 3): receives every sync's to-device/device-list/OTK data, decrypts `m.room.encrypted`, encrypts sends in encrypted rooms. The default `noCrypto` refuses sends in encrypted rooms with a clear error rather than sending plaintext. | [E2EE](https://spec.matrix.org/v1.19/client-server-api/#end-to-end-encryption) |
+
+### Tokens, refresh and soft logout
+
+Login and registration request `refresh_token: true`. Any request that
+fails with `M_UNKNOWN_TOKEN` and `soft_logout: true` triggers one shared
+`POST /refresh` (concurrent 401s wait for the same refresh) and is
+retried once with the new token; rotated tokens are persisted at once.
+If refreshing is impossible the client enters **soft logout**: sync and
+sends stop, everything local is kept, and a re-authentication screen
+signs in again with the same `device_id` (keeping the device and, later,
+its keys); unsent messages can then be retried. `soft_logout: false`
+(device deleted, password reset with logout) is a hard logout that wipes
+local state.
+
+Account management uses UIA with the account password
+(`m.login.password`): device list/rename (`/devices`), signing out other
+devices (`/delete_devices`), changing the password (`/account/password`,
+optionally signing out other devices) and deactivation
+(`/account/deactivate`, optional erase).
 
 ### Persistence and reload
 
@@ -60,6 +81,8 @@ events. Logout (`POST /logout`) and `M_UNKNOWN_TOKEN` wipe all three keys.
 - **`unsigned.transaction_id`:** absent on the sender's own events; echo
   reconciliation uses the event ID from the PUT response instead.
   (`conduit-y99.27`)
+- **Empty state key with a trailing slash:** `PUT .../state/{type}/` is
+  404; the client uses the slash-less form. (`conduit-y99.47`)
 
 ## UI (`client/src/ui`)
 
@@ -84,6 +107,18 @@ Shift+Enter newline, `/me` emotes, inline retry/delete on failure),
 create room / join by address / invite / leave dialogs (native
 `<dialog>`), settings (display name, theme, session facts, sign out),
 and a reconnecting banner driven by sync health.
+
+Phase 2 surfaces: a per-message action toolbar (react, reply, reply in
+thread, edit own, delete own or as moderator; visible on hover or keyboard
+focus, always visible on touch), reaction chips (`aria-pressed` for your
+own), reply quotes that jump to the original, "(edited)" markers, thread
+summaries and a thread panel with its own composer, composer reply/edit
+context (Escape cancels, ArrowUp edits your last message), attachments
+with image previews and file cards, typing line, "seen by" receipt
+plates, presence lamps, room settings (name, topic, picture, who can
+join, history visibility, roles), the public room directory inside the
+join dialog, user-directory suggestions when inviting, and account
+settings (devices, password, deactivation) plus the soft-logout screen.
 
 Accessibility: semantic landmarks and headings; skip link; roving
 tabindex with arrow/Home/End through the room list and the timeline;
@@ -147,13 +182,15 @@ with Playwright route interception (aborted `/send` and `/sync`).
 |---|---|
 | `chat.spec.ts` | Two browser contexts register, create a room, invite (with validation), accept, chat both ways (multi-line), unread lamp and preview while away, member panel with roles, sender grouping, day plates; session survives reload and sign-out revokes the token (`M_UNKNOWN_TOKEN`); display-name change; decline invite; join by room ID with address validation and not-found error, then leave. |
 | `resilience.spec.ts` | 75-message history paged back to the beginning, every message once and in order, jump to latest; failed send with inline retry and delete, retry delivers exactly once; failed sends survive reload; sync loss shows the reconnecting banner and recovers; sign-in validation and server errors (wrong password, taken username, weak input); unreachable homeserver. |
+| `features.spec.ts` | Two people: reactions (add, join, remove), reply quote, ArrowUp edit with "(edited)", delete with reason, threads both ways with summaries; typing indicator and read receipts; PNG preview and text-file download through authenticated v1 media; room settings (rename, topic, history visibility, promote to moderator); public directory search and join; invite through user-directory suggestions. |
+| `account.spec.ts` | Device list, rename, wrong-password then correct sign-out of another session (which lands on sign-in with local state wiped); password change then sign-in with the new password; deactivation (token revoked, sign-in refused); transparent refresh on a soft-logout 401 (new token, same device); soft logout with a rejected refresh token, re-authentication keeping rooms, device and the failed message for retry. |
 | `a11y.spec.ts` | axe (WCAG 2.0/2.1/2.2 A+AA) with zero serious/critical violations on sign-in, sign-in errors, empty home, room view with invite and member panel, failed send, create dialog and settings, in light and dark; keyboard navigation through rooms, composer and timeline; live announcement of incoming messages; reduced motion. |
 
 ## Roadmap
 
-Phase 2 and 3 work is tracked as children of `conduit-y99.9`: media,
-typing/receipts/presence, relations (reactions, edits, replies,
-threads, redactions), device and session management, room settings,
-room directory and user search, and E2EE through
-`@matrix-org/matrix-sdk-crypto-wasm` (device verification with SAS
-emoji, key backup).
+Children of `conduit-y99.9`: E2EE through
+`@matrix-org/matrix-sdk-crypto-wasm` behind `CryptoBackend` (`.1`),
+device verification with SAS emoji and cross-signing (`.2`), key backup
+(`.3`), notification settings and mentions (`.4`), rich text, DMs,
+search, knocking, spaces, URL previews, inline audio/video (`.5`), and
+Firefox/WebKit plus a manual screen-reader audit (`.6`).
