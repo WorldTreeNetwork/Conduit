@@ -1,10 +1,10 @@
 {
   "schema_version": 1,
   "target_specification": "https://spec.matrix.org/v1.19/",
-  "inventory_complete": false,
+  "inventory_complete": true,
   "full_compliance_proven": false,
   "verification_command": "SQLX_OFFLINE=true cargo test --workspace",
-  "coverage_note": "This is a starting evidence register, not an exhaustive requirement inventory. Passing tests cover only the assertions named below. Endpoint presence does not establish semantic conformance.",
+  "coverage_note": "This register holds requirement-level assertion evidence. The exhaustive v1.19 requirement inventory (every endpoint, module, room version component and appendix section with status, code, tests and gap beads) is docs/spec-inventory.json (human view: docs/spec-inventory.md). Passing tests cover only the assertions named. Endpoint presence does not establish semantic conformance.",
   "requirements": [
     {
       "id": "v11-event-cryptographic-bytes",
@@ -156,8 +156,12 @@
       "id": "complete-server-requirement-inventory",
       "role": "homeserver",
       "source": "https://spec.matrix.org/v1.19/",
-      "status": "incomplete",
+      "status": "complete",
       "issue": "conduit-y99.3",
+      "evidence": [
+        "docs/spec-inventory.md",
+        "docs/spec-inventory.json"
+      ],
       "scope": [
         "Client-server modules and endpoint semantics",
         "Server-server API and independent interoperability",
@@ -167,6 +171,30 @@
         "Identity-service integration",
         "Push gateway interactions",
         "Olm/Megolm and encrypted client interactions"
+      ],
+      "assertions": [
+        "Every v1.19 endpoint (client-server 164 incl. 9 deprecated, server-server 36, application-service 11, push-gateway 1, identity-service 23) is enumerated from the published HTML and cross-checked against each page's endpoint TOC",
+        "Every homeserver-relevant module/section, room versions 1-12 (5 components each) and every appendix section is enumerated",
+        "Each item records status, code location, test location and gap beads; every partial/missing/untested item names a bead; every not-applicable item states its justification"
+      ],
+      "inventory_summary": {
+        "implemented+tested": 154,
+        "implemented-untested": 14,
+        "partial": 124,
+        "missing": 136,
+        "not-applicable": 37,
+        "total": 465
+      },
+      "limitations": [
+        "Inventory snapshot of main at 8e301e5 (after conduit-y99.18 account/devices and conduit-y99.19 room content landed); lanes conduit-y99.13/.14/.15/.16/.22/.23 and conduit-embed-pdu change rows as they land and must update docs/spec-inventory.json",
+        "Status implemented+tested means named tests assert the behaviour, not that every clause is proven; full_compliance_proven remains false",
+        "Olm/Megolm client interactions are client-side and tracked by conduit-y99.9, not by homeserver rows"
+      ],
+      "gap_issues": [
+        "conduit-y99.28", "conduit-y99.29", "conduit-y99.30", "conduit-y99.31", "conduit-y99.32",
+        "conduit-y99.33", "conduit-y99.34", "conduit-y99.35", "conduit-y99.36",
+        "conduit-y99.38", "conduit-y99.39", "conduit-y99.40", "conduit-y99.41", "conduit-y99.42",
+        "conduit-y99.43", "conduit-y99.44", "conduit-y99.45", "conduit-y99.46"
       ]
     },
     {
