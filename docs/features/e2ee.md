@@ -94,8 +94,26 @@ with the event or the complete local/remote delivery set in one transaction.
 Concurrent retries produce one effect; restarts reproduce the stored result;
 wildcards are expanded once, so later devices do not receive retried messages.
 Failed writes roll back both the effect and the deduplication marker.
-Original error-response and whole federation-transaction replay remain tracked
-as `conduit-y99.10.2`; successful-effect idempotency does not prove those cases.
+Transaction guards serialize each authenticated identity across requests and
+server instances. The first request body is saved before processing; successful
+and definitive rejected responses are immutable. Retries after transient server
+failures resume that body, not a changed retransmission. Interrupted transport
+body reads remain retryable. Completed results are checked before later body
+validation, and normal authentication still precedes any cached response.
+
+Inbound federation `send` transactions also retain their original request and
+final response by signed origin and HTTP transaction ID. A partially processed
+EDU batch resumes after failure or restart: committed message IDs deduplicate,
+and only unfinished original messages are delivered. Federation requests require
+origin, timestamp and PDUs, enforce 50-PDU/100-EDU limits, and accept framed bodies
+up to 16 MB so valid large batches do not hit the old 2 MB JSON default.
+
+PostgreSQL lifetime advisory locks use a separate lazy pool of at most four
+connections per storage instance, preserving data-pool capacity even when that
+pool has one connection. Dropping/cancelling a guard rolls its lock transaction
+back. MemoryStorage uses scoped owned mutex guards with weak registry entries.
+Completed to-device retries also wake persisted pending outboxes, recovering a
+commit whose caller was interrupted before worker notification.
 Outbound device list churn (`keys/upload`,
 `keys/device_signing/upload`) is similarly broadcast as
 `m.device_list_update` EDUs to every remote server sharing a room

@@ -361,7 +361,7 @@ pub async fn send_to_device<S: AuthState>(
     State(state): State<S>,
     authed: AuthedUser,
     Path((event_type, txn_id)): Path<(String, String)>,
-    Json(body): Json<SendToDeviceBody>,
+    request: axum::extract::Request,
 ) -> Response {
     use conduit::storage::{OutboundDelivery, ToDeviceDelivery, TransactionKey};
     let storage = state.storage();
@@ -371,25 +371,55 @@ pub async fn send_to_device<S: AuthState>(
         &["send_to_device", &event_type],
         &txn_id,
     );
-    match storage.transaction_result(&key).await {
-        Ok(Some(result)) => return (StatusCode::OK, Json(result)).into_response(),
-        Ok(None) => {}
-        Err(error) => return MatrixError::unknown(error.to_string()).into_response(),
-    }
+    let mut replay = match crate::replay::Replay::start(storage.clone(), key.clone()).await {
+        Ok(crate::replay::Start::Cached(response)) => {
+            if let Some(queue) = state.federation_queue() {
+                queue.start().await;
+            }
+            return response;
+        }
+        Ok(crate::replay::Start::Execute(replay)) => replay,
+        Err(error) => return error,
+    };
+    let raw = match replay.body(request).await {
+        Ok(body) => body,
+        Err(error) => return error,
+    };
+    let body = match serde_json::from_value::<SendToDeviceBody>(raw) {
+        Ok(body) => body,
+        Err(error) => {
+            return replay
+                .finish(
+                    StatusCode::BAD_REQUEST,
+                    json!({"errcode": "M_BAD_JSON", "error": error.to_string()}),
+                )
+                .await
+        }
+    };
     // Every delivery may later cross federation, whose signed JSON must be
     // canonical. Reject unsupported values before recording any effects.
     if conduit::canonical_json::to_canonical_bytes(&body.messages).is_err() {
-        return MatrixError::bad_json("to-device contents must be canonical JSON").into_response();
+        return replay.finish(StatusCode::BAD_REQUEST, json!({"errcode": "M_BAD_JSON", "error": "to-device contents must be canonical JSON"})).await;
     }
     let mut local = Vec::new();
     let mut remote_by_server: HashMap<String, HashMap<String, HashMap<String, Value>>> =
         HashMap::new();
     for (target_user, devices) in body.messages {
         let Some((localpart, server)) = target_user.split_once(':') else {
-            return MatrixError::bad_json("invalid target user ID").into_response();
+            return replay
+                .finish(
+                    StatusCode::BAD_REQUEST,
+                    json!({"errcode": "M_BAD_JSON", "error": "invalid target user ID"}),
+                )
+                .await;
         };
         if !localpart.starts_with('@') || localpart.len() < 2 || server.is_empty() {
-            return MatrixError::bad_json("invalid target user ID").into_response();
+            return replay
+                .finish(
+                    StatusCode::BAD_REQUEST,
+                    json!({"errcode": "M_BAD_JSON", "error": "invalid target user ID"}),
+                )
+                .await;
         }
         if server == state.server_name() {
             for (device, content) in devices {
@@ -415,10 +445,15 @@ pub async fn send_to_device<S: AuthState>(
             .flat_map(|devices| devices.values())
             .any(|content| !content.is_object())
     {
-        return MatrixError::bad_json("to-device contents must be JSON objects").into_response();
+        return replay.finish(StatusCode::BAD_REQUEST, json!({"errcode": "M_BAD_JSON", "error": "to-device contents must be JSON objects"})).await;
     }
     if !remote_by_server.is_empty() && state.federation_queue().is_none() {
-        return MatrixError::unknown("federation delivery is unavailable").into_response();
+        return replay
+            .finish(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                json!({"errcode": "M_UNKNOWN", "error": "federation delivery is unavailable"}),
+            )
+            .await;
     }
     let remote: Vec<_> = remote_by_server.into_iter().map(|(destination, messages)| {
         let id = uuid::Uuid::new_v4().simple().to_string();
@@ -430,7 +465,7 @@ pub async fn send_to_device<S: AuthState>(
     }).collect();
     match storage.deliver_to_device_once(&key, &local, &remote).await {
         Ok(_) => {}
-        Err(error) => return MatrixError::unknown(error.to_string()).into_response(),
+        Err(error) => return crate::replay::error(error),
     }
     if let Some(queue) = state.federation_queue() {
         for delivery in &remote {
@@ -438,7 +473,7 @@ pub async fn send_to_device<S: AuthState>(
         }
     }
     state.sync_notify().notify_waiters();
-    (StatusCode::OK, Json(json!({}))).into_response()
+    replay.finish(StatusCode::OK, json!({})).await
 }
 /// Expand wildcard recipients before writing device-specific queue entries.
 pub(crate) async fn enqueue_local_to_device(

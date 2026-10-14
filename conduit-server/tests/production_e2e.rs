@@ -1461,3 +1461,159 @@ async fn production_startup_rejects_missing_or_invalid_private_ca() {
         }
     }
 }
+
+#[tokio::test]
+async fn production_rejected_transaction_replays_after_permissions_change() {
+    let mut server = Server::new().await;
+    let alice = server.register("alice").await;
+    let bob = server.register("bob").await;
+    let alice_token = alice["access_token"].as_str().unwrap();
+    let bob_token = bob["access_token"].as_str().unwrap();
+    let room = server
+        .request(
+            Method::POST,
+            "/_matrix/client/v3/createRoom",
+            Some(alice_token),
+            Some(json!({"preset": "public_chat"})),
+            200,
+        )
+        .await;
+    let room = room["room_id"].as_str().unwrap();
+    let path = format!("/_matrix/client/v3/rooms/{room}/send/m.room.message/denied");
+    let original = server
+        .request(
+            Method::PUT,
+            &path,
+            Some(bob_token),
+            Some(json!({"msgtype": "m.text", "body": "Original"})),
+            403,
+        )
+        .await;
+    server
+        .request(
+            Method::POST,
+            &format!("/_matrix/client/v3/join/{room}"),
+            Some(bob_token),
+            Some(json!({})),
+            200,
+        )
+        .await;
+    server.stop();
+    server.start().await;
+    let retry = server
+        .request(
+            Method::PUT,
+            &path,
+            Some(bob_token),
+            Some(json!({"msgtype": "m.text", "body": "Changed"})),
+            403,
+        )
+        .await;
+    assert_eq!(retry, original);
+    server
+        .request(
+            Method::PUT,
+            &format!("/_matrix/client/v3/rooms/{room}/send/m.room.message/new"),
+            Some(bob_token),
+            Some(json!({"msgtype": "m.text", "body": "New request"})),
+            200,
+        )
+        .await;
+}
+
+#[tokio::test]
+async fn production_completed_transaction_is_replayed_before_body_validation() {
+    let mut server = Server::new().await;
+    let alice = server.register("alice").await;
+    let token = alice["access_token"].as_str().unwrap();
+    let path = "/_matrix/client/v3/sendToDevice/m.test/replay";
+    let original = server
+        .request(
+            Method::PUT,
+            path,
+            Some(token),
+            Some(json!({"messages": {}})),
+            200,
+        )
+        .await;
+    server.stop();
+    server.start().await;
+    let response = server
+        .http
+        .put(format!("{}{path}", server.base_url))
+        .bearer_auth(token)
+        .header("Content-Type", "text/plain")
+        .body("invalid JSON")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 200);
+    assert_eq!(response.json::<Value>().await.unwrap(), original);
+    server
+        .request(
+            Method::POST,
+            "/_matrix/client/v3/logout",
+            Some(token),
+            Some(json!({})),
+            200,
+        )
+        .await;
+    let revoked = server
+        .http
+        .put(format!("{}{path}", server.base_url))
+        .bearer_auth(token)
+        .header("Content-Type", "text/plain")
+        .body("invalid JSON")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        revoked.status().as_u16(),
+        401,
+        "a cached response must never bypass authentication"
+    );
+    let login = server
+        .request(
+            Method::POST,
+            "/_matrix/client/v3/login",
+            None,
+            Some(json!({
+                "type": "m.login.password", "identifier": {"type": "m.id.user", "user": "alice"},
+                "password": "test-password", "device_id": alice["device_id"]
+            })),
+            200,
+        )
+        .await;
+    let response = server
+        .http
+        .put(format!("{}{path}", server.base_url))
+        .bearer_auth(login["access_token"].as_str().unwrap())
+        .header("Content-Type", "text/plain")
+        .body("invalid JSON")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status().as_u16(),
+        200,
+        "device-scoped replay must survive a new access token"
+    );
+    assert_eq!(response.json::<Value>().await.unwrap(), original);
+}
+
+#[tokio::test]
+async fn production_interrupted_body_does_not_freeze_a_transaction() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let server = Server::new().await;
+    let alice = server.register("alice").await;
+    let token = alice["access_token"].as_str().unwrap();
+    let address = server.base_url.strip_prefix("http://").unwrap();
+    let path = "/_matrix/client/v3/sendToDevice/m.test/interrupted";
+    let mut connection = tokio::net::TcpStream::connect(address).await.unwrap();
+    let request = format!("PUT {path} HTTP/1.1\r\nHost: {address}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: 1000\r\nConnection: close\r\n\r\n{{");
+    connection.write_all(request.as_bytes()).await.unwrap();
+    connection.shutdown().await.unwrap();
+    let mut reply = Vec::new();
+    tokio::time::timeout(Duration::from_secs(2), connection.read_to_end(&mut reply)).await.unwrap().unwrap();
+    server.request(Method::PUT, path, Some(token), Some(json!({"messages": {}})), 200).await;
+}

@@ -39,7 +39,7 @@ use std::collections::HashMap;
 
 use biscuit_auth::builder::{fact, string, Term};
 use biscuit_auth::{
-    Algorithm, AuthorizerBuilder, Biscuit, BiscuitBuilder, BlockBuilder, KeyPair, PrivateKey,
+    Algorithm, AuthorizerBuilder, AuthorizerLimits, Biscuit, BiscuitBuilder, BlockBuilder, KeyPair, PrivateKey,
     PublicKey,
 };
 use thiserror::Error;
@@ -371,8 +371,15 @@ fn parse(minter_public: &PublicKey, token: &str) -> Result<Biscuit> {
         .map_err(|e| AgencyError::Malformed(e.to_string()))
 }
 
+// Biscuit's 1ms wall-clock default also counts scheduling delays. Keep
+// evaluation bounded while allowing ordinary concurrent authentication work.
+fn authorization_limits() -> AuthorizerLimits {
+    AuthorizerLimits { max_time: std::time::Duration::from_millis(50), ..Default::default() }
+}
+
 fn claims_of(biscuit: &Biscuit) -> Result<TokenClaims> {
     let mut authorizer = AuthorizerBuilder::new()
+        .set_limits(authorization_limits())
         .build(biscuit)
         .map_err(|e| AgencyError::Biscuit(e.to_string()))?;
 
@@ -395,6 +402,7 @@ fn claims_of(biscuit: &Biscuit) -> Result<TokenClaims> {
 
 fn authorize_biscuit(biscuit: &Biscuit, ctx: &VerifyContext) -> Result<()> {
     let mut builder = AuthorizerBuilder::new()
+        .set_limits(authorization_limits())
         .fact(fact("time", &[Term::Date(ctx.now.max(0) as u64)]))
         .and_then(|b| b.fact(fact("device_epoch", &[Term::Integer(ctx.device_epoch)])))
         .map_err(|e| AgencyError::Biscuit(e.to_string()))?;
@@ -459,6 +467,36 @@ mod tests {
     // `epoch` under its own name) passes trivially, so this test is the
     // one that proves the check is real.
     // -----------------------------------------------------------------------
+
+    #[test]
+    fn valid_tokens_verify_under_parallel_load() {
+        let minter = Minter::generate();
+        let token = minter.mint_root(&claims(1, Some(NOW + 60))).unwrap();
+        let public = minter.public_key();
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                let token = &token;
+                let public = &public;
+                scope.spawn(move || {
+                    for _ in 0..20 { assert!(verify(public, token, &ctx(NOW, 1)).is_ok()); }
+                });
+            }
+        });
+    }
+
+    #[test]
+    fn oversized_datalog_grants_still_fail_closed() {
+        let minter = Minter::generate();
+        let token = minter.mint_root(&claims(1, Some(NOW + 60))).unwrap();
+        let grant = verify(&minter.public_key(), &token, &ctx(NOW, 1)).unwrap();
+        let mut code: String = (0..1001).map(|value| format!("extra({value});\n")).collect();
+        code.push_str("derived($value) <- extra($value);\n");
+        let oversized = grant.attenuate(&code).unwrap();
+        match verify(&minter.public_key(), &oversized, &ctx(NOW, 1)) {
+            Err(error) => assert!(error.to_string().contains("limits"), "unexpected rejection: {error}"),
+            Ok(_) => panic!("generated facts must remain bounded"),
+        }
+    }
 
     #[test]
     fn epoch_bump_revokes_the_token() {

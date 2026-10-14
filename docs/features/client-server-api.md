@@ -61,7 +61,10 @@ messages, device list changes, ...
 4. Successful room-send and to-device `txnId` results persist atomically with
    their effects, scoped to the device and complete endpoint path. An in-memory
    cache cannot establish restart durability or concurrent idempotency.
-   Original error-response replay remains `conduit-y99.10.2`.
+   Definitive client errors are retained as well. The authenticated device and
+   endpoint identify the original request; completed results replay before a
+   later body is parsed. Revoked credentials still fail authentication, and a
+   new token for the same device retains its transaction scope.
 
 ## Gotchas
 

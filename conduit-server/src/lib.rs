@@ -10,6 +10,7 @@ pub mod keys;
 pub mod media_storage;
 pub mod push_worker;
 pub mod remote_keys;
+pub mod replay;
 pub mod storage_pg;
 
 pub use media_storage::BlobStore;

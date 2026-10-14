@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT pg_advisory_xact_lock($1) IS NULL AS lock_held",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "lock_held",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "0d1664a3f4027d0da81d67c33a1f2d6a6f1be60892ba20a6412a0a69c7216c50"
+}

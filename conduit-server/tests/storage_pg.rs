@@ -26,6 +26,42 @@ use conduit::storage::Storage;
 use conduit_server::PostgresStorage;
 
 #[tokio::test]
+async fn transaction_guards_serialize_instances_without_starving_a_single_connection_pool() {
+    use conduit::storage::TransactionKey;
+    use std::sync::Arc;
+    use std::time::Duration;
+    let db = TempDb::new().await;
+    let pool = PgPoolOptions::new().max_connections(1)
+        .connect(&replace_db_in_url(&db.admin_url, &db.db_name)).await.unwrap();
+    let store = Arc::new(PostgresStorage::new(pool));
+    let other = Arc::new(db.storage());
+    let key = TransactionKey::federation_request("a.test", "once");
+    let guard = store.lock_transaction(&key).await.unwrap();
+    let first = serde_json::json!({"first": true});
+    tokio::time::timeout(Duration::from_secs(2), store.transaction_request(&key, &first)).await.unwrap().unwrap();
+    let (started, ready) = tokio::sync::oneshot::channel();
+    let other_key = key.clone();
+    let waiter = tokio::spawn(async move {
+        started.send(()).unwrap();
+        other.lock_transaction(&other_key).await.unwrap()
+    });
+    ready.await.unwrap();
+    tokio::task::yield_now().await;
+    assert!(!waiter.is_finished(), "another storage instance acquired the same identity");
+    waiter.abort();
+    assert!(matches!(waiter.await, Err(error) if error.is_cancelled()));
+    drop(guard);
+    let guard = tokio::time::timeout(Duration::from_secs(2), store.lock_transaction(&key)).await.unwrap().unwrap();
+    let original = store.transaction_request(&key, &serde_json::json!({"changed": true})).await.unwrap();
+    assert_eq!(original, first);
+    let rejected = serde_json::json!({"errcode": "M_FORBIDDEN", "error": "original"});
+    assert_eq!(store.finish_transaction(&key, &rejected).await.unwrap(), rejected);
+    assert_eq!(store.finish_transaction(&key, &serde_json::json!({})).await.unwrap(), rejected);
+    drop(guard);
+    assert_eq!(db.reopen().await.transaction_result(&key).await.unwrap(), Some(rejected));
+}
+
+#[tokio::test]
 async fn device_transaction_rolls_back_deduplication_local_and_remote_effects_together() {
     use conduit::storage::{OutboundDelivery, ToDeviceDelivery, TransactionKey};
     let db = TempDb::new().await;

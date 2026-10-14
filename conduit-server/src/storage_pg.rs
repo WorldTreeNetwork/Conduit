@@ -28,11 +28,16 @@ use conduit::{
 
 pub struct PostgresStorage {
     pool: PgPool,
+    lock_pool: PgPool,
 }
 
 impl PostgresStorage {
     pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+        // Keep lifetime advisory locks off the data pool. Otherwise several
+        // guarded requests can occupy every connection needed for their writes.
+        let lock_pool = sqlx::postgres::PgPoolOptions::new().max_connections(4)
+            .connect_lazy_with((*pool.connect_options()).clone());
+        Self { pool, lock_pool }
     }
 
     /// Convenience constructor that wraps self in `Arc<dyn Storage>`.
@@ -40,6 +45,11 @@ impl PostgresStorage {
         Arc::new(self)
     }
 }
+
+struct PostgresTransactionGuard {
+    _transaction: sqlx::Transaction<'static, sqlx::Postgres>,
+}
+impl conduit::storage::TransactionGuard for PostgresTransactionGuard {}
 
 // ---------------------------------------------------------------------------
 // Helper: map sqlx errors to conduit::Error
@@ -55,12 +65,53 @@ fn map_sqlx(e: sqlx::Error) -> Error {
 
 #[async_trait]
 impl Storage for PostgresStorage {
+    async fn lock_transaction(&self, key: &conduit::storage::TransactionKey) -> Result<Box<dyn conduit::storage::TransactionGuard>> {
+        use sha2::{Digest, Sha256};
+        let identity = serde_json::json!(["conduit-replay", key.scope, key.owner, key.endpoint, key.txn_id]).to_string();
+        let digest = Sha256::digest(identity.as_bytes());
+        let lock_id = i64::from_be_bytes(digest[..8].try_into().expect("eight hash bytes"));
+        let mut transaction = self.lock_pool.begin().await.map_err(map_sqlx)?;
+        sqlx::query!("SELECT pg_advisory_xact_lock($1) IS NULL AS lock_held", lock_id)
+            .fetch_one(&mut *transaction).await.map_err(map_sqlx)?;
+        Ok(Box::new(PostgresTransactionGuard {_transaction: transaction}))
+    }
+
+    async fn transaction_original(&self, key: &conduit::storage::TransactionKey) -> Result<Option<Value>> {
+        let row = sqlx::query!("SELECT request FROM transactions WHERE scope = $1 AND owner = $2 AND endpoint = $3 AND txn_id = $4",
+            key.scope, key.owner, key.endpoint, key.txn_id).fetch_optional(&self.pool).await.map_err(map_sqlx)?;
+        Ok(row.and_then(|row| row.request))
+    }
+
+    async fn transaction_request(&self, key: &conduit::storage::TransactionKey, request: &Value) -> Result<Value> {
+        let row = sqlx::query!(
+            r#"INSERT INTO transactions (scope, owner, endpoint, txn_id, request)
+            VALUES ($1, $2, $3, $4, $5)
+            ON CONFLICT (scope, owner, endpoint, txn_id) DO UPDATE
+                SET request = COALESCE(transactions.request, EXCLUDED.request)
+            RETURNING request"#,
+            key.scope, key.owner, key.endpoint, key.txn_id, request
+        ).fetch_one(&self.pool).await.map_err(map_sqlx)?;
+        row.request.ok_or_else(|| Error::Storage("missing original transaction request".into()))
+    }
+
+    async fn finish_transaction(&self, key: &conduit::storage::TransactionKey, result: &Value) -> Result<Value> {
+        let row = sqlx::query!(
+            r#"INSERT INTO transactions (scope, owner, endpoint, txn_id, result)
+            VALUES ($1, $2, $3, $4, $5)
+            ON CONFLICT (scope, owner, endpoint, txn_id) DO UPDATE
+                SET result = COALESCE(transactions.result, EXCLUDED.result)
+            RETURNING result"#,
+            key.scope, key.owner, key.endpoint, key.txn_id, result
+        ).fetch_one(&self.pool).await.map_err(map_sqlx)?;
+        row.result.ok_or_else(|| Error::Storage("missing completed transaction result".into()))
+    }
+
     async fn transaction_result(&self, key: &conduit::storage::TransactionKey) -> Result<Option<Value>> {
         let row = sqlx::query!(
             "SELECT result FROM transactions WHERE scope = $1 AND owner = $2 AND endpoint = $3 AND txn_id = $4",
             key.scope, key.owner, key.endpoint, key.txn_id
         ).fetch_optional(&self.pool).await.map_err(map_sqlx)?;
-        Ok(row.map(|row| row.result))
+        Ok(row.and_then(|row| row.result))
     }
 
     async fn put_event_once(&self, key: &conduit::storage::TransactionKey, event: &Event) -> Result<(String, bool)> {
@@ -72,12 +123,16 @@ impl Storage for PostgresStorage {
         ).execute(&mut *transaction).await.map_err(map_sqlx)?.rows_affected() > 0;
         if !inserted {
             let row = sqlx::query!(
-                "SELECT result FROM transactions WHERE scope = $1 AND owner = $2 AND endpoint = $3 AND txn_id = $4",
+                "SELECT result FROM transactions WHERE scope = $1 AND owner = $2 AND endpoint = $3 AND txn_id = $4 FOR UPDATE",
                 key.scope, key.owner, key.endpoint, key.txn_id
             ).fetch_one(&mut *transaction).await.map_err(map_sqlx)?;
-            let id = row.result["event_id"].as_str().ok_or_else(|| Error::Storage("invalid stored event transaction".into()))?.to_owned();
-            transaction.commit().await.map_err(map_sqlx)?;
-            return Ok((id, false));
+            if let Some(result) = row.result {
+                let id = result["event_id"].as_str().ok_or_else(|| Error::Storage("invalid stored event transaction".into()))?.to_owned();
+                transaction.commit().await.map_err(map_sqlx)?;
+                return Ok((id, false));
+            }
+            sqlx::query!("UPDATE transactions SET result = $5 WHERE scope = $1 AND owner = $2 AND endpoint = $3 AND txn_id = $4",
+                key.scope, key.owner, key.endpoint, key.txn_id, result).execute(&mut *transaction).await.map_err(map_sqlx)?;
         }
         if event.state_key.is_some() {
             return Err(Error::InvalidEvent("put_event_once accepts non-state events only".into()));
@@ -107,7 +162,13 @@ impl Storage for PostgresStorage {
             "INSERT INTO transactions (scope, owner, endpoint, txn_id, result) VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING",
             key.scope, key.owner, key.endpoint, key.txn_id, result
         ).execute(&mut *transaction).await.map_err(map_sqlx)?.rows_affected() > 0;
-        if !inserted { transaction.commit().await.map_err(map_sqlx)?; return Ok(false); }
+        if !inserted {
+            let row = sqlx::query!("SELECT result FROM transactions WHERE scope = $1 AND owner = $2 AND endpoint = $3 AND txn_id = $4 FOR UPDATE",
+                key.scope, key.owner, key.endpoint, key.txn_id).fetch_one(&mut *transaction).await.map_err(map_sqlx)?;
+            if row.result.is_some() { transaction.commit().await.map_err(map_sqlx)?; return Ok(false); }
+            sqlx::query!("UPDATE transactions SET result = $5 WHERE scope = $1 AND owner = $2 AND endpoint = $3 AND txn_id = $4",
+                key.scope, key.owner, key.endpoint, key.txn_id, result).execute(&mut *transaction).await.map_err(map_sqlx)?;
+        }
         for message in local {
             sqlx::query!(
                 r#"

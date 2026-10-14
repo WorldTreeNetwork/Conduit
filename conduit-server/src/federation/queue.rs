@@ -95,7 +95,7 @@ impl Queue {
         }
         debug!(count = dests.len(), "outbound queue: spawning recovery workers");
         for dest in dests {
-            self.ensure_worker(&dest).await;
+            self.ensure_worker(&dest).await.notify_one();
         }
     }
 

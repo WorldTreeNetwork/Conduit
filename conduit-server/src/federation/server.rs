@@ -116,11 +116,8 @@ fn internal(msg: &str) -> Response {
 
 #[derive(Debug, Deserialize)]
 pub struct SendTransactionBody {
-    #[serde(default)]
-    pub origin: Option<String>,
-    #[serde(default)]
-    pub origin_server_ts: Option<u64>,
-    #[serde(default)]
+    pub origin: String,
+    pub origin_server_ts: u64,
     pub pdus: Vec<Value>,
     #[serde(default)]
     pub edus: Vec<Value>,
@@ -131,18 +128,47 @@ pub async fn send_transaction(
     State(state): State<FedState>,
     origin_ext: Option<axum::extract::Extension<FederationOrigin>>,
     Path(txn_id): Path<String>,
-    Json(body): Json<SendTransactionBody>,
+    request: axum::extract::Request,
 ) -> Response {
     let origin = match origin_ext {
         Some(axum::extract::Extension(o)) => o.server_name,
         None => return unauthorized("Not authenticated"),
     };
 
+    let key = conduit::storage::TransactionKey::federation_request(&origin, &txn_id);
+    let mut replay = match crate::replay::Replay::start(state.storage.clone(), key).await {
+        Ok(crate::replay::Start::Cached(response)) => return response,
+        Ok(crate::replay::Start::Execute(replay)) => replay,
+        Err(error) => return error,
+    };
+    let original = match replay.body(request).await {
+        Ok(body) => body,
+        Err(error) => return error,
+    };
+    let body = match serde_json::from_value::<SendTransactionBody>(original) {
+        Ok(body) => body,
+        Err(error) => {
+            return replay
+                .finish(
+                    StatusCode::BAD_REQUEST,
+                    json!({"errcode": "M_BAD_JSON", "error": error.to_string()}),
+                )
+                .await
+        }
+    };
+    if body.origin != origin {
+        return replay.finish(StatusCode::BAD_REQUEST, json!({"errcode": "M_BAD_JSON", "error": "transaction origin does not match authenticated origin"})).await;
+    }
+    if body.pdus.len() > 50 || body.edus.len() > 100 {
+        return replay.finish(StatusCode::BAD_REQUEST, json!({"errcode": "M_BAD_JSON", "error": "transaction exceeds 50 PDUs or 100 EDUs"})).await;
+    }
     tracing::debug!(%origin, %txn_id, pdu_count = body.pdus.len(), edu_count = body.edus.len(), "inbound federation transaction");
 
     // Process EDUs first (mrm.11).
     for edu in &body.edus {
-        if let Err(error) = handle_edu(&state, &origin, edu).await { return internal(&error.to_string()); }
+        if let Err(error) = handle_edu(&state, &origin, edu).await {
+            return internal(&error.to_string());
+        }
     }
 
     let mut pdu_results: HashMap<String, Value> = HashMap::new();
@@ -184,9 +210,10 @@ pub async fn send_transaction(
         }
     }
 
-    (StatusCode::OK, Json(json!({ "pdus": pdu_results }))).into_response()
+    replay
+        .finish(StatusCode::OK, json!({"pdus": pdu_results}))
+        .await
 }
-
 // ---------------------------------------------------------------------------
 // x2r.5 — GET /make_join/:roomId/:userId
 // ---------------------------------------------------------------------------
@@ -1058,6 +1085,7 @@ pub fn federation_router() -> axum::Router<FedState> {
         .route("/send_join/:roomId/:eventId", put(send_join))
         .route("/invite/:roomId/:eventId", put(invite));
     axum::Router::new().nest("/v1", v1).nest("/v2", v2)
+        .layer(axum::extract::DefaultBodyLimit::max(16 * 1024 * 1024))
 }
 
 /// Mount the federation APIs with the same middleware used by the binary.

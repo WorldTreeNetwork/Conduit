@@ -148,6 +148,12 @@ pub struct TransactionKey {
     pub txn_id: String,
 }
 
+/// Lifetime guard for a single transaction identity. Cancellation releases it.
+/// The kernel exposes no transport or database types through this guard.
+pub trait TransactionGuard: Send {}
+
+impl TransactionGuard for tokio::sync::OwnedMutexGuard<()> {}
+
 impl TransactionKey {
     pub fn client(user: &str, device: &str, endpoint: &[&str], txn_id: &str) -> Self {
         Self {
@@ -165,6 +171,11 @@ impl TransactionKey {
             endpoint: "m.direct_to_device".into(),
             txn_id: message_id.to_owned(),
         }
+    }
+
+    pub fn federation_request(origin: &str, txn_id: &str) -> Self {
+        Self { scope: "federation_request".into(), owner: origin.into(),
+            endpoint: "send".into(), txn_id: txn_id.into() }
     }
 }
 
@@ -253,6 +264,15 @@ pub struct AuditEntry {
 
 #[async_trait]
 pub trait Storage: Send + Sync + 'static {
+    async fn lock_transaction(&self, key: &TransactionKey) -> Result<Box<dyn TransactionGuard>>;
+
+    async fn transaction_original(&self, key: &TransactionKey) -> Result<Option<Value>>;
+
+    /// Insert the first request if absent; return that immutable original.
+    async fn transaction_request(&self, key: &TransactionKey, request: &Value) -> Result<Value>;
+
+    /// Complete an operation without replacing an already committed result.
+    async fn finish_transaction(&self, key: &TransactionKey, result: &Value) -> Result<Value>;
     /// Original successful result, scoped to a device/endpoint or origin/EDU ID.
     async fn transaction_result(&self, key: &TransactionKey) -> Result<Option<Value>>;
 
@@ -899,6 +919,7 @@ pub trait Storage: Send + Sync + 'static {
 /// An in-memory [`Storage`] for tests and demos. Not durable.
 #[derive(Default)]
 pub struct MemoryStorage {
+    transaction_locks: std::sync::Mutex<HashMap<TransactionKey, std::sync::Weak<tokio::sync::Mutex<()>>>>,
     inner: RwLock<MemoryInner>,
 }
 
@@ -917,6 +938,7 @@ struct MemoryOutbound {
 }
 
 struct MemoryInner {
+    requests: HashMap<TransactionKey, Value>,
     transactions: HashMap<TransactionKey, Value>,
     events: HashMap<String, Event>,
     accounts: HashMap<String, Account>,
@@ -979,6 +1001,7 @@ impl Default for MemoryInner {
     fn default() -> Self {
         Self {
             events: HashMap::new(),
+            requests: HashMap::new(),
             transactions: HashMap::new(),
             accounts: HashMap::new(),
             devices: HashMap::new(),
@@ -1016,6 +1039,30 @@ impl Default for MemoryInner {
 
 #[async_trait]
 impl Storage for MemoryStorage {
+    async fn lock_transaction(&self, key: &TransactionKey) -> Result<Box<dyn TransactionGuard>> {
+        let lock = {
+            let mut locks = self.transaction_locks.lock().map_err(|_| crate::Error::Storage("transaction lock registry poisoned".into()))?;
+            locks.retain(|_, value| value.strong_count() > 0);
+            let lock = locks.get(key).and_then(std::sync::Weak::upgrade)
+                .unwrap_or_else(|| std::sync::Arc::new(tokio::sync::Mutex::new(())));
+            locks.insert(key.clone(), std::sync::Arc::downgrade(&lock));
+            lock
+        };
+        Ok(Box::new(lock.lock_owned().await))
+    }
+
+    async fn transaction_original(&self, key: &TransactionKey) -> Result<Option<Value>> {
+        Ok(self.inner.read().await.requests.get(key).cloned())
+    }
+
+    async fn transaction_request(&self, key: &TransactionKey, request: &Value) -> Result<Value> {
+        Ok(self.inner.write().await.requests.entry(key.clone()).or_insert_with(|| request.clone()).clone())
+    }
+
+    async fn finish_transaction(&self, key: &TransactionKey, result: &Value) -> Result<Value> {
+        Ok(self.inner.write().await.transactions.entry(key.clone()).or_insert_with(|| result.clone()).clone())
+    }
+
     async fn transaction_result(&self, key: &TransactionKey) -> Result<Option<Value>> {
         Ok(self.inner.read().await.transactions.get(key).cloned())
     }
@@ -2626,6 +2673,31 @@ impl Storage for MemoryStorage {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn replay_lock_cancellation_retains_original_request_and_result() {
+        let store = std::sync::Arc::new(MemoryStorage::default());
+        let key = TransactionKey::federation_request("peer.test", "once");
+        let guard = store.lock_transaction(&key).await.unwrap();
+        assert_eq!(store.transaction_request(&key, &json!({"first": 1})).await.unwrap(), json!({"first": 1}));
+        let other = store.clone();
+        let other_key = key.clone();
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let waiter = tokio::spawn(async move {
+            started.send(()).unwrap();
+            other.lock_transaction(&other_key).await.unwrap()
+        });
+        ready.await.unwrap();
+        tokio::task::yield_now().await;
+        assert!(!waiter.is_finished());
+        waiter.abort();
+        assert!(waiter.await.is_err());
+        drop(guard);
+        let _guard = tokio::time::timeout(std::time::Duration::from_secs(1), store.lock_transaction(&key)).await.unwrap().unwrap();
+        assert_eq!(store.transaction_request(&key, &json!({"changed": 2})).await.unwrap(), json!({"first": 1}));
+        store.finish_transaction(&key, &json!({"original": 3})).await.unwrap();
+        assert_eq!(store.finish_transaction(&key, &json!({"changed": 4})).await.unwrap(), json!({"original": 3}));
+    }
 
     #[tokio::test]
     async fn atomic_to_device_delivery_is_scoped_and_does_not_reexpand_retries() {

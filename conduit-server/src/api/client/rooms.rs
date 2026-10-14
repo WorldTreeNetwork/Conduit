@@ -325,23 +325,52 @@ pub async fn send_message_event<S: AuthState + conduit::room::RoomEventSender>(
     State(state): State<S>,
     authed: AuthedUser,
     Path((room_id, event_type, txn_id)): Path<(String, String, String)>,
-    Json(content): Json<Value>,
+    request: axum::extract::Request,
 ) -> Response {
-    let key = conduit::storage::TransactionKey::client(&authed.user_id, &authed.device_id,
-        &["room_send", &room_id, &event_type], &txn_id);
-    match state.storage().transaction_result(&key).await {
-        Ok(Some(result)) => return (StatusCode::OK, Json(result)).into_response(),
-        Ok(None) => {},
-        Err(error) => return MatrixError::unknown(error.to_string()).into_response(),
+    let key = conduit::storage::TransactionKey::client(
+        &authed.user_id,
+        &authed.device_id,
+        &["room_send", &room_id, &event_type],
+        &txn_id,
+    );
+    let mut replay = match crate::replay::Replay::start(state.storage().clone(), key.clone()).await
+    {
+        Ok(crate::replay::Start::Cached(response)) => return response,
+        Ok(crate::replay::Start::Execute(replay)) => replay,
+        Err(error) => return error,
+    };
+    let content = match replay.body(request).await {
+        Ok(body) => body,
+        Err(error) => return error,
+    };
+    if !content.is_object() || conduit::canonical_json::to_canonical_bytes(&content).is_err() {
+        return replay.finish(StatusCode::BAD_REQUEST, json!({"errcode": "M_BAD_JSON", "error": "event content must be a canonical JSON object"})).await;
     }
     match super::event_pipeline::build_sign_and_persist_transaction(
-        &state, &authed.user_id, &room_id, &event_type, content, &key,
-    ).await {
-        Ok(event_id) => (StatusCode::OK, Json(json!({"event_id": event_id}))).into_response(),
-        Err(error) => error.into_response(),
+        &state,
+        &authed.user_id,
+        &room_id,
+        &event_type,
+        content,
+        &key,
+    )
+    .await
+    {
+        Ok(event_id) => {
+            replay
+                .finish(StatusCode::OK, json!({"event_id": event_id}))
+                .await
+        }
+        Err((code, error)) => {
+            replay
+                .finish(
+                    code,
+                    serde_json::to_value(error.0).expect("Matrix error serializes"),
+                )
+                .await
+        }
     }
 }
-
 // ---------------------------------------------------------------------------
 // PUT /rooms/:roomId/state/:eventType  (empty state_key)
 // PUT /rooms/:roomId/state/:eventType/:stateKey

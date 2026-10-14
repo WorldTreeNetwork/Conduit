@@ -293,17 +293,25 @@ def main():
         with (root / "synapse.signing.key").open() as key_file:
             signing_key = read_signing_keys(key_file)[0]
 
-        def raw_edu(transaction, message_id, sender, text):
+        def raw_transaction(transaction, body, status=200):
             path = f"/_matrix/federation/v1/send/{transaction}"
-            body = {"origin": synapse_name, "origin_server_ts": int(time.time() * 1000), "pdus": [],
-                    "edus": [{"edu_type": "m.direct_to_device", "content": {
-                        "sender": sender, "type": "m.test", "message_id": message_id,
-                        "messages": {alice["user_id"]: {"*": {"body": text}}}}}]}
             signed = sign_json({"method": "PUT", "uri": path, "origin": synapse_name,
                                 "destination": conduit_name, "content": body}, synapse_name, signing_key)
             key_id, signature = next(iter(signed["signatures"][synapse_name].items()))
             auth = f'X-Matrix origin="{synapse_name}",destination="{conduit_name}",key="{key_id}",sig="{signature}"'
-            request("conduit", "PUT", path, body=body, extra_headers={"Authorization": auth})
+            return request("conduit", "PUT", path, body=body, status=status, extra_headers={"Authorization": auth})
+
+        def edu(message_id, text):
+            return {"edu_type": "m.direct_to_device", "content": {"sender": bob["user_id"],
+                "type": "m.test", "message_id": message_id, "messages": {alice["user_id"]: {"*": {"body": text}}}}}
+
+        def transaction_body(edus):
+            return {"origin": synapse_name, "origin_server_ts": int(time.time() * 1000), "pdus": [], "edus": edus}
+
+        def raw_edu(transaction, message_id, sender, text):
+            message = edu(message_id, text)
+            message["content"]["sender"] = sender
+            return raw_transaction(transaction, transaction_body([message]))
 
         raw_edu("raw-1", "😀" * 32, bob["user_id"], "Unicode ID")
         receive("conduit", bob["user_id"], "Unicode ID")
@@ -316,6 +324,46 @@ def main():
         raw_edu("raw-5", "spoof", bob["user_id"], "Valid sender after rejected spoof")
         receive("conduit", bob["user_id"], "Valid sender after rejected spoof")
         print("Independent signature, EDU replay, Unicode length and origin assertions passed", flush=True)
+
+        original = raw_edu("frozen", "frozen-1", bob["user_id"], "Frozen request")
+        receive("conduit", bob["user_id"], "Frozen request")
+        stop(conduit_process)
+        conduit_process = start_conduit()
+        assert raw_edu("frozen", "frozen-2", bob["user_id"], "Changed HTTP transaction") == original
+        assert request("conduit", "GET", "/_matrix/client/v3/sync?since=" + urllib.parse.quote(cursors["conduit"], safe=""), tokens["conduit"]).get("to_device", {}).get("events", []) == []
+
+        checked(["psql", "--no-psqlrc", database_url, "-v", "ON_ERROR_STOP=1", "-c", """
+            CREATE FUNCTION fail_second_delivery() RETURNS trigger AS $$
+            BEGIN
+                IF NEW.content->>'body' = 'Second original' THEN RAISE EXCEPTION 'injected delivery failure'; END IF;
+                RETURN NEW;
+            END;
+            $$ LANGUAGE plpgsql;
+            CREATE TRIGGER fail_second_delivery BEFORE INSERT ON to_device_queue
+                FOR EACH ROW EXECUTE FUNCTION fail_second_delivery();
+        """])
+        body = transaction_body([edu("partial-1", "First original"), edu("partial-2", "Second original")])
+        raw_transaction("partial", body, status=500)
+        receive("conduit", bob["user_id"], "First original")
+        stop(conduit_process)
+        checked(["psql", "--no-psqlrc", database_url, "-v", "ON_ERROR_STOP=1", "-c", "DROP TRIGGER fail_second_delivery ON to_device_queue"])
+        conduit_process = start_conduit()
+        raw_transaction("partial", transaction_body([edu("replacement", "Unwanted replacement")]))
+        receive("conduit", bob["user_id"], "Second original")
+        print("Whole HTTP transaction replay and interrupted original-body recovery passed", flush=True)
+
+        for transaction, body in [
+            ("too-many-edus", transaction_body([{"edu_type": "unknown", "content": {}}] * 101)),
+            ("too-many-pdus", dict(transaction_body([]), pdus=[{}] * 51)),
+            ("missing-time", {"origin": synapse_name, "pdus": []}),
+            ("wrong-origin", dict(transaction_body([]), origin="forged.test")),
+        ]:
+            raw_transaction(transaction, body, status=400)
+        raw_transaction("maximum-edus", transaction_body([{"edu_type": "unknown", "content": {}}] * 100))
+        large = dict(transaction_body([]), pdus=[{"unknown": "x" * 60_000}] * 50)
+        result = raw_transaction("large-frame", large)
+        assert len(result["pdus"]) == 50
+        print("Federation required fields, count limits and >2MB frame assertions passed", flush=True)
 
 
 if __name__ == "__main__":

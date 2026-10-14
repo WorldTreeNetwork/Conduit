@@ -102,11 +102,11 @@
       ],
       "status": "covered_assertions_only",
       "limitations": [
-        "Whole HTTP transaction and rejected-response replay remain open; peer testing covers to-device messaging, not all federation surfaces"
+        "Full federation surfaces and commit-order/snapshot consistency remain open"
       ],
       "gap_issues": [
-        "conduit-y99.10.2",
-        "conduit-y99.4.2"
+        "conduit-y99.4.2",
+        "conduit-y99.16"
       ]
     },
     {
@@ -313,7 +313,12 @@
         "Concurrent retries have one committed effect",
         "Scope includes user, device and complete logical endpoint",
         "Retries survive restart and do not reexpand wildcard recipients",
-        "Failed writes roll back deduplication and all effects"
+        "Failed writes roll back deduplication and all effects",
+        "Definitive rejected responses survive permission changes and restart",
+        "Completed responses replay before later body validation",
+        "Authentication still rejects revoked credentials before cached reply",
+        "A new access token for the same device retains replay scope",
+        "Interrupted body reads remain retryable"
       ],
       "implementation": [
         "conduit/src/storage.rs",
@@ -327,15 +332,17 @@
         "conduit-server/tests/production_e2e.rs::production_to_device_transactions_are_durable_and_do_not_reexpand_wildcards",
         "conduit-server/tests/storage_pg.rs::device_transaction_rolls_back_deduplication_local_and_remote_effects_together",
         "conduit-server/tests/storage_pg.rs::event_transaction_is_atomic_and_original_result_survives_pool_restart",
-        "conduit/src/storage.rs::tests::atomic_to_device_delivery_is_scoped_and_does_not_reexpand_retries"
+        "conduit/src/storage.rs::tests::atomic_to_device_delivery_is_scoped_and_does_not_reexpand_retries",
+        "conduit-server/tests/production_e2e.rs::production_rejected_transaction_replays_after_permissions_change",
+        "conduit-server/tests/production_e2e.rs::production_completed_transaction_is_replayed_before_body_validation",
+        "conduit-server/tests/production_e2e.rs::production_interrupted_body_does_not_freeze_a_transaction"
       ],
       "limitations": [
-        "Rejected HTTP response replay and complete transaction-front-door semantics remain unproven",
-        "Event authorization/state publication is still outside the storage commit"
+        "Event authorization/state publication and stream commit ordering need their separate audits"
       ],
       "gap_issues": [
-        "conduit-y99.10.2",
-        "conduit-embed-persist"
+        "conduit-embed-persist",
+        "conduit-y99.16"
       ]
     },
     {
@@ -350,7 +357,11 @@
         "Inbound sender domain matches the verified origin",
         "Message-ID deduplication survives different enclosing transactions and restart",
         "Queued remote delivery recovers after an unavailable peer and restart",
-        "Pinned live Synapse produces and consumes both directions over verified TLS"
+        "Pinned live Synapse produces and consumes both directions over verified TLS",
+        "Whole enclosing HTTP transactions pin the first authenticated body and final response",
+        "A partial batch resumes only its unfinished original messages after transient failure and restart",
+        "Required origin/timestamp/PDUs and 50-PDU/100-EDU limits are enforced",
+        "Transport permits >2 MB batches within the 16 MB signed-body limit"
       ],
       "implementation": [
         "conduit-server/src/api/client/keys.rs",
@@ -362,12 +373,10 @@
         "conduit-server/tests/peers/run_synapse_to_device.sh"
       ],
       "limitations": [
-        "Whole enclosing federation transaction replay remains open",
-        "Legacy queued to-device rows without sender metadata cannot be converted into valid EDUs",
-        "Full federation PDU/room-version/auth/peer conformance is not proven"
+        "Legacy senderless queued rows cannot be converted into valid EDUs",
+        "Full federation PDU/room-version/auth/peer conformance remains unproven"
       ],
       "gap_issues": [
-        "conduit-y99.10.2",
         "conduit-y99.4.2",
         "conduit-embed-pdu"
       ]
@@ -390,6 +399,61 @@
       "tests": [
         "conduit-server/tests/production_e2e.rs::production_startup_rejects_missing_or_invalid_private_ca",
         "conduit-server/tests/peers/run_synapse_to_device.sh"
+      ]
+    },
+    {
+      "id": "transaction-replay-serialization-and-recovery",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#transaction-identifiers",
+      "status": "covered_assertions_only",
+      "assertions": [
+        "Replay identities serialize across PG storage instances",
+        "Cancellation releases request guards",
+        "Lifetime locks do not starve the data connection pool",
+        "The first request and completed result remain immutable",
+        "HTTP status/parsing stay in the host, outside the pure kernel storage API",
+        "Transient failures retry the original request rather than freezing an error"
+      ],
+      "implementation": [
+        "conduit-server/src/replay.rs",
+        "conduit-server/src/storage_pg.rs",
+        "conduit/src/storage.rs"
+      ],
+      "tests": [
+        "conduit-server/tests/storage_pg.rs::transaction_guards_serialize_instances_without_starving_a_single_connection_pool",
+        "conduit/src/storage.rs::tests::replay_lock_cancellation_retains_original_request_and_result",
+        "conduit-server/tests/peers/run_synapse_to_device.sh"
+      ],
+      "limitations": [
+        "Independent peer coverage here is limited to the named transaction/EDU assertions; complete protocol coverage remains open"
+      ],
+      "gap_issues": [
+        "conduit-y99.3",
+        "conduit-y99.4.2"
+      ]
+    },
+    {
+      "id": "bounded-capability-evaluation-under-load",
+      "role": "homeserver-authentication",
+      "source": "conduit/src/agency.rs",
+      "status": "covered_assertions_only",
+      "assertions": [
+        "Both claims queries and authorization use a bounded 50ms wall-clock evaluation budget",
+        "Default generated-fact and iteration bounds remain in force",
+        "Valid tokens verify under parallel load",
+        "Expiry, epoch, trust and attenuation rejection tests remain green",
+        "Oversized rule-generated fact sets fail closed"
+      ],
+      "implementation": [
+        "conduit/src/agency.rs"
+      ],
+      "tests": [
+        "conduit/src/agency.rs::tests::valid_tokens_verify_under_parallel_load",
+        "conduit/src/agency.rs::tests::oversized_datalog_grants_still_fail_closed",
+        "conduit/src/agency.rs::tests"
+      ],
+      "limitations": [
+        "These tests cover the current capability backend; they do not prove every Matrix login/session flow"
       ]
     }
   ]

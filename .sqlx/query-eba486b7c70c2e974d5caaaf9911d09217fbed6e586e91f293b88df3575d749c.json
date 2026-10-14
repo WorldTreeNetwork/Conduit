@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO transactions (scope, owner, endpoint, txn_id, result)\n            VALUES ($1, $2, $3, $4, $5)\n            ON CONFLICT (scope, owner, endpoint, txn_id) DO UPDATE\n                SET result = COALESCE(transactions.result, EXCLUDED.result)\n            RETURNING result",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "result",
+        "type_info": "Jsonb"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Jsonb"
+      ]
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "eba486b7c70c2e974d5caaaf9911d09217fbed6e586e91f293b88df3575d749c"
+}
