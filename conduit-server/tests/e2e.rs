@@ -178,7 +178,7 @@ fn build_router(state: TestState) -> Router {
         .route("/_matrix/client/v3/register", post(auth::register::<TestState>))
         .route(
             "/_matrix/client/v3/login",
-            get(auth::get_login_flows).post(auth::login::<TestState>),
+            get(auth::get_login_flows::<TestState>).post(auth::login::<TestState>),
         )
         .route("/_matrix/client/v3/logout", post(auth::logout::<TestState>))
         .route("/_matrix/client/v3/account/whoami", get(auth::whoami))

@@ -187,7 +187,7 @@ fn build_router(state: TestState) -> Router {
         .route("/_matrix/client/v3/register", post(auth::register::<TestState>))
         .route(
             "/_matrix/client/v3/login",
-            get(auth::get_login_flows).post(auth::login::<TestState>),
+            get(auth::get_login_flows::<TestState>).post(auth::login::<TestState>),
         )
         .route("/_matrix/client/v3/createRoom", post(rooms::create_room::<TestState>))
         .route("/_matrix/client/v3/join/:roomIdOrAlias", post(rooms::join_room::<TestState>))
