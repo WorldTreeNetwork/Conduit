@@ -30,6 +30,9 @@ use conduit::storage::Storage;
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AsRegistration {
     pub id: String,
+    /// `null` (or absent) means the AS has no URL: the homeserver never
+    /// pushes to it, and `/appservice/{id}/ping` answers `M_URL_NOT_SET`.
+    #[serde(default, deserialize_with = "null_as_empty")]
     pub url: String,
     pub as_token: String,
     pub hs_token: String,
@@ -38,6 +41,13 @@ pub struct AsRegistration {
     pub rate_limited: bool,
     #[serde(default)]
     pub namespaces: AsNamespaces,
+    /// Third-party protocols the AS bridges (`GET /thirdparty/protocols`).
+    #[serde(default)]
+    pub protocols: Vec<String>,
+}
+
+fn null_as_empty<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    Ok(Option::<String>::deserialize(d)?.unwrap_or_default())
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -71,6 +81,8 @@ pub struct AppService {
     pub user_namespaces: Vec<(bool, Regex)>,
     pub alias_namespaces: Vec<(bool, Regex)>,
     pub room_namespaces: Vec<(bool, Regex)>,
+    /// Third-party protocols this AS bridges (registration `protocols`).
+    pub protocols: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -152,6 +164,7 @@ fn compile_registration(reg: AsRegistration) -> Result<AppService, String> {
         user_namespaces: compile(&reg.namespaces.users)?,
         alias_namespaces: compile(&reg.namespaces.aliases)?,
         room_namespaces: compile(&reg.namespaces.rooms)?,
+        protocols: reg.protocols,
     })
 }
 
@@ -497,6 +510,10 @@ pub fn spawn_as_workers(
 
     // Spawn a flush task per AS.
     for svc in services.iter() {
+        if svc.url.is_empty() {
+            // `url: null` — the AS receives nothing from us.
+            continue;
+        }
         let svc_id = svc.id.clone();
         let svc_url = svc.url.clone();
         let hs_token = svc.hs_token.clone();
@@ -563,6 +580,7 @@ mod tests {
             user_namespaces: vec![(true, Regex::new(ns).unwrap())],
             alias_namespaces: vec![(true, Regex::new(ns).unwrap())],
             room_namespaces: vec![],
+            protocols: vec![],
         }
     }
 

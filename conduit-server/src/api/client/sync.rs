@@ -916,6 +916,7 @@ async fn stripped_membership_preview(
             event.event_type.as_str(),
             "m.room.create"
                 | "m.room.name"
+                | "m.room.topic"
                 | "m.room.avatar"
                 | "m.room.canonical_alias"
                 | "m.room.join_rules"

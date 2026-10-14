@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                SELECT room_id AS \"room_id!\" FROM room_directory\n                UNION\n                SELECT room_id FROM appservice_room_directory\n                ORDER BY 1\n                ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "room_id!",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "4bc51dc2d36f3dac3cfc49971ffd1242d91461b451dc53aba9ce2a3e39920e38"
+}

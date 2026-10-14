@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO room_directory (room_id) VALUES ($1) ON CONFLICT (room_id) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "1fc73294db9bac340ed06424c5b15304f801e94fa4f55c13d139f990657d6370"
+}

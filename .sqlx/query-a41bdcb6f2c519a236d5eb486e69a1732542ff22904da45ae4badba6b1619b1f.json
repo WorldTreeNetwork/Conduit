@@ -1,0 +1,36 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            WITH joined AS (\n                SELECT rcs.room_id, rcs.state_key AS user_id,\n                       e.content->>'displayname' AS member_name,\n                       e.content->>'avatar_url'  AS member_avatar\n                FROM room_current_state rcs\n                JOIN events e ON e.event_id = rcs.event_id\n                WHERE rcs.type = 'm.room.member'\n                  AND e.content->>'membership' = 'join'\n            ),\n            shared_rooms AS (\n                SELECT room_id FROM joined WHERE user_id = $1\n            ),\n            visible_rooms AS (\n                SELECT room_id FROM shared_rooms\n                UNION\n                SELECT rcs.room_id\n                FROM room_current_state rcs\n                JOIN events e ON e.event_id = rcs.event_id\n                WHERE rcs.state_key = ''\n                  AND ((rcs.type = 'm.room.join_rules'\n                        AND e.content->>'join_rule' = 'public')\n                    OR (rcs.type = 'm.room.history_visibility'\n                        AND e.content->>'history_visibility' = 'world_readable'))\n            ),\n            candidates AS (\n                SELECT j.user_id,\n                       bool_or(j.room_id IN (SELECT room_id FROM shared_rooms)) AS shared,\n                       min(j.member_name)   AS member_name,\n                       min(j.member_avatar) AS member_avatar\n                FROM joined j\n                WHERE j.room_id IN (SELECT room_id FROM visible_rooms)\n                GROUP BY j.user_id\n            )\n            SELECT c.user_id AS \"user_id!\",\n                   COALESCE(a.displayname, c.member_name) AS display_name,\n                   COALESCE(a.avatar_url, c.member_avatar) AS avatar_url\n            FROM candidates c\n            LEFT JOIN accounts a ON a.user_id = c.user_id\n            WHERE a.deactivated_at IS NULL\n              AND (strpos(lower(c.user_id), lower($2)) > 0\n                   OR strpos(lower(COALESCE(a.displayname, c.member_name, '')), lower($2)) > 0)\n            ORDER BY c.shared DESC, c.user_id\n            LIMIT $3\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_id!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "display_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "avatar_url",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      null,
+      null
+    ]
+  },
+  "hash": "a41bdcb6f2c519a236d5eb486e69a1732542ff22904da45ae4badba6b1619b1f"
+}

@@ -17,8 +17,9 @@ use conduit::{
     Error, Result,
     event::Event,
     storage::{
-        Account, AuditEntry, Device, DlqEntry, MediaMetadata, OutboundEntry, Pusher, PushRule,
-        RoomKeyVersion, SigningKey, Storage, ThumbnailMetadata, ToDeviceMessage, TokenOwner,
+        Account, AuditEntry, Device, DirectoryScope, DlqEntry, MediaMetadata, OutboundEntry,
+        Pusher, PushRule, RoomKeyVersion, SigningKey, Storage, ThumbnailMetadata,
+        ToDeviceMessage, TokenOwner, UserDirectoryEntry,
     },
 };
 
@@ -3037,5 +3038,189 @@ impl Storage for PostgresStorage {
             use sqlx::Row;
             r.get::<Option<String>, _>("server").unwrap_or_default()
         }).collect())
+    }
+
+    // -----------------------------------------------------------------------
+    // Published room directory & user directory (conduit-y99.20)
+    // -----------------------------------------------------------------------
+
+    async fn set_room_published(&self, room_id: &str, published: bool) -> Result<()> {
+        if published {
+            sqlx::query!(
+                r#"INSERT INTO room_directory (room_id) VALUES ($1) ON CONFLICT (room_id) DO NOTHING"#,
+                room_id,
+            )
+            .execute(&self.pool)
+            .await
+            .map_err(map_sqlx)?;
+        } else {
+            sqlx::query!(r#"DELETE FROM room_directory WHERE room_id = $1"#, room_id)
+                .execute(&self.pool)
+                .await
+                .map_err(map_sqlx)?;
+        }
+        Ok(())
+    }
+
+    async fn is_room_published(&self, room_id: &str) -> Result<bool> {
+        let row = sqlx::query!(
+            r#"SELECT EXISTS (SELECT 1 FROM room_directory WHERE room_id = $1) AS "published!""#,
+            room_id,
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(row.published)
+    }
+
+    async fn set_appservice_room_published(
+        &self,
+        appservice_id: &str,
+        network_id: &str,
+        room_id: &str,
+        published: bool,
+    ) -> Result<()> {
+        if published {
+            sqlx::query!(
+                r#"
+                INSERT INTO appservice_room_directory (appservice_id, network_id, room_id)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (appservice_id, network_id, room_id) DO NOTHING
+                "#,
+                appservice_id,
+                network_id,
+                room_id,
+            )
+            .execute(&self.pool)
+            .await
+            .map_err(map_sqlx)?;
+        } else {
+            sqlx::query!(
+                r#"
+                DELETE FROM appservice_room_directory
+                WHERE appservice_id = $1 AND network_id = $2 AND room_id = $3
+                "#,
+                appservice_id,
+                network_id,
+                room_id,
+            )
+            .execute(&self.pool)
+            .await
+            .map_err(map_sqlx)?;
+        }
+        Ok(())
+    }
+
+    async fn published_rooms(&self, scope: &DirectoryScope) -> Result<Vec<String>> {
+        let rows = match scope {
+            DirectoryScope::Local => sqlx::query_scalar!(
+                r#"SELECT room_id AS "room_id!" FROM room_directory ORDER BY room_id"#
+            )
+            .fetch_all(&self.pool)
+            .await,
+            DirectoryScope::AllNetworks => sqlx::query_scalar!(
+                r#"
+                SELECT room_id AS "room_id!" FROM room_directory
+                UNION
+                SELECT room_id FROM appservice_room_directory
+                ORDER BY 1
+                "#
+            )
+            .fetch_all(&self.pool)
+            .await,
+            DirectoryScope::Network { appservice_id, network_id } => sqlx::query_scalar!(
+                r#"
+                SELECT room_id AS "room_id!" FROM appservice_room_directory
+                WHERE appservice_id = $1 AND network_id = $2
+                ORDER BY room_id
+                "#,
+                appservice_id,
+                network_id,
+            )
+            .fetch_all(&self.pool)
+            .await,
+        };
+        rows.map_err(map_sqlx)
+    }
+
+    async fn alias_creator(&self, alias: &str) -> Result<Option<String>> {
+        let row = sqlx::query!(r#"SELECT creator FROM room_aliases WHERE alias = $1"#, alias)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(map_sqlx)?;
+        Ok(row.map(|r| r.creator))
+    }
+
+    async fn search_user_directory(
+        &self,
+        requester: &str,
+        term: &str,
+        limit: i64,
+    ) -> Result<Vec<UserDirectoryEntry>> {
+        // Joined member state per room, the rooms the requester can "see"
+        // members of (shared, public join rule, world-readable history),
+        // then one row per user with the account profile preferred over
+        // the per-room member event profile.
+        let rows = sqlx::query!(
+            r#"
+            WITH joined AS (
+                SELECT rcs.room_id, rcs.state_key AS user_id,
+                       e.content->>'displayname' AS member_name,
+                       e.content->>'avatar_url'  AS member_avatar
+                FROM room_current_state rcs
+                JOIN events e ON e.event_id = rcs.event_id
+                WHERE rcs.type = 'm.room.member'
+                  AND e.content->>'membership' = 'join'
+            ),
+            shared_rooms AS (
+                SELECT room_id FROM joined WHERE user_id = $1
+            ),
+            visible_rooms AS (
+                SELECT room_id FROM shared_rooms
+                UNION
+                SELECT rcs.room_id
+                FROM room_current_state rcs
+                JOIN events e ON e.event_id = rcs.event_id
+                WHERE rcs.state_key = ''
+                  AND ((rcs.type = 'm.room.join_rules'
+                        AND e.content->>'join_rule' = 'public')
+                    OR (rcs.type = 'm.room.history_visibility'
+                        AND e.content->>'history_visibility' = 'world_readable'))
+            ),
+            candidates AS (
+                SELECT j.user_id,
+                       bool_or(j.room_id IN (SELECT room_id FROM shared_rooms)) AS shared,
+                       min(j.member_name)   AS member_name,
+                       min(j.member_avatar) AS member_avatar
+                FROM joined j
+                WHERE j.room_id IN (SELECT room_id FROM visible_rooms)
+                GROUP BY j.user_id
+            )
+            SELECT c.user_id AS "user_id!",
+                   COALESCE(a.displayname, c.member_name) AS display_name,
+                   COALESCE(a.avatar_url, c.member_avatar) AS avatar_url
+            FROM candidates c
+            LEFT JOIN accounts a ON a.user_id = c.user_id
+            WHERE a.deactivated_at IS NULL
+              AND (strpos(lower(c.user_id), lower($2)) > 0
+                   OR strpos(lower(COALESCE(a.displayname, c.member_name, '')), lower($2)) > 0)
+            ORDER BY c.shared DESC, c.user_id
+            LIMIT $3
+            "#,
+            requester,
+            term,
+            limit.max(0),
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(rows
+            .into_iter()
+            .map(|r| UserDirectoryEntry {
+                user_id: r.user_id,
+                display_name: r.display_name,
+                avatar_url: r.avatar_url,
+            })
+            .collect())
     }
 }

@@ -73,6 +73,8 @@ pub struct CreateRoomRequest {
     pub is_direct: Option<bool>,
     pub room_version: Option<String>,
     pub power_level_content_override: Option<Value>,
+    /// Extra keys for the `m.room.create` content (e.g. `type: m.space`).
+    pub creation_content: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -102,6 +104,32 @@ pub async fn create_room<S: AuthState>(
     // Determine join_rule and history_visibility from preset / visibility.
     let (join_rule, history_visibility) = resolve_preset(&body);
 
+    // The requested alias must be free before anything is created
+    // (`400 M_ROOM_IN_USE`), per the createRoom spec.
+    let alias = match body.room_alias_name.as_deref() {
+        None => None,
+        Some(name) if name.is_empty() || name.contains(':') || name.chars().any(char::is_whitespace) => {
+            return (StatusCode::BAD_REQUEST, Json(json!({
+                "errcode": "M_INVALID_PARAM",
+                "error": "room_alias_name must be a non-empty localpart",
+            }))).into_response();
+        }
+        Some(name) => {
+            let alias = format!("#{name}:{server_name}");
+            match state.storage().get_room_for_alias(&alias).await {
+                Ok(None) => Some(alias),
+                Ok(Some(_)) => {
+                    return (StatusCode::BAD_REQUEST, Json(json!({
+                        "errcode": "M_ROOM_IN_USE",
+                        "error": "Room alias already taken",
+                    }))).into_response();
+                }
+                Err(e) => return MatrixError::unknown(e.to_string()).into_response(),
+            }
+        }
+    };
+    let publish = body.visibility.as_deref() == Some("public");
+
     // Build create-room parameters.
     let params = CreateRoomParams {
         name: body.name.as_deref(),
@@ -112,6 +140,7 @@ pub async fn create_room<S: AuthState>(
             content: ev.content,
         }).collect(),
         power_level_content_override: body.power_level_content_override.clone(),
+        creation_content: body.creation_content.clone(),
     };
 
     // Delegate room creation to the Room struct.
@@ -131,21 +160,39 @@ pub async fn create_room<S: AuthState>(
         }
     }
 
-    // Bind alias if `room_alias_name` was supplied.
-    if let Some(alias_name) = body.room_alias_name.as_deref() {
-        let alias = format!("#{alias_name}:{}", state.server_name());
-        if let Err(e) = state
-            .storage()
-            .upsert_alias(&alias, &room_id, sender)
-            .await
-        {
-            // Alias collision is non-fatal per spec — log and continue.
-            tracing::warn!(
+    // Bind alias if `room_alias_name` was supplied, and make it the
+    // room's canonical alias so directory listings carry it.
+    if let Some(alias) = alias {
+        match state.storage().upsert_alias(&alias, &room_id, sender).await {
+            Ok(()) => {
+                let room = Room::new(&room_id);
+                if let Err(e) = room
+                    .send_state_event(
+                        sender,
+                        "m.room.canonical_alias",
+                        "",
+                        json!({ "alias": alias }),
+                        &RoomEventSenderWrapper(&state),
+                    )
+                    .await
+                {
+                    tracing::warn!(room_id, alias, error = %e, "createRoom: canonical alias failed");
+                }
+            }
+            // Lost a race for the alias after the up-front check.
+            Err(e) => tracing::warn!(
                 room_id,
                 alias,
                 error = %e,
                 "createRoom: room_alias_name binding failed"
-            );
+            ),
+        }
+    }
+
+    // `visibility: public` publishes the room in the room directory.
+    if publish {
+        if let Err(e) = state.storage().set_room_published(&room_id, true).await {
+            return MatrixError::unknown(e.to_string()).into_response();
         }
     }
 

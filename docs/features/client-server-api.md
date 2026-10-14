@@ -121,3 +121,35 @@ remainder. Lazy state selects the syncing user and timeline senders, preserving
 historical membership events with different event IDs. Redundant sender memberships
 may still be resent, as permitted by the specification. Further federation-format
 and state/ephemeral limit edge auditing remains under `conduit-y99.13.4`.
+
+## Directories and knocking
+
+Implemented in `room_directory.rs`, `directory.rs`, `user_directory.rs` and
+`knock.rs` (conduit-y99.20); journeys in `tests/production_directory.rs`.
+
+- **Published room directory.** `room_directory` (local) and
+  `appservice_room_directory` (per AS network) tables, migration 0030.
+  `createRoom` with `visibility: public` publishes. `/publicRooms` builds
+  each chunk from current state (`room_chunk`), filters
+  (`generic_search_term` over name/topic/aliases/room ID, `room_types` with
+  `null` = untyped), sorts largest-first then by room ID, and pages with
+  opaque offset tokens `n{offset}` / `p{offset}`. `include_all_networks`
+  adds AS network rooms; `third_party_instance_id` (`{as_id}|{network_id}`)
+  selects one network. `server=<remote>` proxies federation
+  `GET /publicRooms` and filters that page locally.
+- **Who may publish.** `PUT /directory/list/room/{roomId}` and alias
+  `DELETE` need a server admin or a joined member who could send
+  `m.room.canonical_alias` (`conduit::auth::may_send_state_event`). Alias
+  creators may always delete their own alias.
+- **Aliases.** Malformed or foreign aliases are `400 M_INVALID_PARAM`;
+  `createRoom` `room_alias_name` checks availability first
+  (`400 M_ROOM_IN_USE`) and then sets `m.room.canonical_alias`.
+- **User directory.** One SQL query: users joined to rooms the requester
+  shares, or rooms with `public` join rule or `world_readable` history;
+  account profile preferred over member-event profile; shared-room users
+  first; one extra row fetched to compute `limited`.
+- **Knocking.** `POST /knock/{roomIdOrAlias}` writes `membership: knock`
+  through the normal pipeline; v11 auth decides. Accept = invite (then
+  join), deny = kick, rescind = leave. `/sync` reports `rooms.knock` with
+  stripped `knock_state`. Federated knocks (`make_knock`/`send_knock`) are
+  not implemented.

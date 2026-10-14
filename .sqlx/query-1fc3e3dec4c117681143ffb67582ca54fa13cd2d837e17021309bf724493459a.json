@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                DELETE FROM appservice_room_directory\n                WHERE appservice_id = $1 AND network_id = $2 AND room_id = $3\n                ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "1fc3e3dec4c117681143ffb67582ca54fa13cd2d837e17021309bf724493459a"
+}

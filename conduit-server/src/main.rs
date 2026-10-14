@@ -692,6 +692,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             axum::routing::delete(admin_api::purge_federation_dlq::<AppState>))
         .route("/_matrix/conduit/admin/v1/audit",
             get(admin_api::get_audit_log::<AppState>))
+        // Directory, user directory, knock, third-party, AS ping (conduit-y99.20)
+        .merge(conduit_server::api::client::room_directory::router::<AppState>())
+        .merge(conduit_server::api::client::user_directory::router::<AppState>())
+        .merge(conduit_server::api::client::knock::router::<AppState>())
+        .merge(conduit_server::api::client::thirdparty::router::<AppState>())
+        .merge(conduit_server::api::client::appservice_ping::router::<AppState>())
         // Apply CS-API rate limiter to everything above (conduit-9m4).
         // Federation routes are nested below and use their own per-origin
         // limiter, so they bypass this one.

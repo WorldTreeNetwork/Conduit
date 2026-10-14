@@ -72,9 +72,6 @@ pub enum AuthError {
     #[error("invite rejected: target is already joined or banned")]
     InviteTargetAlreadyJoinedOrBanned,
 
-    #[error("kick/leave rejected: target is not in the room")]
-    TargetNotInRoom,
-
     #[error("insufficient power level: needed {needed}, sender has {sender_has}")]
     InsufficientPowerLevel { needed: i64, sender_has: i64 },
 
@@ -178,9 +175,10 @@ pub fn auth_event_keys(event: &Event) -> Vec<(String, String)> {
             if state_key != &event.sender {
                 keys.push(("m.room.member".to_owned(), state_key.clone()));
             }
-            // join_rules is needed when the membership target is joining.
+            // join_rules is needed for join, invite and knock (spec
+            // "Auth events selection").
             if let Ok(mc) = parse_member(&event.content) {
-                if mc.membership == Membership::Join || mc.membership == Membership::Invite {
+                if matches!(mc.membership, Membership::Join | Membership::Invite | Membership::Knock) {
                     keys.push(("m.room.join_rules".to_owned(), String::new()));
                 }
             }
@@ -540,9 +538,10 @@ fn check_member(
         // -------------------------------------------------------------------
         Membership::Leave => {
             if state_key == event.sender {
-                // Self-leave: sender must be invited or joined.
+                // Self-leave: allowed from invite (reject), join (leave)
+                // and knock (rescind), per the v11 rules.
                 match &sender_membership {
-                    Some(Membership::Invite) | Some(Membership::Join) => {}
+                    Some(Membership::Invite) | Some(Membership::Join) | Some(Membership::Knock) => {}
                     _ => {
                         return Err(AuthError::InvalidMemberTransition {
                             from: sender_membership.clone(),
@@ -556,12 +555,15 @@ fn check_member(
                     return Err(AuthError::SenderNotJoined);
                 }
 
-                // Target must currently be in the room.
-                if !matches!(
-                    &target_membership,
-                    Some(Membership::Join) | Some(Membership::Invite)
-                ) {
-                    return Err(AuthError::TargetNotInRoom);
+                // Unbanning (ban -> leave) additionally needs the ban level.
+                // Any other current membership — join, invite, knock (deny
+                // a knock), leave or none — is governed by the kick level
+                // alone, per the v11 rules.
+                if target_membership == Some(Membership::Ban) && sender_level < pl.ban {
+                    return Err(AuthError::InsufficientPowerLevel {
+                        needed: pl.ban,
+                        sender_has: sender_level,
+                    });
                 }
 
                 if sender_level < pl.kick {
@@ -620,10 +622,10 @@ fn check_member(
                 });
             }
 
-            // Cannot knock if banned or already joined.
+            // Cannot knock if banned, already invited, or already joined.
             if matches!(
                 &target_membership,
-                Some(Membership::Ban) | Some(Membership::Join)
+                Some(Membership::Ban) | Some(Membership::Invite) | Some(Membership::Join)
             ) {
                 return Err(AuthError::InvalidMemberTransition {
                     from: target_membership,
@@ -914,6 +916,21 @@ pub async fn require_read_access(
             "{user_id} is not a member of {room_id}"
         )))
     }
+}
+
+/// Is `user_id` joined to the room with enough power to send a state
+/// event of `event_type`?
+///
+/// The permission the published-room directory and alias deletion use:
+/// a user who could change `m.room.canonical_alias` may also change how
+/// the room is advertised.
+pub fn may_send_state_event(state: &StateMap<Event>, user_id: &str, event_type: &str) -> bool {
+    if get_membership(state, user_id) != Some(Membership::Join) {
+        return false;
+    }
+    let pl_event = state.get(&("m.room.power_levels".to_owned(), String::new()));
+    let level = user_power_level(user_id, pl_event, creator_id(state).as_deref());
+    level >= level_required_for_event(event_type, true, &get_pl_content(state))
 }
 
 /// Drop the events in `events` that `user_id` may not see, per the
@@ -1930,5 +1947,101 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(ours.len(), 2);
+    }
+
+    // -----------------------------------------------------------------------
+    // Knock membership rules (v7+ / v11), directory lane conduit-y99.20
+    // -----------------------------------------------------------------------
+
+    const KNOCKER: &str = "@kate:example.com";
+
+    fn knock_room(rule: &str) -> StateMap<Event> {
+        let mut state = base_state("@alice:example.com", "!k:example.com", rule);
+        apply_state_event(
+            &mut state,
+            &make_power_levels_event(
+                "$pl",
+                "@alice:example.com",
+                "!k:example.com",
+                json!({"kick": 50, "ban": 50, "invite": 0, "users": {"@alice:example.com": 100}}),
+            ),
+        );
+        state
+    }
+
+    fn member(sender: &str, target: &str, membership: &str) -> Event {
+        make_member_event("$m", sender, target, "!k:example.com", membership)
+    }
+
+    #[test]
+    fn knock_allowed_only_under_knock_join_rules() {
+        for rule in ["knock", "knock_restricted"] {
+            assert!(check_auth(&member(KNOCKER, KNOCKER, "knock"), &knock_room(rule)).is_ok(), "{rule}");
+        }
+        for rule in ["public", "invite", "restricted", "private"] {
+            assert!(check_auth(&member(KNOCKER, KNOCKER, "knock"), &knock_room(rule)).is_err(), "{rule}");
+        }
+    }
+
+    #[test]
+    fn knock_selects_join_rules_as_an_auth_event() {
+        let keys = auth_event_keys(&member(KNOCKER, KNOCKER, "knock"));
+        assert!(keys.contains(&("m.room.join_rules".to_owned(), String::new())));
+    }
+
+    #[test]
+    fn knock_on_behalf_of_another_user_rejected() {
+        let state = knock_room("knock");
+        assert!(check_auth(&member("@alice:example.com", KNOCKER, "knock"), &state).is_err());
+    }
+
+    #[test]
+    fn knock_rejected_when_banned_invited_or_joined() {
+        for current in ["ban", "invite", "join"] {
+            let mut state = knock_room("knock");
+            apply_state_event(&mut state, &member("@alice:example.com", KNOCKER, current));
+            assert!(check_auth(&member(KNOCKER, KNOCKER, "knock"), &state).is_err(), "{current}");
+        }
+        let mut state = knock_room("knock");
+        apply_state_event(&mut state, &member(KNOCKER, KNOCKER, "leave"));
+        assert!(check_auth(&member(KNOCKER, KNOCKER, "knock"), &state).is_ok());
+    }
+
+    #[test]
+    fn knocker_may_rescind_with_self_leave() {
+        let mut state = knock_room("knock");
+        apply_state_event(&mut state, &member(KNOCKER, KNOCKER, "knock"));
+        assert!(check_auth(&member(KNOCKER, KNOCKER, "leave"), &state).is_ok());
+    }
+
+    #[test]
+    fn knock_is_accepted_by_invite_and_denied_by_kick() {
+        let mut state = knock_room("knock");
+        apply_state_event(&mut state, &member(KNOCKER, KNOCKER, "knock"));
+        assert!(check_auth(&member("@alice:example.com", KNOCKER, "invite"), &state).is_ok());
+        assert!(check_auth(&member("@alice:example.com", KNOCKER, "leave"), &state).is_ok());
+        // A knocker may not join directly under `knock`; they need the invite.
+        assert!(check_auth(&member(KNOCKER, KNOCKER, "join"), &state).is_err());
+    }
+
+    #[test]
+    fn unban_requires_ban_level_as_well_as_kick_level() {
+        let mut state = knock_room("knock");
+        apply_state_event(
+            &mut state,
+            &make_member_event("$bob", "@bob:example.com", "@bob:example.com", "!k:example.com", "join"),
+        );
+        apply_state_event(
+            &mut state,
+            &make_power_levels_event(
+                "$pl2",
+                "@alice:example.com",
+                "!k:example.com",
+                json!({"kick": 50, "ban": 75, "users": {"@alice:example.com": 100, "@bob:example.com": 60}}),
+            ),
+        );
+        apply_state_event(&mut state, &member("@alice:example.com", KNOCKER, "ban"));
+        assert!(check_auth(&member("@bob:example.com", KNOCKER, "leave"), &state).is_err());
+        assert!(check_auth(&member("@alice:example.com", KNOCKER, "leave"), &state).is_ok());
     }
 }

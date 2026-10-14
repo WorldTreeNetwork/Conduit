@@ -8,10 +8,12 @@
 //!   GET  /_matrix/client/v3/account/whoami
 
 pub mod account_data;
+pub mod appservice_ping;
 pub mod directory;
 pub mod event_pipeline;
 pub mod filters;
 pub mod keys;
+pub mod knock;
 pub mod media;
 pub mod presence;
 pub mod probe;
@@ -19,11 +21,14 @@ pub mod rate_limit;
 pub mod profile;
 pub mod push;
 pub mod receipts;
+pub mod room_directory;
 pub mod rooms;
 pub mod sso;
 pub mod sync;
+pub mod thirdparty;
 pub mod typing;
 pub mod uia;
+pub mod user_directory;
 
 use std::collections::HashMap;
 use std::sync::Arc;

@@ -85,10 +85,12 @@ impl Room {
         let room_id = room_id;
 
         // 1. m.room.create
-        let content = json!({
-            "room_version": room_version,
-            "creator": sender,
-        });
+        let mut content = match &body.creation_content {
+            Some(Value::Object(extra)) => Value::Object(extra.clone()),
+            _ => json!({}),
+        };
+        content["room_version"] = json!(room_version);
+        content["creator"] = json!(sender);
         sender_.send_event(sender, room_id, "m.room.create", Some(""), content).await?;
 
         // 2. m.room.member — creator joins
@@ -272,6 +274,9 @@ pub struct CreateRoomParams<'a> {
     pub topic: Option<&'a str>,
     pub initial_state: Vec<CreateRoomInitialState>,
     pub power_level_content_override: Option<Value>,
+    /// Extra `m.room.create` content (e.g. `type`, `m.federate`).
+    /// `creator` and `room_version` are always set by the server.
+    pub creation_content: Option<Value>,
 }
 
 /// An initial state event supplied at room creation.

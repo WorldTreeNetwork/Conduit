@@ -63,3 +63,18 @@ and optionally `?user_id={target_user}`.
   `/thirdparty` endpoints, which most servers stub.
 - An AS may legitimately need to backfill events as a user joining
   late; allow `ts=` on send.
+
+## Ping, third-party lookups and network directories (conduit-y99.20)
+
+- Registration `url: null` is accepted: nothing is pushed to that AS and
+  `POST /_matrix/client/v1/appservice/{id}/ping` answers `M_URL_NOT_SET`.
+  Ping calls `POST /_matrix/app/v1/ping` with `Authorization: Bearer
+  <hs_token>`, a 10s timeout (`504 M_CONNECTION_TIMEOUT`), and maps non-2xx
+  to `502 M_BAD_STATUS` (with `status`/`body`) and transport failures to
+  `502 M_CONNECTION_FAILED`.
+- Registration `protocols: [...]` feeds `/thirdparty/protocols`; instances
+  get `instance_id = "{as_id}|{network_id}"`. Location/user lookups
+  aggregate the AS answers; an empty aggregate is `404 M_NOT_FOUND`.
+- `PUT /_matrix/client/v3/directory/list/appservice/{networkId}/{roomId}`
+  (as_token) maintains per-network lists read by `/publicRooms` with
+  `include_all_networks` or `third_party_instance_id`.

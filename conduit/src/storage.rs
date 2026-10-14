@@ -928,6 +928,79 @@ pub trait Storage: Send + Sync + 'static {
     /// in the Postgres backend, or falls back to the O(rooms × members)
     /// walk in the default implementation.
     async fn get_remote_servers_for_user(&self, user_id: &str, server_name: &str) -> Result<Vec<String>>;
+
+    // --- Published room directory & user directory (conduit-y99.20) --------
+
+    /// Publish (`true`) or unpublish a room in the server's main room
+    /// directory (`PUT /directory/list/room/{roomId}`, `createRoom`
+    /// with `visibility: public`). Idempotent.
+    async fn set_room_published(&self, room_id: &str, published: bool) -> Result<()>;
+
+    /// Whether the room is published in the main room directory.
+    async fn is_room_published(&self, room_id: &str) -> Result<bool>;
+
+    /// Publish or unpublish a room in an application service's
+    /// third-party network directory
+    /// (`PUT /directory/list/appservice/{networkId}/{roomId}`).
+    async fn set_appservice_room_published(
+        &self,
+        appservice_id: &str,
+        network_id: &str,
+        room_id: &str,
+        published: bool,
+    ) -> Result<()>;
+
+    /// Room IDs listed in the given directory scope, deduplicated, in
+    /// no particular order (the handler sorts).
+    async fn published_rooms(&self, scope: &DirectoryScope) -> Result<Vec<String>>;
+
+    /// The creator of an alias binding, if the alias exists.
+    async fn alias_creator(&self, alias: &str) -> Result<Option<String>>;
+
+    /// Case-insensitive substring search over user IDs and display names
+    /// of users visible to `requester`: anyone joined to a room the
+    /// requester is joined to, or joined to a room whose join rule is
+    /// `public` or whose history visibility is `world_readable`.
+    /// Deactivated local accounts are excluded. Returns at most `limit`
+    /// entries, users sharing a room with the requester first, then by
+    /// user ID.
+    async fn search_user_directory(
+        &self,
+        requester: &str,
+        term: &str,
+        limit: i64,
+    ) -> Result<Vec<UserDirectoryEntry>>;
+}
+
+// ---------------------------------------------------------------------------
+// Directory domain types (conduit-y99.20)
+// ---------------------------------------------------------------------------
+
+/// Which published-room list `POST /publicRooms` reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DirectoryScope {
+    /// The server's own directory only (the default).
+    Local,
+    /// The server's directory plus every application-service network.
+    AllNetworks,
+    /// One application service network (`third_party_instance_id`).
+    Network { appservice_id: String, network_id: String },
+}
+
+/// One row of `POST /user_directory/search`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserDirectoryEntry {
+    pub user_id: String,
+    pub display_name: Option<String>,
+    pub avatar_url: Option<String>,
+}
+
+/// In-memory published-room directory for [`MemoryStorage`].
+#[derive(Default)]
+struct MemoryDirectory {
+    local: std::collections::HashSet<String>,
+    /// (appservice_id, network_id, room_id)
+    appservice: std::collections::HashSet<(String, String, String)>,
 }
 
 // ---------------------------------------------------------------------------
@@ -939,6 +1012,7 @@ pub trait Storage: Send + Sync + 'static {
 pub struct MemoryStorage {
     transaction_locks: std::sync::Mutex<HashMap<TransactionKey, std::sync::Weak<tokio::sync::Mutex<()>>>>,
     inner: RwLock<MemoryInner>,
+    directory: RwLock<MemoryDirectory>,
 }
 
 #[derive(Debug, Clone)]
@@ -2666,6 +2740,135 @@ impl Storage for MemoryStorage {
         let mut out: Vec<String> = servers.into_iter().collect();
         out.sort();
         Ok(out)
+    }
+
+    // --- Published room directory & user directory (conduit-y99.20) --------
+
+    async fn set_room_published(&self, room_id: &str, published: bool) -> Result<()> {
+        let mut directory = self.directory.write().await;
+        if published {
+            directory.local.insert(room_id.to_owned());
+        } else {
+            directory.local.remove(room_id);
+        }
+        Ok(())
+    }
+
+    async fn is_room_published(&self, room_id: &str) -> Result<bool> {
+        Ok(self.directory.read().await.local.contains(room_id))
+    }
+
+    async fn set_appservice_room_published(
+        &self,
+        appservice_id: &str,
+        network_id: &str,
+        room_id: &str,
+        published: bool,
+    ) -> Result<()> {
+        let key = (appservice_id.to_owned(), network_id.to_owned(), room_id.to_owned());
+        let mut directory = self.directory.write().await;
+        if published {
+            directory.appservice.insert(key);
+        } else {
+            directory.appservice.remove(&key);
+        }
+        Ok(())
+    }
+
+    async fn published_rooms(&self, scope: &DirectoryScope) -> Result<Vec<String>> {
+        let directory = self.directory.read().await;
+        let mut rooms: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        match scope {
+            DirectoryScope::Local => rooms.extend(directory.local.iter().cloned()),
+            DirectoryScope::AllNetworks => {
+                rooms.extend(directory.local.iter().cloned());
+                rooms.extend(directory.appservice.iter().map(|(_, _, room)| room.clone()));
+            }
+            DirectoryScope::Network { appservice_id, network_id } => rooms.extend(
+                directory
+                    .appservice
+                    .iter()
+                    .filter(|(a, n, _)| a == appservice_id && n == network_id)
+                    .map(|(_, _, room)| room.clone()),
+            ),
+        }
+        Ok(rooms.into_iter().collect())
+    }
+
+    async fn alias_creator(&self, alias: &str) -> Result<Option<String>> {
+        Ok(self.inner.read().await.aliases.get(alias).map(|(_, creator, _)| creator.clone()))
+    }
+
+    async fn search_user_directory(
+        &self,
+        requester: &str,
+        term: &str,
+        limit: i64,
+    ) -> Result<Vec<UserDirectoryEntry>> {
+        let inner = self.inner.read().await;
+        let state = |room: &str, kind: &str, key: &str| {
+            inner
+                .room_state
+                .get(&(room.to_owned(), kind.to_owned(), key.to_owned()))
+                .and_then(|id| inner.events.get(id))
+        };
+        // room → joined members (with their member event)
+        let mut joined: HashMap<&str, Vec<&Event>> = HashMap::new();
+        for ((room, kind, _), id) in &inner.room_state {
+            if kind != "m.room.member" {
+                continue;
+            }
+            if let Some(event) = inner.events.get(id) {
+                if event.content["membership"] == "join" {
+                    joined.entry(room.as_str()).or_default().push(event);
+                }
+            }
+        }
+        let needle = term.to_lowercase();
+        // user → (shares a room with requester, entry)
+        let mut found: HashMap<String, (bool, UserDirectoryEntry)> = HashMap::new();
+        for (room, members) in &joined {
+            let shared = members.iter().any(|m| m.state_key.as_deref() == Some(requester));
+            let public = state(room, "m.room.join_rules", "")
+                .is_some_and(|e| e.content["join_rule"] == "public");
+            let world_readable = state(room, "m.room.history_visibility", "")
+                .is_some_and(|e| e.content["history_visibility"] == "world_readable");
+            if !(shared || public || world_readable) {
+                continue;
+            }
+            for member in members {
+                let Some(user) = member.state_key.as_deref() else { continue };
+                let account = inner.accounts.get(user);
+                if account.is_some_and(|a| a.deactivated_at.is_some()) {
+                    continue;
+                }
+                let display_name = account
+                    .and_then(|a| a.displayname.clone())
+                    .or_else(|| member.content["displayname"].as_str().map(str::to_owned));
+                let avatar_url = account
+                    .and_then(|a| a.avatar_url.clone())
+                    .or_else(|| member.content["avatar_url"].as_str().map(str::to_owned));
+                let matches = user.to_lowercase().contains(&needle)
+                    || display_name.as_deref().is_some_and(|d| d.to_lowercase().contains(&needle));
+                if !matches {
+                    continue;
+                }
+                let slot = found.entry(user.to_owned()).or_insert_with(|| {
+                    (
+                        false,
+                        UserDirectoryEntry { user_id: user.to_owned(), display_name, avatar_url },
+                    )
+                });
+                slot.0 |= shared;
+            }
+        }
+        let mut rows: Vec<_> = found.into_values().collect();
+        rows.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.user_id.cmp(&b.1.user_id)));
+        Ok(rows
+            .into_iter()
+            .take(limit.max(0) as usize)
+            .map(|(_, entry)| entry)
+            .collect())
     }
 }
 

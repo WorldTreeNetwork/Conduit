@@ -568,6 +568,158 @@
         "conduit-y99.13.4",
         "conduit-embed-pdu"
       ]
+    },
+    {
+      "id": "published-room-directory",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#published-room-directory",
+      "status": "covered_assertions_only",
+      "assertions": [
+        "GET /publicRooms needs no auth; POST requires an access token (401 M_MISSING_TOKEN)",
+        "Chunks carry room_id, name, topic (plain text), canonical_alias, num_joined_members, world_readable, guest_can_join, avatar_url, join_rule, room_type",
+        "Stable order: largest joined count first, then room ID; total_room_count_estimate is the filtered count",
+        "limit/since paginate with next_batch and prev_batch; malformed since is 400 M_INVALID_PARAM",
+        "filter.generic_search_term matches name/topic/aliases case-insensitively; filter.room_types honours null for untyped rooms",
+        "include_all_networks and third_party_instance_id select application-service network lists; combining them is 400 M_INVALID_PARAM",
+        "createRoom visibility=public publishes; GET /directory/list/room reports public/private; unknown room 404 M_NOT_FOUND",
+        "PUT /directory/list/room requires a server admin or a joined member able to send m.room.canonical_alias (403 M_FORBIDDEN otherwise); visibility defaults to public; invalid visibility 400 M_INVALID_PARAM",
+        "PUT /directory/list/appservice/{networkId}/{roomId} is as_token-authenticated"
+      ],
+      "implementation": [
+        "conduit-server/src/api/client/room_directory.rs",
+        "conduit-server/src/api/client/rooms.rs",
+        "conduit-server/migrations/0030_room_directory.sql",
+        "conduit-server/src/storage_pg.rs",
+        "conduit/src/storage.rs"
+      ],
+      "tests": [
+        "conduit-server/src/api/client/room_directory.rs::tests",
+        "conduit-server/tests/production_directory.rs::public_room_directory_lists_filters_and_paginates",
+        "conduit-server/tests/production_directory.rs::directory_visibility_changes_are_authorized",
+        "conduit-server/tests/production_directory.rs::appservice_ping_thirdparty_and_network_directory"
+      ],
+      "limitations": [
+        "server=<remote> proxies the federation GET /publicRooms and filters that page locally; not exercised against a live peer"
+      ],
+      "gap_issues": [
+        "conduit-y99.20.1"
+      ]
+    },
+    {
+      "id": "room-alias-directory",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#room-aliases",
+      "status": "covered_assertions_only",
+      "assertions": [
+        "PUT/GET/DELETE /directory/room/{alias}; existing alias 409 M_UNKNOWN; malformed or foreign alias 400 M_INVALID_PARAM",
+        "GET resolves to room_id and servers; missing alias 404 M_NOT_FOUND",
+        "DELETE allowed for the creator, a server admin or a member able to set m.room.canonical_alias; otherwise 403; missing 404",
+        "GET /rooms/{roomId}/aliases is for joined members or world_readable rooms (403 M_FORBIDDEN)",
+        "POST /join/{roomIdOrAlias} resolves local aliases; unknown alias 404 M_NOT_FOUND",
+        "createRoom room_alias_name binds the alias, sets m.room.canonical_alias, and rejects a taken alias with 400 M_ROOM_IN_USE"
+      ],
+      "implementation": [
+        "conduit-server/src/api/client/directory.rs",
+        "conduit-server/src/api/client/rooms.rs"
+      ],
+      "tests": [
+        "conduit-server/src/api/client/directory.rs::tests",
+        "conduit-server/tests/production_directory.rs::room_alias_directory_and_join_by_alias",
+        "conduit-server/tests/production_directory.rs::public_room_directory_lists_filters_and_paginates"
+      ],
+      "limitations": [
+        "Remote aliases resolve via federation query/directory but join of remote rooms is not implemented"
+      ]
+    },
+    {
+      "id": "user-directory-search",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#post_matrixclientv3user_directorysearch",
+      "status": "covered_assertions_only",
+      "assertions": [
+        "Searches users sharing a room with the requester and users joined to public-join-rule or world_readable rooms; others are invisible",
+        "Case-insensitive match on user ID and display name; display_name/avatar_url from the profile",
+        "limit defaults to 10; limited reports truncation; shared-room users rank first",
+        "Missing search_term 400 M_MISSING_PARAM; wrong type 400 M_BAD_JSON; unauthenticated 401"
+      ],
+      "implementation": [
+        "conduit-server/src/api/client/user_directory.rs",
+        "conduit-server/src/storage_pg.rs",
+        "conduit/src/storage.rs"
+      ],
+      "tests": [
+        "conduit-server/tests/production_directory.rs::user_directory_search_covers_shared_and_public_rooms_only"
+      ],
+      "limitations": [
+        "Remote user directories are not queried (SHOULD)"
+      ]
+    },
+    {
+      "id": "client-knocking",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#knocking-on-rooms",
+      "status": "covered_assertions_only",
+      "assertions": [
+        "POST /knock/{roomIdOrAlias} by room ID or alias returns room_id and records reason",
+        "Only knock/knock_restricted rooms accept knocks; banned, invited or joined users are refused 403 M_FORBIDDEN; unknown room or alias 404",
+        "Knock auth events include m.room.join_rules (auth events selection)",
+        "rooms.knock in /sync carries stripped knock_state (create, name, topic, join_rules, own member) without event IDs",
+        "Knocker cannot join directly; invite accepts (rooms.invite then join); kick denies; self-leave rescinds (rooms.leave)",
+        "v11 leave rules: self-leave from knock; kick governs any non-ban target; unban also needs the ban level"
+      ],
+      "implementation": [
+        "conduit-server/src/api/client/knock.rs",
+        "conduit/src/auth.rs",
+        "conduit-server/src/api/client/sync.rs"
+      ],
+      "tests": [
+        "conduit/src/auth.rs::tests",
+        "conduit-server/tests/production_directory.rs::knock_accept_deny_and_rescind"
+      ],
+      "limitations": [
+        "Knocking on rooms this server is not in (make_knock/send_knock over federation) is not implemented"
+      ],
+      "gap_issues": [
+        "conduit-y99.20.2"
+      ]
+    },
+    {
+      "id": "third-party-networks",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#third-party-networks",
+      "status": "covered_assertions_only",
+      "assertions": [
+        "GET /thirdparty/protocols aggregates registered application services' protocols; {} with none",
+        "Protocol instances gain instance_id {appservice_id}|{network_id}, usable as third_party_instance_id",
+        "protocol/location/user lookups proxy the AS API with Bearer hs_token and pass the client's fields through; nothing found is 404 M_NOT_FOUND",
+        "location?alias and user?userid route to ASes whose namespaces match; missing parameter 400 M_MISSING_PARAM"
+      ],
+      "implementation": [
+        "conduit-server/src/api/client/thirdparty.rs",
+        "conduit-server/src/app_service.rs"
+      ],
+      "tests": [
+        "conduit-server/tests/production_directory.rs::thirdparty_lookups_without_bridges_are_empty",
+        "conduit-server/tests/production_directory.rs::appservice_ping_thirdparty_and_network_directory"
+      ]
+    },
+    {
+      "id": "appservice-ping",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#post_matrixclientv1appserviceappserviceidping",
+      "status": "covered_assertions_only",
+      "assertions": [
+        "Requires the path appservice's own as_token (403 M_FORBIDDEN for other AS or user tokens; 401 without token)",
+        "Calls POST /_matrix/app/v1/ping with Bearer hs_token and the transaction_id; returns duration_ms",
+        "url: null is 400 M_URL_NOT_SET; non-2xx is 502 M_BAD_STATUS with status and body; refused connection 502 M_CONNECTION_FAILED; >10s 504 M_CONNECTION_TIMEOUT"
+      ],
+      "implementation": [
+        "conduit-server/src/api/client/appservice_ping.rs",
+        "conduit-server/src/app_service.rs"
+      ],
+      "tests": [
+        "conduit-server/tests/production_directory.rs::appservice_ping_thirdparty_and_network_directory"
+      ]
     }
   ]
 }

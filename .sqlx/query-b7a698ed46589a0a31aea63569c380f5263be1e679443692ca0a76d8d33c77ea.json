@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                SELECT room_id AS \"room_id!\" FROM appservice_room_directory\n                WHERE appservice_id = $1 AND network_id = $2\n                ORDER BY room_id\n                ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "room_id!",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "b7a698ed46589a0a31aea63569c380f5263be1e679443692ca0a76d8d33c77ea"
+}
