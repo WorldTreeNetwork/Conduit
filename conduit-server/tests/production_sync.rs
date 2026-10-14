@@ -1313,3 +1313,131 @@ async fn key_inventory_fields_are_always_present() {
     assert_eq!(after["device_one_time_keys_count"], json!({"signed_curve25519": 2}));
     assert_eq!(after["device_unused_fallback_key_types"], json!(["signed_curve25519"]));
 }
+
+// ---------------------------------------------------------------------------
+// conduit-y99.27 / .26 / .47
+// ---------------------------------------------------------------------------
+
+fn timeline<'a>(sync: &'a Value, room: &str) -> Vec<&'a Value> {
+    sync["rooms"]["join"][room]["timeline"]["events"]
+        .as_array()
+        .map(|events| events.iter().collect())
+        .unwrap_or_default()
+}
+
+#[tokio::test]
+async fn only_the_sending_device_sees_its_transaction_id() {
+    let server = Server::new().await;
+    let (alice, bob, room, _) = server.chat_pair().await;
+    let other_device = server
+        .request(
+            Method::POST,
+            "/_matrix/client/v3/login",
+            None,
+            Some(json!({"type": "m.login.password", "identifier": {"type": "m.id.user", "user": "alice"},
+                "password": "test-password"})),
+            200,
+        )
+        .await;
+    let since_alice = next_batch(&sync(&server, &alice, None).await);
+    let since_other = next_batch(&sync(&server, &other_device, None).await);
+    let since_bob = next_batch(&sync(&server, &bob, None).await);
+    let event = send_text(&server, &alice, &room, "local-echo-1", json!({"msgtype": "m.text", "body": "echo"})).await;
+    let find = |sync: &Value| -> Value {
+        timeline(sync, &room)
+            .into_iter()
+            .find(|candidate| candidate["event_id"] == event)
+            .cloned()
+            .unwrap_or_else(|| panic!("event missing: {sync}"))
+    };
+    let own = find(&sync(&server, &alice, Some(&since_alice)).await);
+    assert_eq!(own["unsigned"]["transaction_id"], "local-echo-1", "{own}");
+    let other = find(&sync(&server, &other_device, Some(&since_other)).await);
+    assert!(other["unsigned"]["transaction_id"].is_null(), "{other}");
+    let peer = find(&sync(&server, &bob, Some(&since_bob)).await);
+    assert!(peer["unsigned"]["transaction_id"].is_null(), "{peer}");
+    // Initial sync on the sending device carries it too.
+    let initial = find(&sync(&server, &alice, None).await);
+    assert_eq!(initial["unsigned"]["transaction_id"], "local-echo-1");
+}
+
+#[tokio::test]
+async fn back_pagination_reaches_the_room_creation_under_any_visibility() {
+    let server = Server::new().await;
+    let alice = server.register("alice").await;
+    let bob = server.register("bob").await;
+    for visibility in ["shared", "joined", "invited"] {
+        let room = server
+            .request(
+                Method::POST,
+                "/_matrix/client/v3/createRoom",
+                Some(token(&alice)),
+                Some(json!({"preset": "public_chat", "initial_state": [{
+                    "type": "m.room.history_visibility", "state_key": "",
+                    "content": {"history_visibility": visibility}}]})),
+                200,
+            )
+            .await["room_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        join(&server, &bob, &room).await;
+        send_text(&server, &alice, &room, "m", json!({"msgtype": "m.text", "body": "hello"})).await;
+        // Page backwards to the start as the creator.
+        let mut from: Option<String> = None;
+        let mut seen = Vec::new();
+        loop {
+            let path = match &from {
+                Some(from) => format!("/_matrix/client/v3/rooms/{room}/messages?dir=b&limit=3&from={from}"),
+                None => format!("/_matrix/client/v3/rooms/{room}/messages?dir=b&limit=3"),
+            };
+            let page = server.request(Method::GET, &path, Some(token(&alice)), None, 200).await;
+            for event in page["chunk"].as_array().unwrap() {
+                seen.push((event["type"].as_str().unwrap().to_owned(), event["state_key"].as_str().map(str::to_owned)));
+            }
+            match page.get("end") {
+                Some(end) => {
+                    assert!(end.as_str().is_some_and(|end| !end.is_empty()), "end must be a token or omitted: {page}");
+                    from = Some(end.as_str().unwrap().to_owned());
+                }
+                None => break,
+            }
+            assert!(seen.len() < 100, "pagination did not terminate");
+        }
+        assert!(seen.contains(&("m.room.create".to_owned(), Some(String::new()))), "{visibility}: {seen:?}");
+        assert!(seen.contains(&("m.room.member".to_owned(), Some(user(&alice).to_owned()))), "{visibility}: {seen:?}");
+        assert_eq!(seen.last().unwrap().0, "m.room.create", "{visibility}: {seen:?}");
+    }
+}
+
+#[tokio::test]
+async fn state_paths_accept_an_optional_trailing_slash_for_empty_keys() {
+    let server = Server::new().await;
+    let (alice, _bob, room, _) = server.chat_pair().await;
+    server
+        .request(
+            Method::PUT,
+            &format!("/_matrix/client/v3/rooms/{room}/state/m.room.topic/"),
+            Some(token(&alice)),
+            Some(json!({"topic": "With slash"})),
+            200,
+        )
+        .await;
+    for path in [
+        format!("/_matrix/client/v3/rooms/{room}/state/m.room.topic"),
+        format!("/_matrix/client/v3/rooms/{room}/state/m.room.topic/"),
+    ] {
+        let topic = server.request(Method::GET, &path, Some(token(&alice)), None, 200).await;
+        assert_eq!(topic["topic"], "With slash", "{path}");
+    }
+    // Explicit non-empty keys are unaffected.
+    server
+        .request(
+            Method::GET,
+            &format!("/_matrix/client/v3/rooms/{room}/state/m.room.member/{}", user(&alice)),
+            Some(token(&alice)),
+            None,
+            200,
+        )
+        .await;
+}

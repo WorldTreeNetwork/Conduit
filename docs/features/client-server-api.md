@@ -147,6 +147,17 @@ take receipts as a stream-ordered prefix (typing plus one `m.receipt` per
 thread scope per room) and leave the cursor before the first receipt that does
 not fit; state limits trim after sorting required members first.
 
+### Local echo, history visibility and state paths (conduit-y99.27/.26/.47)
+
+Sync adds `unsigned.transaction_id` to timeline events created by the
+requesting device (looked up from its stored client transactions; other
+devices never see it). History visibility is judged per event from the
+`m.room.history_visibility` in force before it (default `shared`), with the
+spec's before-or-after exceptions for visibility events and the user's own
+membership, so members can page back to `m.room.create`. `/messages` omits
+`end` when no further events exist. `PUT`/`GET /state/{eventType}/` (trailing
+slash) equal the empty-state-key form (`state_paths.rs`).
+
 ## Directories and knocking
 
 Implemented in `room_directory.rs`, `directory.rs`, `user_directory.rs` and

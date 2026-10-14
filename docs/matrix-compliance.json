@@ -2279,6 +2279,72 @@
       "limitations": [
         "No resource limits exist, so m.server_notice.usage_limit_reached is only sent manually by an operator"
       ]
+    },
+    {
+      "id": "sync-transaction-id-local-echo",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#transaction-identifiers",
+      "status": "covered_assertions_only",
+      "assertions": [
+        "Events returned by /sync to the device that sent them carry unsigned.transaction_id",
+        "Other devices of the same user and other users never see it",
+        "Initial and incremental syncs both carry it"
+      ],
+      "implementation": [
+        "conduit-server/src/api/client/sync.rs",
+        "conduit-server/src/storage_pg.rs",
+        "conduit-server/migrations/0051_transaction_event_lookup.sql",
+        "conduit/src/storage.rs"
+      ],
+      "tests": [
+        "conduit-server/tests/production_sync.rs::only_the_sending_device_sees_its_transaction_id"
+      ],
+      "limitations": [
+        "/messages and /event do not yet add transaction_id"
+      ],
+      "gap_issues": []
+    },
+    {
+      "id": "history-visibility-at-event",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#server-behaviour-7",
+      "status": "covered_assertions_only",
+      "assertions": [
+        "Visibility uses the m.room.history_visibility in force at each event (default shared), not the current value",
+        "A user always sees their own membership events that make or end their membership",
+        "History-visibility events are visible if the value before or after allows",
+        "Back-pagination by a current member reaches m.room.create and the creator's join under shared, invited and joined",
+        "/messages omits end when no further events are available"
+      ],
+      "implementation": [
+        "conduit/src/auth.rs",
+        "conduit-server/src/api/client/rooms.rs"
+      ],
+      "tests": [
+        "conduit-server/tests/production_sync.rs::back_pagination_reaches_the_room_creation_under_any_visibility",
+        "conduit-server/tests/sync.rs::joined_visibility_hides_pre_join_events_in_sync"
+      ],
+      "limitations": [
+        "Visibility history is derived by scanning the room's events per request"
+      ],
+      "gap_issues": []
+    },
+    {
+      "id": "state-path-optional-trailing-slash",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#put_matrixclientv3roomsroomidstateeventtypestatekey",
+      "status": "covered_assertions_only",
+      "assertions": [
+        "PUT and GET /rooms/{roomId}/state/{eventType}/ behave as the empty-state-key form"
+      ],
+      "implementation": [
+        "conduit-server/src/api/client/state_paths.rs"
+      ],
+      "tests": [
+        "conduit-server/tests/production_sync.rs::state_paths_accept_an_optional_trailing_slash_for_empty_keys"
+      ],
+      "limitations": [],
+      "gap_issues": []
     }
   ]
 }

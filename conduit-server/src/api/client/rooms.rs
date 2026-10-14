@@ -655,7 +655,8 @@ pub async fn get_messages<S: AuthState>(
                 match storage.room_latest_stream_position(&room_id).await {
                     Ok(Some(pos)) => pos,
                     Ok(None) => {
-                        return (StatusCode::OK, Json(json!({ "chunk": [], "start": "0", "end": "0" }))).into_response();
+                        // No events: no further pages, so `end` is omitted.
+                        return (StatusCode::OK, Json(json!({ "chunk": [], "start": "0" }))).into_response();
                     }
                     Err(e) => return MatrixError::unknown(e.to_string()).into_response(),
                 }
@@ -695,15 +696,14 @@ pub async fn get_messages<S: AuthState>(
             if let Err(e) = viewer.decorate_values(&mut chunk, true).await {
                 return MatrixError::from_conduit(e).into_response();
             }
-            let end_token = next_pos.map(|p| p.to_string()).unwrap_or_default();
-            (
-                StatusCode::OK,
-                Json(json!({
-                    "chunk": chunk,
-                    "start": from.to_string(),
-                    "end": end_token
-                })),
-            ).into_response()
+            // `end` is omitted when there are no more events in this
+            // direction (spec: "If no further events are available ... the
+            // end property is omitted").
+            let mut body = json!({"chunk": chunk, "start": from.to_string()});
+            if let Some(next) = next_pos {
+                body["end"] = json!(next.to_string());
+            }
+            (StatusCode::OK, Json(body)).into_response()
         }
         Err(e) => MatrixError::from_conduit(e).into_response(),
     }

@@ -639,6 +639,7 @@ async fn build_sync_response<S: AuthState>(
                 .await?;
                 decorate_block(storage.as_ref(), user_id, filter, &mut block).await?;
                 filter_room_block(&mut block, filter, &membership.room_id, user_id);
+                add_transaction_ids(storage.as_ref(), user_id, authed_device_id, &mut block).await?;
                 project_room_block(&mut block, filter);
                 left_rooms.insert(membership.room_id.clone(), block);
             }
@@ -853,6 +854,7 @@ async fn build_sync_response<S: AuthState>(
                 }
             }
         }
+        add_transaction_ids(storage.as_ref(), user_id, authed_device_id, &mut block).await?;
         project_room_block(&mut block, filter);
         joined_rooms.insert(room_id.clone(), block);
     }
@@ -1552,6 +1554,39 @@ fn filter_room_block(
         }
     }
     held
+}
+
+/// Mark the requesting device's own events with `unsigned.transaction_id`
+/// so it can reconcile local echoes (conduit-y99.27). Other devices of the
+/// same user never see it.
+async fn add_transaction_ids(
+    storage: &dyn conduit::storage::Storage,
+    user: &str,
+    device: &str,
+    block: &mut JoinedRoomBlock,
+) -> Result<(), Response> {
+    let own: Vec<String> = block
+        .timeline
+        .events
+        .iter()
+        .filter(|event| event["sender"] == user)
+        .filter_map(|event| event["event_id"].as_str().map(str::to_owned))
+        .collect();
+    if own.is_empty() {
+        return Ok(());
+    }
+    let transactions = storage
+        .client_transaction_ids(user, device, &own)
+        .await
+        .map_err(|error| MatrixError::unknown(error.to_string()).into_response())?;
+    for event in &mut block.timeline.events {
+        let Some(txn) = event["event_id"].as_str().and_then(|id| transactions.get(id)) else { continue };
+        if !event["unsigned"].is_object() {
+            event["unsigned"] = json!({});
+        }
+        event["unsigned"]["transaction_id"] = json!(txn);
+    }
+    Ok(())
 }
 
 /// Apply `event_fields` projection, after every filter that reads fields.

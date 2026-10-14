@@ -40,6 +40,7 @@ pub mod room_content;
 pub mod rooms;
 pub mod safe_fetch;
 pub mod sso;
+pub mod state_paths;
 pub mod standards;
 pub mod server_notices;
 pub mod sync;

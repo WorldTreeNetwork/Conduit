@@ -618,13 +618,18 @@ async fn joined_visibility_hides_pre_join_events_in_sync() {
         bobs_timeline.len() < alices_timeline,
         "Bob's timeline must be shorter than Alice's: {bobs_timeline:?}"
     );
-    assert!(
-        !bobs_timeline
-            .iter()
-            .any(|e| e["event_id"] == alices_view["rooms"]["join"][&room_id]["timeline"]
-                ["events"][0]["event_id"]),
-        "Bob must not receive the room's first event"
-    );
+    // Visibility is judged by the state at each event: events from before
+    // `joined` was set stay `shared` (spec "History visibility"), but the
+    // message sent under `joined` before Bob arrived is hidden from him.
+    // (The helper sends the same body each time: Alice sees both messages,
+    // Bob only the one sent after he joined.)
+    let messages = |timeline: &[Value]| timeline.iter().filter(|e| e["type"] == "m.room.message").count();
+    let alices_events = alices_view["rooms"]["join"][&room_id]["timeline"]["events"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(messages(&alices_events), 2);
+    assert_eq!(messages(&bobs_timeline), 1, "Bob must not receive pre-join messages: {bobs_timeline:?}");
 }
 
 // RoomEventSender for the test harness (conduit-29w). Mirrors the AppState impl

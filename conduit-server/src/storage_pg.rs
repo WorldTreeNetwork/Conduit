@@ -4328,6 +4328,28 @@ impl Storage for PostgresStorage {
             .collect())
     }
 
+    async fn client_transaction_ids(
+        &self,
+        user: &str,
+        device: &str,
+        event_ids: &[String],
+    ) -> Result<HashMap<String, String>> {
+        if event_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let owner = conduit::storage::TransactionKey::client(user, device, &[], "").owner;
+        let rows = sqlx::query!(
+            r#"SELECT result->>'event_id' AS "event_id!", txn_id FROM transactions
+               WHERE scope = 'client' AND owner = $1 AND result->>'event_id' = ANY($2)"#,
+            owner,
+            event_ids
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(rows.into_iter().map(|row| (row.event_id, row.txn_id)).collect())
+    }
+
     async fn user_receipts_in_room(
         &self,
         room_id: &str,

@@ -1376,6 +1376,15 @@ pub trait Storage: Send + Sync + 'static {
 
     /// The current receipts `user_id` holds in `room_id` (every scope).
     async fn user_receipts_in_room(&self, room_id: &str, user_id: &str) -> Result<Vec<ReceiptRecord>>;
+
+    /// Client transaction IDs under which `(user, device)` created any of
+    /// `event_ids`: `event_id -> txn_id` (conduit-y99.27).
+    async fn client_transaction_ids(
+        &self,
+        user: &str,
+        device: &str,
+        event_ids: &[String],
+    ) -> Result<HashMap<String, String>>;
 }
 
 /// One stored receipt (conduit-y99.15).
@@ -3923,6 +3932,25 @@ impl Storage for MemoryStorage {
             .collect();
         rows.sort_by_key(|row| row.stream_pos);
         Ok(rows)
+    }
+
+    async fn client_transaction_ids(
+        &self,
+        user: &str,
+        device: &str,
+        event_ids: &[String],
+    ) -> Result<HashMap<String, String>> {
+        let owner = TransactionKey::client(user, device, &[], "").owner;
+        let inner = self.inner.read().await;
+        Ok(inner
+            .transactions
+            .iter()
+            .filter(|(key, _)| key.scope == "client" && key.owner == owner)
+            .filter_map(|(key, result)| {
+                let event = result["event_id"].as_str()?;
+                event_ids.iter().any(|id| id == event).then(|| (event.to_owned(), key.txn_id.clone()))
+            })
+            .collect())
     }
 
     async fn user_receipts_in_room(&self, room_id: &str, user_id: &str) -> Result<Vec<ReceiptRecord>> {

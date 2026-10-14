@@ -675,6 +675,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .merge(conduit_server::api::client::room_directory::router::<AppState>())
         .merge(conduit_server::api::client::user_directory::router::<AppState>())
         .merge(conduit_server::api::client::knock::router::<AppState>())
+        .merge(conduit_server::api::client::state_paths::router::<AppState>())
         .merge(conduit_server::api::client::thirdparty::router::<AppState>())
         .merge(conduit_server::api::client::appservice_ping::router::<AppState>())
         .merge(conduit_server::api::client::room_content::router::<AppState>())

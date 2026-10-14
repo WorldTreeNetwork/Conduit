@@ -941,10 +941,8 @@ pub async fn filter_visible_for_user(
     user_id: &str,
     events: Vec<Event>,
 ) -> crate::Result<Vec<Event>> {
-    let state = current_state_map(storage, room_id).await?;
-    let hist_vis = history_visibility_of(&state);
     let members = storage.member_events_for_user(room_id, user_id).await?;
-    filter_with(storage, hist_vis, &members, events, user_event_position).await
+    filter_with(storage, room_id, &members, events, user_event_position, Some(user_id)).await
 }
 
 /// The same filter, for a requesting origin server (federation
@@ -955,33 +953,94 @@ pub async fn filter_visible_for_server(
     origin: &str,
     events: Vec<Event>,
 ) -> crate::Result<Vec<Event>> {
-    let state = current_state_map(storage, room_id).await?;
-    let hist_vis = history_visibility_of(&state);
     let members = storage.member_events_for_server(room_id, origin).await?;
-    filter_with(storage, hist_vis, &members, events, server_event_position).await
+    filter_with(storage, room_id, &members, events, server_event_position, None).await
 }
 
+/// `m.room.history_visibility` values in stream order, as `(position, value)`.
+async fn visibility_history(
+    storage: &dyn crate::storage::Storage,
+    room_id: &str,
+) -> crate::Result<Vec<(i64, HistoryVisibility)>> {
+    let changes: Vec<Event> = storage
+        .room_events(room_id)
+        .await?
+        .into_iter()
+        .filter(|event| event.event_type == "m.room.history_visibility" && event.state_key.as_deref() == Some(""))
+        .collect();
+    let ids: Vec<String> = changes.iter().map(|event| event.event_id.clone()).collect();
+    let positions = storage.event_stream_positions(&ids).await?;
+    let mut history: Vec<_> = changes
+        .iter()
+        .filter_map(|event| {
+            let position = *positions.get(&event.event_id)?;
+            // An unparseable value is treated as `shared`, per spec.
+            let value = parse_history_visibility(&event.content)
+                .map(|content| content.history_visibility)
+                .unwrap_or(HistoryVisibility::Shared);
+            Some((position, value))
+        })
+        .collect();
+    history.sort_by_key(|(position, _)| *position);
+    Ok(history)
+}
+
+/// Visibility in force at an event: the latest change strictly before it,
+/// defaulting to `shared`.
+fn visibility_before(history: &[(i64, HistoryVisibility)], position: i64) -> HistoryVisibility {
+    history
+        .iter()
+        .take_while(|(changed, _)| *changed < position)
+        .last()
+        .map(|(_, value)| value.clone())
+        .unwrap_or(HistoryVisibility::Shared)
+}
+
+/// Spec "History visibility": the rules use the state of the room at each
+/// event. A history-visibility event is visible if the value before or after
+/// it allows; a user's own membership event is visible if their membership
+/// before or after it allows (so a user always sees their own join).
 async fn filter_with(
     storage: &dyn crate::storage::Storage,
-    hist_vis: HistoryVisibility,
+    room_id: &str,
     members: &[(i64, Event)],
     events: Vec<Event>,
     position: fn(&[(i64, Event)], i64) -> UserEventPosition,
+    own_user: Option<&str>,
 ) -> crate::Result<Vec<Event>> {
-    if hist_vis == HistoryVisibility::WorldReadable {
-        return Ok(events);
-    }
-
+    let history = visibility_history(storage, room_id).await?;
     // One lookup for the whole page, not one per event.
     let ids: Vec<String> = events.iter().map(|e| e.event_id.clone()).collect();
     let positions = storage.event_stream_positions(&ids).await?;
 
     Ok(events
         .into_iter()
-        .filter(|ev| match positions.get(&ev.event_id) {
-            Some(pos) => can_see(&hist_vis, &position(members, *pos)),
+        .filter(|ev| {
             // An event we cannot place is an event we cannot clear.
-            None => false,
+            let Some(pos) = positions.get(&ev.event_id).copied() else {
+                return false;
+            };
+            let before = visibility_before(&history, pos);
+            let standing = position(members, pos);
+            if can_see(&before, &standing) {
+                return true;
+            }
+            if ev.event_type == "m.room.history_visibility" && ev.state_key.as_deref() == Some("") {
+                if let Ok(after) = parse_history_visibility(&ev.content) {
+                    if can_see(&after.history_visibility, &standing) {
+                        return true;
+                    }
+                }
+            }
+            if ev.event_type == "m.room.member" && own_user.is_some() && ev.state_key.as_deref() == own_user {
+                let after = match parse_member(&ev.content).map(|content| content.membership) {
+                    Ok(Membership::Join) => UserEventPosition::WasMember,
+                    Ok(Membership::Invite) => UserEventPosition::WasInvited,
+                    _ => standing,
+                };
+                return can_see(&before, &after);
+            }
+            false
         })
         .collect())
 }
