@@ -142,7 +142,7 @@ pub async fn send_transaction(
 
     // Process EDUs first (mrm.11).
     for edu in &body.edus {
-        handle_edu(&state, edu).await;
+        if let Err(error) = handle_edu(&state, &origin, edu).await { return internal(&error.to_string()); }
     }
 
     let mut pdu_results: HashMap<String, Value> = HashMap::new();
@@ -922,15 +922,82 @@ pub async fn fed_send_to_device(
 
 /// Handle EDUs in an inbound federation transaction.
 /// Currently processes `m.device_list_update`.
-pub(crate) async fn handle_edu(state: &FedState, edu: &serde_json::Value) {
+pub(crate) async fn handle_edu(
+    state: &FedState,
+    origin: &str,
+    edu: &serde_json::Value,
+) -> conduit::Result<()> {
     let edu_type = edu.get("edu_type").and_then(|v| v.as_str()).unwrap_or("");
+    if edu_type == "m.direct_to_device" {
+        #[derive(Deserialize)]
+        struct DirectToDevice {
+            sender: String,
+            #[serde(rename = "type")]
+            event_type: String,
+            message_id: String,
+            messages: HashMap<String, HashMap<String, Value>>,
+        }
+        let Some(content) = edu.get("content") else {
+            return Ok(());
+        };
+        let Ok(message) = serde_json::from_value::<DirectToDevice>(content.clone()) else {
+            return Ok(());
+        };
+        let Some((localpart, sender_server)) = message.sender.split_once(':') else {
+            return Ok(());
+        };
+        if !localpart.starts_with('@')
+            || localpart.len() < 2
+            || sender_server != origin
+            || message.message_id.chars().count() > 32
+        {
+            return Ok(());
+        }
+        if message
+            .messages
+            .values()
+            .flat_map(|devices| devices.values())
+            .any(|content| !content.is_object())
+        {
+            return Ok(());
+        }
+        let mut deliveries = Vec::new();
+        for (target, devices) in message.messages {
+            let Some((localpart, server)) = target.split_once(':') else {
+                continue;
+            };
+            if !localpart.starts_with('@') || localpart.len() < 2 || server != &*state.server_name {
+                continue;
+            }
+            for (device, content) in devices {
+                deliveries.push(conduit::storage::ToDeviceDelivery {
+                    target_user: target.clone(),
+                    target_device: device,
+                    sender: message.sender.clone(),
+                    event_type: message.event_type.clone(),
+                    content,
+                });
+            }
+        }
+        let key = conduit::storage::TransactionKey::federation(origin, &message.message_id);
+        state
+            .storage
+            .deliver_to_device_once(&key, &deliveries, &[])
+            .await?;
+    }
     if edu_type == "m.device_list_update" {
         let content = edu.get("content").unwrap_or(edu);
         let user_id = match content.get("user_id").and_then(|v| v.as_str()) {
             Some(u) => u.to_owned(),
-            None => return,
+            None => return Ok(()),
         };
-        let device_id = content.get("device_id").and_then(|v| v.as_str()).unwrap_or("");
+        if user_id.split_once(':').map(|(_, server)| server) != Some(origin) {
+            return Ok(());
+        }
+        let device_id = content
+            .get("device_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         let deleted = content
             .get("deleted")
             .and_then(|v| v.as_bool())
@@ -941,20 +1008,26 @@ pub(crate) async fn handle_edu(state: &FedState, edu: &serde_json::Value) {
         // If the EDU includes the device keys, persist them.
         if let Some(keys) = content.get("keys") {
             if !deleted && !device_id.is_empty() {
-                let _ = state.storage.upsert_device_keys(&user_id, device_id, keys).await;
+                state
+                    .storage
+                    .upsert_device_keys(&user_id, device_id, keys)
+                    .await?;
             }
         }
 
         // Tombstone the device when the EDU signals deletion (conduit-ub5).
         if deleted && !device_id.is_empty() {
-            let _ = state.storage.delete_device_keys(&user_id, device_id).await;
+            state
+                .storage
+                .delete_device_keys(&user_id, device_id)
+                .await?;
         }
 
         // Record device list change so local /sync picks it up.
-        let _ = state.storage.record_device_list_change(&user_id).await;
+        state.storage.record_device_list_change(&user_id).await?;
     }
+    Ok(())
 }
-
 // ---------------------------------------------------------------------------
 // Router builder
 // ---------------------------------------------------------------------------
@@ -970,7 +1043,6 @@ pub fn federation_router() -> axum::Router<FedState> {
 
     let v1 = axum::Router::new()
         .route("/send/:txnId", put(send_transaction))
-        .route("/send_to_device/:txnId", put(fed_send_to_device))
         .route("/make_join/:roomId/:userId", get(make_join))
         .route("/state/:roomId", get(state))
         .route("/state_ids/:roomId", get(state_ids))

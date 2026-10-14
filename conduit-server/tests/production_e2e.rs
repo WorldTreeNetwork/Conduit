@@ -138,9 +138,23 @@ impl Server {
     }
 
     fn launch(&mut self, listen_addr: &str, ready: &std::path::Path) {
+        self.launch_with_ca(listen_addr, ready, None);
+    }
+
+    fn launch_with_ca(
+        &mut self,
+        listen_addr: &str,
+        ready: &std::path::Path,
+        ca: Option<&std::path::Path>,
+    ) {
         let log = File::create(self.files.path().join("server.log")).unwrap();
+        let mut command = Command::new(env!("CARGO_BIN_EXE_conduit-server"));
+        command.env_remove("CONDUIT_TLS_CA");
+        if let Some(path) = ca {
+            command.env("CONDUIT_TLS_CA", path);
+        }
         self.child = Some(
-            Command::new(env!("CARGO_BIN_EXE_conduit-server"))
+            command
                 .current_dir(self.files.path())
                 .env("DATABASE_URL", &self.database_url)
                 .env("CONDUIT_SERVER_NAME", "production.test")
@@ -1212,4 +1226,238 @@ async fn production_key_inventory_wakes_sync_and_quiets_after_acknowledgement() 
     assert_eq!(quiet["to_device"]["events"], json!([]));
     assert_eq!(quiet["presence"]["events"], json!([]));
     assert!(quiet["rooms"]["join"].as_object().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn production_room_send_transactions_are_durable_and_endpoint_scoped() {
+    let mut server = Server::new().await;
+    let (alice, bob, room, _) = server.chat_pair().await;
+    let alice_token = alice["access_token"].as_str().unwrap();
+    let bob_token = bob["access_token"].as_str().unwrap();
+    let before = server
+        .request(
+            Method::GET,
+            "/_matrix/client/v3/sync",
+            Some(bob_token),
+            None,
+            200,
+        )
+        .await;
+    let path = format!("/_matrix/client/v3/rooms/{room}/send/m.room.message/repeated");
+    let mut requests = Vec::new();
+    for value in 0..12 {
+        let http = server.http.clone();
+        let url = format!("{}{path}", server.base_url);
+        let token = alice_token.to_owned();
+        requests.push(tokio::spawn(async move {
+            let response = http
+                .put(url)
+                .bearer_auth(token)
+                .json(&json!({"msgtype": "m.text", "body": format!("Retry {value}")}))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status().as_u16(), 200);
+            response.json::<Value>().await.unwrap()
+        }));
+    }
+    let mut responses = Vec::new();
+    for request in requests {
+        responses.push(request.await.unwrap());
+    }
+    assert!(
+        responses.iter().all(|response| response == &responses[0]),
+        "concurrent retries produced different results: {responses:?}"
+    );
+    let sent = responses[0].clone();
+    let sync = server
+        .request(
+            Method::GET,
+            &format!(
+                "/_matrix/client/v3/sync?since={}",
+                before["next_batch"].as_str().unwrap()
+            ),
+            Some(bob_token),
+            None,
+            200,
+        )
+        .await;
+    let timeline = sync["rooms"]["join"][&room]["timeline"]["events"]
+        .as_array()
+        .unwrap();
+    assert_eq!(
+        timeline
+            .iter()
+            .filter(|event| event["event_id"] == sent["event_id"])
+            .count(),
+        1
+    );
+    assert_eq!(
+        timeline
+            .iter()
+            .filter(|event| event["content"]["body"]
+                .as_str()
+                .is_some_and(|body| body.starts_with("Retry ")))
+            .count(),
+        1
+    );
+    server.stop();
+    server.start().await;
+    let retry = server
+        .request(
+            Method::PUT,
+            &path,
+            Some(alice_token),
+            Some(json!({"msgtype": "m.text", "body": "Changed after restart"})),
+            200,
+        )
+        .await;
+    assert_eq!(retry, sent, "restart lost the transaction result");
+    let other_room = server
+        .request(
+            Method::POST,
+            "/_matrix/client/v3/createRoom",
+            Some(alice_token),
+            Some(json!({})),
+            200,
+        )
+        .await;
+    let other = server
+        .request(
+            Method::PUT,
+            &format!(
+                "/_matrix/client/v3/rooms/{}/send/m.room.message/repeated",
+                other_room["room_id"].as_str().unwrap()
+            ),
+            Some(alice_token),
+            Some(json!({"msgtype": "m.text", "body": "Another endpoint"})),
+            200,
+        )
+        .await;
+    assert_ne!(
+        other["event_id"], sent["event_id"],
+        "room paths must not share transaction scope"
+    );
+    let other_type = server
+        .request(
+            Method::PUT,
+            &format!("/_matrix/client/v3/rooms/{room}/send/m.custom/repeated"),
+            Some(alice_token),
+            Some(json!({"body": "Another event type"})),
+            200,
+        )
+        .await;
+    assert_ne!(other_type["event_id"], sent["event_id"]);
+}
+
+#[tokio::test]
+async fn production_to_device_transactions_are_durable_and_do_not_reexpand_wildcards() {
+    let mut server = Server::new().await;
+    let (alice, bob, _, _) = server.chat_pair().await;
+    let alice_token = alice["access_token"].as_str().unwrap();
+    let bob_token = bob["access_token"].as_str().unwrap();
+    let path = "/_matrix/client/v3/sendToDevice/m.test/repeated";
+    let body = json!({"messages": {"@bob:production.test": {"*": {"body": "Once"}}}});
+    server
+        .request(
+            Method::PUT,
+            "/_matrix/client/v3/sendToDevice/m.test/invalid",
+            Some(alice_token),
+            Some(json!({"messages": {"@bob:production.test": {"*": {"bad": 0.5}}}})),
+            400,
+        )
+        .await;
+    let mut requests = Vec::new();
+    for _ in 0..12 {
+        let http = server.http.clone();
+        let url = format!("{}{path}", server.base_url);
+        let token = alice_token.to_owned();
+        let body = body.clone();
+        requests.push(tokio::spawn(async move {
+            let response = http
+                .put(url)
+                .bearer_auth(token)
+                .json(&body)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status().as_u16(), 200);
+        }));
+    }
+    for request in requests {
+        request.await.unwrap();
+    }
+    let received = server
+        .request(
+            Method::GET,
+            "/_matrix/client/v3/sync",
+            Some(bob_token),
+            None,
+            200,
+        )
+        .await;
+    assert_eq!(received["to_device"]["events"].as_array().unwrap().len(), 1);
+    server
+        .request(
+            Method::GET,
+            &format!(
+                "/_matrix/client/v3/sync?since={}",
+                received["next_batch"].as_str().unwrap()
+            ),
+            Some(bob_token),
+            None,
+            200,
+        )
+        .await;
+    let new_device = server.request(Method::POST, "/_matrix/client/v3/login", None, Some(json!({
+        "type": "m.login.password", "identifier": {"type": "m.id.user", "user": "bob"}, "password": "test-password", "device_id": "NEW"
+    })), 200).await;
+    server.stop();
+    server.start().await;
+    server
+        .request(Method::PUT, path, Some(alice_token), Some(body), 200)
+        .await;
+    for token in [bob_token, new_device["access_token"].as_str().unwrap()] {
+        let sync = server
+            .request(
+                Method::GET,
+                "/_matrix/client/v3/sync",
+                Some(token),
+                None,
+                200,
+            )
+            .await;
+        assert_eq!(
+            sync["to_device"]["events"],
+            json!([]),
+            "retry delivered/reexpanded an already acknowledged message"
+        );
+    }
+}
+
+#[tokio::test]
+async fn production_startup_rejects_missing_or_invalid_private_ca() {
+    let mut server = Server::new().await;
+    server.stop();
+    let invalid = server.files.path().join("invalid-ca.pem");
+    std::fs::write(&invalid, "invalid PEM data").unwrap();
+    let missing = server.files.path().join("missing-ca.pem");
+    let ready = server.files.path().join("ready.json");
+    for ca in [missing, invalid] {
+        server.launch_with_ca("127.0.0.1:0", &ready, Some(&ca));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(status) = server.child.as_mut().unwrap().try_wait().unwrap() {
+                assert!(!status.success());
+                server.child.take();
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "invalid CA configuration did not fail startup: {}",
+                server.logs()
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
 }

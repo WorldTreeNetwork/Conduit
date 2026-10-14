@@ -363,62 +363,83 @@ pub async fn send_to_device<S: AuthState>(
     Path((event_type, txn_id)): Path<(String, String)>,
     Json(body): Json<SendToDeviceBody>,
 ) -> Response {
+    use conduit::storage::{OutboundDelivery, ToDeviceDelivery, TransactionKey};
     let storage = state.storage();
-    let sender = &authed.user_id;
-
-    // Bucket targets by server: local goes straight to the to-device queue;
-    // remote dests are aggregated and dispatched through the federation
-    // /sendToDevice endpoint (conduit-0t6).
+    let key = TransactionKey::client(
+        &authed.user_id,
+        &authed.device_id,
+        &["send_to_device", &event_type],
+        &txn_id,
+    );
+    match storage.transaction_result(&key).await {
+        Ok(Some(result)) => return (StatusCode::OK, Json(result)).into_response(),
+        Ok(None) => {}
+        Err(error) => return MatrixError::unknown(error.to_string()).into_response(),
+    }
+    // Every delivery may later cross federation, whose signed JSON must be
+    // canonical. Reject unsupported values before recording any effects.
+    if conduit::canonical_json::to_canonical_bytes(&body.messages).is_err() {
+        return MatrixError::bad_json("to-device contents must be canonical JSON").into_response();
+    }
+    let mut local = Vec::new();
     let mut remote_by_server: HashMap<String, HashMap<String, HashMap<String, Value>>> =
         HashMap::new();
-
-    for (target_user, devices) in &body.messages {
-        let target_server = target_user.split_once(':').map(|(_, server)| server).unwrap_or("");
-        if target_server == state.server_name() {
-            for (target_device, content) in devices {
-                if let Err(e) = enqueue_local_to_device(
-                    storage.as_ref(), target_user, target_device, sender, &event_type, content,
-                ).await
-                {
-                    return MatrixError::unknown(e.to_string()).into_response();
-                }
+    for (target_user, devices) in body.messages {
+        let Some((localpart, server)) = target_user.split_once(':') else {
+            return MatrixError::bad_json("invalid target user ID").into_response();
+        };
+        if !localpart.starts_with('@') || localpart.len() < 2 || server.is_empty() {
+            return MatrixError::bad_json("invalid target user ID").into_response();
+        }
+        if server == state.server_name() {
+            for (device, content) in devices {
+                local.push(ToDeviceDelivery {
+                    target_user: target_user.clone(),
+                    target_device: device,
+                    sender: authed.user_id.clone(),
+                    event_type: event_type.clone(),
+                    content,
+                });
             }
         } else {
-            let per_server = remote_by_server
-                .entry(target_server.to_owned())
-                .or_default();
-            per_server
-                .entry(target_user.clone())
+            remote_by_server
+                .entry(server.to_owned())
                 .or_default()
-                .extend(devices.iter().map(|(d, c)| (d.clone(), c.clone())));
+                .insert(target_user, devices);
         }
     }
-
-    // Persist remote deliveries on the durable outbound queue (conduit-5n3 /
-    // US-006). The queue's per-destination worker drains, retries with
-    // exponential backoff, and dead-letters after MAX_ATTEMPTS — replacing
-    // the previous fire-and-forget tokio::spawn.
-    if !remote_by_server.is_empty() {
-        if let Some(queue) = state.federation_queue().cloned() {
-            for (dest, messages_for_server) in remote_by_server {
-                let messages_json = serde_json::to_value(&messages_for_server)
-                    .unwrap_or_else(|_| json!({}));
-                queue
-                    .enqueue_to_device(&dest, &event_type, messages_json)
-                    .await;
-            }
-        } else {
-            tracing::debug!("remote sendToDevice requested but no federation queue available");
+    if local.iter().any(|message| !message.content.is_object())
+        || remote_by_server
+            .values()
+            .flat_map(|users| users.values())
+            .flat_map(|devices| devices.values())
+            .any(|content| !content.is_object())
+    {
+        return MatrixError::bad_json("to-device contents must be JSON objects").into_response();
+    }
+    if !remote_by_server.is_empty() && state.federation_queue().is_none() {
+        return MatrixError::unknown("federation delivery is unavailable").into_response();
+    }
+    let remote: Vec<_> = remote_by_server.into_iter().map(|(destination, messages)| {
+        let id = uuid::Uuid::new_v4().simple().to_string();
+        OutboundDelivery { destination, txn_id: id.clone(), payload: json!({
+            "pdus": [], "edus": [{"edu_type": "m.direct_to_device", "content": {
+                "sender": authed.user_id, "type": event_type, "message_id": id, "messages": messages
+            }}]
+        }) }
+    }).collect();
+    match storage.deliver_to_device_once(&key, &local, &remote).await {
+        Ok(_) => {}
+        Err(error) => return MatrixError::unknown(error.to_string()).into_response(),
+    }
+    if let Some(queue) = state.federation_queue() {
+        for delivery in &remote {
+            queue.wake(&delivery.destination).await;
         }
     }
-    // txn_id is the CS-API idempotency key; the federation txn_id is generated
-    // by the queue per row.
-    let _ = txn_id;
-
     state.sync_notify().notify_waiters();
     (StatusCode::OK, Json(json!({}))).into_response()
 }
-
 /// Expand wildcard recipients before writing device-specific queue entries.
 pub(crate) async fn enqueue_local_to_device(
     storage: &dyn Storage,

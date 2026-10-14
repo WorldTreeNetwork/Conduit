@@ -327,27 +327,18 @@ pub async fn send_message_event<S: AuthState + conduit::room::RoomEventSender>(
     Path((room_id, event_type, txn_id)): Path<(String, String, String)>,
     Json(content): Json<Value>,
 ) -> Response {
-    let sender = &authed.user_id;
-    let device_id = &authed.device_id;
-
-    // Idempotency: check the txn cache.
-    let cache_key = (sender.clone(), device_id.clone(), txn_id.clone());
-    {
-        let cache = state.txn_cache().read().await;
-        if let Some(cached_event_id) = cache.get(&cache_key) {
-            return (StatusCode::OK, Json(json!({ "event_id": cached_event_id }))).into_response();
-        }
+    let key = conduit::storage::TransactionKey::client(&authed.user_id, &authed.device_id,
+        &["room_send", &room_id, &event_type], &txn_id);
+    match state.storage().transaction_result(&key).await {
+        Ok(Some(result)) => return (StatusCode::OK, Json(result)).into_response(),
+        Ok(None) => {},
+        Err(error) => return MatrixError::unknown(error.to_string()).into_response(),
     }
-
-    let room = Room::new(&room_id);
-    match room.send_event(sender, &event_type, content, &RoomEventSenderWrapper(&state)).await {
-        Ok(event_id) => {
-            // Store in txn cache.
-            let mut cache = state.txn_cache().write().await;
-            cache.insert(cache_key, event_id.clone());
-            (StatusCode::OK, Json(json!({ "event_id": event_id }))).into_response()
-        }
-        Err(e) => MatrixError::from_conduit(e).into_response(),
+    match super::event_pipeline::build_sign_and_persist_transaction(
+        &state, &authed.user_id, &room_id, &event_type, content, &key,
+    ).await {
+        Ok(event_id) => (StatusCode::OK, Json(json!({"event_id": event_id}))).into_response(),
+        Err(error) => error.into_response(),
     }
 }
 

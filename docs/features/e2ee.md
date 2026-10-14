@@ -28,7 +28,7 @@ That's still a lot of work, but it's much less than "implement crypto".
   every server in any shared room must learn (via the
   `m.device_list_update` EDU).
 - Federate to-device messages:
-  `PUT /_matrix/federation/v1/send_to_device/{txnId}`.
+  `m.direct_to_device` EDUs through `PUT /_matrix/federation/v1/send/{txnId}`.
 - Carry **cross-signing keys** (master / self-signing / user-signing)
   so devices can verify each other.
 
@@ -81,8 +81,21 @@ tests verify upload, depletion, fallback use, and acknowledgement.
 
 Remote: the same `PUT /sendToDevice` handler groups any
 remote-targeted user IDs by destination server and dispatches each
-batch via the outbound federation client's
-`PUT /_matrix/federation/v1/send_to_device/{txnId}` (conduit-0t6).
+batch as a standard `m.direct_to_device` EDU inside a durable federation
+transaction. The EDU retains the authenticated user's full Matrix ID and has
+its own stable 32-codepoint-bounded message ID. Inbound delivery checks that
+sender's domain against the signed origin and deduplicates by origin/message ID.
+The nonstandard federation send-to-device route is no longer mounted.
+
+Successful client room-send transactions are scoped by user, device, room,
+event type and transaction ID. To-device transactions are scoped by user,
+device, event type and transaction ID. PostgreSQL records the result together
+with the event or the complete local/remote delivery set in one transaction.
+Concurrent retries produce one effect; restarts reproduce the stored result;
+wildcards are expanded once, so later devices do not receive retried messages.
+Failed writes roll back both the effect and the deduplication marker.
+Original error-response and whole federation-transaction replay remain tracked
+as `conduit-y99.10.2`; successful-effect idempotency does not prove those cases.
 Outbound device list churn (`keys/upload`,
 `keys/device_signing/upload`) is similarly broadcast as
 `m.device_list_update` EDUs to every remote server sharing a room

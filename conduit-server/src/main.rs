@@ -224,7 +224,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let minter = Arc::new(keys::load_or_generate_minter(&*storage).await?);
     tracing::info!("biscuit minter key ready");
 
-    let http = reqwest::Client::new();
+    let mut http_builder = reqwest::Client::builder();
+    if let Some(path) = env::var_os("CONDUIT_TLS_CA") {
+        let pem = std::fs::read(path)?;
+        let certificates = reqwest::Certificate::from_pem_bundle(&pem)?;
+        if certificates.is_empty() {
+            return Err("CONDUIT_TLS_CA must contain at least one PEM certificate".into());
+        }
+        for certificate in certificates {
+            http_builder = http_builder.add_root_certificate(certificate);
+        }
+    }
+    let http = http_builder.build()?;
 
     let remote_keys = {
         let cache = RemoteKeyCache::new();

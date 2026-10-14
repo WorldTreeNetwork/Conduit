@@ -71,7 +71,7 @@ pub trait AuthState: Clone + Send + Sync + 'static + conduit::room::RoomEventSen
     fn server_name(&self) -> &str;
     /// The server's signing key (ed25519).  Used by the event pipeline.
     fn server_key(&self) -> Arc<ServerKey>;
-    /// Shared in-memory idempotency cache for `PUT /send/.../:txnId`.
+    /// Legacy host cache, retained for compatibility. Protocol idempotency uses Storage transactions.
     fn txn_cache(&self) -> &Arc<RwLock<HashMap<TxnCacheKey, String>>>;
     /// Broadcast sender for new stream positions.  `/sync` long-poll
     /// subscribes to this to wake up when new events arrive.

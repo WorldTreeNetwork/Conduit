@@ -74,6 +74,19 @@ automation can then probe `/health`. Defaults are `0.0.0.0:8008` and no readines
 file. Each restart must use a fresh or removed readiness file. These hooks use
 the normal HTTP routes and authentication.
 
+For the pinned live Synapse federation journey, run
+`bash conduit-server/tests/peers/run_synapse_to_device.sh`. It requires PostgreSQL
+with `CREATE DATABASE`, `psql`, `openssl`, Python 3.12+, `uv`, and the Rust
+toolchain. The runner provisions the isolated peer environment and exercises
+verified HTTPS, normal registration, bidirectional to-device delivery, retries,
+restart recovery, and signed-origin checks. Failures are fatal and cleanup is
+automatic. On Darwin 27 it uses LLVM's Mach-O linker and an installed 26.5 SDK
+for the peer extension; `CONDUIT_PEER_SDK` can select another compatible SDK.
+
+`CONDUIT_TLS_CA=/path/to/root.pem` adds a private PEM root for outbound HTTPS.
+The default certificate/hostname verification and public trust roots remain
+enabled. This supports private federation deployments and the peer test CA.
+
 **Status caveats** — full Matrix compliance is not yet established. The initial
 [requirement evidence register](docs/matrix-compliance.json) records verified
 assertions and uncovered scope; the complete server/client effort is tracked in

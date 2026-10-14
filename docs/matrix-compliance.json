@@ -102,10 +102,11 @@
       ],
       "status": "covered_assertions_only",
       "limitations": [
-        "Durable transaction deduplication and standard remote EDUs remain open"
+        "Whole HTTP transaction and rejected-response replay remain open; peer testing covers to-device messaging, not all federation surfaces"
       ],
       "gap_issues": [
-        "conduit-y99.10"
+        "conduit-y99.10.2",
+        "conduit-y99.4.2"
       ]
     },
     {
@@ -187,12 +188,21 @@
       "id": "independent-conformance-and-ci",
       "role": "test-infrastructure",
       "source": "https://spec.matrix.org/v1.19/",
-      "status": "missing",
+      "status": "partial",
       "issue": "conduit-y99.4.2",
       "scope": [
-        "Independent Matrix peer conformance",
+        "Full independent Matrix peer conformance",
         "CI execution and prerequisite provisioning",
         "Client UX/accessibility automation"
+      ],
+      "evidence": [
+        "Pinned live Synapse 1.162.0 bidirectional to-device journey passes with certificate, hostname and signature verification enabled"
+      ],
+      "tests": [
+        "conduit-server/tests/peers/run_synapse_to_device.sh"
+      ],
+      "limitations": [
+        "CI and full independent protocol coverage remain missing"
       ]
     },
     {
@@ -290,6 +300,96 @@
       "gap_issues": [
         "conduit-y99.14",
         "conduit-y99.9"
+      ]
+    },
+    {
+      "id": "successful-client-transaction-durability",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#transaction-identifiers",
+      "status": "covered_assertions_only",
+      "assertions": [
+        "Successful room-send results persist atomically with events",
+        "To-device deduplication, local queues and remote outboxes commit atomically",
+        "Concurrent retries have one committed effect",
+        "Scope includes user, device and complete logical endpoint",
+        "Retries survive restart and do not reexpand wildcard recipients",
+        "Failed writes roll back deduplication and all effects"
+      ],
+      "implementation": [
+        "conduit/src/storage.rs",
+        "conduit-server/src/storage_pg.rs",
+        "conduit-server/src/api/client/event_pipeline.rs",
+        "conduit-server/src/api/client/keys.rs",
+        "conduit-server/src/api/client/rooms.rs"
+      ],
+      "tests": [
+        "conduit-server/tests/production_e2e.rs::production_room_send_transactions_are_durable_and_endpoint_scoped",
+        "conduit-server/tests/production_e2e.rs::production_to_device_transactions_are_durable_and_do_not_reexpand_wildcards",
+        "conduit-server/tests/storage_pg.rs::device_transaction_rolls_back_deduplication_local_and_remote_effects_together",
+        "conduit-server/tests/storage_pg.rs::event_transaction_is_atomic_and_original_result_survives_pool_restart",
+        "conduit/src/storage.rs::tests::atomic_to_device_delivery_is_scoped_and_does_not_reexpand_retries"
+      ],
+      "limitations": [
+        "Rejected HTTP response replay and complete transaction-front-door semantics remain unproven",
+        "Event authorization/state publication is still outside the storage commit"
+      ],
+      "gap_issues": [
+        "conduit-y99.10.2",
+        "conduit-embed-persist"
+      ]
+    },
+    {
+      "id": "standard-to-device-federation",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/server-server-api/#send-to-device-messaging",
+      "status": "covered_assertions_only",
+      "assertions": [
+        "Remote deliveries use m.direct_to_device EDUs in standard /send transactions",
+        "Sender is the authenticated Matrix user, not a bare server name",
+        "Stable message IDs use at most 32 Unicode codepoints",
+        "Inbound sender domain matches the verified origin",
+        "Message-ID deduplication survives different enclosing transactions and restart",
+        "Queued remote delivery recovers after an unavailable peer and restart",
+        "Pinned live Synapse produces and consumes both directions over verified TLS"
+      ],
+      "implementation": [
+        "conduit-server/src/api/client/keys.rs",
+        "conduit-server/src/federation/server.rs",
+        "conduit-server/src/federation/client.rs",
+        "conduit-server/src/federation/queue.rs"
+      ],
+      "tests": [
+        "conduit-server/tests/peers/run_synapse_to_device.sh"
+      ],
+      "limitations": [
+        "Whole enclosing federation transaction replay remains open",
+        "Legacy queued to-device rows without sender metadata cannot be converted into valid EDUs",
+        "Full federation PDU/room-version/auth/peer conformance is not proven"
+      ],
+      "gap_issues": [
+        "conduit-y99.10.2",
+        "conduit-y99.4.2",
+        "conduit-embed-pdu"
+      ]
+    },
+    {
+      "id": "private-ca-peer-automation",
+      "role": "test-infrastructure",
+      "source": "openspec/specs/federation-automation/spec.md",
+      "status": "covered_assertions_only",
+      "assertions": [
+        "Operator PEM roots preserve normal outbound TLS verification",
+        "Missing and invalid configured roots fail startup",
+        "Live-peer fixture provisions processes, databases and certificates without human interaction",
+        "Missing prerequisites and assertion failures exit nonzero"
+      ],
+      "implementation": [
+        "conduit-server/src/main.rs",
+        "conduit-server/tests/peers/synapse_to_device.py"
+      ],
+      "tests": [
+        "conduit-server/tests/production_e2e.rs::production_startup_rejects_missing_or_invalid_private_ca",
+        "conduit-server/tests/peers/run_synapse_to_device.sh"
       ]
     }
   ]

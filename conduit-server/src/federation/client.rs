@@ -702,24 +702,18 @@ impl Client {
         self.signed_get(dest, &path).await
     }
 
-    /// `PUT /_matrix/federation/v1/send_to_device/{txnId}`
-    ///
-    /// Send to-device messages to devices on `dest`.
-    /// `messages` is `{ user_id: { device_id: content } }`.
+    /// Deliver a standard m.direct_to_device EDU through a send transaction.
     pub async fn send_to_device(
-        &self,
-        dest: &str,
-        txn_id: &str,
-        event_type: &str,
-        messages: serde_json::Value,
+        &self, dest: &str, txn_id: &str, sender: &str, event_type: &str, messages: Value,
     ) -> Result<Value, FederationError> {
-        let path = format!("/_matrix/federation/v1/send_to_device/{}/{}", urlencoding(event_type), urlencoding(txn_id));
-        let body = serde_json::json!({
-            "sender": &*self.server_name,
-            "type": event_type,
-            "messages": messages,
-        });
-        self.signed_put(dest, &path, &body).await
+        use sha2::{Digest, Sha256};
+        // Retain stable deduplication IDs even for older 36-character queue IDs.
+        let message_id = hex::encode(Sha256::digest(txn_id.as_bytes()))[..32].to_owned();
+        self.send_transaction(dest, txn_id, vec![], vec![serde_json::json!({
+            "edu_type": "m.direct_to_device", "content": {
+                "sender": sender, "type": event_type, "message_id": message_id, "messages": messages
+            }
+        })]).await.map(|_| serde_json::json!({}))
     }
 
     /// `GET /_matrix/federation/v1/query/directory?room_alias={alias}`

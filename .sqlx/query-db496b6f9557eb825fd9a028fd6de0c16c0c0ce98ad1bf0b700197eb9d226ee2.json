@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                INSERT INTO to_device_queue (target_user, target_device, sender, event_type, content)\n                SELECT user_id, device_id, $3, $4, $5 FROM devices\n                WHERE user_id = $1 AND ($2 = '*' OR device_id = $2)\n                ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Jsonb"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "db496b6f9557eb825fd9a028fd6de0c16c0c0ce98ad1bf0b700197eb9d226ee2"
+}

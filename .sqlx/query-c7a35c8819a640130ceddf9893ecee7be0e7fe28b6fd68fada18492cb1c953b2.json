@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                INSERT INTO fed_outbound_queue (destination, kind, txn_id, payload)\n                VALUES ($1, 'transaction', $2, $3)\n                ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Jsonb"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "c7a35c8819a640130ceddf9893ecee7be0e7fe28b6fd68fada18492cb1c953b2"
+}

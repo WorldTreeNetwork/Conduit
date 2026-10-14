@@ -55,6 +55,82 @@ fn map_sqlx(e: sqlx::Error) -> Error {
 
 #[async_trait]
 impl Storage for PostgresStorage {
+    async fn transaction_result(&self, key: &conduit::storage::TransactionKey) -> Result<Option<Value>> {
+        let row = sqlx::query!(
+            "SELECT result FROM transactions WHERE scope = $1 AND owner = $2 AND endpoint = $3 AND txn_id = $4",
+            key.scope, key.owner, key.endpoint, key.txn_id
+        ).fetch_optional(&self.pool).await.map_err(map_sqlx)?;
+        Ok(row.map(|row| row.result))
+    }
+
+    async fn put_event_once(&self, key: &conduit::storage::TransactionKey, event: &Event) -> Result<(String, bool)> {
+        let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
+        let result = serde_json::json!({"event_id": event.event_id});
+        let inserted = sqlx::query!(
+            "INSERT INTO transactions (scope, owner, endpoint, txn_id, result) VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING",
+            key.scope, key.owner, key.endpoint, key.txn_id, result
+        ).execute(&mut *transaction).await.map_err(map_sqlx)?.rows_affected() > 0;
+        if !inserted {
+            let row = sqlx::query!(
+                "SELECT result FROM transactions WHERE scope = $1 AND owner = $2 AND endpoint = $3 AND txn_id = $4",
+                key.scope, key.owner, key.endpoint, key.txn_id
+            ).fetch_one(&mut *transaction).await.map_err(map_sqlx)?;
+            let id = row.result["event_id"].as_str().ok_or_else(|| Error::Storage("invalid stored event transaction".into()))?.to_owned();
+            transaction.commit().await.map_err(map_sqlx)?;
+            return Ok((id, false));
+        }
+        if event.state_key.is_some() {
+            return Err(Error::InvalidEvent("put_event_once accepts non-state events only".into()));
+        }
+        sqlx::query!(
+            r#"
+            INSERT INTO events
+                (event_id, room_id, sender, type, state_key, content,
+                 auth_events, prev_events, signatures, hashes, unsigned,
+                 origin_server_ts, depth)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+            ON CONFLICT (event_id) DO NOTHING
+            "#,
+            event.event_id, event.room_id, event.sender, event.event_type, event.state_key, event.content,
+            &event.auth_events, &event.prev_events, event.signatures, event.hashes, event.unsigned,
+            event.origin_server_ts as i64, event.depth
+        ).execute(&mut *transaction).await.map_err(map_sqlx)?;
+        transaction.commit().await.map_err(map_sqlx)?;
+        Ok((event.event_id.clone(), true))
+    }
+
+    async fn deliver_to_device_once(&self, key: &conduit::storage::TransactionKey,
+        local: &[conduit::storage::ToDeviceDelivery], remote: &[conduit::storage::OutboundDelivery]) -> Result<bool> {
+        let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
+        let result = serde_json::json!({});
+        let inserted = sqlx::query!(
+            "INSERT INTO transactions (scope, owner, endpoint, txn_id, result) VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING",
+            key.scope, key.owner, key.endpoint, key.txn_id, result
+        ).execute(&mut *transaction).await.map_err(map_sqlx)?.rows_affected() > 0;
+        if !inserted { transaction.commit().await.map_err(map_sqlx)?; return Ok(false); }
+        for message in local {
+            sqlx::query!(
+                r#"
+                INSERT INTO to_device_queue (target_user, target_device, sender, event_type, content)
+                SELECT user_id, device_id, $3, $4, $5 FROM devices
+                WHERE user_id = $1 AND ($2 = '*' OR device_id = $2)
+                "#,
+                message.target_user, message.target_device, message.sender, message.event_type, message.content
+            ).execute(&mut *transaction).await.map_err(map_sqlx)?;
+        }
+        for delivery in remote {
+            sqlx::query!(
+                r#"
+                INSERT INTO fed_outbound_queue (destination, kind, txn_id, payload)
+                VALUES ($1, 'transaction', $2, $3)
+                "#,
+                delivery.destination, delivery.txn_id, delivery.payload
+            ).execute(&mut *transaction).await.map_err(map_sqlx)?;
+        }
+        transaction.commit().await.map_err(map_sqlx)?;
+        Ok(true)
+    }
+
     // -----------------------------------------------------------------------
     // Events
     // -----------------------------------------------------------------------

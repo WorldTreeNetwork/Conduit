@@ -109,10 +109,11 @@ impl Queue {
     pub async fn enqueue_to_device(
         &self,
         dest: &str,
+        sender: &str,
         event_type: &str,
         messages: Value,
     ) {
-        let payload = json!({ "event_type": event_type, "messages": messages });
+        let payload = json!({ "sender": sender, "event_type": event_type, "messages": messages });
         self.persist_and_signal(dest, "to_device", &payload).await;
     }
 
@@ -132,6 +133,11 @@ impl Queue {
             }
         }
         self.ensure_worker(dest).await.notify_one();
+    }
+
+    /// Wake dispatch after an outbox row was committed by an atomic operation.
+    pub async fn wake(&self, destination: &str) {
+        self.ensure_worker(destination).await.notify_one();
     }
 
     /// Get or create the Notify handle for `dest`, spawning the worker if
@@ -328,8 +334,10 @@ async fn send_to_device(
         .get("messages")
         .cloned()
         .ok_or_else(|| "to_device payload missing messages".to_owned())?;
+    let sender = entry.payload.get("sender").and_then(Value::as_str)
+        .ok_or_else(|| "legacy to-device row has no sender; cannot send a valid Matrix EDU".to_owned())?;
     client
-        .send_to_device(dest, &entry.txn_id, event_type, messages)
+        .send_to_device(dest, &entry.txn_id, sender, event_type, messages)
         .await
         .map(|_| ())
         .map_err(|e| e.to_string())

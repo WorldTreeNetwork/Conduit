@@ -58,8 +58,10 @@ messages, device list changes, ...
    device lists, to-device, presence).
 3. Use **UI Authentication** (UIA) for password changes and other
    sensitive flows — it's a state machine the spec defines.
-4. Idempotency via `txnId` — keep a small per-device cache of recent
-   transaction IDs.
+4. Successful room-send and to-device `txnId` results persist atomically with
+   their effects, scoped to the device and complete endpoint path. An in-memory
+   cache cannot establish restart durability or concurrent idempotency.
+   Original error-response replay remains `conduit-y99.10.2`.
 
 ## Gotchas
 

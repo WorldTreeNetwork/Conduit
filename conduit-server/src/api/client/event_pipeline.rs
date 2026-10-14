@@ -92,6 +92,20 @@ pub async fn build_sign_and_persist<S: AuthState>(
     state_key: Option<&str>,
     content: serde_json::Value,
 ) -> Result<String, (StatusCode, Json<MatrixError>)> {
+    build_sign_and_persist_inner(state, sender, room_id, type_, state_key, content, None).await
+}
+
+pub async fn build_sign_and_persist_transaction<S: AuthState>(
+    state: &S, sender: &str, room_id: &str, type_: &str, content: Value,
+    key: &conduit::storage::TransactionKey,
+) -> Result<String, (StatusCode, Json<MatrixError>)> {
+    build_sign_and_persist_inner(state, sender, room_id, type_, None, content, Some(key)).await
+}
+
+async fn build_sign_and_persist_inner<S: AuthState>(
+    state: &S, sender: &str, room_id: &str, type_: &str, state_key: Option<&str>, content: Value,
+    transaction_key: Option<&conduit::storage::TransactionKey>,
+) -> Result<String, (StatusCode, Json<MatrixError>)> {
     let storage = state.storage();
     let server_name = state.server_name();
 
@@ -176,9 +190,13 @@ pub async fn build_sign_and_persist<S: AuthState>(
     // ------------------------------------------------------------------
     // Step 9 — persist
     // ------------------------------------------------------------------
-    storage.put_event(&event).await.map_err(|e| {
-        MatrixError::unknown(format!("storage error: {e}"))
-    })?;
+    if let Some(key) = transaction_key {
+        let (event_id, inserted) = storage.put_event_once(key, &event).await
+            .map_err(|error| MatrixError::unknown(format!("storage error: {error}")))?;
+        if !inserted { return Ok(event_id); }
+    } else {
+        storage.put_event(&event).await.map_err(|error| MatrixError::unknown(format!("storage error: {error}")))?;
+    }
 
     // ------------------------------------------------------------------
     // Step 10 — update current state if this is a state event

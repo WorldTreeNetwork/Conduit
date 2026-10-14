@@ -25,6 +25,140 @@ use conduit::event::Event;
 use conduit::storage::Storage;
 use conduit_server::PostgresStorage;
 
+#[tokio::test]
+async fn device_transaction_rolls_back_deduplication_local_and_remote_effects_together() {
+    use conduit::storage::{OutboundDelivery, ToDeviceDelivery, TransactionKey};
+    let db = TempDb::new().await;
+    let store = db.storage();
+    store.create_account("@bob:test", None).await.unwrap();
+    store.upsert_device("@bob:test", "B", None).await.unwrap();
+    sqlx::query(
+        r#"
+        CREATE FUNCTION reject_test_outbound() RETURNS trigger AS $$
+        BEGIN
+            IF NEW.destination = 'fail.test' THEN RAISE EXCEPTION 'injected write failure'; END IF;
+            RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql;
+    "#,
+    )
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query("CREATE TRIGGER reject_test_outbound BEFORE INSERT ON fed_outbound_queue FOR EACH ROW EXECUTE FUNCTION reject_test_outbound()")
+        .execute(&db.pool).await.unwrap();
+    let key = TransactionKey::client("@alice:test", "A", &["send_to_device", "m.test"], "once");
+    let local = vec![ToDeviceDelivery {
+        target_user: "@bob:test".into(),
+        target_device: "*".into(),
+        sender: "@alice:test".into(),
+        event_type: "m.test".into(),
+        content: json!({"value": 1}),
+    }];
+    let remote: Vec<_> = ["ok.test", "fail.test"]
+        .into_iter()
+        .map(|destination| OutboundDelivery {
+            destination: destination.into(),
+            txn_id: "id".into(),
+            payload: json!({"pdus": [], "edus": []}),
+        })
+        .collect();
+    assert!(store
+        .deliver_to_device_once(&key, &local, &remote)
+        .await
+        .is_err());
+    assert!(store.transaction_result(&key).await.unwrap().is_none());
+    assert!(store
+        .drain_to_device("@bob:test", "B", 0, 100)
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(store
+        .outbound_destinations_with_pending()
+        .await
+        .unwrap()
+        .is_empty());
+    sqlx::query("DROP TRIGGER reject_test_outbound ON fed_outbound_queue")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    assert!(store
+        .deliver_to_device_once(&key, &local, &remote)
+        .await
+        .unwrap());
+    assert_eq!(
+        store
+            .drain_to_device("@bob:test", "B", 0, 100)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        store
+            .outbound_destinations_with_pending()
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+    let reopened = db.reopen().await;
+    reopened
+        .upsert_device("@bob:test", "NEW", None)
+        .await
+        .unwrap();
+    assert!(!reopened
+        .deliver_to_device_once(&key, &local, &remote)
+        .await
+        .unwrap());
+    assert!(reopened
+        .drain_to_device("@bob:test", "NEW", 0, 100)
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        reopened
+            .drain_to_device("@bob:test", "B", 0, 100)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn event_transaction_is_atomic_and_original_result_survives_pool_restart() {
+    use conduit::storage::TransactionKey;
+    let db = TempDb::new().await;
+    let store = db.storage();
+    let key = TransactionKey::client(
+        "@alice:test",
+        "A",
+        &["room_send", "!room:test", "m.room.message"],
+        "once",
+    );
+    let mut event = make_event(
+        "$once",
+        "!room:test",
+        "m.room.message",
+        Some("invalid-state"),
+    );
+    assert!(store.put_event_once(&key, &event).await.is_err());
+    assert!(store.transaction_result(&key).await.unwrap().is_none());
+    assert!(store.get_event("$once").await.unwrap().is_none());
+    event.state_key = None;
+    assert_eq!(
+        store.put_event_once(&key, &event).await.unwrap(),
+        ("$once".into(), true)
+    );
+    let reopened = db.reopen().await;
+    event.event_id = "$duplicate".into();
+    assert_eq!(
+        reopened.put_event_once(&key, &event).await.unwrap(),
+        ("$once".into(), false)
+    );
+    assert!(reopened.get_event("$duplicate").await.unwrap().is_none());
+}
 // ---------------------------------------------------------------------------
 // TempDb — ephemeral test database fixture
 // ---------------------------------------------------------------------------

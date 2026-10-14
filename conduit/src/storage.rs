@@ -139,6 +139,52 @@ pub struct TokenOwner {
     pub device_id: String,
 }
 
+/// Collision-free domain identity for a retried client request or federation EDU.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TransactionKey {
+    pub scope: String,
+    pub owner: String,
+    pub endpoint: String,
+    pub txn_id: String,
+}
+
+impl TransactionKey {
+    pub fn client(user: &str, device: &str, endpoint: &[&str], txn_id: &str) -> Self {
+        Self {
+            scope: "client".into(),
+            owner: serde_json::json!([user, device]).to_string(),
+            endpoint: serde_json::json!(endpoint).to_string(),
+            txn_id: txn_id.to_owned(),
+        }
+    }
+
+    pub fn federation(origin: &str, message_id: &str) -> Self {
+        Self {
+            scope: "federation".into(),
+            owner: origin.to_owned(),
+            endpoint: "m.direct_to_device".into(),
+            txn_id: message_id.to_owned(),
+        }
+    }
+}
+
+/// A local delivery; `target_device == "*"` is expanded atomically on commit.
+#[derive(Debug, Clone)]
+pub struct ToDeviceDelivery {
+    pub target_user: String,
+    pub target_device: String,
+    pub sender: String,
+    pub event_type: String,
+    pub content: Value,
+}
+
+/// An already-framed standard federation transaction for the durable outbox.
+#[derive(Debug, Clone)]
+pub struct OutboundDelivery {
+    pub destination: String,
+    pub txn_id: String,
+    pub payload: Value,
+}
 /// A server signing key (ed25519 or similar).
 #[derive(Debug, Clone)]
 pub struct SigningKey {
@@ -207,6 +253,17 @@ pub struct AuditEntry {
 
 #[async_trait]
 pub trait Storage: Send + Sync + 'static {
+    /// Original successful result, scoped to a device/endpoint or origin/EDU ID.
+    async fn transaction_result(&self, key: &TransactionKey) -> Result<Option<Value>>;
+
+    /// Atomically persist a non-state event and its transaction result.
+    /// Returns the original event ID and whether this call inserted it.
+    async fn put_event_once(&self, key: &TransactionKey, event: &Event) -> Result<(String, bool)>;
+
+    /// Atomically record deduplication, local deliveries, and remote outbox rows.
+    /// Returns false for a successful request that was already committed.
+    async fn deliver_to_device_once(&self, key: &TransactionKey,
+        local: &[ToDeviceDelivery], remote: &[OutboundDelivery]) -> Result<bool>;
     // --- Events (unchanged) -------------------------------------------------
 
     async fn get_event(&self, event_id: &str) -> Result<Option<Event>>;
@@ -860,6 +917,7 @@ struct MemoryOutbound {
 }
 
 struct MemoryInner {
+    transactions: HashMap<TransactionKey, Value>,
     events: HashMap<String, Event>,
     accounts: HashMap<String, Account>,
     /// (user_id, device_id) → Device
@@ -921,6 +979,7 @@ impl Default for MemoryInner {
     fn default() -> Self {
         Self {
             events: HashMap::new(),
+            transactions: HashMap::new(),
             accounts: HashMap::new(),
             devices: HashMap::new(),
             tokens: HashMap::new(),
@@ -957,6 +1016,50 @@ impl Default for MemoryInner {
 
 #[async_trait]
 impl Storage for MemoryStorage {
+    async fn transaction_result(&self, key: &TransactionKey) -> Result<Option<Value>> {
+        Ok(self.inner.read().await.transactions.get(key).cloned())
+    }
+
+    async fn put_event_once(&self, key: &TransactionKey, event: &Event) -> Result<(String, bool)> {
+        let mut inner = self.inner.write().await;
+        if let Some(result) = inner.transactions.get(key) {
+            return result["event_id"].as_str().map(|id| (id.to_owned(), false))
+                .ok_or_else(|| crate::Error::Storage("invalid stored event transaction".into()));
+        }
+        if event.state_key.is_some() {
+            return Err(crate::Error::InvalidEvent("put_event_once accepts non-state events only".into()));
+        }
+        inner.events.entry(event.event_id.clone()).or_insert_with(|| event.clone());
+        inner.transactions.insert(key.clone(), serde_json::json!({"event_id": event.event_id}));
+        Ok((event.event_id.clone(), true))
+    }
+
+    async fn deliver_to_device_once(&self, key: &TransactionKey, local: &[ToDeviceDelivery], remote: &[OutboundDelivery]) -> Result<bool> {
+        let mut inner = self.inner.write().await;
+        if inner.transactions.contains_key(key) { return Ok(false); }
+        for message in local {
+            let targets: Vec<_> = inner.devices.keys()
+                .filter(|(user, device)| user == &message.target_user && (message.target_device == "*" || device == &message.target_device))
+                .map(|(_, device)| device.clone()).collect();
+            for device in targets {
+                inner.to_device_next_id += 1;
+                let id = inner.to_device_next_id;
+                inner.to_device_queue.push((id, message.target_user.clone(), device,
+                    message.sender.clone(), message.event_type.clone(), message.content.clone()));
+            }
+        }
+        for delivery in remote {
+            inner.outbound_queue.next_id += 1;
+            let id = inner.outbound_queue.next_id;
+            inner.outbound_queue.rows.push(OutboundRow {
+                entry: OutboundEntry {id, destination: delivery.destination.clone(), kind: "transaction".into(), txn_id: delivery.txn_id.clone(), payload: delivery.payload.clone(), attempts: 0},
+                status: "pending".into(), next_attempt_at_ms: chrono::Utc::now().timestamp_millis(), last_error: None,
+            });
+        }
+        inner.transactions.insert(key.clone(), serde_json::json!({}));
+        Ok(true)
+    }
+
     // --- Events -------------------------------------------------------------
 
     async fn get_event(&self, event_id: &str) -> Result<Option<Event>> {
@@ -2523,6 +2626,24 @@ impl Storage for MemoryStorage {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn atomic_to_device_delivery_is_scoped_and_does_not_reexpand_retries() {
+        let store = MemoryStorage::default();
+        store.upsert_device("@bob:test", "ONE", None).await.unwrap();
+        store.upsert_device("@bob:test", "TWO", None).await.unwrap();
+        let key = TransactionKey::client("@alice:test", "A", &["send_to_device", "m.test"], "once");
+        let local = vec![ToDeviceDelivery {target_user: "@bob:test".into(), target_device: "*".into(),
+            sender: "@alice:test".into(), event_type: "m.test".into(), content: json!({"body": "once"})}];
+        assert!(store.deliver_to_device_once(&key, &local, &[]).await.unwrap());
+        store.upsert_device("@bob:test", "NEW", None).await.unwrap();
+        assert!(!store.deliver_to_device_once(&key, &local, &[]).await.unwrap());
+        for device in ["ONE", "TWO"] { assert_eq!(store.drain_to_device("@bob:test", device, 0, 100).await.unwrap().len(), 1); }
+        assert!(store.drain_to_device("@bob:test", "NEW", 0, 100).await.unwrap().is_empty());
+        let other = TransactionKey::client("@alice:test", "SECOND", &["send_to_device", "m.test"], "once");
+        assert!(store.deliver_to_device_once(&other, &local, &[]).await.unwrap());
+        assert_eq!(store.drain_to_device("@bob:test", "NEW", 0, 100).await.unwrap().len(), 1);
+    }
 
     #[tokio::test]
     async fn account_data_cursor_uses_observed_positions_across_overwrites_and_gaps() {
