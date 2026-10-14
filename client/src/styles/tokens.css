@@ -1,0 +1,176 @@
+/*
+ * Conduit design tokens: station enamel.
+ * A pale enamel hall, a deep tube-green destination board, white enamel
+ * plates, brass reserved for lamps and the one primary action, signal red
+ * for jams. Light is the day shift; dark is the night shift.
+ * Every colour pair used for text is checked for WCAG AA (see
+ * src/styles/contrast.test.ts).
+ */
+:root {
+  color-scheme: light;
+
+  /* Hall and plates */
+  --color-ground: #e9eeea;
+  --color-surface: #fbfcfa;
+  --color-surface-sunk: #dfe6e1;
+  --color-surface-hover: #e2e9e4;
+  --color-rule: #c3cfc8;
+  --color-rule-strong: #6c7f76;
+
+  /* Ink */
+  --color-ink: #13201c;
+  --color-ink-muted: #48594f;
+  --color-ink-faint: #5d6e66;
+
+  /* Destination board (navigation) */
+  --color-board: #163a33;
+  --color-board-raised: #1e4a42;
+  --color-board-selected: #24524a;
+  --color-board-ink: #edf3ef;
+  --color-board-ink-muted: #bfd2ca;
+  --color-board-rule: #2d544b;
+  --color-board-clear: #7fd3a0;
+  --color-board-signal: #ff9d92;
+
+  /* Brass: lamps and the primary action only */
+  --color-brass: #c48f2c;
+  --color-brass-strong: #a8761a;
+  --color-brass-ink: #1b1305;
+  --color-brass-text: #835a0c;
+  --color-lamp: #e2ad45;
+  --color-lamp-ink: #1b1305;
+
+  /* Service states */
+  --color-signal: #b02a20;
+  --color-signal-surface: #f8e4e1;
+  --color-signal-ink: #7d1a12;
+  --color-clear: #2c7148;
+  --color-caution-surface: #f6ebcf;
+  --color-caution-ink: #5c4108;
+
+  --color-focus: #1f6fd6;
+  --color-selection: #f3d891;
+  --color-scrim: rgb(10 22 19 / 0.45);
+
+  /* Type */
+  --font-plate: "Barlow Condensed", "Arial Narrow", sans-serif;
+  --font-text: "Atkinson Hyperlegible Next Variable", "Atkinson Hyperlegible Next", system-ui, sans-serif;
+  --text-xs: 0.75rem;
+  --text-sm: 0.875rem;
+  --text-md: 1rem;
+  --text-lg: 1.125rem;
+  --text-xl: 1.375rem;
+  --text-2xl: 1.75rem;
+  --leading-tight: 1.2;
+  --leading-body: 1.5;
+
+  /* Space (4px grid) */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.5rem;
+  --space-6: 2rem;
+  --space-7: 3rem;
+
+  /* Shape and depth */
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 14px;
+  --radius-pill: 999px;
+  --shadow-plate: 0 1px 2px rgb(19 32 28 / 0.08), 0 8px 24px -12px rgb(19 32 28 / 0.25);
+  --shadow-dialog: 0 2px 6px rgb(19 32 28 / 0.12), 0 24px 48px -16px rgb(19 32 28 / 0.4);
+
+  /* Motion */
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --duration-fast: 150ms;
+  --duration-med: 220ms;
+
+  /* Layout */
+  --board-width: 18.5rem;
+  --panel-width: 17rem;
+  --measure: 72ch;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --color-ground: #0e1815;
+    --color-surface: #15221e;
+    --color-surface-sunk: #0a1210;
+    --color-surface-hover: #1c2c27;
+    --color-rule: #2a3c36;
+    --color-rule-strong: #63796f;
+    --color-ink: #e4ece7;
+    --color-ink-muted: #a3b5ad;
+    --color-ink-faint: #8fa39a;
+    --color-board: #0a1311;
+    --color-board-raised: #13211d;
+    --color-board-selected: #1e3530;
+    --color-board-ink: #e4ece7;
+    --color-board-ink-muted: #9fb3aa;
+    --color-board-rule: #1f302b;
+    --color-board-clear: #6cc08f;
+    --color-board-signal: #f07a6e;
+    --color-brass: #d9a441;
+    --color-brass-strong: #e6b75a;
+    --color-brass-ink: #1b1305;
+    --color-brass-text: #e3b45a;
+    --color-lamp: #e8b34d;
+    --color-signal: #f07a6e;
+    --color-signal-surface: #3a1714;
+    --color-signal-ink: #ffb4aa;
+    --color-clear: #6cc08f;
+    --color-caution-surface: #33280e;
+    --color-caution-ink: #f1d18a;
+    --color-focus: #6aa8ff;
+    --color-selection: #5b4613;
+    --color-scrim: rgb(0 0 0 / 0.6);
+    --shadow-plate: 0 1px 2px rgb(0 0 0 / 0.4), 0 8px 24px -12px rgb(0 0 0 / 0.6);
+    --shadow-dialog: 0 2px 6px rgb(0 0 0 / 0.5), 0 24px 48px -16px rgb(0 0 0 / 0.8);
+  }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --color-ground: #0e1815;
+  --color-surface: #15221e;
+  --color-surface-sunk: #0a1210;
+  --color-surface-hover: #1c2c27;
+  --color-rule: #2a3c36;
+  --color-rule-strong: #63796f;
+  --color-ink: #e4ece7;
+  --color-ink-muted: #a3b5ad;
+  --color-ink-faint: #8fa39a;
+  --color-board: #0a1311;
+  --color-board-raised: #13211d;
+  --color-board-selected: #1e3530;
+  --color-board-ink: #e4ece7;
+  --color-board-ink-muted: #9fb3aa;
+  --color-board-rule: #1f302b;
+  --color-board-clear: #6cc08f;
+  --color-board-signal: #f07a6e;
+  --color-brass: #d9a441;
+  --color-brass-strong: #e6b75a;
+  --color-brass-ink: #1b1305;
+  --color-brass-text: #e3b45a;
+  --color-lamp: #e8b34d;
+  --color-signal: #f07a6e;
+  --color-signal-surface: #3a1714;
+  --color-signal-ink: #ffb4aa;
+  --color-clear: #6cc08f;
+  --color-caution-surface: #33280e;
+  --color-caution-ink: #f1d18a;
+  --color-focus: #6aa8ff;
+  --color-selection: #5b4613;
+  --color-scrim: rgb(0 0 0 / 0.6);
+  --shadow-plate: 0 1px 2px rgb(0 0 0 / 0.4), 0 8px 24px -12px rgb(0 0 0 / 0.6);
+  --shadow-dialog: 0 2px 6px rgb(0 0 0 / 0.5), 0 24px 48px -16px rgb(0 0 0 / 0.8);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --duration-fast: 0ms;
+    --duration-med: 0ms;
+  }
+}
