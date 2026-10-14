@@ -2108,6 +2108,32 @@
       "limitations": [
         "Federation /invite v1/v2 hook is conduit-y99.29.1"
       ]
+    },
+    {
+      "id": "as-transaction-push",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/application-service-api/#pushing-events",
+      "status": "covered_assertions_only",
+      "assertions": [
+        "Transactions use Authorization: Bearer hs_token and never the access_token query parameter on /_matrix/app/v1",
+        "Only interesting events are pushed (alias-namespace room, users-namespace member target); unrelated rooms are not",
+        "txnIds strictly increase; a failing transaction is retried with the same txnId and identical body, including after a server restart, and events are delivered exactly once in order",
+        "404 on the v1 route falls back to the legacy /transactions route with ?access_token",
+        "receive_ephemeral pushes m.typing/m.receipt for interesting rooms and m.presence for users sharing them; private receipts of non-namespace users are withheld"
+      ],
+      "implementation": [
+        "conduit-server/src/appservice_push.rs",
+        "conduit-server/src/app_service.rs"
+      ],
+      "tests": [
+        "conduit-server/tests/production_appservice.rs::transactions_push_interesting_events_and_ephemeral_with_bearer_auth",
+        "conduit-server/tests/production_appservice.rs::transactions_retry_with_identical_body_across_restart",
+        "conduit-server/tests/production_appservice.rs::transactions_fall_back_to_legacy_routes"
+      ],
+      "limitations": [
+        "Typing/presence push cursors restart at the current head after a server restart (in-memory stores)",
+        "Interest uses current room state, not the state at each event"
+      ]
     }
   ]
 }

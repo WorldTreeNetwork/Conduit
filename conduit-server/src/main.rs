@@ -28,7 +28,7 @@ use conduit::{keys::ServerKey, storage::Storage};
 use conduit_server::{
     api::client::{AuthState, TxnCacheKey, TypingStore, PresenceStore},
     api::client::media::{MediaState, cleanup_remote_media},
-    app_service::{self, AppService, AsQueues},
+    app_service::{self, AppService},
     federation,
     federation::{
         FedState, RateLimiter, authenticated_federation_router,
@@ -471,19 +471,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tracing::info!("push notification worker started");
     }
 
-    // Spawn AS transaction pusher workers (E11 AS5, AS7).
-    {
-        let as_rx = state.events_tx.subscribe();
-        let as_queues = Arc::new(AsQueues::new(&state.app_services));
-        app_service::spawn_as_workers(
-            Arc::clone(&state.app_services),
-            Arc::clone(&as_queues),
-            state.http.clone(),
-            as_rx,
-            Arc::clone(&state.storage),
-        );
-        tracing::info!("AS transaction pusher workers started");
-    }
+    // Spawn durable AS transaction pusher workers (conduit-y99.34).
+    conduit_server::appservice_push::spawn_workers(
+        &state.app_services,
+        conduit_server::appservice_push::PushContext {
+            storage: Arc::clone(&state.storage),
+            server_name: Arc::clone(&state.server_name),
+            http: state.http.clone(),
+            typing: Arc::clone(&state.typing_store),
+            presence: Arc::clone(&state.presence_store),
+            backoff_base: conduit_server::appservice_push::PushContext::backoff_from_env(),
+        },
+        &state.events_tx,
+    );
 
     // Build the per-origin rate limiter.
     let rate_limiter = RateLimiter::default_federation();

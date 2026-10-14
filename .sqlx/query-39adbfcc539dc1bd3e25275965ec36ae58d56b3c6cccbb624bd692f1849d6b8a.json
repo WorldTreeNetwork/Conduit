@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO threepid_id_server_bindings (user_id, medium, address, id_server)\n            VALUES ($1, $2, $3, $4)\n            ON CONFLICT DO NOTHING\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "39adbfcc539dc1bd3e25275965ec36ae58d56b3c6cccbb624bd692f1849d6b8a"
+}

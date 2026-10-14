@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            DELETE FROM threepid_id_server_bindings\n            WHERE user_id = $1 AND medium = $2 AND address = $3\n              AND ($4::TEXT IS NULL OR id_server = $4)\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "8ff1ff6a037995b4d6e3301fff0676a742b7ecf87cc545ecdb260b0e80901736"
+}

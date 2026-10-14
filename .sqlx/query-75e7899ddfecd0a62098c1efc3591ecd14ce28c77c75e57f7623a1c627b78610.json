@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT txn_id, body FROM appservice_txns WHERE as_id = $1 ORDER BY txn_id LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "txn_id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "body",
+        "type_info": "Jsonb"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "75e7899ddfecd0a62098c1efc3591ecd14ce28c77c75e57f7623a1c627b78610"
+}

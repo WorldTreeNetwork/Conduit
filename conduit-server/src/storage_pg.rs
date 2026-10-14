@@ -4017,6 +4017,182 @@ impl Storage for PostgresStorage {
         Ok(())
     }
 
+    // --- Application services & identity-server bindings (appservice lane) --
+
+    async fn appservice_cursor(&self, as_id: &str) -> Result<conduit::storage::AppserviceCursor> {
+        let existing = sqlx::query!(
+            "SELECT event_pos, receipt_pos FROM appservice_stream WHERE as_id = $1",
+            as_id
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        if let Some(row) = existing {
+            return Ok(conduit::storage::AppserviceCursor {
+                event_pos: row.event_pos,
+                receipt_pos: row.receipt_pos,
+            });
+        }
+        let event_pos = self.global_max_stream_position().await?;
+        // A first start inserts at the stream heads; a racing insert wins.
+        let row = sqlx::query!(
+            r#"
+            WITH inserted AS (
+                INSERT INTO appservice_stream (as_id, event_pos, receipt_pos)
+                VALUES ($1, $2, (SELECT COALESCE(MAX(stream_pos), 0) FROM receipts))
+                ON CONFLICT (as_id) DO NOTHING
+                RETURNING event_pos, receipt_pos
+            )
+            SELECT event_pos AS "event_pos!", receipt_pos AS "receipt_pos!" FROM inserted
+            UNION ALL
+            SELECT event_pos, receipt_pos FROM appservice_stream WHERE as_id = $1
+            LIMIT 1
+            "#,
+            as_id,
+            event_pos
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(conduit::storage::AppserviceCursor {
+            event_pos: row.event_pos,
+            receipt_pos: row.receipt_pos,
+        })
+    }
+
+    async fn appservice_pending_txn(&self, as_id: &str) -> Result<Option<(i64, Value)>> {
+        let row = sqlx::query!(
+            "SELECT txn_id, body FROM appservice_txns WHERE as_id = $1 ORDER BY txn_id LIMIT 1",
+            as_id
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(row.map(|r| (r.txn_id, r.body)))
+    }
+
+    async fn appservice_enqueue_txn(
+        &self,
+        as_id: &str,
+        body: Option<&Value>,
+        cursor: &conduit::storage::AppserviceCursor,
+    ) -> Result<Option<i64>> {
+        let mut tx = self.pool.begin().await.map_err(map_sqlx)?;
+        let next = sqlx::query_scalar!(
+            "SELECT next_txn_id FROM appservice_stream WHERE as_id = $1 FOR UPDATE",
+            as_id
+        )
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(map_sqlx)?
+        .ok_or_else(|| Error::Storage(format!("no cursor for application service {as_id}")))?;
+        let txn_id = match body {
+            Some(body) => {
+                sqlx::query!(
+                    "INSERT INTO appservice_txns (as_id, txn_id, body) VALUES ($1, $2, $3)",
+                    as_id,
+                    next,
+                    body
+                )
+                .execute(&mut *tx)
+                .await
+                .map_err(map_sqlx)?;
+                Some(next)
+            }
+            None => None,
+        };
+        sqlx::query!(
+            r#"
+            UPDATE appservice_stream
+            SET event_pos = $2, receipt_pos = $3, next_txn_id = $4
+            WHERE as_id = $1
+            "#,
+            as_id,
+            cursor.event_pos,
+            cursor.receipt_pos,
+            next + i64::from(txn_id.is_some())
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(map_sqlx)?;
+        tx.commit().await.map_err(map_sqlx)?;
+        Ok(txn_id)
+    }
+
+    async fn appservice_complete_txn(&self, as_id: &str, txn_id: i64) -> Result<()> {
+        sqlx::query!(
+            "DELETE FROM appservice_txns WHERE as_id = $1 AND txn_id = $2",
+            as_id,
+            txn_id
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(())
+    }
+
+    async fn add_threepid_binding(
+        &self,
+        user_id: &str,
+        medium: &str,
+        address: &str,
+        id_server: &str,
+    ) -> Result<()> {
+        sqlx::query!(
+            r#"
+            INSERT INTO threepid_id_server_bindings (user_id, medium, address, id_server)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT DO NOTHING
+            "#,
+            user_id,
+            medium,
+            address,
+            id_server
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(())
+    }
+
+    async fn threepid_bindings(&self, user_id: &str) -> Result<Vec<(String, String, String)>> {
+        let rows = sqlx::query!(
+            r#"
+            SELECT medium, address, id_server FROM threepid_id_server_bindings
+            WHERE user_id = $1 ORDER BY medium, address, id_server
+            "#,
+            user_id
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(rows.into_iter().map(|r| (r.medium, r.address, r.id_server)).collect())
+    }
+
+    async fn remove_threepid_binding(
+        &self,
+        user_id: &str,
+        medium: &str,
+        address: &str,
+        id_server: Option<&str>,
+    ) -> Result<()> {
+        sqlx::query!(
+            r#"
+            DELETE FROM threepid_id_server_bindings
+            WHERE user_id = $1 AND medium = $2 AND address = $3
+              AND ($4::TEXT IS NULL OR id_server = $4)
+            "#,
+            user_id,
+            medium,
+            address,
+            id_server
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(())
+    }
+
     // -----------------------------------------------------------------------
     // Sync & E2EE semantics (conduit-y99.14 / .15 / .16)
     // -----------------------------------------------------------------------

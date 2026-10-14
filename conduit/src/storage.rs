@@ -1262,6 +1262,52 @@ pub trait Storage: Send + Sync + 'static {
 
     /// Revoke every token issued in exchange for `parent_hash`.
     async fn delete_refresh_token_children(&self, parent_hash: &str) -> Result<()>;
+    // --- Application services & identity-server bindings (appservice lane:
+    //     conduit-y99.34, conduit-y99.36) -------------------------------------
+
+    /// The push cursor of application service `as_id`.  Created at the
+    /// current event and receipt stream heads on first use, so a newly
+    /// registered AS is not backfilled with history.
+    async fn appservice_cursor(&self, as_id: &str) -> Result<AppserviceCursor>;
+
+    /// The oldest frozen, not yet acknowledged transaction of `as_id`.
+    async fn appservice_pending_txn(&self, as_id: &str) -> Result<Option<(i64, Value)>>;
+
+    /// Atomically advance the cursor of `as_id` to `cursor` and, when
+    /// `body` is given, freeze it under the next transaction ID (returned).
+    /// Transaction IDs are durable and strictly increasing per AS.
+    async fn appservice_enqueue_txn(
+        &self,
+        as_id: &str,
+        body: Option<&Value>,
+        cursor: &AppserviceCursor,
+    ) -> Result<Option<i64>>;
+
+    /// Forget an acknowledged transaction.
+    async fn appservice_complete_txn(&self, as_id: &str, txn_id: i64) -> Result<()>;
+
+    /// Remember that `user_id` bound `(medium, address)` on `id_server`
+    /// through `POST /account/3pid/bind`.  Idempotent.
+    async fn add_threepid_binding(
+        &self,
+        user_id: &str,
+        medium: &str,
+        address: &str,
+        id_server: &str,
+    ) -> Result<()>;
+
+    /// Identity-server bindings of `user_id`: `(medium, address, id_server)`.
+    async fn threepid_bindings(&self, user_id: &str) -> Result<Vec<(String, String, String)>>;
+
+    /// Forget a binding.  `id_server: None` forgets it on every server.
+    async fn remove_threepid_binding(
+        &self,
+        user_id: &str,
+        medium: &str,
+        address: &str,
+        id_server: Option<&str>,
+    ) -> Result<()>;
+
     // --- Sync & E2EE semantics (conduit-y99.14 / .15 / .16) ----------------
 
     /// Cross-signing signatures whose target belongs to `target_user`, as
@@ -1314,6 +1360,26 @@ pub struct ReceiptRecord {
     pub stream_pos: i64,
 }
 
+/// Where an application service's transaction pusher has read up to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AppserviceCursor {
+    /// Last event stream position folded into a transaction.
+    pub event_pos: i64,
+    /// Last receipt stream position folded into a transaction.
+    pub receipt_pos: i64,
+}
+
+/// In-memory application-service push state for [`MemoryStorage`].
+#[derive(Default)]
+struct MemoryAppservice {
+    /// as_id -> (cursor, next transaction ID)
+    cursors: HashMap<String, (AppserviceCursor, i64)>,
+    /// (as_id, txn_id) -> frozen body
+    txns: std::collections::BTreeMap<(String, i64), Value>,
+    /// (user_id, medium, address, id_server)
+    bindings: std::collections::BTreeSet<(String, String, String, String)>,
+}
+
 // ---------------------------------------------------------------------------
 // Directory domain types (conduit-y99.20)
 // ---------------------------------------------------------------------------
@@ -1356,6 +1422,7 @@ pub struct MemoryStorage {
     inner: RwLock<MemoryInner>,
     room_content: RwLock<MemoryRoomContent>,
     directory: RwLock<MemoryDirectory>,
+    appservice: RwLock<MemoryAppservice>,
 }
 
 #[derive(Debug, Clone)]
@@ -3558,6 +3625,102 @@ impl Storage for MemoryStorage {
             .account_lane
             .refresh_tokens
             .retain(|_, r| r.parent_hash.as_deref() != Some(parent_hash));
+        Ok(())
+    }
+
+    // --- Application services & identity-server bindings (appservice lane) --
+
+    async fn appservice_cursor(&self, as_id: &str) -> Result<AppserviceCursor> {
+        if let Some((cursor, _)) = self.appservice.read().await.cursors.get(as_id) {
+            return Ok(*cursor);
+        }
+        let event_pos = self.global_max_stream_position().await?;
+        let receipt_pos = {
+            let inner = self.inner.read().await;
+            inner.receipts.values().map(|(_, _, pos)| *pos).max().unwrap_or(0)
+        };
+        let mut appservice = self.appservice.write().await;
+        let entry = appservice
+            .cursors
+            .entry(as_id.to_owned())
+            .or_insert((AppserviceCursor { event_pos, receipt_pos }, 1));
+        Ok(entry.0)
+    }
+
+    async fn appservice_pending_txn(&self, as_id: &str) -> Result<Option<(i64, Value)>> {
+        let appservice = self.appservice.read().await;
+        Ok(appservice
+            .txns
+            .range((as_id.to_owned(), i64::MIN)..=(as_id.to_owned(), i64::MAX))
+            .next()
+            .map(|((_, id), body)| (*id, body.clone())))
+    }
+
+    async fn appservice_enqueue_txn(
+        &self,
+        as_id: &str,
+        body: Option<&Value>,
+        cursor: &AppserviceCursor,
+    ) -> Result<Option<i64>> {
+        let mut appservice = self.appservice.write().await;
+        let Some((stored, next)) = appservice.cursors.get_mut(as_id) else {
+            return Err(Error::Storage(format!("no cursor for application service {as_id}")));
+        };
+        *stored = *cursor;
+        let txn_id = body.map(|_| {
+            let id = *next;
+            *next += 1;
+            id
+        });
+        if let (Some(id), Some(body)) = (txn_id, body) {
+            appservice.txns.insert((as_id.to_owned(), id), body.clone());
+        }
+        Ok(txn_id)
+    }
+
+    async fn appservice_complete_txn(&self, as_id: &str, txn_id: i64) -> Result<()> {
+        self.appservice.write().await.txns.remove(&(as_id.to_owned(), txn_id));
+        Ok(())
+    }
+
+    async fn add_threepid_binding(
+        &self,
+        user_id: &str,
+        medium: &str,
+        address: &str,
+        id_server: &str,
+    ) -> Result<()> {
+        self.appservice.write().await.bindings.insert((
+            user_id.to_owned(),
+            medium.to_owned(),
+            address.to_owned(),
+            id_server.to_owned(),
+        ));
+        Ok(())
+    }
+
+    async fn threepid_bindings(&self, user_id: &str) -> Result<Vec<(String, String, String)>> {
+        Ok(self
+            .appservice
+            .read()
+            .await
+            .bindings
+            .iter()
+            .filter(|(u, ..)| u == user_id)
+            .map(|(_, m, a, s)| (m.clone(), a.clone(), s.clone()))
+            .collect())
+    }
+
+    async fn remove_threepid_binding(
+        &self,
+        user_id: &str,
+        medium: &str,
+        address: &str,
+        id_server: Option<&str>,
+    ) -> Result<()> {
+        self.appservice.write().await.bindings.retain(|(u, m, a, s)| {
+            !(u == user_id && m == medium && a == address && id_server.is_none_or(|i| i == s))
+        });
         Ok(())
     }
 

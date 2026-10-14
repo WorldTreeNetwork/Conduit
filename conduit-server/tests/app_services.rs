@@ -16,13 +16,9 @@
 //! ```
 
 use std::io::Write as IoWrite;
-use std::sync::Arc;
-
-use serde_json::json;
 
 use conduit_server::app_service::{
-    AsQueues, AsQueueEntry,
-    exclusive_as_for_user, exclusive_as_for_alias,
+    exclusive_as_for_user,
     load_app_services, user_in_as_namespace,
 };
 
@@ -183,61 +179,37 @@ fn as_auth_user_in_namespace() {
     assert!(!user_in_as_namespace("@carol:localhost", svc));
     assert!(!user_in_as_namespace("@bot_alice:other.server", svc));
 }
-
 // ---------------------------------------------------------------------------
-// Test: AS transaction queue push and drain (dd8.11 AS5, dd8.13 AS7)
 // ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn as_queue_push_and_drain() {
-    let tmp = tempfile::tempdir().expect("tmpdir");
-    write_as_yaml(
-        tmp.path(),
-        "bridge.yaml",
-        &minimal_as_yaml("bridge", "tok", "hs", r"@bridge_.*:localhost", true),
-    );
-    let services = load_app_services(tmp.path().to_str().unwrap());
-    let queues = AsQueues::new(&services);
-
-    let queue = queues.queues.get("bridge").expect("bridge queue exists");
-
-    // Initially empty drain.
-    let (txn_id_1, entries_1) = queue.drain().await;
-    assert_eq!(entries_1.len(), 0);
-    assert_eq!(txn_id_1, 1, "first drain gives txn_id=1");
-
-    // Push two events.
-    queue.push(AsQueueEntry { event_json: json!({ "type": "m.room.message", "id": 1 }) }).await;
-    queue.push(AsQueueEntry { event_json: json!({ "type": "m.room.message", "id": 2 }) }).await;
-
-    // Drain returns both and increments txn_id.
-    let (txn_id_2, entries_2) = queue.drain().await;
-    assert_eq!(txn_id_2, 2);
-    assert_eq!(entries_2.len(), 2);
-
-    // After drain, queue is empty again.
-    let (txn_id_3, entries_3) = queue.drain().await;
-    assert_eq!(txn_id_3, 3);
-    assert_eq!(entries_3.len(), 0);
-}
+// Test: receive_ephemeral (spec v1.13) and its MSC2409 alias
+// ---------------------------------------------------------------------------
 
 #[test]
-fn as_queues_created_per_service() {
+fn receive_ephemeral_parsed_with_msc2409_alias() {
     let tmp = tempfile::tempdir().expect("tmpdir");
+    let base = minimal_as_yaml("plain", "tok1", "hs1", r"@p_.*:localhost", true);
+    write_as_yaml(tmp.path(), "plain.yaml", &base);
     write_as_yaml(
         tmp.path(),
-        "bridge1.yaml",
-        &minimal_as_yaml("bridge1", "tok1", "hs1", r"@b1_.*:localhost", true),
+        "stable.yaml",
+        &format!("{}receive_ephemeral: true\n", minimal_as_yaml("stable", "tok2", "hs2", r"@s_.*:localhost", true)),
     );
     write_as_yaml(
         tmp.path(),
-        "bridge2.yaml",
-        &minimal_as_yaml("bridge2", "tok2", "hs2", r"@b2_.*:localhost", true),
+        "msc.yaml",
+        &format!(
+            "{}de.sorunome.msc2409.push_ephemeral: true\n",
+            minimal_as_yaml("msc", "tok3", "hs3", r"@m_.*:localhost", true)
+        ),
     );
     let services = load_app_services(tmp.path().to_str().unwrap());
-    let queues = AsQueues::new(&services);
-
-    assert_eq!(queues.queues.len(), 2);
-    assert!(queues.queues.contains_key("bridge1"));
-    assert!(queues.queues.contains_key("bridge2"));
+    let by_id = |id: &str| services.iter().find(|s| s.id == id).unwrap().receive_ephemeral;
+    assert!(!by_id("plain"));
+    assert!(by_id("stable"));
+    assert!(by_id("msc"));
+    let svc = services.iter().find(|s| s.id == "plain").unwrap();
+    assert_eq!(svc.sender_user_id("localhost"), "@bot:localhost");
+    assert!(svc.is_interested_in_user("@bot:localhost", "localhost"));
+    assert!(svc.is_interested_in_user("@p_x:localhost", "localhost"));
+    assert!(!svc.is_interested_in_user("@q_x:localhost", "localhost"));
 }

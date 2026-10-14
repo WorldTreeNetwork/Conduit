@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            WITH inserted AS (\n                INSERT INTO appservice_stream (as_id, event_pos, receipt_pos)\n                VALUES ($1, $2, (SELECT COALESCE(MAX(stream_pos), 0) FROM receipts))\n                ON CONFLICT (as_id) DO NOTHING\n                RETURNING event_pos, receipt_pos\n            )\n            SELECT event_pos AS \"event_pos!\", receipt_pos AS \"receipt_pos!\" FROM inserted\n            UNION ALL\n            SELECT event_pos, receipt_pos FROM appservice_stream WHERE as_id = $1\n            LIMIT 1\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "event_pos!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "receipt_pos!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null,
+      null
+    ]
+  },
+  "hash": "8a0b477bdf2a98add443b7ba3a6e7c6a01577027ebfb5dbdb903dbfd2b815b6e"
+}

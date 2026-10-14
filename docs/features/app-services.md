@@ -78,3 +78,38 @@ and optionally `?user_id={target_user}`.
 - `PUT /_matrix/client/v3/directory/list/appservice/{networkId}/{roomId}`
   (as_token) maintains per-network lists read by `/publicRooms` with
   `include_all_networks` or `third_party_instance_id`.
+
+## Transaction push (conduit-y99.34)
+
+Code: `conduit-server/src/appservice_push.rs`, `app_service::as_request`.
+Tests: `conduit-server/tests/production_appservice.rs` (mock AS in-test).
+
+- One worker per AS with a URL. It folds the event stream (and, with
+  `receive_ephemeral: true` — or the pre-stable
+  `de.sorunome.msc2409.push_ephemeral` — receipts, typing and presence)
+  into transactions of at most 100 events.
+- **Durable queue.** The next transaction is frozen in Postgres
+  (`appservice_txns`, migration 0080) in the same SQL transaction that
+  advances the AS cursor (`appservice_stream`: event and receipt
+  positions, next txnId). Only one transaction is in flight; it is
+  retried with the same txnId and byte-identical body until 2xx
+  (exponential backoff from `CONDUIT_AS_BACKOFF_BASE_MS`, default 1s,
+  capped at 10 min), including across restarts. A new AS starts at the
+  stream heads (no history backfill).
+- **Auth.** `Authorization: Bearer <hs_token>` on every HS→AS request.
+  On 404/405 from `/_matrix/app/v1/...` the legacy unprefixed route is
+  tried with `?access_token=` (spec "legacy routes"); the current route is
+  tried first every time. User/alias queries retry 3x on network error/5xx.
+- **Interest.** An event is pushed if its room ID matches a `rooms`
+  regex; any room alias (directory aliases and `m.room.canonical_alias`
+  `alias`/`alt_aliases`) matches an `aliases` regex; or a *local* user
+  that is the AS sender or matches a `users` regex is the sender, the
+  `m.room.member` target, or a joined member. Interest is evaluated on
+  current room state when the transaction is built.
+- **Ephemeral.** `m.typing`/`m.receipt` carry `room_id` and follow room
+  interest; `m.read.private` only for namespace users; `m.presence` when
+  the user is interesting or shares an interesting room. Typing/presence
+  cursors are process-local (their stores are in-memory); receipts are
+  durable with the event cursor.
+- Not in v1.19 (MSC-only, not implemented): to-device and device-list
+  data for application services (MSC2409 to_device, MSC3202).

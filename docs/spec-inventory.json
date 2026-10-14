@@ -52,18 +52,18 @@
   },
   "as": {
    "endpoint": {
-    "implemented+tested": 8,
+    "implemented+tested": 11,
     "implemented-untested": 0,
-    "partial": 3,
+    "partial": 0,
     "missing": 0,
     "not-applicable": 0,
     "total": 11
    },
    "requirement": {
-    "implemented+tested": 4,
+    "implemented+tested": 9,
     "implemented-untested": 0,
-    "partial": 4,
-    "missing": 8,
+    "partial": 1,
+    "missing": 6,
     "not-applicable": 2,
     "total": 18
    }
@@ -125,10 +125,10 @@
    }
   },
   "all": {
-   "implemented+tested": 168,
+   "implemented+tested": 176,
    "implemented-untested": 14,
-   "partial": 117,
-   "missing": 129,
+   "partial": 111,
+   "missing": 127,
    "not-applicable": 37,
    "total": 465
   }
@@ -5867,22 +5867,23 @@
    "rate_limited": "No",
    "deprecated": false,
    "role": "homeserver as client",
-   "status": "partial",
+   "status": "implemented+tested",
    "code": [
     {
-     "loc": "conduit-server/src/app_service.rs:540",
-     "handler": "spawn_as_workers (outbound)",
+     "loc": "conduit-server/src/appservice_push.rs:234",
+     "handler": "Worker::deliver (outbound)",
      "kind": "client"
     }
    ],
    "tests": [
-    "conduit-server/tests/app_services.rs::as_queue_push_and_drain"
+    "conduit-server/tests/production_appservice.rs::transactions_push_interesting_events_and_ephemeral_with_bearer_auth",
+    "conduit-server/tests/production_appservice.rs::transactions_retry_with_identical_body_across_restart",
+    "conduit-server/tests/production_appservice.rs::transactions_fall_back_to_legacy_routes",
+    "conduit-server/src/appservice_push.rs::memory_cursor_freezes_transactions_with_durable_ids"
    ],
-   "tests_total": 1,
-   "gap_beads": [
-    "conduit-y99.34"
-   ],
-   "notes": "Homeserver->AS push: query-param token only, in-memory queue, no retry, coarse interest test, no ephemeral."
+   "tests_total": 4,
+   "gap_beads": [],
+   "notes": "Bearer hs_token, durable frozen transactions (Postgres appservice_txns) with durable increasing txnIds, identical-body retry with exponential backoff across restart, legacy-route fallback, events + ephemeral."
   },
   {
    "id": "as.ep.post_matrixappv1ping",
@@ -5923,23 +5924,23 @@
    "rate_limited": "No",
    "deprecated": false,
    "role": "homeserver as client",
-   "status": "partial",
+   "status": "implemented+tested",
    "code": [
     {
-     "loc": "conduit-server/src/app_service.rs:238",
+     "loc": "conduit-server/src/app_service.rs:269",
      "handler": "query_as_user (outbound)",
      "kind": "client"
     }
    ],
    "tests": [
+    "conduit-server/src/app_service.rs::queries_use_bearer_first_then_fall_back_to_legacy_routes",
     "conduit-server/src/app_service.rs::query_as_user_returns_true_on_200",
-    "conduit-server/src/app_service.rs::query_as_user_returns_false_on_404"
+    "conduit-server/src/app_service.rs::query_as_user_returns_false_on_404",
+    "conduit-server/src/app_service.rs::query_as_user_returns_false_when_no_namespace_match"
    ],
-   "tests_total": 2,
-   "gap_beads": [
-    "conduit-y99.34"
-   ],
-   "notes": "Sent with access_token query param only (MUST send Authorization header)."
+   "tests_total": 4,
+   "gap_beads": [],
+   "notes": "Authorization: Bearer hs_token, legacy /users fallback, retried on network error/5xx; only users-namespace IDs are queried."
   },
   {
    "id": "as.ep.get_matrixappv1roomsroomalias",
@@ -5953,22 +5954,21 @@
    "rate_limited": "No",
    "deprecated": false,
    "role": "homeserver as client",
-   "status": "partial",
+   "status": "implemented+tested",
    "code": [
     {
-     "loc": "conduit-server/src/app_service.rs:266",
+     "loc": "conduit-server/src/app_service.rs:283",
      "handler": "query_as_alias (outbound)",
      "kind": "client"
     }
    ],
    "tests": [
-    "conduit-server/src/app_service.rs::query_as_alias_returns_true_on_200"
+    "conduit-server/src/app_service.rs::query_as_alias_returns_true_on_200",
+    "conduit-server/src/app_service.rs::queries_use_bearer_first_then_fall_back_to_legacy_routes"
    ],
-   "tests_total": 1,
-   "gap_beads": [
-    "conduit-y99.34"
-   ],
-   "notes": "Sent with access_token query param only."
+   "tests_total": 2,
+   "gap_beads": [],
+   "notes": "Authorization: Bearer hs_token, legacy /rooms fallback, retried on network error/5xx; only aliases-namespace aliases are queried."
   },
   {
    "id": "as.ep.get_matrixappv1thirdpartylocation",
@@ -9271,13 +9271,14 @@
    ],
    "tests": [
     "conduit-server/tests/app_services.rs::as_registration_loaded_from_dir",
-    "conduit-server/tests/app_services.rs::namespace_exclusive_ownership"
+    "conduit-server/tests/app_services.rs::namespace_exclusive_ownership",
+    "conduit-server/tests/app_services.rs::receive_ephemeral_parsed_with_msc2409_alias"
    ],
-   "tests_total": 2,
+   "tests_total": 3,
    "gap_beads": [
     "conduit-y99.35"
    ],
-   "notes": "rate_limited and receive_ephemeral flags not honoured."
+   "notes": "receive_ephemeral (+MSC2409 alias) honoured; rate_limited exemption tracked in conduit-y99.35."
   },
   {
    "id": "as.authorisation",
@@ -9286,18 +9287,20 @@
    "title": "Homeserver->AS authorisation (Authorization: Bearer hs_token)",
    "source": "https://spec.matrix.org/v1.19/application-service-api/#authorisation",
    "role": "homeserver",
-   "status": "partial",
+   "status": "implemented+tested",
    "code": [
     {
-     "loc": "conduit-server/src/app_service.rs"
+     "loc": "conduit-server/src/app_service.rs:327"
     }
    ],
-   "tests": [],
-   "tests_total": 0,
-   "gap_beads": [
-    "conduit-y99.34"
+   "tests": [
+    "conduit-server/tests/production_appservice.rs::transactions_push_interesting_events_and_ephemeral_with_bearer_auth",
+    "conduit-server/src/app_service.rs::queries_use_bearer_first_then_fall_back_to_legacy_routes",
+    "conduit-server/tests/production_directory.rs::appservice_ping_thirdparty_and_network_directory"
    ],
-   "notes": "Ping/thirdparty use Bearer; transactions and user/room queries use query param only."
+   "tests_total": 3,
+   "gap_beads": [],
+   "notes": "Every homeserver->AS request (transactions, user/alias queries, ping, third-party) carries Authorization: Bearer hs_token; the query token is only sent on the legacy-route fallback."
   },
   {
    "id": "as.legacy-routes",
@@ -9306,14 +9309,19 @@
    "title": "Legacy route fallback (SHOULD)",
    "source": "https://spec.matrix.org/v1.19/application-service-api/#legacy-routes",
    "role": "homeserver",
-   "status": "missing",
-   "code": [],
-   "tests": [],
-   "tests_total": 0,
-   "gap_beads": [
-    "conduit-y99.34"
+   "status": "implemented+tested",
+   "code": [
+    {
+     "loc": "conduit-server/src/app_service.rs:327"
+    }
    ],
-   "notes": ""
+   "tests": [
+    "conduit-server/tests/production_appservice.rs::transactions_fall_back_to_legacy_routes",
+    "conduit-server/src/app_service.rs::queries_use_bearer_first_then_fall_back_to_legacy_routes"
+   ],
+   "tests_total": 2,
+   "gap_beads": [],
+   "notes": "On 404/405 from /_matrix/app/v1/* the unprefixed legacy route is tried with ?access_token; the current route is retried first on every request. 5xx is treated as an outage (backoff), not as an unknown route."
   },
   {
    "id": "as.unknown-routes",
@@ -9336,20 +9344,20 @@
    "title": "Pushing events (interest rules, txn retry, ordering)",
    "source": "https://spec.matrix.org/v1.19/application-service-api/#pushing-events",
    "role": "homeserver",
-   "status": "partial",
+   "status": "implemented+tested",
    "code": [
     {
-     "loc": "conduit-server/src/app_service.rs:449"
+     "loc": "conduit-server/src/appservice_push.rs:141"
     }
    ],
    "tests": [
-    "conduit-server/tests/app_services.rs::as_queue_push_and_drain"
+    "conduit-server/tests/production_appservice.rs::transactions_push_interesting_events_and_ephemeral_with_bearer_auth",
+    "conduit-server/tests/production_appservice.rs::transactions_retry_with_identical_body_across_restart",
+    "conduit-server/src/appservice_push.rs::interest_covers_sender_target_room_alias_and_joined_members"
    ],
-   "tests_total": 1,
-   "gap_beads": [
-    "conduit-y99.34"
-   ],
-   "notes": ""
+   "tests_total": 3,
+   "gap_beads": [],
+   "notes": "Interest: rooms namespace, any room alias (directory + canonical alt_aliases), local namespace/sender user as sender, member target or joined member. Linearised by stream position, one transaction in flight, exactly-once across restart. Interest is evaluated on current room state."
   },
   {
    "id": "as.pushing-ephemeral",
@@ -9358,14 +9366,20 @@
    "title": "Pushing ephemeral data (receive_ephemeral)",
    "source": "https://spec.matrix.org/v1.19/application-service-api/#pushing-ephemeral-data",
    "role": "homeserver",
-   "status": "missing",
-   "code": [],
-   "tests": [],
-   "tests_total": 0,
-   "gap_beads": [
-    "conduit-y99.34"
+   "status": "implemented+tested",
+   "code": [
+    {
+     "loc": "conduit-server/src/appservice_push.rs:346"
+    }
    ],
-   "notes": ""
+   "tests": [
+    "conduit-server/tests/production_appservice.rs::transactions_push_interesting_events_and_ephemeral_with_bearer_auth",
+    "conduit-server/src/appservice_push.rs::private_receipts_only_for_namespace_users",
+    "conduit-server/tests/app_services.rs::receive_ephemeral_parsed_with_msc2409_alias"
+   ],
+   "tests_total": 3,
+   "gap_beads": [],
+   "notes": "receive_ephemeral (and the MSC2409 alias): m.typing and m.receipt with room_id under room interest, private receipts only for namespace users, m.presence when the user is interesting or shares an interesting room. Typing/presence cursors are process-local (stores are in-memory)."
   },
   {
    "id": "as.pinging",
@@ -9394,21 +9408,21 @@
    "title": "Querying users and aliases",
    "source": "https://spec.matrix.org/v1.19/application-service-api/#querying",
    "role": "homeserver",
-   "status": "partial",
+   "status": "implemented+tested",
    "code": [
     {
-     "loc": "conduit-server/src/app_service.rs:238"
+     "loc": "conduit-server/src/app_service.rs:269"
     }
    ],
    "tests": [
-    "conduit-server/src/app_service.rs::query_as_user_returns_true_on_200"
+    "conduit-server/src/app_service.rs::query_as_user_returns_true_on_200",
+    "conduit-server/src/app_service.rs::queries_use_bearer_first_then_fall_back_to_legacy_routes"
    ],
-   "tests_total": 1,
+   "tests_total": 2,
    "gap_beads": [
-    "conduit-y99.34",
     "conduit-c3u"
    ],
-   "notes": ""
+   "notes": "Retries several times on network error/5xx before giving up. conduit-c3u: negative cache (performance, not conformance)."
   },
   {
    "id": "as.third-party-networks",

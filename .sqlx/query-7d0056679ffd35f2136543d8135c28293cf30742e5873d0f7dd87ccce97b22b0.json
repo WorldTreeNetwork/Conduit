@@ -1,0 +1,34 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT medium, address, id_server FROM threepid_id_server_bindings\n            WHERE user_id = $1 ORDER BY medium, address, id_server\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "medium",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "address",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "id_server",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "7d0056679ffd35f2136543d8135c28293cf30742e5873d0f7dd87ccce97b22b0"
+}

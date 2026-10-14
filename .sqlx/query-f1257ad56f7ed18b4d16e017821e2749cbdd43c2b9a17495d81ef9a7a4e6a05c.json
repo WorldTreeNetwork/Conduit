@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT event_pos, receipt_pos FROM appservice_stream WHERE as_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "event_pos",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "receipt_pos",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "f1257ad56f7ed18b4d16e017821e2749cbdd43c2b9a17495d81ef9a7a4e6a05c"
+}

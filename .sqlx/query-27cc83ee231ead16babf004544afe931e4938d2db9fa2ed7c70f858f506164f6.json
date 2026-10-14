@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE appservice_stream\n            SET event_pos = $2, receipt_pos = $3, next_txn_id = $4\n            WHERE as_id = $1\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Int8",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "27cc83ee231ead16babf004544afe931e4938d2db9fa2ed7c70f858f506164f6"
+}

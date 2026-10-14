@@ -18,7 +18,6 @@ use axum::{
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tokio::sync::Mutex;
 use tracing::{info, warn};
 
 use conduit::storage::Storage;
@@ -44,6 +43,11 @@ pub struct AsRegistration {
     /// Third-party protocols the AS bridges (`GET /thirdparty/protocols`).
     #[serde(default)]
     pub protocols: Vec<String>,
+    /// Whether the AS wants ephemeral data (typing, receipts, presence) in
+    /// its transactions (spec v1.13).  The MSC2409 key is accepted as an
+    /// alias for registrations written before stabilisation.
+    #[serde(default, alias = "de.sorunome.msc2409.push_ephemeral")]
+    pub receive_ephemeral: bool,
 }
 
 fn null_as_empty<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
@@ -83,6 +87,31 @@ pub struct AppService {
     pub room_namespaces: Vec<(bool, Regex)>,
     /// Third-party protocols this AS bridges (registration `protocols`).
     pub protocols: Vec<String>,
+    /// Push ephemeral data in transactions (registration `receive_ephemeral`).
+    pub receive_ephemeral: bool,
+}
+
+impl AppService {
+    /// The AS's own user, `@{sender_localpart}:{server_name}`.
+    pub fn sender_user_id(&self, server_name: &str) -> String {
+        format!("@{}:{}", self.sender_localpart, server_name)
+    }
+
+    /// Whether `user_id` is the AS sender or lies in its `users`
+    /// namespaces (exclusive or not).
+    pub fn is_interested_in_user(&self, user_id: &str, server_name: &str) -> bool {
+        user_id == self.sender_user_id(server_name) || user_in_as_namespace(user_id, self)
+    }
+
+    /// Whether `room_id` lies in the AS's `rooms` namespaces.
+    pub fn is_interested_in_room_id(&self, room_id: &str) -> bool {
+        self.room_namespaces.iter().any(|(_, re)| re.is_match(room_id))
+    }
+
+    /// Whether `alias` lies in the AS's `aliases` namespaces.
+    pub fn is_interested_in_alias(&self, alias: &str) -> bool {
+        self.alias_namespaces.iter().any(|(_, re)| re.is_match(alias))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -165,6 +194,7 @@ fn compile_registration(reg: AsRegistration) -> Result<AppService, String> {
         alias_namespaces: compile(&reg.namespaces.aliases)?,
         room_namespaces: compile(&reg.namespaces.rooms)?,
         protocols: reg.protocols,
+        receive_ephemeral: reg.receive_ephemeral,
     })
 }
 
@@ -226,7 +256,8 @@ pub fn as_for_alias<'a>(alias: &str, services: &'a [AppService]) -> Option<&'a A
 }
 
 /// Ask the matching AS whether it owns `user_id` by calling
-/// `GET {as.url}/_matrix/app/v1/users/{userId}?access_token={hs_token}`.
+/// `GET {as.url}/_matrix/app/v1/users/{userId}` with
+/// `Authorization: Bearer {hs_token}` (legacy `/users/{userId}` fallback).
 /// Returns true on 2xx; false on 4xx/5xx, network error, or no matching AS.
 ///
 /// The AS is expected to call back to the HS to create the user account if
@@ -243,26 +274,12 @@ pub async fn query_as_user(
     let Some(svc) = as_for_user(user_id, services) else {
         return false;
     };
-    let url = format!(
-        "{}/_matrix/app/v1/users/{}?access_token={}",
-        svc.url.trim_end_matches('/'),
-        urlencode_path(user_id),
-        svc.hs_token,
-    );
-    match http.get(&url).send().await {
-        Ok(r) if r.status().is_success() => true,
-        Ok(r) => {
-            tracing::debug!(as_id = svc.id, status = r.status().as_u16(), user_id, "AS user query miss");
-            false
-        }
-        Err(e) => {
-            warn!(as_id = svc.id, error = %e, user_id, "AS user query failed");
-            false
-        }
-    }
+    let path = format!("users/{}", urlencode_path(user_id));
+    query_as(http, svc, &path).await
 }
 
-/// Ask the matching AS whether it owns `alias`.
+/// Ask the matching AS whether it owns `alias`
+/// (`GET /_matrix/app/v1/rooms/{roomAlias}`, legacy `/rooms/{roomAlias}`).
 pub async fn query_as_alias(
     http: &reqwest::Client,
     services: &[AppService],
@@ -271,23 +288,72 @@ pub async fn query_as_alias(
     let Some(svc) = as_for_alias(alias, services) else {
         return false;
     };
-    let url = format!(
-        "{}/_matrix/app/v1/rooms/{}?access_token={}",
-        svc.url.trim_end_matches('/'),
-        urlencode_path(alias),
-        svc.hs_token,
-    );
-    match http.get(&url).send().await {
-        Ok(r) if r.status().is_success() => true,
-        Ok(r) => {
-            tracing::debug!(as_id = svc.id, status = r.status().as_u16(), alias, "AS alias query miss");
-            false
-        }
-        Err(e) => {
-            warn!(as_id = svc.id, error = %e, alias, "AS alias query failed");
-            false
-        }
+    let path = format!("rooms/{}", urlencode_path(alias));
+    query_as(http, svc, &path).await
+}
+
+/// How many times a user/alias query is attempted on a network error or
+/// 5xx ("the homeserver should retry several times before timing out").
+const QUERY_ATTEMPTS: usize = 3;
+
+async fn query_as(http: &reqwest::Client, svc: &AppService, path: &str) -> bool {
+    if svc.url.is_empty() {
+        return false;
     }
+    for attempt in 0..QUERY_ATTEMPTS {
+        match as_request(http, svc, reqwest::Method::GET, path, None).await {
+            Ok(status) if (200..300).contains(&status) => return true,
+            Ok(status) if status < 500 => {
+                tracing::debug!(as_id = svc.id, status, path, "AS query miss");
+                return false;
+            }
+            Ok(status) => warn!(as_id = svc.id, status, path, attempt, "AS query failed"),
+            Err(e) => warn!(as_id = svc.id, error = %e, path, attempt, "AS query failed"),
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200 << attempt)).await;
+    }
+    false
+}
+
+/// Send one homeserver -> AS request, authorised with
+/// `Authorization: Bearer {hs_token}` (spec v1.4+; no query token).
+///
+/// `path` is relative to `/_matrix/app/v1/`.  If the AS does not know the
+/// route (404, or 405 `M_UNRECOGNIZED`), the legacy unprefixed route is
+/// tried with the `access_token` query parameter the legacy spec used
+/// (spec: legacy routes).  The current route is always tried first, so an
+/// upgraded AS is picked up on the next request.  Returns the final HTTP
+/// status.
+pub async fn as_request(
+    http: &reqwest::Client,
+    svc: &AppService,
+    method: reqwest::Method,
+    path: &str,
+    body: Option<&serde_json::Value>,
+) -> Result<u16, reqwest::Error> {
+    let base = svc.url.trim_end_matches('/');
+    let send = |url: String, legacy: bool| {
+        let mut req = http
+            .request(method.clone(), url)
+            .bearer_auth(&svc.hs_token)
+            .timeout(std::time::Duration::from_secs(30));
+        if legacy {
+            req = req.query(&[("access_token", svc.hs_token.as_str())]);
+        }
+        if let Some(body) = body {
+            req = req.json(body);
+        }
+        req.send()
+    };
+    let status = send(format!("{base}/_matrix/app/v1/{path}"), false).await?.status().as_u16();
+    if status == 404 || status == 405 {
+        let legacy = send(format!("{base}/{path}"), true).await?.status().as_u16();
+        if (200..300).contains(&legacy) {
+            tracing::info!(as_id = svc.id, path, "AS answered on its legacy route");
+        }
+        return Ok(legacy);
+    }
+    Ok(status)
 }
 
 /// Percent-encode a path segment for URL safety.
@@ -344,6 +410,15 @@ pub async fn ensure_ghost_account(storage: &Arc<dyn Storage>, user_id: &str) {
     }
 }
 
+/// A decoded query-string parameter (`None` when absent or empty).
+pub fn query_param(parts: &Parts, name: &str) -> Option<String> {
+    let query = parts.uri.query()?;
+    url::form_urlencoded::parse(query.as_bytes())
+        .find(|(k, _)| k == name)
+        .map(|(_, v)| v.into_owned())
+        .filter(|v| !v.is_empty())
+}
+
 #[async_trait]
 impl<S: AsState> FromRequestParts<S> for AsAuthed {
     type Rejection = Response;
@@ -373,13 +448,7 @@ impl<S: AsState> FromRequestParts<S> for AsAuthed {
             })?;
 
         // Extract ?user_id= query param if present.
-        let acting_as = parts.uri.query()
-            .and_then(|q| {
-                // Simple extraction without a full query parser.
-                q.split('&')
-                    .find(|p| p.starts_with("user_id="))
-                    .map(|p| p["user_id=".len()..].to_owned())
-            });
+        let acting_as = query_param(parts, "user_id");
 
         // Validate that user_id falls within AS's user namespace.
         if let Some(ref uid) = acting_as {
@@ -397,167 +466,6 @@ impl<S: AsState> FromRequestParts<S> for AsAuthed {
             service: Arc::new(svc.clone()),
             acting_as,
         })
-    }
-}
-
-// ---------------------------------------------------------------------------
-// AS transaction pusher (AS5, AS7)
-// ---------------------------------------------------------------------------
-
-/// Per-AS outbound transaction queue entry.
-#[derive(Debug, Clone)]
-pub struct AsQueueEntry {
-    pub event_json: serde_json::Value,
-}
-
-/// Per-AS queue: a list of pending events to deliver.
-#[derive(Debug, Default)]
-pub struct AsQueue {
-    pub entries: Mutex<Vec<AsQueueEntry>>,
-    pub next_txn_id: Mutex<u64>,
-}
-
-impl AsQueue {
-    pub async fn push(&self, entry: AsQueueEntry) {
-        self.entries.lock().await.push(entry);
-    }
-
-    pub async fn drain(&self) -> (u64, Vec<AsQueueEntry>) {
-        let mut id = self.next_txn_id.lock().await;
-        *id += 1;
-        let txn_id = *id;
-        let entries = std::mem::take(&mut *self.entries.lock().await);
-        (txn_id, entries)
-    }
-}
-
-/// Collection of per-AS queues, keyed by AS id.
-pub struct AsQueues {
-    pub queues: std::collections::HashMap<String, Arc<AsQueue>>,
-}
-
-impl AsQueues {
-    pub fn new(services: &[AppService]) -> Self {
-        let queues = services.iter()
-            .map(|s| (s.id.clone(), Arc::new(AsQueue::default())))
-            .collect();
-        Self { queues }
-    }
-}
-
-/// Spawn the AS transaction pusher workers. One task per AS.
-pub fn spawn_as_workers(
-    services: Arc<Vec<AppService>>,
-    queues: Arc<AsQueues>,
-    http: reqwest::Client,
-    mut events_rx: tokio::sync::broadcast::Receiver<i64>,
-    storage: Arc<dyn Storage>,
-) {
-    // Spawn a single dispatcher task that fans events to each AS queue.
-    let services_clone = Arc::clone(&services);
-    let queues_clone = Arc::clone(&queues);
-    let storage_clone = Arc::clone(&storage);
-
-    tokio::spawn(async move {
-        loop {
-            let stream_pos = match events_rx.recv().await {
-                Ok(pos) => pos,
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                    warn!(missed = n, "AS worker lagged behind event broadcast");
-                    continue;
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-            };
-
-            // Fetch the event.
-            let events = match storage_clone.events_since(stream_pos - 1, 1).await {
-                Ok(evs) => evs,
-                Err(e) => {
-                    warn!(error = %e, "AS worker: events_since failed");
-                    continue;
-                }
-            };
-
-            let event = match events.into_iter().next() {
-                Some(e) => e,
-                None => continue,
-            };
-
-            let event_json = match serde_json::to_value(&event) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-
-            // Check which ASes care about this event.
-            let room_id = &event.room_id;
-            let sender = &event.sender;
-
-            for svc in services_clone.iter() {
-                let relevant = svc.user_namespaces.iter().any(|(_, re)| re.is_match(sender))
-                    || svc.alias_namespaces.iter().any(|(_, re)| re.is_match(room_id))
-                    || svc.room_namespaces.iter().any(|(_, re)| re.is_match(room_id));
-
-                if !relevant {
-                    continue;
-                }
-
-                if let Some(queue) = queues_clone.queues.get(&svc.id) {
-                    queue.push(AsQueueEntry { event_json: event_json.clone() }).await;
-                }
-            }
-        }
-    });
-
-    // Spawn a flush task per AS.
-    for svc in services.iter() {
-        if svc.url.is_empty() {
-            // `url: null` — the AS receives nothing from us.
-            continue;
-        }
-        let svc_id = svc.id.clone();
-        let svc_url = svc.url.clone();
-        let hs_token = svc.hs_token.clone();
-        let queue = match queues.queues.get(&svc_id) {
-            Some(q) => Arc::clone(q),
-            None => continue,
-        };
-        let http_clone = http.clone();
-
-        tokio::spawn(async move {
-            // Flush every 500ms.
-            let interval = std::time::Duration::from_millis(500);
-            loop {
-                tokio::time::sleep(interval).await;
-
-                let (txn_id, entries) = queue.drain().await;
-                if entries.is_empty() {
-                    continue;
-                }
-
-                let events: Vec<_> = entries.into_iter().map(|e| e.event_json).collect();
-                let body = serde_json::json!({ "events": events });
-                let url = format!(
-                    "{}/_matrix/app/v1/transactions/{}?access_token={}",
-                    svc_url.trim_end_matches('/'),
-                    txn_id,
-                    hs_token
-                );
-
-                let resp = http_clone.put(&url).json(&body).send().await;
-                match resp {
-                    Ok(r) if r.status().is_success() => {
-                        tracing::debug!(as_id = svc_id, txn_id, events = events.len() as i64, "AS transaction delivered");
-                        // Note: events variable is moved; we logged its len already via events.len() before moving.
-                    }
-                    Ok(r) => {
-                        warn!(as_id = svc_id, status = r.status().as_u16(), "AS transaction rejected");
-                    }
-                    Err(e) => {
-                        warn!(as_id = svc_id, error = %e, "AS transaction delivery failed");
-                    }
-                }
-            }
-        });
     }
 }
 
@@ -581,6 +489,7 @@ mod tests {
             alias_namespaces: vec![(true, Regex::new(ns).unwrap())],
             room_namespaces: vec![],
             protocols: vec![],
+            receive_ephemeral: false,
         }
     }
 
@@ -634,6 +543,52 @@ mod tests {
         let http = reqwest::Client::new();
         let services = vec![svc];
         assert!(!query_as_user(&http, &services, "@human:localhost").await);
+    }
+
+    /// Records `(path, authorization, query)` of every request; answers 200
+    /// only on the legacy unprefixed route and only with the legacy query
+    /// token, 404 elsewhere.
+    async fn legacy_only_as() -> (String, Arc<std::sync::Mutex<Vec<(String, Option<String>, Option<String>)>>>) {
+        use axum::{extract::Request, Router};
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = Arc::clone(&seen);
+        let app = Router::new().fallback(move |req: Request| {
+            let log = Arc::clone(&log);
+            async move {
+                let path = req.uri().path().to_owned();
+                let auth = req.headers().get("authorization").and_then(|v| v.to_str().ok()).map(str::to_owned);
+                let query = req.uri().query().map(str::to_owned);
+                log.lock().unwrap().push((path.clone(), auth, query.clone()));
+                if path.starts_with("/users/") && query.as_deref() == Some("access_token=hst") {
+                    StatusCode::OK
+                } else {
+                    StatusCode::NOT_FOUND
+                }
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (url, seen)
+    }
+
+    #[tokio::test]
+    async fn queries_use_bearer_first_then_fall_back_to_legacy_routes() {
+        let (url, seen) = legacy_only_as().await;
+        let services = vec![build_svc(&url, r"^@bot_.*:localhost$")];
+        let http = reqwest::Client::new();
+        assert!(query_as_user(&http, &services, "@bot_a:localhost").await);
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), 2, "{seen:?}");
+        // Current route: Bearer only, no query-string token.
+        assert_eq!(seen[0].0, "/_matrix/app/v1/users/%40bot_a%3Alocalhost");
+        assert_eq!(seen[0].1.as_deref(), Some("Bearer hst"));
+        assert_eq!(seen[0].2, None);
+        // Legacy route: unprefixed, with the legacy query token.
+        assert_eq!(seen[1].0, "/users/%40bot_a%3Alocalhost");
+        assert_eq!(seen[1].2.as_deref(), Some("access_token=hst"));
     }
 
     #[tokio::test]
