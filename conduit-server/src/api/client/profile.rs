@@ -335,7 +335,7 @@ pub async fn propagate<S: AuthState>(state: &S, user_id: &str, profile: &Map<Str
     };
     for room_id in rooms {
         let current = match state.storage().get_state_entry(&room_id, "m.room.member", user_id).await {
-            Ok(Some(ev)) => ev.content,
+            Ok(Some(ev)) => ev.pdu.content,
             _ => continue,
         };
         let content = member_content_with_profile(&current, displayname.as_deref(), avatar_url.as_deref());

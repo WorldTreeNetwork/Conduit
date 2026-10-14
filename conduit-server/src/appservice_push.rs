@@ -437,17 +437,20 @@ mod tests {
     fn event(id: &str, room: &str, sender: &str, ty: &str, state_key: Option<&str>, content: Value) -> Event {
         Event {
             event_id: id.into(),
-            room_id: room.into(),
-            sender: sender.into(),
-            event_type: ty.into(),
-            content,
-            state_key: state_key.map(str::to_owned),
-            origin_server_ts: 1,
-            auth_events: vec![],
-            prev_events: vec![],
-            hashes: json!({}),
-            signatures: json!({}),
-            depth: 1,
+            pdu: conduit::event::Pdu {
+                room_id: room.into(),
+                sender: sender.into(),
+                event_type: ty.into(),
+                content,
+                state_key: state_key.map(str::to_owned),
+                origin_server_ts: 1,
+                auth_events: vec![],
+                prev_events: vec![],
+                hashes: json!({}),
+                signatures: json!({}),
+                depth: 1,
+                extensions: Default::default(),
+            },
             unsigned: Some(json!({"transaction_id": "secret"})),
         }
     }
