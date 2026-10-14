@@ -6,18 +6,18 @@
 //!   from the PDU, canonical-JSON-encode, sha256, standard-base64 (no padding).
 //!   <https://spec.matrix.org/latest/server-server-api/#calculating-the-content-hash-for-a-pdu>
 //!
-//! - **Reference hash / event ID** (room v11): strip `signatures`, `unsigned`
-//!   from the PDU, canonical-JSON-encode, sha256, URL-safe-base64 (no padding),
+//! - **Reference hash / event ID** (room v11): redact, strip `signatures`,
+//!   `unsigned`, then canonical-JSON-encode, sha256, URL-safe-base64 (no padding),
 //!   then prefix with `$`.
 //!   <https://spec.matrix.org/latest/server-server-api/#calculating-the-reference-hash-for-a-pdu>
 //!   <https://spec.matrix.org/latest/rooms/v11/>
 
-use base64::Engine as _;
 use base64::engine::general_purpose::{STANDARD_NO_PAD, URL_SAFE_NO_PAD};
+use base64::Engine as _;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use crate::canonical_json::{CanonicalJsonError, to_canonical_bytes};
+use crate::canonical_json::{to_canonical_bytes, CanonicalJsonError};
 use crate::event::Event;
 use crate::redaction::redact_event;
 
@@ -46,27 +46,57 @@ fn strip_fields(value: &mut serde_json::Value, fields: &[&str]) {
 
 /// Compute `hashes.sha256` for a PDU.
 ///
-/// Strips `hashes`, `signatures`, and `unsigned` from a copy of the event,
+/// Hashes the unredacted contents. Strips `hashes`, `signatures`, `unsigned`,
+/// and the locally derived `event_id` from a copy of the event,
 /// serializes to canonical JSON, and returns the SHA-256 digest encoded as
 /// **standard base64 without padding**.
 pub fn content_hash(event: &Event) -> Result<String, HashingError> {
-    let redacted = redact_event(event);
-    let mut value = serde_json::to_value(&redacted)?;
-    strip_fields(&mut value, &["hashes", "signatures", "unsigned"]);
+    let mut value = serde_json::to_value(event)?;
+    strip_fields(
+        &mut value,
+        &["event_id", "hashes", "signatures", "unsigned"],
+    );
     let canonical = to_canonical_bytes(&value)?;
     let digest = Sha256::digest(&canonical);
     Ok(STANDARD_NO_PAD.encode(digest))
 }
 
+/// Check the transmitted content hash. A mismatch indicates that the received
+/// event must be redacted after its signature is verified, rather than rejected.
+/// Compare decoded bytes, accepting both padded and unpadded base64.
+pub fn content_hash_matches(event: &Event) -> Result<bool, HashingError> {
+    use base64::engine::{DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig};
+
+    let Some(expected) = event
+        .hashes
+        .get("sha256")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return Ok(false);
+    };
+    let decoder = GeneralPurpose::new(
+        &base64::alphabet::STANDARD,
+        GeneralPurposeConfig::new().with_decode_padding_mode(DecodePaddingMode::Indifferent),
+    );
+    let Ok(expected) = decoder.decode(expected) else {
+        return Ok(false);
+    };
+    let actual = STANDARD_NO_PAD
+        .decode(content_hash(event)?)
+        .expect("generated SHA-256 base64");
+    Ok(expected == actual)
+}
+
 /// Derive the event ID (reference hash) for a room-v11 PDU.
 ///
-/// Strips `signatures` and `unsigned` from a copy of the event (NOT `hashes`),
+/// Redacts, then strips `signatures`, `unsigned`, and the locally derived
+/// `event_id` from a copy of the event (NOT `hashes`),
 /// serializes to canonical JSON, and returns `$` followed by the SHA-256
 /// digest encoded as **URL-safe base64 without padding**.
 pub fn event_id(event: &Event) -> Result<String, HashingError> {
     let redacted = redact_event(event);
     let mut value = serde_json::to_value(&redacted)?;
-    strip_fields(&mut value, &["signatures", "unsigned"]);
+    strip_fields(&mut value, &["event_id", "signatures", "unsigned"]);
     let canonical = to_canonical_bytes(&value)?;
     let digest = Sha256::digest(&canonical);
     Ok(format!("${}", URL_SAFE_NO_PAD.encode(digest)))
@@ -151,7 +181,10 @@ mod tests {
     #[test]
     fn event_id_starts_with_dollar() {
         let id = event_id(&make_event()).unwrap();
-        assert!(id.starts_with('$'), "event_id must start with '$', got: {id}");
+        assert!(
+            id.starts_with('$'),
+            "event_id must start with '$', got: {id}"
+        );
     }
 
     /// The suffix of event_id (after `$`) must be URL-safe base64:
@@ -194,6 +227,10 @@ mod tests {
         let ch = content_hash(&event).unwrap();
         let eid = event_id(&event).unwrap();
         // event_id starts with $; strip it before comparing
-        assert_ne!(ch, &eid[1..], "content_hash and event_id reference hash must differ");
+        assert_ne!(
+            ch,
+            &eid[1..],
+            "content_hash and event_id reference hash must differ"
+        );
     }
 }

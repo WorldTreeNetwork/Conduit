@@ -4,21 +4,17 @@
 //! <https://spec.matrix.org/latest/server-server-api/#signing-events>
 //! <https://spec.matrix.org/latest/server-server-api/#checking-for-a-signature>
 //!
-//! # V0 scope note
-//!
-//! For now only `signatures` and `unsigned` are stripped before signing /
-//! verifying (matching what [`crate::hashing::event_id`] does).  Full v11
-//! redaction (per-event-type allowed content fields) is tracked separately
-//! and must be implemented before federation interop.
+//! Signatures cover the v11 redacted PDU and its unredacted content hash.
+//! The locally derived event ID is metadata and is never signed.
 
-use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD_NO_PAD;
+use base64::Engine as _;
 use ed25519_dalek::{Signature, Signer as _, VerifyingKey};
 use thiserror::Error;
 
-use crate::canonical_json::{CanonicalJsonError, to_canonical_bytes};
+use crate::canonical_json::{to_canonical_bytes, CanonicalJsonError};
 use crate::event::Event;
-use crate::hashing::{HashingError, content_hash};
+use crate::hashing::{content_hash, content_hash_matches, HashingError};
 use crate::keys::ServerKey;
 use crate::redaction::redact_event;
 
@@ -45,6 +41,9 @@ pub enum SigningError {
 /// Errors that can occur while verifying an event signature.
 #[derive(Debug, Error)]
 pub enum VerifyError {
+    /// Computing the received event's content hash failed.
+    #[error("content hash error: {0}")]
+    Hashing(#[from] HashingError),
     /// Canonical JSON serialization failed.
     #[error("canonical JSON error: {0}")]
     CanonicalJson(#[from] CanonicalJsonError),
@@ -71,17 +70,11 @@ pub enum VerifyError {
 
     /// A required signature was missing or could not be looked up.
     #[error("no valid signature found for server '{server_name}' with key '{key_id}'")]
-    MissingSignature {
-        server_name: String,
-        key_id: String,
-    },
+    MissingSignature { server_name: String, key_id: String },
 
     /// The key lookup closure returned `None` for this (server, key_id) pair.
     #[error("unknown key: server '{server_name}', key_id '{key_id}'")]
-    UnknownKey {
-        server_name: String,
-        key_id: String,
-    },
+    UnknownKey { server_name: String, key_id: String },
 
     /// The originating server (sender's server) had no valid signature at all.
     #[error("no valid signature from originating server '{server_name}'")]
@@ -102,14 +95,14 @@ pub enum VerifyError {
 
 /// Build the canonical JSON bytes that are signed / verified.
 ///
-/// Per the v11 spec, the event is first redacted (stripping per-event-type
-/// content fields and `unsigned.content`), then `signatures` is set to `{}`
-/// and `unsigned` is removed — matching [`crate::hashing::event_id`].
+/// Redact first, then remove `signatures`, `unsigned`, and the locally
+/// derived `event_id`. An empty signatures object would change the bytes.
 fn signing_bytes(event: &Event) -> Result<Vec<u8>, SigningError> {
     let redacted = redact_event(event);
     let mut value = serde_json::to_value(&redacted)?;
     if let Some(map) = value.as_object_mut() {
-        map.insert("signatures".to_owned(), serde_json::json!({}));
+        map.remove("event_id");
+        map.remove("signatures");
         map.remove("unsigned");
     }
     Ok(to_canonical_bytes(&value)?)
@@ -120,7 +113,8 @@ fn signing_bytes_for_verify(event: &Event) -> Result<Vec<u8>, VerifyError> {
     let redacted = redact_event(event);
     let mut value = serde_json::to_value(&redacted)?;
     if let Some(map) = value.as_object_mut() {
-        map.insert("signatures".to_owned(), serde_json::json!({}));
+        map.remove("event_id");
+        map.remove("signatures");
         map.remove("unsigned");
     }
     Ok(to_canonical_bytes(&value)?)
@@ -144,8 +138,7 @@ fn server_name_from_sender(sender: &str) -> Result<&str, VerifyError> {
 ///
 /// Steps:
 /// 1. Compute and set `event.hashes.sha256` via [`content_hash`].
-/// 2. Build the canonical JSON signing bytes (clone with `signatures={}`,
-///    `unsigned` removed).
+/// 2. Redact, remove signatures/unsigned/local event ID, then canonicalize.
 /// 3. Sign with the server's Ed25519 key.
 /// 4. Encode as standard base64 (no padding) and insert into
 ///    `event.signatures[server_name][key_id]`, preserving any pre-existing
@@ -159,7 +152,7 @@ pub fn sign_event(
     let hash = content_hash(event)?;
     event.hashes = serde_json::json!({ "sha256": hash });
 
-    // Step 2 — canonical JSON of (clone with signatures={}, unsigned removed).
+    // Step 2 — canonical JSON of the redacted PDU without signatures.
     let bytes = signing_bytes(event)?;
 
     // Step 3 — sign.
@@ -174,7 +167,10 @@ pub fn sign_event(
     if !event.signatures.is_object() {
         event.signatures = serde_json::json!({});
     }
-    let sigs = event.signatures.as_object_mut().expect("just ensured object");
+    let sigs = event
+        .signatures
+        .as_object_mut()
+        .expect("just ensured object");
 
     // Get or create the inner object for this server.
     let server_obj = sigs
@@ -187,7 +183,10 @@ pub fn sign_event(
     server_obj
         .as_object_mut()
         .expect("just ensured object")
-        .insert(server_key.key_id.clone(), serde_json::Value::String(sig_b64));
+        .insert(
+            server_key.key_id.clone(),
+            serde_json::Value::String(sig_b64),
+        );
 
     Ok(())
 }
@@ -320,9 +319,27 @@ where
     }
 
     // Originating server was found in signatures but no valid sig won.
-    Err(last_originating_error.unwrap_or(VerifyError::NoOriginatingServerSignature {
-        server_name: originating_server.to_owned(),
-    }))
+    Err(
+        last_originating_error.unwrap_or(VerifyError::NoOriginatingServerSignature {
+            server_name: originating_server.to_owned(),
+        }),
+    )
+}
+
+/// Verify signatures before trusting content, then enforce the content hash.
+/// Validly signed events with missing, malformed, or mismatched content hashes
+/// are returned in redacted form, preserving the signed hash and signatures.
+/// See Matrix server-server API, "Validating hashes and signatures on received events".
+pub fn verify_event_and_hash<F>(event: &Event, key_lookup: F) -> Result<Event, VerifyError>
+where
+    F: Fn(&str, &str) -> Option<Vec<u8>>,
+{
+    verify_event(event, key_lookup)?;
+    if content_hash_matches(event)? {
+        Ok(event.clone())
+    } else {
+        Ok(redact_event(event))
+    }
 }
 
 /// Inner helper: verify `sig_val` (a JSON string holding base64 sig) against
@@ -332,10 +349,12 @@ fn verify_with_bytes(
     sig_val: &serde_json::Value,
     pub_bytes: &[u8],
 ) -> Result<(), VerifyError> {
-    let sig_b64 = sig_val.as_str().ok_or_else(|| VerifyError::MissingSignature {
-        server_name: String::new(),
-        key_id: String::new(),
-    })?;
+    let sig_b64 = sig_val
+        .as_str()
+        .ok_or_else(|| VerifyError::MissingSignature {
+            server_name: String::new(),
+            key_id: String::new(),
+        })?;
 
     let sig_bytes = STANDARD_NO_PAD.decode(sig_b64)?;
     let sig_array: [u8; 64] = sig_bytes
@@ -399,8 +418,7 @@ mod tests {
     }
 
     /// Mutating event content after signing must break verification.
-    /// Uses m.room.member (whose content fields survive redaction) so
-    /// that tampering after signing changes the signing bytes.
+    /// Uses the membership field, which survives v11 redaction.
     #[test]
     fn tamper_content_breaks_verify() {
         let server_key = generate_server_key();
@@ -418,8 +436,8 @@ mod tests {
 
         // Tamper with content — change a redaction-preserved field.
         event.content = json!({
-            "membership": "join",
-            "displayname": "TAMPERED",
+            "membership": "ban",
+            "displayname": "Alice",
         });
 
         let result = verify_event_signature(&event, "example.org", &server_key.key_id, &pub_bytes);
@@ -504,7 +522,9 @@ mod tests {
             "other.org signature was lost after signing"
         );
         assert!(
-            event.signatures.get("other.org")
+            event
+                .signatures
+                .get("other.org")
                 .and_then(|v| v.get("ed25519:abc"))
                 .is_some(),
             "other.org key entry was lost after signing"

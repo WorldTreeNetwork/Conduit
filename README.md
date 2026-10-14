@@ -63,7 +63,7 @@ The shape of a real Matrix homeserver is in. Working subsystems:
 
 **Status caveats** — there are known gaps tracked as P2/P3 follow-ups in `bd`:
 
-- Sign/verify uses simplified field-stripping (signatures + unsigned). Full v11 redaction (per-event-type content pruning) is filed as `conduit-sv4.11`.
+- v11 cryptographic bytes and redaction have independent protocol-vector tests. The separate PDU wire model (including unknown-field preservation) remains tracked as `conduit-embed-pdu`.
 - AS ghost user auto-creation (`conduit-5vr`) and AS query endpoints (`conduit-dhd`) are stubbed.
 - Some `/sync` streams are still scaffolding-only (presence federation, full filter implementation).
 - Run `bd ready` to see the current backlog.

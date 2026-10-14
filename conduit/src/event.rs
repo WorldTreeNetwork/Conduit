@@ -22,7 +22,7 @@ pub struct Event {
     #[serde(rename = "type")]
     pub event_type: String,
     pub content: Value,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state_key: Option<String>,
     pub origin_server_ts: u64,
     /// Event IDs of events required for this event to be valid.
@@ -36,5 +36,6 @@ pub struct Event {
     /// Topological ordering depth within the room DAG.
     pub depth: i64,
     /// Optional ephemeral data not included in the event hash.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unsigned: Option<Value>,
 }

@@ -23,7 +23,7 @@ use tokio::sync::broadcast;
 use conduit::auth::{StateMap, auth_event_keys, check_auth};
 use conduit::event::Event;
 use conduit::room::state_res;
-use conduit::signing::{verify_event, VerifyError};
+use conduit::signing::{verify_event_and_hash, VerifyError};
 use conduit::storage::Storage;
 
 use crate::RemoteKeyCache;
@@ -109,7 +109,7 @@ pub async fn process_incoming_pdu(
     // Build a key cache by fetching what we need.
     let key_cache = build_key_cache(remote_keys, http, &pdu).await;
     let lookup = make_key_lookup(key_cache);
-    verify_event(&pdu, lookup).map_err(PipelineError::SignatureError)?;
+    let pdu = verify_event_and_hash(&pdu, lookup).map_err(PipelineError::SignatureError)?;
 
     // Room version 11 only (kernel gate — in-process cannot bypass).
     {
