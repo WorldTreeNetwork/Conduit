@@ -179,18 +179,33 @@ Pdu alone. The set is evaluated on the form being checked; redaction keeps
   key: If the event is not validly signed by the homeserver of the user ID
   denoted by the key, reject") for joins. A value that is not a valid user
   ID drops the PDU.
-- **Other memberships carrying the key.** Rule 4.2 is written for every
-  `m.room.member` event, but Synapse enforces it only on joins, and only at
-  the signature stage. To stay on Synapse's side of drop and accept,
-  non-join events are not dropped. Instead, `SignedBy` records exactly which
-  servers produced a valid eligible signature. The auth check
-  (`conduit::auth`, rule 4.2) then rejects any `m.room.member` event whose
-  `join_authorised_via_users_server` server is not in `SignedBy`. A rejected
-  event is stored as rejected, not dropped.
-- **Other servers' signatures.** They are checked only when the server is
-  required. A signature from a server that is not required is ignored,
-  whether valid or not. It does not count toward `SignedBy`, and it is
-  preserved exactly in `pdu_json`.
+- **Other memberships carrying the key: observed, not required.** Rule 4.2
+  is written for every `m.room.member` event. Synapse enforces it only on
+  joins, and only at the signature stage. To stay on Synapse's side of drop
+  and accept, a non-join event is never dropped over this key. Instead:
+  - The server of `join_authorised_via_users_server` becomes an *observed
+    server* for that event.
+  - Its signatures are verified under exactly the same rules as a required
+    server's: event-time key eligibility, refetch of unknown or ineligible
+    keys, every eligible signature must verify, and at least one must
+    remain.
+  - The outcome is recorded rather than enforced at this stage. The
+    observed server goes into `SignedBy` if and only if that verification
+    passes. Missing, ineligible and invalid signatures all leave it out,
+    and none of them drop the PDU.
+  - A non-join value that is not a valid user ID produces no observed
+    server. The rule-4.2 check then rejects the event.
+
+  The auth check (`conduit::auth`, rule 4.2) then rejects any
+  `m.room.member` event whose `join_authorised_via_users_server` server is
+  not in `SignedBy`. A rejected event is stored as rejected, not dropped.
+  A valid authoriser signature on a non-join event therefore counts toward
+  the auth decision, and the event is accepted when the other rules pass.
+- **Other servers' signatures.** A server that is neither required nor
+  observed is not verified. Its signatures are ignored whether valid or
+  not, never count toward `SignedBy`, and are preserved exactly in
+  `pdu_json`. `SignedBy` therefore holds exactly the required servers
+  (always present on admission) plus each observed server that verified.
 
 ### Signing-key validity (event-time)
 
@@ -392,29 +407,47 @@ snapshots with the local `event_id`. Pre-change snapshots could never hold a
 wire `event_id`, because v3+ wire PDUs have none, so in that layout the key
 is always the local ID. The flattened layout is read-only.
 
-Draining a legacy envelope never just strips metadata. For each snapshot
-the drain calls `classify_legacy_snapshot(saved_event_id, snapshot)`. That
-call rebuilds the Pdu without `event_id`, then runs the same
-`classify_legacy_row` logic against the saved ID:
+Draining a legacy envelope never just strips metadata. A queue snapshot and
+the stored `events` row under the same saved ID can hold different bytes.
+For example, the snapshot was taken before a lossy ingest rewrote the row,
+or the reverse. So the two are classified independently, and every hash
+check concerns the object that is actually emitted.
 
-- **`verified`:** the reference hash equals the saved ID and the content
-  hash matches. The PDU is emitted as it is.
-- **`content_mismatch`:** the ID matches but the content hash does not. The
-  PDU is emitted as its v11 redaction, which is the same rule as
-  `get_wire_pdu`.
-- **`id_mismatch`:** the PDU is withheld. It is removed from the envelope
-  and logged at WARN with both IDs. If that leaves the envelope with no
-  PDUs and no EDUs, the row is marked `sent`, with `last_error` set to
-  "withheld: legacy id_mismatch".
+1. **Snapshot verdict.** `classify_legacy_snapshot(saved_event_id,
+   snapshot)` rebuilds the snapshot's Pdu without `event_id`. It then runs
+   the shared classification logic against the saved ID, giving
+   `verified`, `content_mismatch` or `id_mismatch` for the snapshot bytes.
+   The verdict is recorded only on the queue row, in
+   `fed_outbound_queue.legacy_snapshot_verdicts`. That is a JSON-text map
+   `{event_id: verdict}`, written once at drain. It is never written to
+   `events.id_integrity`.
+2. **Row verdict.** The stored row is classified only from its own bytes, by
+   `classify_legacy_row` (via `get_wire_pdu`, or the sweep), exactly as
+   under "ID-integrity check for legacy rows". A snapshot verdict never
+   changes a row's class, its `pdu_json`, or what clients read.
+3. **Choice of emitted object.** The two candidates are the snapshot and
+   the stored row. Each carries its own verdict for the saved ID, and the
+   drain takes the first match below. Each choice is a `WirePdu` whose own
+   bytes passed the check for that ID.
+   - The snapshot is `verified`: emit the snapshot as it is.
+   - Otherwise, the row is `verified`: emit the row's Pdu, from
+     `get_wire_pdu`.
+   - Otherwise, the snapshot is `content_mismatch`: emit `redact(snapshot)`.
+   - Otherwise, the row is `content_mismatch`: emit `redact(row)`, from
+     `get_wire_pdu`.
+   - Otherwise, withhold. The PDU is removed from the envelope and logged
+     at WARN with the saved ID, the snapshot's derived ID and the row's
+     class. If that leaves the envelope with no PDUs and no EDUs, the queue
+     row is marked `sent`, with `last_error` set to "withheld: legacy
+     id_mismatch".
 
-A withheld snapshot is never re-signed, re-hashed, or sent under a new
-identity. Re-signing would mint a different event ID for content that local
-history and other servers' `prev_events` know under the old one.
+Nothing is ever re-signed, re-hashed, or sent under a new identity.
+Re-signing would mint a different event ID for content that local history
+and other servers' `prev_events` know under the old one. A verified snapshot
+does not repair a lossy stored row either. Repair, if it is ever wanted, is
+a separate change, because it would alter retained history.
 
-Each classification also writes the event's `id_integrity`, so the
-`events` row and the queue agree. The snapshot is checked by itself
-because the queue may hold a snapshot whose bytes differ from the current
-`events` row. Any new persisted `Event` envelope nests as
+Any new persisted `Event` envelope nests as
 `{"event_id": ..., "pdu": {...}}`.
 
 ## Storage (PostgreSQL)
@@ -422,10 +455,23 @@ because the queue may hold a snapshot whose bytes differ from the current
 ### Migrations: metadata-only first, no rewrites anywhere
 
 Each step is its own migration file. sqlx runs each file in its own
-transaction, so no lock outlives its own step. Each file begins with
-`SET LOCAL lock_timeout = '5s'`, so the migration fails fast instead of
-queueing all traffic behind a long-running query. The numbers are the next
-free ones at implementation time.
+transaction. Locks taken by an `ALTER TABLE` are held until that
+transaction ends, so no lock outlives its own step, and within a step every
+lock lasts the whole step. Each file begins with
+`SET LOCAL lock_timeout = '5s'`.
+
+`lock_timeout` bounds only how long a statement waits to acquire a lock.
+That matters because a waiting `ACCESS EXCLUSIVE` request blocks every
+later request on the table, so failing fast stops the migration from
+queueing all traffic behind a long-running query. It does not bound how
+long a lock is held once granted.
+
+The total hold time is bounded instead by the statements themselves. Every
+statement in migrations E and T is catalog-only, with no rewrite and no
+validation scan, so the hold time is the catalog update for each step, not
+a function of table size.
+
+The numbers are the next free ones at implementation time.
 
 **Migration E (`events`):**
 
@@ -453,6 +499,7 @@ ALTER TABLE transactions       ADD CONSTRAINT transaction_has_request_or_result
     CHECK (request IS NOT NULL OR result IS NOT NULL
            OR request_text IS NOT NULL OR result_text IS NOT NULL) NOT VALID;
 ALTER TABLE fed_outbound_queue ADD COLUMN payload_text TEXT;
+ALTER TABLE fed_outbound_queue ADD COLUMN legacy_snapshot_verdicts TEXT;  -- C3 snapshot verdicts
 ALTER TABLE fed_outbound_queue ALTER COLUMN payload DROP NOT NULL;
 ```
 
@@ -625,10 +672,12 @@ invisible. It runs in two ways:
   is up. It walks `id_integrity = 'unchecked'` rows in batches of 1000 by
   `stream_position`. It logs a count for each class, and logs every
   `id_mismatch` row at WARN with both IDs.
-- **On demand.** When `get_wire_pdu` or `classify_legacy_snapshot` meets an
-  `unchecked` row, it runs `classify_legacy_row` inline. It persists the
-  class, then answers from the result. Federation never answers 404 just
-  because the sweep has not reached a row yet.
+- **On demand.** When `get_wire_pdu` meets an `unchecked` row, it runs
+  `classify_legacy_row` inline on that row's own bytes. It persists the
+  class, then answers from the result. That includes calls the legacy
+  outbox drain makes for its row candidate. Federation never answers 404
+  just because the sweep has not reached a row yet.
+  `classify_legacy_snapshot` never writes a row class.
 
 Neither path ever rewrites a primary key or any reference to one.
 
@@ -775,9 +824,24 @@ rejection, which is what the spec text says.
     `SignedBy` = {sender's server, authoriser's server}.
   - The same three cases arrive as a fetched auth event through
     `admit_fetched`, with the same verdicts.
-  - A non-join `m.room.member` that carries the key with no authoriser
-    signature is admitted at the signature stage and rejected by auth rule
-    4.2.
+  - Non-join vectors are checked-in `m.room.member` events with
+    `membership: invite` and `membership: leave`. Each carries
+    `join_authorised_via_users_server` naming a user on a third server,
+    and is signed validly by the sender's server. There are three cases:
+    - **valid:** the authoriser's server also signed validly with an
+      eligible key. The event passes the signature stage with `SignedBy` =
+      {sender's server, authoriser's server}, and auth rule 4.2 accepts
+      it.
+    - **missing:** no signature from the authoriser's server. The event
+      passes the signature stage with `SignedBy` = {sender's server}. Rule
+      4.2 rejects it, and it is stored as rejected, not dropped.
+    - **invalid:** the authoriser's server signed with an eligible key, but
+      the signature does not verify. Same outcome as missing: rejected, not
+      dropped.
+  - The same three non-join cases are also run as fetched auth events
+    through `admit_fetched`, with the same outcomes.
+  - An authoriser signature made with an ineligible key (expired before
+    `origin_server_ts`, no renewal on refetch) counts as missing.
   - A 3rd-party-invite membership (`membership: invite` with
     `third_party_invite`) that lacks the sender's server signature passes
     the signature stage. The same event without `third_party_invite` is
@@ -831,9 +895,25 @@ rejection, which is what the spec text says.
   - withholds the other and logs it with both IDs;
   - never re-signs it, so no event under a new ID appears in the outgoing
     body or in `events`;
-  - marks both events' `id_integrity`.
-  An envelope that holds only the bad snapshot is marked `sent` and carries
-  the withheld note.
+  - records both snapshot verdicts in `legacy_snapshot_verdicts` and
+    leaves `events.id_integrity` untouched by the drain.
+
+  An envelope that holds only the bad snapshot, whose stored row is also
+  `id_mismatch`, is marked `sent` and carries the withheld note.
+- Differing snapshot and row (C3), each case with one saved ID:
+  - **snapshot verified, row lossy:**
+    - the drain emits the snapshot in full and records the snapshot verdict
+      `verified`;
+    - the row's own classification stays `content_mismatch`;
+    - federation `/event` for that ID still serves the redaction;
+    - client reads are unchanged.
+  - **snapshot id_mismatch, row verified:**
+    - the drain emits the row's Pdu (from `get_wire_pdu`);
+    - the snapshot verdict `id_mismatch` is recorded on the queue row;
+    - `events.id_integrity` is `verified` from the row's own bytes.
+  - **snapshot content_mismatch, row id_mismatch:** the drain emits
+    `redact(snapshot)`, and the row stays `id_mismatch`, so federation
+    `/event` returns 404.
 - Migrations (C5): a test runs migrations E and T against a database whose
   `transactions`, `fed_outbound_queue` and `events` tables hold rows. It
   asserts:
@@ -1212,3 +1292,58 @@ above win. Three earlier statements are superseded:
   membership. Inbound `/invite` also exempts such invites from the
   sender-equals-origin check. The `third_party_invite.signed` block is
   checked by auth rule 4.4.
+
+## Review disposition, round 4 (advise-5 codex send-back)
+
+C1, C4 and C5 were confirmed resolved. Where this round changes the round-3
+disposition, the contract sections above win.
+
+**C2 follow-up. Non-join authoriser signatures: adopted.**
+
+- For non-join `m.room.member` events, the server named by
+  `join_authorised_via_users_server` is now an *observed* server. Its
+  signatures are verified under the same event-time eligibility and
+  all-eligible-must-verify rules as a required server's.
+- It enters `SignedBy` only when that verification passes. A missing,
+  ineligible or invalid signature leaves it out, and does not drop the PDU.
+- Auth rule 4.2 (v11, which applies to every membership event) then accepts
+  or rejects using `SignedBy`. A valid authoriser signature on a non-join
+  event therefore counts, and the reject-versus-drop distinction is kept:
+  joins drop at the signature stage, as Synapse does, and non-joins are
+  rejected by auth.
+- Valid, missing and invalid non-join vectors (invite and leave) were added
+  for both inbound receipt and fetched auth events, plus an
+  ineligible-key case.
+
+**C3 follow-up. Snapshot vs stored-row classification: adopted.**
+
+- The queue snapshot and the stored row are classified independently, each
+  from its own bytes.
+- The snapshot verdict is recorded only in the new nullable column
+  `fed_outbound_queue.legacy_snapshot_verdicts`. That column is part of
+  migration T and is catalog-only. The verdict is never written to
+  `events.id_integrity`.
+- The row is classified only by `classify_legacy_row` (through
+  `get_wire_pdu` or the sweep).
+- The drain emits the best candidate whose own bytes were checked against
+  the saved ID, in this order:
+  - a verified snapshot;
+  - a verified row;
+  - a redacted snapshot;
+  - a redacted row.
+
+  Otherwise it withholds the PDU. Nothing is re-signed, and a snapshot
+  never repairs or reclassifies a row.
+- Three differing snapshot/row cases were added. The delta's
+  outbox-envelope scenario now matches this.
+
+**Implementation notes:**
+
+- The delta's "Key validity boundary" scenario now uses a key fetched at F
+  with `valid_until_ts` T = F + 3 days. The old wording put the fetch more
+  than 7 days before T, which the seven-day cap makes ineligible at T. The
+  design's test already used 3 days.
+- The migration text now says that `lock_timeout` bounds only how long a
+  statement waits to acquire a lock, and that locks are held to the end of
+  the transaction. Total hold time is bounded by every statement being
+  catalog-only, not by `lock_timeout`.

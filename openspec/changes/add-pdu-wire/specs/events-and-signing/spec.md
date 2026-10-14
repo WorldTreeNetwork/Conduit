@@ -141,18 +141,30 @@ each required server, every signature made with an eligible key SHALL
 verify, and at least one SHALL remain. Otherwise the PDU SHALL be dropped.
 
 These rules SHALL apply equally to `/send`, `/send_join`, `/invite`, and
-every fetched PDU, auth events included. A non-join `m.room.member` event
-that carries `join_authorised_via_users_server` without a valid signature
-from that user's server SHALL be rejected by the auth rules (v11 rule 4.2),
-not dropped.
+every fetched PDU, auth events included.
+
+For a non-join `m.room.member` event that carries
+`join_authorised_via_users_server`, that user's server SHALL be an observed
+server:
+- Its signatures SHALL be verified under the same eligibility and
+  verification rules as a required server's.
+- Its outcome SHALL be recorded in the event's set of verified signers, and
+  SHALL NOT cause a drop.
+- The auth rules (v11 rule 4.2) SHALL accept the event when that server
+  verified, and SHALL reject it (store it as rejected, not drop it) when the
+  signature is missing, made with an ineligible key, or invalid.
+
+Signatures from servers that are neither required nor observed SHALL NOT
+count toward that set.
 
 #### Scenario: Key validity boundary
 
-- GIVEN a key with `valid_until_ts` T, fetched more than 7 days before T
-  was reached
-- WHEN events signed with it at `origin_server_ts` T and T+1 are received
+- GIVEN a key fetched at time F with `valid_until_ts` T = F + 3 days, so
+  the seven-day cap does not apply
+- WHEN events signed with it at `origin_server_ts` T and T+1 are received,
+  and the refetch for the second returns no renewal
 - THEN the event at T verifies, and the event at T+1 is dropped with no
-  eligible signature, unless a refetch renews the key
+  eligible signature
 
 #### Scenario: Seven-day cap
 
@@ -177,6 +189,18 @@ not dropped.
 - WHEN each is received over `/send`, and each is fetched as an auth event
 - THEN the first two are dropped and not stored in both paths, the third
   is admitted, and each verdict equals the recorded Synapse verdict
+
+#### Scenario: Non-join authoriser signatures
+
+- GIVEN checked-in v11 `m.room.member` events with `membership` `invite` and
+  `leave`. Each carries `join_authorised_via_users_server` naming a user on
+  a third server, and each is validly signed by the sender's server. They
+  come in three variants: validly co-signed by the authoriser's server, not
+  signed by it, and signed by it with an eligible key but an invalid
+  signature.
+- WHEN each is received over `/send`, and each is fetched as an auth event
+- THEN none is dropped. The validly co-signed events pass auth rule 4.2,
+  and the missing and invalid variants are stored as rejected by rule 4.2.
 
 #### Scenario: Third-party invite exemption
 
@@ -455,13 +479,24 @@ Only the following SHALL construct a `WirePdu`:
 - `classify_legacy_snapshot`.
 
 New outbox envelopes SHALL hold wire PDUs only. Legacy flattened envelopes
-SHALL be read-only, and each snapshot SHALL be classified against its saved
-local ID before emission:
-- `verified` is sent;
-- `content_mismatch` is sent as its redaction;
-- `id_mismatch` is withheld and logged.
+SHALL be read-only.
 
-A legacy snapshot SHALL NEVER be re-signed into a new identity.
+For each legacy snapshot, the system SHALL classify the snapshot bytes and
+the stored `events` row independently against the saved local ID:
+- The snapshot verdict SHALL be recorded only on the queue row, and SHALL
+  NOT be written to the row's integrity class.
+- The row SHALL be classified only from its own bytes.
+
+The drain SHALL then emit, in this order of preference:
+- the snapshot, if it is verified;
+- else the row's Pdu, if the row is verified;
+- else the snapshot's redaction, if the snapshot's ID matches;
+- else the row's redaction, if the row's ID matches.
+
+Otherwise it SHALL withhold the PDU and log it. Every hash check SHALL
+concern the object actually emitted. A legacy snapshot SHALL NEVER be
+re-signed into a new identity, and SHALL NOT change the stored row, its
+integrity class, or client reads.
 
 #### Scenario: No local ID on the wire
 
@@ -476,5 +511,21 @@ A legacy snapshot SHALL NEVER be re-signed into a new identity.
   verifiable snapshot
 - WHEN the queue drains it
 - THEN only the verifiable PDU is sent, the other is withheld and logged
-  with both IDs, nothing appears under a new event ID, and both events'
-  integrity classes are recorded
+  with both IDs, and nothing appears under a new event ID. Both snapshot
+  verdicts are recorded on the queue row, and the drain does not change
+  `events.id_integrity`.
+
+#### Scenario: Snapshot and stored row differ
+
+- GIVEN a legacy outbox snapshot and an `events` row under the same saved
+  ID, with different bytes
+- WHEN the queue drains it, in each of three cases
+- THEN:
+  - **verified snapshot, lossy row:** the full snapshot is sent, the row
+    stays `content_mismatch`, federation `/event` still serves the row's
+    redaction, and client reads are unchanged;
+  - **snapshot ID mismatch, verified row:** the row's Pdu is sent, the
+    snapshot verdict `id_mismatch` is recorded on the queue row, and the
+    row's class is `verified`;
+  - **snapshot content mismatch, row ID mismatch:** the snapshot's
+    redaction is sent, and the row stays `id_mismatch`.
