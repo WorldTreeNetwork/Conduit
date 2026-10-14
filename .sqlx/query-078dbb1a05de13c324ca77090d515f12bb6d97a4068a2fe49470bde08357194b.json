@@ -1,0 +1,47 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT media_id, origin_server, creator, created_at, expires_at\n               FROM media_pending WHERE media_id = $1 AND origin_server = $2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "media_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "origin_server",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "creator",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 4,
+        "name": "expires_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "078dbb1a05de13c324ca77090d515f12bb6d97a4068a2fe49470bde08357194b"
+}

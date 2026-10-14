@@ -193,20 +193,7 @@ fn build_router(state: TestState) -> Router {
         .route("/_matrix/client/v3/register", post(auth::register::<TestState>))
         .route("/_matrix/client/v3/login",
             get(auth::get_login_flows::<TestState>).post(auth::login::<TestState>))
-        .route("/_matrix/media/v3/upload",
-            post(media_api::upload::<TestState>))
-        .route("/_matrix/media/v3/config",
-            get(media_api::media_config::<TestState>))
-        .route("/_matrix/media/v3/download/:serverName/:mediaId",
-            get(media_api::download_legacy::<TestState>))
-        .route("/_matrix/media/v3/download/:serverName/:mediaId/:fileName",
-            get(media_api::download_legacy_filename::<TestState>))
-        .route("/_matrix/media/v3/thumbnail/:serverName/:mediaId",
-            get(media_api::thumbnail_legacy::<TestState>))
-        .route("/_matrix/client/v1/media/download/:serverName/:mediaId",
-            get(media_api::download_authed::<TestState>))
-        .route("/_matrix/client/v1/media/config",
-            get(media_api::media_config::<TestState>))
+        .merge(media_api::router::<TestState>())
         .with_state(state)
 }
 
@@ -303,7 +290,8 @@ async fn download_round_trip() {
 
     let req = Request::builder()
         .method("GET")
-        .uri(format!("/_matrix/media/v3/download/localhost/{media_id}"))
+        .uri(format!("/_matrix/client/v1/media/download/localhost/{media_id}"))
+        .header("authorization", format!("Bearer {token}"))
         .body(Body::empty())
         .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
@@ -331,7 +319,8 @@ async fn download_with_filename_includes_disposition() {
 
     let req = Request::builder()
         .method("GET")
-        .uri(format!("/_matrix/media/v3/download/localhost/{media_id}/myphoto.png"))
+        .uri(format!("/_matrix/client/v1/media/download/localhost/{media_id}/myphoto.png"))
+        .header("authorization", format!("Bearer {token}"))
         .body(Body::empty())
         .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
@@ -367,7 +356,8 @@ async fn download_html_forced_attachment() {
 
     let req = Request::builder()
         .method("GET")
-        .uri(format!("/_matrix/media/v3/download/localhost/{media_id}"))
+        .uri(format!("/_matrix/client/v1/media/download/localhost/{media_id}"))
+        .header("authorization", format!("Bearer {token}"))
         .body(Body::empty())
         .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
@@ -393,10 +383,12 @@ async fn download_unknown_media_404() {
     let tmp = TempDir::new().unwrap();
     let state = make_test_state(&db, &tmp).await;
     let app = build_router(state);
+    let token = register_user(&app, "uploader5").await;
 
     let req = Request::builder()
         .method("GET")
-        .uri("/_matrix/media/v3/download/localhost/doesnotexist999")
+        .uri("/_matrix/client/v1/media/download/localhost/doesnotexist999")
+        .header("authorization", format!("Bearer {token}"))
         .body(Body::empty())
         .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
@@ -425,18 +417,17 @@ async fn thumbnail_scale_smaller_than_source() {
     let req = Request::builder()
         .method("GET")
         .uri(format!(
-            "/_matrix/media/v3/thumbnail/localhost/{media_id}?width=50&height=50&method=scale"
+            "/_matrix/client/v1/media/thumbnail/localhost/{media_id}?width=50&height=50&method=scale"
         ))
+        .header("authorization", format!("Bearer {token}"))
         .body(Body::empty())
         .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK, "thumbnail request failed");
     let thumb_bytes = raw_body(resp).await;
-    // The thumbnail should be smaller than the source (which was a real PNG).
-    assert!(
-        thumb_bytes.len() < png.len() || thumb_bytes.len() > 0,
-        "thumbnail should be non-empty"
-    );
+    // Scaled down to exactly the requested size (square source, square box).
+    let thumb = image::load_from_memory(&thumb_bytes).unwrap();
+    assert_eq!((thumb.width(), thumb.height()), (50, 50));
     // Verify it's a valid PNG.
     assert!(thumb_bytes.starts_with(b"\x89PNG"), "thumbnail must be PNG");
 }
@@ -460,17 +451,17 @@ async fn thumbnail_cached_on_second_call() {
 
     // First thumbnail request — generates + caches.
     let thumb_uri = format!(
-        "/_matrix/media/v3/thumbnail/localhost/{media_id}?width=40&height=40&method=scale"
+        "/_matrix/client/v1/media/thumbnail/localhost/{media_id}?width=40&height=40&method=scale"
     );
     let resp1 = app.clone().oneshot(
-        Request::builder().method("GET").uri(&thumb_uri).body(Body::empty()).unwrap()
+        Request::builder().method("GET").uri(&thumb_uri).header("authorization", format!("Bearer {token}")).body(Body::empty()).unwrap()
     ).await.unwrap();
     assert_eq!(resp1.status(), StatusCode::OK);
     let bytes1 = raw_body(resp1).await;
 
     // Second request — should come from cache (same bytes).
     let resp2 = app.clone().oneshot(
-        Request::builder().method("GET").uri(&thumb_uri).body(Body::empty()).unwrap()
+        Request::builder().method("GET").uri(&thumb_uri).header("authorization", format!("Bearer {token}")).body(Body::empty()).unwrap()
     ).await.unwrap();
     assert_eq!(resp2.status(), StatusCode::OK);
     let bytes2 = raw_body(resp2).await;
@@ -478,7 +469,6 @@ async fn thumbnail_cached_on_second_call() {
     assert_eq!(bytes1, bytes2, "cached thumbnail must be identical to original");
 
     // Verify the thumbnail is in the DB.
-    use conduit_server::api::client::media::MediaState as _;
     let thumb = MediaState::storage(&state)
         .get_thumbnail(media_id, "localhost", 40, 40, "scale")
         .await
@@ -497,9 +487,11 @@ async fn media_config_returns_upload_limit() {
     let state = make_test_state(&db, &tmp).await;
     let app = build_router(state);
 
+    let token = register_user(&app, "configreader").await;
     let req = Request::builder()
         .method("GET")
         .uri("/_matrix/media/v3/config")
+        .header("authorization", format!("Bearer {token}"))
         .body(Body::empty())
         .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
@@ -551,7 +543,8 @@ async fn safe_headers_present() {
 
     let req = Request::builder()
         .method("GET")
-        .uri(format!("/_matrix/media/v3/download/localhost/{media_id}"))
+        .uri(format!("/_matrix/client/v1/media/download/localhost/{media_id}"))
+        .header("authorization", format!("Bearer {token}"))
         .body(Body::empty())
         .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
@@ -632,4 +625,167 @@ impl conduit::room::RoomEventSender for TestState {
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// conduit-aef: remote media over federation (mock origin server)
+// ---------------------------------------------------------------------------
+
+/// A mock origin homeserver. `/_matrix/federation/v1/media/download/:id`
+/// answers in the spec's multipart/mixed format for `blob`, 404s for
+/// `missing`, and serves a body larger than any test limit for `huge`.
+async fn spawn_mock_origin(
+    hits: Arc<std::sync::atomic::AtomicUsize>,
+    png: Vec<u8>,
+) -> String {
+    use axum::extract::Path as AxPath;
+    use axum::response::IntoResponse;
+    let app = Router::new().route(
+        "/_matrix/federation/v1/media/download/:mediaId",
+        get(move |AxPath(media_id): AxPath<String>| {
+            let hits = Arc::clone(&hits);
+            let png = png.clone();
+            async move {
+                hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                match media_id.as_str() {
+                    "blob" => {
+                        let mut body = Vec::new();
+                        body.extend_from_slice(b"--fedboundary\r\nContent-Type: application/json\r\n\r\n{}\r\n--fedboundary\r\nContent-Type: image/png\r\nContent-Disposition: inline; filename=\"remote cat.png\"\r\n\r\n");
+                        body.extend_from_slice(&png);
+                        body.extend_from_slice(b"\r\n--fedboundary--\r\n");
+                        (
+                            StatusCode::OK,
+                            [(header::CONTENT_TYPE, "multipart/mixed; boundary=fedboundary")],
+                            body,
+                        )
+                            .into_response()
+                    }
+                    "huge" => (
+                        StatusCode::OK,
+                        [(header::CONTENT_TYPE, "application/octet-stream")],
+                        vec![0u8; 4096],
+                    )
+                        .into_response(),
+                    _ => (
+                        StatusCode::NOT_FOUND,
+                        axum::Json(json!({"errcode": "M_NOT_FOUND", "error": "nope"})),
+                    )
+                        .into_response(),
+                }
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    format!("http://{addr}")
+}
+
+async fn authed_get(app: &Router, token: &str, uri: &str) -> axum::response::Response {
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(uri)
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn remote_media_is_fetched_over_federation_cached_and_served() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let db = TempDb::new().await;
+    let tmp = TempDir::new().unwrap();
+    let hits = Arc::new(AtomicUsize::new(0));
+    let png = make_png(64, 32);
+    let origin = spawn_mock_origin(Arc::clone(&hits), png.clone()).await;
+    let mut state = make_test_state(&db, &tmp).await;
+    state.fed_client = Arc::new(
+        federation::Client::new(
+            reqwest::Client::new(),
+            hickory_resolver::TokioAsyncResolver::tokio_from_system_conf().unwrap(),
+            Arc::new(conduit_server::RemoteKeyCache::new()),
+            Arc::clone(&state.server_key),
+            Arc::clone(&state.server_name),
+        )
+        .with_test_base_url(origin),
+    );
+    state.max_upload_bytes = 1024 * 1024;
+    let app = build_router(state.clone());
+    let token = register_user(&app, "remotefan").await;
+
+    // First request fetches from the origin (multipart/mixed) and caches.
+    let resp = authed_get(&app, &token, "/_matrix/client/v1/media/download/remote.example/blob").await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.headers()[header::CONTENT_TYPE], "image/png");
+    assert_eq!(
+        resp.headers()[header::CONTENT_DISPOSITION],
+        "inline; filename=\"remote cat.png\"",
+        "remote filename must be reused"
+    );
+    assert_eq!(raw_body(resp).await, png);
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+
+    // Second request is served from the local cache.
+    let resp = authed_get(&app, &token, "/_matrix/client/v1/media/download/remote.example/blob").await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(raw_body(resp).await, png);
+    assert_eq!(hits.load(Ordering::SeqCst), 1, "cached media must not be refetched");
+    let cached = MediaState::storage(&state).get_media("blob", "remote.example").await.unwrap().unwrap();
+    assert_eq!(cached.uploader, None);
+    assert_eq!(cached.upload_name.as_deref(), Some("remote cat.png"));
+
+    // Thumbnails of cached remote media come from the cache too.
+    let resp = authed_get(&app, &token, "/_matrix/client/v1/media/thumbnail/remote.example/blob?width=16&height=16&method=crop").await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+
+    // Newly cached remote media is frozen on the deprecated endpoint, which
+    // also never triggers a fetch for uncached remote media.
+    let resp = app.clone().oneshot(
+        Request::builder().uri("/_matrix/media/v3/download/remote.example/blob").body(Body::empty()).unwrap(),
+    ).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    let resp = app.clone().oneshot(
+        Request::builder().uri("/_matrix/media/v3/download/remote.example/other").body(Body::empty()).unwrap(),
+    ).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+
+    // Remote 404 maps to M_NOT_FOUND.
+    let resp = authed_get(&app, &token, "/_matrix/client/v1/media/download/remote.example/missing").await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    assert_eq!(json_body(resp).await["errcode"], "M_NOT_FOUND");
+}
+
+#[tokio::test]
+async fn oversized_remote_media_is_502_too_large() {
+    use std::sync::atomic::AtomicUsize;
+    let db = TempDb::new().await;
+    let tmp = TempDir::new().unwrap();
+    let origin = spawn_mock_origin(Arc::new(AtomicUsize::new(0)), make_png(4, 4)).await;
+    let mut state = make_test_state(&db, &tmp).await;
+    state.fed_client = Arc::new(
+        federation::Client::new(
+            reqwest::Client::new(),
+            hickory_resolver::TokioAsyncResolver::tokio_from_system_conf().unwrap(),
+            Arc::new(conduit_server::RemoteKeyCache::new()),
+            Arc::clone(&state.server_key),
+            Arc::clone(&state.server_name),
+        )
+        .with_test_base_url(origin),
+    );
+    state.max_upload_bytes = 1000;
+    let app = build_router(state.clone());
+    let token = register_user(&app, "bigremote").await;
+    let resp = authed_get(&app, &token, "/_matrix/client/v1/media/download/remote.example/huge").await;
+    assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+    assert_eq!(json_body(resp).await["errcode"], "M_TOO_LARGE");
+    assert!(MediaState::storage(&state).get_media("huge", "remote.example").await.unwrap().is_none());
 }

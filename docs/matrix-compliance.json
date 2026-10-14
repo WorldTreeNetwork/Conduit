@@ -720,6 +720,178 @@
       "tests": [
         "conduit-server/tests/production_directory.rs::appservice_ping_thirdparty_and_network_directory"
       ]
+    },
+    {
+      "id": "content-repo-download-headers",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#serving-inline-content",
+      "assertions": [
+        "Content-Type is returned exactly as uploaded; absent upload type is application/octet-stream",
+        "Content-Disposition is inline only for the spec's inline-safe list, attachment otherwise",
+        "Upload filename (query parameter) or path override is reproduced exactly, RFC 8187 for non-ASCII, omitted when absent",
+        "Recommended Content-Security-Policy, nosniff and Cross-Origin-Resource-Policy are sent",
+        "Invalid media IDs are 404 and invalid server names 400 M_INVALID_PARAM",
+        "Authenticated download/upload reject missing tokens"
+      ],
+      "implementation": [
+        "conduit-server/src/api/client/media.rs"
+      ],
+      "tests": [
+        "conduit-server/tests/production_media.rs::production_media_download_headers_follow_spec",
+        "conduit-server/src/api/client/media.rs::tests"
+      ],
+      "status": "covered_assertions_only",
+      "limitations": [
+        "Downloads are never redirected (allowed by the spec)"
+      ]
+    },
+    {
+      "id": "content-repo-unauthenticated-freeze",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#content-repo-client-behaviour",
+      "assertions": [
+        "Media stored after the freeze is 404 M_NOT_FOUND on deprecated download/thumbnail endpoints",
+        "Media stored before the freeze remains reachable unauthenticated",
+        "Remote cache fills count as new media; deprecated endpoints never fetch remote media",
+        "allow_redirect=true still returns the content",
+        "The freeze can be disabled by the operator"
+      ],
+      "implementation": [
+        "conduit-server/src/api/client/media.rs",
+        "conduit-server/migrations/0040_media_async_freeze_previews.sql"
+      ],
+      "tests": [
+        "conduit-server/tests/production_media.rs::production_media_unauthenticated_endpoints_are_frozen",
+        "conduit-server/tests/production_media.rs::production_media_freeze_can_be_disabled",
+        "conduit-server/tests/media.rs::remote_media_is_fetched_over_federation_cached_and_served"
+      ],
+      "status": "covered_assertions_only",
+      "limitations": [
+        "No m.login.sso IdP icon exemption (no IdP icons are served)"
+      ]
+    },
+    {
+      "id": "content-repo-config-and-limits",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#get_matrixclientv1mediaconfig",
+      "assertions": [
+        "v1 and v3 config return the same m.upload.size and require authentication",
+        "Uploads above the configured limit are 413 M_TOO_LARGE; uploads above 2 MiB but within the limit succeed",
+        "Oversized remote media is 502 M_TOO_LARGE",
+        "Remote media is 404 M_NOT_FOUND without fetching when federation is disabled"
+      ],
+      "implementation": [
+        "conduit-server/src/api/client/media.rs"
+      ],
+      "tests": [
+        "conduit-server/tests/production_media.rs::production_media_config_parity_and_upload_limit",
+        "conduit-server/tests/production_media.rs::production_media_remote_is_not_found_when_federation_disabled",
+        "conduit-server/tests/media.rs::oversized_remote_media_is_502_too_large"
+      ],
+      "status": "covered_assertions_only",
+      "limitations": [
+        "No per-user upload quota"
+      ],
+      "gap_issue": "conduit-38v"
+    },
+    {
+      "id": "content-repo-async-upload",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#post_matrixmediav1create",
+      "assertions": [
+        "create returns content_uri and unused_expires_at (24h default)",
+        "Pending media downloads wait up to timeout_ms then 504 M_NOT_YET_UPLOADED, and complete when content arrives",
+        "Only the creator may upload (403 M_FORBIDDEN); existing content is 409 M_CANNOT_OVERWRITE_MEDIA",
+        "Unknown, foreign or expired IDs are 404 M_NOT_FOUND",
+        "Too many pending uploads per user is 429 M_LIMIT_EXCEEDED with retry_after_ms; expired reservations stop counting"
+      ],
+      "implementation": [
+        "conduit-server/src/api/client/media.rs",
+        "conduit-server/src/storage_pg.rs",
+        "conduit/src/storage.rs"
+      ],
+      "tests": [
+        "conduit-server/tests/production_media.rs::production_media_async_upload_lifecycle",
+        "conduit-server/tests/production_media.rs::production_media_pending_limit_and_expiry"
+      ],
+      "status": "covered_assertions_only"
+    },
+    {
+      "id": "content-repo-thumbnails",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#thumbnails",
+      "assertions": [
+        "width and height are required positive integers; method is crop or scale; animated is boolean",
+        "scale preserves aspect and is never smaller than requested; crop returns the requested size",
+        "Content is never upscaled; small content is returned as-is",
+        "Static output unless animated=true",
+        "Thumbnail Content-Disposition is inline",
+        "Non-images are 400 M_UNKNOWN; oversized images 413 M_TOO_LARGE"
+      ],
+      "implementation": [
+        "conduit-server/src/api/client/media.rs"
+      ],
+      "tests": [
+        "conduit-server/tests/production_media.rs::production_media_thumbnails",
+        "conduit-server/src/api/client/media.rs::tests"
+      ],
+      "status": "covered_assertions_only",
+      "limitations": [
+        "Animated thumbnails are only produced by passing through small animated originals"
+      ],
+      "gap_issue": "conduit-y99.21.2"
+    },
+    {
+      "id": "content-repo-preview-url",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#get_matrixclientv1mediapreview_url",
+      "assertions": [
+        "v1 and deprecated v3 preview_url require authentication",
+        "HTML OpenGraph og:* properties are returned with title/description fallbacks",
+        "og:image is re-hosted as an mxc URI with og:image:type, dimensions and matrix:image:size",
+        "Results are cached; ts selects the newest preview at or before ts, else a newer one",
+        "Loopback, private, link-local, CGNAT, multicast, ULA, IPv4-mapped and NAT64-embedded destinations are refused before connecting, including after redirects and for og:image",
+        "Bodies over the size cap are 502 M_TOO_LARGE (with or without Content-Length); the fetch deadline is enforced"
+      ],
+      "implementation": [
+        "conduit-server/src/api/client/media_preview.rs",
+        "conduit-server/src/api/client/safe_fetch.rs"
+      ],
+      "tests": [
+        "conduit-server/tests/production_media.rs::production_media_preview_url_refuses_internal_destinations",
+        "conduit-server/tests/production_media.rs::production_media_preview_url_opengraph_rehost_cache_and_ts",
+        "conduit-server/tests/production_media.rs::production_media_preview_url_revalidates_redirects_and_images",
+        "conduit-server/tests/production_media.rs::production_media_preview_url_size_and_time_limits",
+        "conduit-server/src/api/client/safe_fetch.rs::tests",
+        "conduit-server/src/api/client/media_preview.rs::tests"
+      ],
+      "status": "covered_assertions_only",
+      "limitations": [
+        "HTML is decoded as UTF-8 only; no oEmbed"
+      ],
+      "gap_issue": "conduit-y99.21.2"
+    },
+    {
+      "id": "federation-media-fetch",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/server-server-api/#content-repository",
+      "assertions": [
+        "Remote media is fetched from /_matrix/federation/v1/media/download, multipart/mixed parsed, cached and served without refetching",
+        "The remote Content-Disposition filename is reused",
+        "Remote 404 maps to M_NOT_FOUND"
+      ],
+      "implementation": [
+        "conduit-server/src/api/client/media.rs"
+      ],
+      "tests": [
+        "conduit-server/tests/media.rs::remote_media_is_fetched_over_federation_cached_and_served"
+      ],
+      "status": "covered_assertions_only",
+      "limitations": [
+        "Inbound federation media endpoints answer raw bytes rather than multipart/mixed",
+        "Not yet verified against a live Synapse peer"
+      ],
+      "gap_issue": "conduit-y99.21.1"
     }
   ]
 }

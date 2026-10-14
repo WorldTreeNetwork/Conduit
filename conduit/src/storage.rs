@@ -47,6 +47,47 @@ pub struct ThumbnailMetadata {
     pub storage_path: String,
 }
 
+/// An `mxc://` URI reserved by `POST /_matrix/media/v1/create` whose
+/// content has not been uploaded yet.
+#[derive(Debug, Clone)]
+pub struct PendingMedia {
+    pub media_id: String,
+    pub origin_server: String,
+    pub creator: String,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+}
+
+/// Outcome of reserving a pending media ID.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PendingMediaCreate {
+    Created,
+    /// The creator already holds the maximum number of unexpired
+    /// reservations; the earliest one expires at `earliest_expiry`.
+    LimitExceeded { earliest_expiry: Option<DateTime<Utc>> },
+}
+
+/// Outcome of attaching content to a pending media ID.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingMediaCompletion {
+    Completed,
+    /// Never created, or the reservation expired.
+    NotFound,
+    /// Reserved by a different user.
+    Forbidden,
+    /// Content already exists for this ID.
+    AlreadyUploaded,
+}
+
+/// A cached URL preview (OpenGraph object) generated at `fetched_at`.
+#[derive(Debug, Clone)]
+pub struct UrlPreview {
+    pub url: String,
+    pub fetched_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    pub og: Value,
+}
+
 // ---------------------------------------------------------------------------
 // E2EE domain types
 // ---------------------------------------------------------------------------
@@ -735,6 +776,38 @@ pub trait Storage: Send + Sync + 'static {
         method: &str,
     ) -> Result<Option<ThumbnailMetadata>>;
 
+    // --- Media lane (conduit-y99.21): async upload, freeze, previews ------
+
+    /// Reserve `p` unless its creator already holds `max_pending`
+    /// unexpired reservations. Expired reservations of the creator are
+    /// discarded first. Atomic per creator.
+    async fn create_pending_media(&self, p: &PendingMedia, max_pending: i64) -> Result<PendingMediaCreate>;
+    /// The unexpired-or-not reservation for an ID, if one exists.
+    async fn get_pending_media(&self, media_id: &str, origin_server: &str) -> Result<Option<PendingMedia>>;
+    /// Atomically consume the reservation for `m` (checking creator and
+    /// expiry against `now`) and insert `m`.
+    async fn complete_pending_media(
+        &self,
+        m: &MediaMetadata,
+        uploader: &str,
+        now: DateTime<Utc>,
+    ) -> Result<PendingMediaCompletion>;
+    /// Whether the deprecated unauthenticated endpoints may serve this
+    /// media (stored before the freeze). False for unknown media.
+    async fn media_unauthenticated_access(&self, media_id: &str, origin_server: &str) -> Result<bool>;
+    async fn set_media_unauthenticated_access(&self, media_id: &str, origin_server: &str, allowed: bool) -> Result<()>;
+    /// Whether any media or thumbnail row still references a
+    /// content-addressed blob path (blobs are deduplicated by sha256).
+    async fn media_storage_path_in_use(&self, storage_path: &str) -> Result<bool>;
+    async fn insert_url_preview(&self, p: &UrlPreview) -> Result<()>;
+    /// Newest cached preview for `url`, restricted to previews fetched at
+    /// or before `fetched_at_or_before` when given.
+    async fn latest_url_preview(
+        &self,
+        url: &str,
+        fetched_at_or_before: Option<DateTime<Utc>>,
+    ) -> Result<Option<UrlPreview>>;
+
     // --- Receipts (1mo.6) ----------------------------------------------------
 
     /// Upsert a read receipt. Returns the new stream_pos.
@@ -1080,6 +1153,10 @@ struct MemoryInner {
     // Media (E07)
     media: HashMap<(String, String), MediaMetadata>,
     thumbnails: HashMap<(String, String, i32, i32, String), ThumbnailMetadata>,
+    // Media lane (conduit-y99.21)
+    pending_media: HashMap<(String, String), PendingMedia>,
+    media_legacy_access: std::collections::HashSet<(String, String)>,
+    url_previews: Vec<UrlPreview>,
     // Push (E11)
     pushers: HashMap<(String, String, String), Pusher>,
     push_rules: HashMap<(String, String, String, String), PushRule>,
@@ -1125,6 +1202,9 @@ impl Default for MemoryInner {
             receipts_next_pos: 0,
             media: HashMap::new(),
             thumbnails: HashMap::new(),
+            pending_media: HashMap::new(),
+            media_legacy_access: std::collections::HashSet::new(),
+            url_previews: Vec::new(),
             pushers: HashMap::new(),
             push_rules: HashMap::new(),
             audit_log: Vec::new(),
@@ -2235,6 +2315,7 @@ impl Storage for MemoryStorage {
     async fn delete_media(&self, media_id: &str, origin_server: &str) -> Result<()> {
         let mut inner = self.inner.write().await;
         inner.media.remove(&(media_id.to_owned(), origin_server.to_owned()));
+        inner.media_legacy_access.remove(&(media_id.to_owned(), origin_server.to_owned()));
         // Cascade: remove thumbnails too.
         inner.thumbnails.retain(|(mid, orig, _, _, _), _| {
             !(mid == media_id && orig == origin_server)
@@ -2280,6 +2361,121 @@ impl Storage for MemoryStorage {
             method.to_owned(),
         );
         Ok(self.inner.read().await.thumbnails.get(&key).cloned())
+    }
+
+    // --- Media lane (conduit-y99.21) ----------------------------------------
+
+    async fn create_pending_media(&self, p: &PendingMedia, max_pending: i64) -> Result<PendingMediaCreate> {
+        let mut inner = self.inner.write().await;
+        let now = p.created_at;
+        inner
+            .pending_media
+            .retain(|_, existing| existing.creator != p.creator || existing.expires_at > now);
+        let mine: Vec<DateTime<Utc>> = inner
+            .pending_media
+            .values()
+            .filter(|existing| existing.creator == p.creator)
+            .map(|existing| existing.expires_at)
+            .collect();
+        if mine.len() as i64 >= max_pending {
+            return Ok(PendingMediaCreate::LimitExceeded {
+                earliest_expiry: mine.into_iter().min(),
+            });
+        }
+        inner
+            .pending_media
+            .insert((p.media_id.clone(), p.origin_server.clone()), p.clone());
+        Ok(PendingMediaCreate::Created)
+    }
+
+    async fn get_pending_media(&self, media_id: &str, origin_server: &str) -> Result<Option<PendingMedia>> {
+        Ok(self
+            .inner
+            .read()
+            .await
+            .pending_media
+            .get(&(media_id.to_owned(), origin_server.to_owned()))
+            .cloned())
+    }
+
+    async fn complete_pending_media(
+        &self,
+        m: &MediaMetadata,
+        uploader: &str,
+        now: DateTime<Utc>,
+    ) -> Result<PendingMediaCompletion> {
+        let mut inner = self.inner.write().await;
+        let key = (m.media_id.clone(), m.origin_server.clone());
+        let Some(pending) = inner.pending_media.get(&key).cloned() else {
+            return Ok(if inner.media.contains_key(&key) {
+                PendingMediaCompletion::AlreadyUploaded
+            } else {
+                PendingMediaCompletion::NotFound
+            });
+        };
+        if pending.creator != uploader {
+            return Ok(PendingMediaCompletion::Forbidden);
+        }
+        inner.pending_media.remove(&key);
+        if pending.expires_at <= now {
+            return Ok(PendingMediaCompletion::NotFound);
+        }
+        if inner.media.contains_key(&key) {
+            return Ok(PendingMediaCompletion::AlreadyUploaded);
+        }
+        inner.media.insert(key, m.clone());
+        Ok(PendingMediaCompletion::Completed)
+    }
+
+    async fn media_unauthenticated_access(&self, media_id: &str, origin_server: &str) -> Result<bool> {
+        Ok(self
+            .inner
+            .read()
+            .await
+            .media_legacy_access
+            .contains(&(media_id.to_owned(), origin_server.to_owned())))
+    }
+
+    async fn set_media_unauthenticated_access(&self, media_id: &str, origin_server: &str, allowed: bool) -> Result<()> {
+        let mut inner = self.inner.write().await;
+        let key = (media_id.to_owned(), origin_server.to_owned());
+        if allowed && inner.media.contains_key(&key) {
+            inner.media_legacy_access.insert(key);
+        } else if !allowed {
+            inner.media_legacy_access.remove(&key);
+        }
+        Ok(())
+    }
+
+    async fn media_storage_path_in_use(&self, storage_path: &str) -> Result<bool> {
+        let inner = self.inner.read().await;
+        Ok(inner.media.values().any(|m| m.storage_path == storage_path)
+            || inner.thumbnails.values().any(|t| t.storage_path == storage_path))
+    }
+
+    async fn insert_url_preview(&self, p: &UrlPreview) -> Result<()> {
+        let mut inner = self.inner.write().await;
+        inner
+            .url_previews
+            .retain(|existing| !(existing.url == p.url && existing.fetched_at == p.fetched_at));
+        inner.url_previews.push(p.clone());
+        Ok(())
+    }
+
+    async fn latest_url_preview(
+        &self,
+        url: &str,
+        fetched_at_or_before: Option<DateTime<Utc>>,
+    ) -> Result<Option<UrlPreview>> {
+        Ok(self
+            .inner
+            .read()
+            .await
+            .url_previews
+            .iter()
+            .filter(|p| p.url == url && fetched_at_or_before.is_none_or(|ts| p.fetched_at <= ts))
+            .max_by_key(|p| p.fetched_at)
+            .cloned())
     }
 
     // --- Push (E11) ----------------------------------------------------------

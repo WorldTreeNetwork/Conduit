@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT unauthenticated_access FROM media WHERE media_id = $1 AND origin_server = $2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "unauthenticated_access",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "30937bf3198f97fa5f6c7f641dbd788688c10d1c6758dae55d4164ca24a1cadf"
+}

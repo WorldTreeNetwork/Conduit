@@ -2281,6 +2281,176 @@ impl Storage for PostgresStorage {
     }
 
     // -----------------------------------------------------------------------
+    // Media lane (conduit-y99.21): async upload, freeze, URL previews
+    // -----------------------------------------------------------------------
+
+    async fn create_pending_media(
+        &self,
+        p: &conduit::storage::PendingMedia,
+        max_pending: i64,
+    ) -> Result<conduit::storage::PendingMediaCreate> {
+        use sha2::{Digest, Sha256};
+        let digest = Sha256::digest(format!("conduit-media-pending:{}", p.creator).as_bytes());
+        let lock_id = i64::from_be_bytes(digest[..8].try_into().expect("eight hash bytes"));
+        let mut tx = self.pool.begin().await.map_err(map_sqlx)?;
+        // Serialize reservations per creator so the quota cannot be raced.
+        sqlx::query!("SELECT pg_advisory_xact_lock($1) IS NULL AS lock_held", lock_id)
+            .fetch_one(&mut *tx).await.map_err(map_sqlx)?;
+        sqlx::query!(
+            "DELETE FROM media_pending WHERE creator = $1 AND expires_at <= $2",
+            p.creator, p.created_at
+        ).execute(&mut *tx).await.map_err(map_sqlx)?;
+        let held = sqlx::query!(
+            r#"SELECT count(*) AS "count!", min(expires_at) AS earliest
+               FROM media_pending WHERE creator = $1"#,
+            p.creator
+        ).fetch_one(&mut *tx).await.map_err(map_sqlx)?;
+        if held.count >= max_pending {
+            tx.commit().await.map_err(map_sqlx)?;
+            return Ok(conduit::storage::PendingMediaCreate::LimitExceeded {
+                earliest_expiry: held.earliest,
+            });
+        }
+        sqlx::query!(
+            r#"INSERT INTO media_pending (media_id, origin_server, creator, created_at, expires_at)
+               VALUES ($1, $2, $3, $4, $5)"#,
+            p.media_id, p.origin_server, p.creator, p.created_at, p.expires_at
+        ).execute(&mut *tx).await.map_err(map_sqlx)?;
+        tx.commit().await.map_err(map_sqlx)?;
+        Ok(conduit::storage::PendingMediaCreate::Created)
+    }
+
+    async fn get_pending_media(
+        &self,
+        media_id: &str,
+        origin_server: &str,
+    ) -> Result<Option<conduit::storage::PendingMedia>> {
+        let row = sqlx::query!(
+            r#"SELECT media_id, origin_server, creator, created_at, expires_at
+               FROM media_pending WHERE media_id = $1 AND origin_server = $2"#,
+            media_id, origin_server
+        ).fetch_optional(&self.pool).await.map_err(map_sqlx)?;
+        Ok(row.map(|r| conduit::storage::PendingMedia {
+            media_id: r.media_id,
+            origin_server: r.origin_server,
+            creator: r.creator,
+            created_at: r.created_at,
+            expires_at: r.expires_at,
+        }))
+    }
+
+    async fn complete_pending_media(
+        &self,
+        m: &MediaMetadata,
+        uploader: &str,
+        now: DateTime<Utc>,
+    ) -> Result<conduit::storage::PendingMediaCompletion> {
+        use conduit::storage::PendingMediaCompletion as Outcome;
+        let mut tx = self.pool.begin().await.map_err(map_sqlx)?;
+        let pending = sqlx::query!(
+            r#"SELECT creator, expires_at FROM media_pending
+               WHERE media_id = $1 AND origin_server = $2 FOR UPDATE"#,
+            m.media_id, m.origin_server
+        ).fetch_optional(&mut *tx).await.map_err(map_sqlx)?;
+        let Some(pending) = pending else {
+            let exists = sqlx::query!(
+                r#"SELECT EXISTS (SELECT 1 FROM media WHERE media_id = $1 AND origin_server = $2) AS "exists!""#,
+                m.media_id, m.origin_server
+            ).fetch_one(&mut *tx).await.map_err(map_sqlx)?;
+            return Ok(if exists.exists { Outcome::AlreadyUploaded } else { Outcome::NotFound });
+        };
+        if pending.creator != uploader {
+            return Ok(Outcome::Forbidden);
+        }
+        sqlx::query!(
+            "DELETE FROM media_pending WHERE media_id = $1 AND origin_server = $2",
+            m.media_id, m.origin_server
+        ).execute(&mut *tx).await.map_err(map_sqlx)?;
+        if pending.expires_at <= now {
+            tx.commit().await.map_err(map_sqlx)?;
+            return Ok(Outcome::NotFound);
+        }
+        let inserted = sqlx::query!(
+            r#"
+            INSERT INTO media
+                (media_id, origin_server, uploader, content_type, upload_name,
+                 file_size, sha256, storage_path, uploaded_at, last_accessed)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            ON CONFLICT (media_id, origin_server) DO NOTHING
+            "#,
+            m.media_id,
+            m.origin_server,
+            m.uploader,
+            m.content_type,
+            m.upload_name,
+            m.file_size,
+            m.sha256,
+            m.storage_path,
+            m.uploaded_at,
+            m.last_accessed,
+        ).execute(&mut *tx).await.map_err(map_sqlx)?;
+        if inserted.rows_affected() == 0 {
+            return Ok(Outcome::AlreadyUploaded);
+        }
+        tx.commit().await.map_err(map_sqlx)?;
+        Ok(Outcome::Completed)
+    }
+
+    async fn media_unauthenticated_access(&self, media_id: &str, origin_server: &str) -> Result<bool> {
+        let row = sqlx::query!(
+            "SELECT unauthenticated_access FROM media WHERE media_id = $1 AND origin_server = $2",
+            media_id, origin_server
+        ).fetch_optional(&self.pool).await.map_err(map_sqlx)?;
+        Ok(row.is_some_and(|r| r.unauthenticated_access))
+    }
+
+    async fn set_media_unauthenticated_access(&self, media_id: &str, origin_server: &str, allowed: bool) -> Result<()> {
+        sqlx::query!(
+            "UPDATE media SET unauthenticated_access = $3 WHERE media_id = $1 AND origin_server = $2",
+            media_id, origin_server, allowed
+        ).execute(&self.pool).await.map_err(map_sqlx)?;
+        Ok(())
+    }
+
+    async fn media_storage_path_in_use(&self, storage_path: &str) -> Result<bool> {
+        let row = sqlx::query!(
+            r#"SELECT (EXISTS (SELECT 1 FROM media WHERE storage_path = $1)
+                    OR EXISTS (SELECT 1 FROM media_thumbnails WHERE storage_path = $1)) AS "in_use!""#,
+            storage_path
+        ).fetch_one(&self.pool).await.map_err(map_sqlx)?;
+        Ok(row.in_use)
+    }
+
+    async fn insert_url_preview(&self, p: &conduit::storage::UrlPreview) -> Result<()> {
+        sqlx::query!(
+            r#"INSERT INTO url_previews (url, fetched_at, expires_at, og)
+               VALUES ($1, $2, $3, $4)
+               ON CONFLICT (url, fetched_at) DO UPDATE SET expires_at = EXCLUDED.expires_at, og = EXCLUDED.og"#,
+            p.url, p.fetched_at, p.expires_at, p.og
+        ).execute(&self.pool).await.map_err(map_sqlx)?;
+        Ok(())
+    }
+
+    async fn latest_url_preview(
+        &self,
+        url: &str,
+        fetched_at_or_before: Option<DateTime<Utc>>,
+    ) -> Result<Option<conduit::storage::UrlPreview>> {
+        let row = sqlx::query!(
+            r#"SELECT url, fetched_at, expires_at, og FROM url_previews
+               WHERE url = $1 AND ($2::timestamptz IS NULL OR fetched_at <= $2)
+               ORDER BY fetched_at DESC LIMIT 1"#,
+            url, fetched_at_or_before
+        ).fetch_optional(&self.pool).await.map_err(map_sqlx)?;
+        Ok(row.map(|r| conduit::storage::UrlPreview {
+            url: r.url,
+            fetched_at: r.fetched_at,
+            expires_at: r.expires_at,
+            og: r.og,
+        }))
+    }
+
+    // -----------------------------------------------------------------------
     // Push (E11 P1–P6)
     // -----------------------------------------------------------------------
 

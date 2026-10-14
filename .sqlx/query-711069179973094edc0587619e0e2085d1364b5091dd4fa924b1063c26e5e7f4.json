@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM media_pending WHERE media_id = $1 AND origin_server = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "711069179973094edc0587619e0e2085d1364b5091dd4fa924b1063c26e5e7f4"
+}

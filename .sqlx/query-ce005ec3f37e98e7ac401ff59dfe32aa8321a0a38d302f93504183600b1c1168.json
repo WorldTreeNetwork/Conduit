@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO url_previews (url, fetched_at, expires_at, og)\n               VALUES ($1, $2, $3, $4)\n               ON CONFLICT (url, fetched_at) DO UPDATE SET expires_at = EXCLUDED.expires_at, og = EXCLUDED.og",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Timestamptz",
+        "Timestamptz",
+        "Jsonb"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "ce005ec3f37e98e7ac401ff59dfe32aa8321a0a38d302f93504183600b1c1168"
+}

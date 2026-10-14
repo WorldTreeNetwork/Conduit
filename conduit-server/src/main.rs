@@ -620,26 +620,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/_matrix/client/v3/presence/:userId/status",
             get(presence_api::get_presence::<AppState>)
             .put(presence_api::put_presence::<AppState>))
-        // Media (E07) — legacy unauthenticated endpoints
-        .route("/_matrix/media/v3/upload",
-            post(media_api::upload::<AppState>))
-        .route("/_matrix/media/v3/config",
-            get(media_api::media_config::<AppState>))
-        .route("/_matrix/media/v3/download/:serverName/:mediaId",
-            get(media_api::download_legacy::<AppState>))
-        .route("/_matrix/media/v3/download/:serverName/:mediaId/:fileName",
-            get(media_api::download_legacy_filename::<AppState>))
-        .route("/_matrix/media/v3/thumbnail/:serverName/:mediaId",
-            get(media_api::thumbnail_legacy::<AppState>))
-        // Media (E07) — authenticated v1 endpoints
-        .route("/_matrix/client/v1/media/download/:serverName/:mediaId",
-            get(media_api::download_authed::<AppState>))
-        .route("/_matrix/client/v1/media/download/:serverName/:mediaId/:fileName",
-            get(media_api::download_authed_filename::<AppState>))
-        .route("/_matrix/client/v1/media/thumbnail/:serverName/:mediaId",
-            get(media_api::thumbnail_authed::<AppState>))
-        .route("/_matrix/client/v1/media/config",
-            get(media_api::media_config::<AppState>))
+        // Media (E07, conduit-y99.21): content repository
+        .merge(media_api::router::<AppState>())
         // Push (E11 P1–P2)
         .route("/_matrix/client/v3/pushers",
             get(push_api::get_pushers::<AppState>))
