@@ -55,6 +55,14 @@ pub async fn keys_upload<S: AuthState>(
     let storage = state.storage();
     let user_id = &authed.user_id;
     let device_id = &authed.device_id;
+    // A device-less application-service request has no device to key.
+    if device_id.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"errcode": "M_MISSING_PARAM", "error": "Uploading keys requires a device: pass device_id"})),
+        )
+            .into_response();
+    }
 
     // Validate everything before persisting anything (conduit-y99.14).
     let new_device_keys = match body.device_keys.as_ref().map(|keys| validate_device_keys(keys, user_id, device_id)) {
@@ -762,7 +770,9 @@ pub async fn device_signing_upload<S: AuthState>(
     let unchanged = provided
         .iter()
         .all(|(slot, _, key)| existing.get(*slot).is_some_and(|stored| stored == *key));
-    if existing.contains_key("master") {
+    // Application services never need UIA here, even when cross-signing
+    // keys already exist (spec v1.17, conduit-y99.35).
+    if existing.contains_key("master") && authed.appservice.is_none() {
         let exact_retry = body.master_key.is_some() && unchanged;
         if !exact_retry {
             if let Some(response) = require_password_uia(&state, user_id, body.auth.as_ref()).await {

@@ -125,7 +125,7 @@ fn registration(id: &str, url: &str, extra: &str) -> String {
         "id: {id}\nurl: \"{url}\"\nas_token: as_{id}\nhs_token: hs_{id}\nsender_localpart: {id}bot\n\
          rate_limited: false\n\
          namespaces:\n  users:\n    - exclusive: true\n      regex: '@{id}_.*:production\\.test'\n  \
-         aliases:\n    - exclusive: true\n      regex: '#{id}_.*:production\\.test'\n  \
+         aliases:\n    - exclusive: false\n      regex: '#{id}_.*:production\\.test'\n  \
          rooms:\n    - exclusive: false\n      regex: '!nomatch:.*'\n{extra}"
     )
 }
@@ -375,4 +375,222 @@ async fn transactions_fall_back_to_legacy_routes() {
     assert_eq!(current.authorization.as_deref(), Some("Bearer hs_old"));
     assert_eq!(current.query, None);
     assert_eq!(legacy.query.as_deref(), Some("access_token=hs_old"));
+}
+
+// ---------------------------------------------------------------------------
+// conduit-y99.35 / conduit-y99.18.1 — client-server API extensions
+// ---------------------------------------------------------------------------
+
+/// `path` with the AS identity-assertion query appended.
+fn as_user(path: &str, user: &str) -> String {
+    let sep = if path.contains('?') { '&' } else { '?' };
+    format!("{path}{sep}user_id={}", user.replace('@', "%40").replace(':', "%3A"))
+}
+
+#[tokio::test]
+async fn identity_assertion_devices_registration_and_login() {
+    let (url, _log) = spawn_as(false).await;
+    let server = server_with(&[("irc", registration("irc", &url, ""))]).await;
+    let alice = server.register("alice").await;
+    let carol = format!("@irc_carol:{HS}");
+    let whoami = "/_matrix/client/v3/account/whoami";
+
+    // No user_id: the AS acts as its sender user, device-less.
+    let me = server.request(Method::GET, whoami, Some("as_irc"), None, 200).await;
+    assert_eq!(me, json!({"user_id": format!("@ircbot:{HS}")}));
+
+    // Unregistered namespace user, foreign users, remote look-alikes.
+    let refused = server.request(Method::GET, &as_user(whoami, &carol), Some("as_irc"), None, 403).await;
+    assert_eq!(refused["errcode"], "M_FORBIDDEN");
+    for outsider in [format!("@alice:{HS}"), "@irc_carol:elsewhere.test".to_owned()] {
+        let refused = server.request(Method::GET, &as_user(whoami, &outsider), Some("as_irc"), None, 403).await;
+        assert_eq!(refused["errcode"], "M_FORBIDDEN", "{outsider}");
+    }
+
+    // Registration type m.login.application_service needs the as_token.
+    let body = json!({"type": "m.login.application_service", "username": "irc_carol", "inhibit_login": true});
+    let missing = server.request(Method::POST, "/_matrix/client/v3/register", None, Some(body.clone()), 401).await;
+    assert_eq!(missing["errcode"], "M_MISSING_TOKEN");
+    let unknown = server.request(Method::POST, "/_matrix/client/v3/register", Some("nope"), Some(body.clone()), 401).await;
+    assert_eq!(unknown["errcode"], "M_UNKNOWN_TOKEN");
+    let registered = server.request(Method::POST, "/_matrix/client/v3/register", Some("as_irc"), Some(body), 200).await;
+    assert_eq!(registered, json!({"user_id": carol}));
+    let me = server.request(Method::GET, &as_user(whoami, &carol), Some("as_irc"), None, 200).await;
+    assert_eq!(me, json!({"user_id": carol}));
+
+    // Device masquerading: unknown device is M_UNKNOWN_DEVICE.
+    let bad = server
+        .request(Method::GET, &format!("{}&device_id=NOPE", as_user(whoami, &carol)), Some("as_irc"), None, 400)
+        .await;
+    assert_eq!(bad["errcode"], "M_UNKNOWN_DEVICE");
+
+    // conduit-y99.18.1: AS creates a device with PUT (201), updates (200).
+    let device_path = as_user("/_matrix/client/v3/devices/BRIDGEDEV", &carol);
+    server.request(Method::PUT, &device_path, Some("as_irc"), Some(json!({"display_name": "IRC"})), 201).await;
+    server.request(Method::PUT, &device_path, Some("as_irc"), Some(json!({"display_name": "IRC 2"})), 200).await;
+    let devices = server.request(Method::GET, &as_user("/_matrix/client/v3/devices", &carol), Some("as_irc"), None, 200).await;
+    assert_eq!(devices["devices"][0]["device_id"], "BRIDGEDEV");
+    assert_eq!(devices["devices"][0]["display_name"], "IRC 2");
+    let me = server
+        .request(Method::GET, &format!("{}&device_id=BRIDGEDEV", as_user(whoami, &carol)), Some("as_irc"), None, 200)
+        .await;
+    assert_eq!(me, json!({"user_id": carol, "device_id": "BRIDGEDEV"}));
+    // Ordinary clients may not create devices this way.
+    let not_found = server
+        .request(Method::PUT, "/_matrix/client/v3/devices/NEWDEV", Some(token(&alice)), Some(json!({})), 404)
+        .await;
+    assert_eq!(not_found["errcode"], "M_NOT_FOUND");
+    // Device-less key upload is refused; with a device it works.
+    let keyless = server
+        .request(Method::POST, &as_user("/_matrix/client/v3/keys/upload", &carol), Some("as_irc"), Some(json!({})), 400)
+        .await;
+    assert_eq!(keyless["errcode"], "M_MISSING_PARAM");
+
+    // Cross-signing replacement needs no UIA for the AS (spec v1.17).
+    let signing = as_user("/_matrix/client/v3/keys/device_signing/upload", &carol);
+    let first = common::keys::CrossSigning::new(&carol);
+    server.request(Method::POST, &signing, Some("as_irc"), Some(first.upload_body()), 200).await;
+    let second = common::keys::CrossSigning::new(&carol);
+    server.request(Method::POST, &signing, Some("as_irc"), Some(second.upload_body()), 200).await;
+
+    // Device deletion without UIA (DELETE and POST /delete_devices).
+    server.request(Method::DELETE, &device_path, Some("as_irc"), Some(json!({})), 200).await;
+    server.request(Method::PUT, &as_user("/_matrix/client/v3/devices/D2", &carol), Some("as_irc"), Some(json!({})), 201).await;
+    server
+        .request(Method::POST, &as_user("/_matrix/client/v3/delete_devices", &carol), Some("as_irc"), Some(json!({"devices": ["D2"]})), 200)
+        .await;
+    let devices = server.request(Method::GET, &as_user("/_matrix/client/v3/devices", &carol), Some("as_irc"), None, 200).await;
+    assert_eq!(devices["devices"], json!([]));
+
+    // m.login.application_service login.
+    let flows = server.request(Method::GET, "/_matrix/client/v3/login", None, None, 200).await;
+    assert!(flows["flows"].as_array().unwrap().iter().any(|f| f["type"] == "m.login.application_service"));
+    let login = |user: &str| json!({"type": "m.login.application_service", "identifier": {"type": "m.id.user", "user": user}});
+    let session = server.request(Method::POST, "/_matrix/client/v3/login", Some("as_irc"), Some(login("irc_carol")), 200).await;
+    assert_eq!(session["user_id"], carol.as_str());
+    let me = server.request(Method::GET, whoami, Some(token(&session)), None, 200).await;
+    assert_eq!(me["user_id"], carol.as_str());
+    let exclusive = server.request(Method::POST, "/_matrix/client/v3/login", Some("as_irc"), Some(login("alice")), 403).await;
+    assert_eq!(exclusive["errcode"], "M_EXCLUSIVE");
+    let unregistered = server.request(Method::POST, "/_matrix/client/v3/login", Some("as_irc"), Some(login("irc_nobody")), 403).await;
+    assert_eq!(unregistered["errcode"], "M_FORBIDDEN");
+    let no_token = server.request(Method::POST, "/_matrix/client/v3/login", None, Some(login("irc_carol")), 403).await;
+    assert_eq!(no_token["errcode"], "M_FORBIDDEN");
+}
+
+#[tokio::test]
+async fn timestamp_massaging_sync_and_alias_exclusivity() {
+    let (url, _log) = spawn_as(false).await;
+    // This registration holds its alias namespace exclusively.
+    let exclusive = registration("irc", &url, "")
+        .replace("aliases:\n    - exclusive: false", "aliases:\n    - exclusive: true");
+    assert!(exclusive.contains("aliases:\n    - exclusive: true"));
+    let server = server_with(&[("irc", exclusive)]).await;
+    let alice = server.register("alice").await;
+    let carol = format!("@irc_carol:{HS}");
+    as_register(&server, "as_irc", "irc_carol").await;
+    let room = create_room(&server, token(&alice), json!({"preset": "public_chat"})).await;
+    server
+        .request(Method::POST, &as_user(&format!("/_matrix/client/v3/join/{room}"), &carol), Some("as_irc"), Some(json!({})), 200)
+        .await;
+
+    // ts on send and on state, honoured for the AS.
+    let send = format!("/_matrix/client/v3/rooms/{room}/send/m.room.message/t1?ts=1234567890123");
+    let sent = server
+        .request(Method::PUT, &as_user(&send, &carol), Some("as_irc"), Some(json!({"msgtype": "m.text", "body": "old"})), 200)
+        .await;
+    let event_path = |id: &str| format!("/_matrix/client/v3/rooms/{room}/event/{id}");
+    let event = server.request(Method::GET, &event_path(sent["event_id"].as_str().unwrap()), Some(token(&alice)), None, 200).await;
+    assert_eq!(event["origin_server_ts"], 1234567890123u64);
+    assert_eq!(event["sender"], carol.as_str());
+    let state = format!("/_matrix/client/v3/rooms/{room}/state/m.room.topic?ts=1000");
+    // carol lacks power for the topic; alice's AS-less ts is ignored.
+    let topic = server
+        .request(Method::PUT, &state, Some(token(&alice)), Some(json!({"topic": "t"})), 200)
+        .await;
+    let event = server.request(Method::GET, &event_path(topic["event_id"].as_str().unwrap()), Some(token(&alice)), None, 200).await;
+    assert_ne!(event["origin_server_ts"], 1000, "ts is an application-service privilege");
+    let member_state = format!("/_matrix/client/v3/rooms/{room}/state/org.example.bridge/{}?ts=2000", carol.replace('@', "%40").replace(':', "%3A"));
+    let bridged_state = server
+        .request(Method::PUT, &as_user(&member_state, &carol), Some("as_irc"), Some(json!({"x": 1})), 403)
+        .await;
+    assert_eq!(bridged_state["errcode"], "M_FORBIDDEN", "auth rules still apply");
+    let invalid = server
+        .request(
+            Method::PUT,
+            &as_user(&format!("/_matrix/client/v3/rooms/{room}/send/m.room.message/t2?ts=abc"), &carol),
+            Some("as_irc"),
+            Some(json!({"msgtype": "m.text", "body": "x"})),
+            400,
+        )
+        .await;
+    assert_eq!(invalid["errcode"], "M_INVALID_PARAM");
+
+    // /sync as a virtual user.
+    let sync = server
+        .request(Method::GET, &as_user("/_matrix/client/v3/sync?timeout=0", &carol), Some("as_irc"), None, 200)
+        .await;
+    assert!(sync["rooms"]["join"][&room].is_object(), "{sync}");
+
+    // Alias namespaces are exclusive.
+    let put_alias = |alias: &str| format!("/_matrix/client/v3/directory/room/{}", alias.replace('#', "%23").replace(':', "%3A"));
+    let taken = server
+        .request(Method::PUT, &put_alias(&format!("#irc_chan:{HS}")), Some(token(&alice)), Some(json!({"room_id": room})), 400)
+        .await;
+    assert_eq!(taken["errcode"], "M_EXCLUSIVE");
+    let taken = server
+        .request(Method::POST, "/_matrix/client/v3/createRoom", Some(token(&alice)), Some(json!({"room_alias_name": "irc_new"})), 400)
+        .await;
+    assert_eq!(taken["errcode"], "M_EXCLUSIVE");
+    server
+        .request(Method::PUT, &as_user(&put_alias(&format!("#irc_chan:{HS}")), &carol), Some("as_irc"), Some(json!({"room_id": room})), 200)
+        .await;
+    let outside = server
+        .request(Method::PUT, &put_alias(&format!("#elsewhere:{HS}")), Some("as_irc"), Some(json!({"room_id": room})), 400)
+        .await;
+    assert_eq!(outside["errcode"], "M_EXCLUSIVE");
+}
+
+#[tokio::test]
+async fn appservice_requests_are_exempt_from_rate_limits() {
+    let (url, _log) = spawn_as(false).await;
+    let limited = registration("lim", &url, "").replace("rate_limited: false", "rate_limited: true");
+    let server = server_with(&[("irc", registration("irc", &url, "")), ("lim", limited)]).await;
+    let alice = server.register("alice").await;
+    as_register(&server, "as_lim", "lim_x").await;
+    let burst = |token: String, path: String| {
+        let http = server.http.clone();
+        let url = format!("{}{path}", server.base_url);
+        async move {
+            // 8 workers x 60 requests: well past the 200-request burst
+            // before the 100/s refill can catch up.
+            let mut set = tokio::task::JoinSet::new();
+            for _ in 0..8 {
+                let (http, url, token) = (http.clone(), url.clone(), token.clone());
+                set.spawn(async move {
+                    let mut limited = 0;
+                    for _ in 0..60 {
+                        let status = http.get(&url).bearer_auth(&token).send().await.unwrap().status();
+                        if status.as_u16() == 429 {
+                            limited += 1;
+                        }
+                    }
+                    limited
+                });
+            }
+            let mut limited = 0;
+            while let Some(n) = set.join_next().await {
+                limited += n.unwrap();
+            }
+            limited
+        }
+    };
+    let whoami = "/_matrix/client/v3/account/whoami".to_owned();
+    assert!(burst(token(&alice).to_owned(), whoami.clone()).await > 0, "the limiter must be active for users");
+    assert_eq!(burst("as_irc".into(), whoami.clone()).await, 0, "AS sender is exempt");
+    assert_eq!(burst("as_lim".into(), whoami.clone()).await, 0, "the sender is excluded even when rate_limited");
+    assert!(
+        burst("as_lim".into(), as_user(&whoami, &format!("@lim_x:{HS}"))).await > 0,
+        "masqueraded users of a rate_limited AS are limited"
+    );
 }

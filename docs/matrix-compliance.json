@@ -2345,6 +2345,35 @@
       ],
       "limitations": [],
       "gap_issues": []
+    },
+    {
+      "id": "as-client-server-extensions",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/application-service-api/#client-server-api-extensions",
+      "status": "covered_assertions_only",
+      "assertions": [
+        "An as_token without user_id acts as the AS sender user and whoami omits device_id",
+        "user_id outside the namespace, remote, or unregistered is 403 M_FORBIDDEN; an unknown device_id is 400 M_UNKNOWN_DEVICE; a known device_id is reported by whoami",
+        "/register with type m.login.application_service is 401 M_MISSING_TOKEN/M_UNKNOWN_TOKEN without a valid as_token and succeeds with it",
+        "PUT /devices/{id} creates a device for the AS (201) and updates it (200); ordinary users get 404; AS device deletion and cross-signing replacement need no UIA",
+        "m.login.application_service is advertised and logs in a registered namespace user; outside the namespace is 403 M_EXCLUSIVE, unregistered or tokenless is 403 M_FORBIDDEN",
+        "?ts on send sets origin_server_ts for the AS, is ignored for ordinary users, and a non-integer ts is 400 M_INVALID_PARAM",
+        "/sync works for an asserted virtual user",
+        "Aliases in an exclusive AS namespace are 400 M_EXCLUSIVE for others (PUT /directory/room and createRoom); an AS outside its alias namespace is 400 M_EXCLUSIVE",
+        "AS sender requests are never rate-limited; masqueraded users are limited only when rate_limited is true"
+      ],
+      "implementation": [
+        "conduit-server/src/api/client/appservice_auth.rs",
+        "conduit-server/src/api/client/mod.rs",
+        "conduit-server/src/api/client/devices.rs",
+        "conduit-server/src/api/client/rate_limit.rs"
+      ],
+      "tests": [
+        "conduit-server/tests/production_appservice.rs::identity_assertion_devices_registration_and_login",
+        "conduit-server/tests/production_appservice.rs::timestamp_massaging_sync_and_alias_exclusivity",
+        "conduit-server/tests/production_appservice.rs::appservice_requests_are_exempt_from_rate_limits"
+      ],
+      "limitations": []
     }
   ]
 }

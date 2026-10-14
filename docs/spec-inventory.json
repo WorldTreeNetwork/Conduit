@@ -16,17 +16,17 @@
  "summary": {
   "cs": {
    "endpoint": {
-    "implemented+tested": 120,
+    "implemented+tested": 122,
     "implemented-untested": 3,
-    "partial": 33,
+    "partial": 31,
     "missing": 7,
     "not-applicable": 1,
     "total": 164
    },
    "requirement": {
-    "implemented+tested": 38,
+    "implemented+tested": 39,
     "implemented-untested": 3,
-    "partial": 31,
+    "partial": 30,
     "missing": 5,
     "not-applicable": 9,
     "total": 86
@@ -60,10 +60,10 @@
     "total": 11
    },
    "requirement": {
-    "implemented+tested": 9,
+    "implemented+tested": 16,
     "implemented-untested": 0,
-    "partial": 1,
-    "missing": 6,
+    "partial": 0,
+    "missing": 0,
     "not-applicable": 2,
     "total": 18
    }
@@ -125,10 +125,10 @@
    }
   },
   "all": {
-   "implemented+tested": 200,
+   "implemented+tested": 210,
    "implemented-untested": 9,
-   "partial": 101,
-   "missing": 118,
+   "partial": 97,
+   "missing": 112,
    "not-applicable": 37,
    "total": 465
   }
@@ -379,7 +379,7 @@
    "rate_limited": "Yes",
    "deprecated": false,
    "role": "homeserver",
-   "status": "partial",
+   "status": "implemented+tested",
    "code": [
     {
      "loc": "conduit-server/src/main.rs:514",
@@ -399,13 +399,12 @@
     "conduit-server/tests/production_account.rs::production_device_lifecycle_with_uia_keys_and_device_lists",
     "conduit-server/tests/production_account.rs::production_get_login_token_reprompts_and_logs_in_once",
     "conduit-server/tests/production_account.rs::production_guest_access_is_restricted_and_upgradable",
-    "conduit-server/tests/production_account.rs::production_logout_deletes_devices"
+    "conduit-server/tests/production_account.rs::production_logout_deletes_devices",
+    "conduit-server/tests/production_appservice.rs::identity_assertion_devices_registration_and_login"
    ],
-   "tests_total": 20,
-   "gap_beads": [
-    "conduit-y99.35"
-   ],
-   "notes": "refresh_token/expires_in_ms and get_login_token supported; m.login.application_service login type missing (y99.35)."
+   "tests_total": 21,
+   "gap_beads": [],
+   "notes": "refresh_token/expires_in_ms, get_login_token, and m.login.application_service (as_token; M_EXCLUSIVE outside the namespace, M_FORBIDDEN for unregistered users) supported."
   },
   {
    "id": "cs.ep.post_matrixclientv1loginget_token",
@@ -1059,11 +1058,12 @@
     "conduit-server/tests/production_account.rs::production_access_token_query_parameter_is_accepted",
     "conduit-server/tests/production_account.rs::production_deactivation_leaves_rooms_and_blocks_login",
     "conduit-server/tests/production_account.rs::production_device_lifecycle_with_uia_keys_and_device_lists",
-    "conduit-server/tests/production_account.rs::production_guest_access_is_restricted_and_upgradable"
+    "conduit-server/tests/production_account.rs::production_guest_access_is_restricted_and_upgradable",
+    "conduit-server/tests/production_appservice.rs::identity_assertion_devices_registration_and_login"
    ],
-   "tests_total": 18,
+   "tests_total": 19,
    "gap_beads": [],
-   "notes": "is_guest / AS identity assertion follow the account and AS beads."
+   "notes": "AS identity assertion: user_id/device_id query, device_id omitted for device-less AS requests; 403 M_FORBIDDEN for unregistered or out-of-namespace users."
   },
   {
    "id": "cs.ep.get_matrixclientv3capabilities",
@@ -1768,11 +1768,12 @@
     }
    ],
    "tests": [
-    "conduit-server/tests/production_directory.rs::room_alias_directory_and_join_by_alias"
+    "conduit-server/tests/production_directory.rs::room_alias_directory_and_join_by_alias",
+    "conduit-server/tests/production_appservice.rs::timestamp_massaging_sync_and_alias_exclusivity"
    ],
-   "tests_total": 1,
+   "tests_total": 2,
    "gap_beads": [],
-   "notes": ""
+   "notes": "400 M_EXCLUSIVE inside another application service's exclusive alias namespace, or for an AS outside its own."
   },
   {
    "id": "cs.ep.delete_matrixclientv3directoryroomroomalias",
@@ -3016,11 +3017,12 @@
     }
    ],
    "tests": [
-    "conduit-server/tests/production_account.rs::production_device_lifecycle_with_uia_keys_and_device_lists"
+    "conduit-server/tests/production_account.rs::production_device_lifecycle_with_uia_keys_and_device_lists",
+    "conduit-server/tests/production_appservice.rs::identity_assertion_devices_registration_and_login"
    ],
-   "tests_total": 1,
+   "tests_total": 2,
    "gap_beads": [],
-   "notes": ""
+   "notes": "UIA required for users; application services delete without UIA (spec v1.17)."
   },
   {
    "id": "cs.ep.get_matrixclientv3devices",
@@ -3094,7 +3096,7 @@
    "rate_limited": "No",
    "deprecated": false,
    "role": "homeserver",
-   "status": "partial",
+   "status": "implemented+tested",
    "code": [
     {
      "loc": "conduit-server/src/api/client/account.rs:35",
@@ -3104,13 +3106,12 @@
    ],
    "tests": [
     "conduit-server/src/api/client/session.rs::guest_allowlist_matches_spec_endpoints",
-    "conduit-server/tests/production_account.rs::production_device_lifecycle_with_uia_keys_and_device_lists"
+    "conduit-server/tests/production_account.rs::production_device_lifecycle_with_uia_keys_and_device_lists",
+    "conduit-server/tests/production_appservice.rs::identity_assertion_devices_registration_and_login"
    ],
-   "tests_total": 2,
-   "gap_beads": [
-    "conduit-y99.18.1"
-   ],
-   "notes": "Rename works; AS device creation (201) missing."
+   "tests_total": 3,
+   "gap_beads": [],
+   "notes": "Rename (200); application services create devices for asserted users (201); ordinary clients get 404 for unknown devices."
   },
   {
    "id": "cs.ep.delete_matrixclientv3devicesdeviceid",
@@ -3135,13 +3136,12 @@
    "tests": [
     "conduit-server/src/api/client/session.rs::guest_allowlist_matches_spec_endpoints",
     "conduit-server/tests/production_account.rs::production_device_lifecycle_with_uia_keys_and_device_lists",
-    "conduit-server/tests/production_account.rs::production_password_fallback_page_completes_uia"
+    "conduit-server/tests/production_account.rs::production_password_fallback_page_completes_uia",
+    "conduit-server/tests/production_appservice.rs::identity_assertion_devices_registration_and_login"
    ],
-   "tests_total": 3,
-   "gap_beads": [
-    "conduit-y99.18.1"
-   ],
-   "notes": "UIA required; AS deletion without UIA is y99.18.1."
+   "tests_total": 4,
+   "gap_beads": [],
+   "notes": "UIA required for users; application services delete without UIA (spec v1.17)."
   },
   {
    "id": "cs.ep.post_matrixclientv3keysdevice_signingupload",
@@ -6926,13 +6926,12 @@
    ],
    "tests": [
     "conduit-server/tests/sso.rs::login_token_roundtrip",
-    "conduit-server/tests/production_account.rs::production_get_login_token_reprompts_and_logs_in_once"
+    "conduit-server/tests/production_account.rs::production_get_login_token_reprompts_and_logs_in_once",
+    "conduit-server/tests/production_appservice.rs::identity_assertion_devices_registration_and_login"
    ],
-   "tests_total": 2,
-   "gap_beads": [
-    "conduit-y99.35"
-   ],
-   "notes": "m.login.application_service missing."
+   "tests_total": 3,
+   "gap_beads": [],
+   "notes": "m.login.application_service implemented (conduit-y99.35); remaining deviations are listed on the login endpoint rows."
   },
   {
    "id": "cs.auth.registration",
@@ -7698,20 +7697,19 @@
    "title": "Device management",
    "source": "https://spec.matrix.org/v1.19/client-server-api/#device-management",
    "role": "homeserver",
-   "status": "partial",
+   "status": "implemented+tested",
    "code": [
     {
      "loc": "conduit-server/src/api/client/devices.rs"
     }
    ],
    "tests": [
-    "conduit-server/tests/production_account.rs::production_device_lifecycle_with_uia_keys_and_device_lists"
+    "conduit-server/tests/production_account.rs::production_device_lifecycle_with_uia_keys_and_device_lists",
+    "conduit-server/tests/production_appservice.rs::identity_assertion_devices_registration_and_login"
    ],
-   "tests_total": 1,
-   "gap_beads": [
-    "conduit-y99.18.1"
-   ],
-   "notes": "AS device creation/deletion missing."
+   "tests_total": 2,
+   "gap_beads": [],
+   "notes": "Includes AS device creation (PUT 201) and UIA-free deletion."
   },
   {
    "id": "cs.mod.e2ee",
@@ -9230,7 +9228,7 @@
    "title": "Registration (YAML, namespaces, exclusive, url null, rate_limited, protocols)",
    "source": "https://spec.matrix.org/v1.19/application-service-api/#registration",
    "role": "homeserver",
-   "status": "partial",
+   "status": "implemented+tested",
    "code": [
     {
      "loc": "conduit-server/src/app_service.rs:94"
@@ -9239,13 +9237,13 @@
    "tests": [
     "conduit-server/tests/app_services.rs::as_registration_loaded_from_dir",
     "conduit-server/tests/app_services.rs::namespace_exclusive_ownership",
-    "conduit-server/tests/app_services.rs::receive_ephemeral_parsed_with_msc2409_alias"
+    "conduit-server/tests/app_services.rs::receive_ephemeral_parsed_with_msc2409_alias",
+    "conduit-server/tests/production_appservice.rs::appservice_requests_are_exempt_from_rate_limits",
+    "conduit-server/src/api/client/rate_limit.rs::appservice_sender_is_exempt_and_masquerade_follows_rate_limited"
    ],
-   "tests_total": 3,
-   "gap_beads": [
-    "conduit-y99.35"
-   ],
-   "notes": "receive_ephemeral (+MSC2409 alias) honoured; rate_limited exemption tracked in conduit-y99.35."
+   "tests_total": 5,
+   "gap_beads": [],
+   "notes": "receive_ephemeral (+MSC2409 alias) and rate_limited honoured; url null, protocols, exclusive namespaces."
   },
   {
    "id": "as.authorisation",
@@ -9418,14 +9416,19 @@
    "title": "Identity assertion (user_id / device_id masquerading)",
    "source": "https://spec.matrix.org/v1.19/application-service-api/#identity-assertion",
    "role": "homeserver",
-   "status": "missing",
-   "code": [],
-   "tests": [],
-   "tests_total": 0,
-   "gap_beads": [
-    "conduit-y99.35"
+   "status": "implemented+tested",
+   "code": [
+    {
+     "loc": "conduit-server/src/api/client/appservice_auth.rs:57"
+    }
    ],
-   "notes": ""
+   "tests": [
+    "conduit-server/tests/production_appservice.rs::identity_assertion_devices_registration_and_login",
+    "conduit-server/tests/production_appservice.rs::timestamp_massaging_sync_and_alias_exclusivity"
+   ],
+   "tests_total": 2,
+   "gap_beads": [],
+   "notes": "as_token accepted by every AuthedUser endpoint; ?user_id defaults to the sender user, must be registered and in the users namespace (403 M_FORBIDDEN); ?device_id (v1.17, MSC3202 name accepted) must belong to the user (400 M_UNKNOWN_DEVICE); device-less otherwise."
   },
   {
    "id": "as.cs.timestamp-massaging",
@@ -9434,14 +9437,19 @@
    "title": "Timestamp massaging (ts)",
    "source": "https://spec.matrix.org/v1.19/application-service-api/#timestamp-massaging",
    "role": "homeserver",
-   "status": "missing",
-   "code": [],
-   "tests": [],
-   "tests_total": 0,
-   "gap_beads": [
-    "conduit-y99.35"
+   "status": "implemented+tested",
+   "code": [
+    {
+     "loc": "conduit-server/src/api/client/appservice_auth.rs:171"
+    }
    ],
-   "notes": ""
+   "tests": [
+    "conduit-server/tests/production_appservice.rs::timestamp_massaging_sync_and_alias_exclusivity",
+    "conduit-server/src/api/client/appservice_auth.rs::ts_applies_only_to_send_and_state_puts"
+   ],
+   "tests_total": 2,
+   "gap_beads": [],
+   "notes": "?ts on PUT send/state for as_token requests sets origin_server_ts (task-local override in the event pipeline); invalid ts is 400 M_INVALID_PARAM; ignored for ordinary users."
   },
   {
    "id": "as.cs.admin-permissions",
@@ -9450,14 +9458,26 @@
    "title": "Server admin style permissions (namespace registration, rate-limit exemption, M_EXCLUSIVE)",
    "source": "https://spec.matrix.org/v1.19/application-service-api/#server-admin-style-permissions",
    "role": "homeserver",
-   "status": "missing",
-   "code": [],
-   "tests": [],
-   "tests_total": 0,
-   "gap_beads": [
-    "conduit-y99.35"
+   "status": "implemented+tested",
+   "code": [
+    {
+     "loc": "conduit-server/src/api/client/appservice_auth.rs:125"
+    },
+    {
+     "loc": "conduit-server/src/api/client/registration.rs"
+    },
+    {
+     "loc": "conduit-server/src/api/client/rate_limit.rs:116"
+    }
    ],
-   "notes": ""
+   "tests": [
+    "conduit-server/tests/production_appservice.rs::identity_assertion_devices_registration_and_login",
+    "conduit-server/tests/production_appservice.rs::timestamp_massaging_sync_and_alias_exclusivity",
+    "conduit-server/tests/production_appservice.rs::appservice_requests_are_exempt_from_rate_limits"
+   ],
+   "tests_total": 3,
+   "gap_beads": [],
+   "notes": "/register with type m.login.application_service (401 without/unknown as_token), M_EXCLUSIVE for users and aliases (PUT /directory/room, createRoom room_alias_name), sender and non-rate_limited masquerades exempt from CS rate limits. Legacy login is supported, so M_APPSERVICE_LOGIN_UNSUPPORTED never applies."
   },
   {
    "id": "as.cs.ping",
@@ -9486,14 +9506,18 @@
    "title": "Using /sync and /events as AS users",
    "source": "https://spec.matrix.org/v1.19/application-service-api/#using-sync-and-events",
    "role": "homeserver",
-   "status": "missing",
-   "code": [],
-   "tests": [],
-   "tests_total": 0,
-   "gap_beads": [
-    "conduit-y99.35"
+   "status": "implemented+tested",
+   "code": [
+    {
+     "loc": "conduit-server/src/api/client/appservice_auth.rs:57"
+    }
    ],
-   "notes": ""
+   "tests": [
+    "conduit-server/tests/production_appservice.rs::timestamp_massaging_sync_and_alias_exclusivity"
+   ],
+   "tests_total": 1,
+   "gap_beads": [],
+   "notes": "/sync works for virtual users through identity assertion."
   },
   {
    "id": "as.cs.directories",
@@ -9522,14 +9546,18 @@
    "title": "Device management for AS users (create via PUT, delete without UIA)",
    "source": "https://spec.matrix.org/v1.19/application-service-api/#device-management",
    "role": "homeserver",
-   "status": "missing",
-   "code": [],
-   "tests": [],
-   "tests_total": 0,
-   "gap_beads": [
-    "conduit-y99.18.1"
+   "status": "implemented+tested",
+   "code": [
+    {
+     "loc": "conduit-server/src/api/client/devices.rs:65"
+    }
    ],
-   "notes": ""
+   "tests": [
+    "conduit-server/tests/production_appservice.rs::identity_assertion_devices_registration_and_login"
+   ],
+   "tests_total": 1,
+   "gap_beads": [],
+   "notes": "PUT /devices/{id} creates (201) for AS; DELETE /devices/{id} and POST /delete_devices skip UIA for AS."
   },
   {
    "id": "as.cs.cross-signing",
@@ -9538,14 +9566,18 @@
    "title": "Cross-signing uploads without UIA for AS users",
    "source": "https://spec.matrix.org/v1.19/application-service-api/#cross-signing",
    "role": "homeserver",
-   "status": "missing",
-   "code": [],
-   "tests": [],
-   "tests_total": 0,
-   "gap_beads": [
-    "conduit-y99.35"
+   "status": "implemented+tested",
+   "code": [
+    {
+     "loc": "conduit-server/src/api/client/keys.rs:775"
+    }
    ],
-   "notes": ""
+   "tests": [
+    "conduit-server/tests/production_appservice.rs::identity_assertion_devices_registration_and_login"
+   ],
+   "tests_total": 1,
+   "gap_beads": [],
+   "notes": "Replacement cross-signing uploads skip UIA for application services."
   },
   {
    "id": "as.referencing-3pn",

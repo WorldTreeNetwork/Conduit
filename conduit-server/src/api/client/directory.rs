@@ -68,6 +68,9 @@ pub async fn put_alias<S: AuthState>(
     if !alias_is_local(&alias, state.server_name()) {
         return invalid_alias("Room alias must be on this server");
     }
+    if let Some(refusal) = super::appservice_auth::alias_exclusivity_error(&state, &authed, &alias) {
+        return refusal;
+    }
     match state.storage().get_state_entry(&body.room_id, "m.room.create", "").await {
         Ok(Some(_)) => {}
         Ok(None) => return MatrixError::new_not_found("Room not found").into_response(),

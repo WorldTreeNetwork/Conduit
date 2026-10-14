@@ -156,7 +156,7 @@ impl Worker {
         // Room events, linearised by stream position.
         let events = storage.events_since(cursor.event_pos, MAX_EVENTS_PER_TXN).await?;
         if let Some(last) = events.last() {
-            let positions = storage.event_stream_positions(&[last.event_id.clone()]).await?;
+            let positions = storage.event_stream_positions(std::slice::from_ref(&last.event_id)).await?;
             next.event_pos = positions
                 .get(&last.event_id)
                 .copied()

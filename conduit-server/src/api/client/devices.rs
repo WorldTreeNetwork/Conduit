@@ -75,7 +75,23 @@ pub async fn update_device<S: AuthState>(
     let storage = state.storage();
     let existing = match storage.get_device(&authed.user_id, &device_id).await {
         Ok(Some(d)) => d,
-        // Creating devices here is reserved to application services.
+        // Creating devices here is reserved to application services
+        // (spec v1.17): `201` on creation (conduit-y99.18.1).
+        Ok(None) if authed.appservice.is_some() => {
+            let name = body.get("display_name").and_then(Value::as_str);
+            if body.get("display_name").is_some_and(|v| !v.is_string()) {
+                return MatrixError::bad_json("display_name must be a string").into_response();
+            }
+            return match storage.create_device_if_absent(&authed.user_id, &device_id, name).await {
+                Ok(true) => {
+                    super::session::notify_device_list_change(&state, &authed.user_id, &[]).await;
+                    (StatusCode::CREATED, Json(json!({}))).into_response()
+                }
+                // Lost a race with a concurrent create: it exists now.
+                Ok(false) => (StatusCode::OK, Json(json!({}))).into_response(),
+                Err(e) => MatrixError::unknown(e.to_string()).into_response(),
+            };
+        }
         Ok(None) => return not_found(),
         Err(e) => return MatrixError::unknown(e.to_string()).into_response(),
     };
@@ -107,15 +123,18 @@ pub async fn delete_device<S: AuthState>(
     Path(device_id): Path<String>,
     body: Option<Json<Value>>,
 ) -> Response {
-    let auth = body.as_ref().and_then(|b| b.get("auth")).cloned();
-    let flows = uia::account_flows(&state, &authed.user_id).await;
-    let req = uia::UiaRequest::new(
-        format!("DELETE /devices/{device_id}"),
-        Some(&authed.user_id),
-        flows,
-    );
-    if let Err(r) = uia::authenticate(&state, req, auth.as_ref()).await {
-        return r;
+    // Application services delete devices without UIA (spec v1.17).
+    if authed.appservice.is_none() {
+        let auth = body.as_ref().and_then(|b| b.get("auth")).cloned();
+        let flows = uia::account_flows(&state, &authed.user_id).await;
+        let req = uia::UiaRequest::new(
+            format!("DELETE /devices/{device_id}"),
+            Some(&authed.user_id),
+            flows,
+        );
+        if let Err(r) = uia::authenticate(&state, req, auth.as_ref()).await {
+            return r;
+        }
     }
     match remove_devices(&state, &authed.user_id, &[device_id]).await {
         // Deleting an already-deleted device is a success per spec.
@@ -155,10 +174,12 @@ pub async fn delete_devices<S: AuthState>(
                 .into_response()
         }
     };
-    let flows = uia::account_flows(&state, &authed.user_id).await;
-    let req = uia::UiaRequest::new("POST /delete_devices", Some(&authed.user_id), flows);
-    if let Err(r) = uia::authenticate(&state, req, body.get("auth")).await {
-        return r;
+    if authed.appservice.is_none() {
+        let flows = uia::account_flows(&state, &authed.user_id).await;
+        let req = uia::UiaRequest::new("POST /delete_devices", Some(&authed.user_id), flows);
+        if let Err(r) = uia::authenticate(&state, req, body.get("auth")).await {
+            return r;
+        }
     }
     match remove_devices(&state, &authed.user_id, &devices).await {
         Ok(()) => (StatusCode::OK, Json(json!({}))).into_response(),

@@ -113,3 +113,38 @@ Tests: `conduit-server/tests/production_appservice.rs` (mock AS in-test).
   durable with the event cursor.
 - Not in v1.19 (MSC-only, not implemented): to-device and device-list
   data for application services (MSC2409 to_device, MSC3202).
+
+## Client-server API extensions (conduit-y99.35, conduit-y99.18.1)
+
+Code: `conduit-server/src/api/client/appservice_auth.rs` (+ small hooks in
+`mod.rs`, `devices.rs`, `keys.rs`, `directory.rs`, `rooms.rs`,
+`registration.rs`, `rate_limit.rs`, `event_pipeline.rs`).
+
+- **Identity assertion.** `AuthedUser` accepts an `as_token`. The request
+  acts as `?user_id=` (default: the AS sender user, auto-created), which
+  must be a *registered* local user in a `users` namespace — otherwise
+  `403 M_FORBIDDEN` (spec: "the server should verify that the given
+  user_id is registered by the appservice"). `?device_id=` (v1.17; the
+  `org.matrix.msc3202.device_id` name is accepted) must belong to that
+  user (`400 M_UNKNOWN_DEVICE`); without it the request is device-less
+  (`whoami` omits `device_id`, `/keys/upload` is `400 M_MISSING_PARAM`).
+  `AuthedUser.appservice` names the asserting AS; `grant` is `None`.
+- **Timestamp massaging.** Route-layer middleware: `?ts=` on
+  `PUT /rooms/{id}/send/...` and `PUT /rooms/{id}/state/...` from an
+  `as_token` runs the handler inside a `tokio::task_local!` that the event
+  pipeline reads for `origin_server_ts`. Bad values: `400 M_INVALID_PARAM`.
+- **Registration / login.** `/register` with `type:
+  m.login.application_service` requires the `as_token` (401
+  `M_MISSING_TOKEN`/`M_UNKNOWN_TOKEN`). `POST /login` type
+  `m.login.application_service` is advertised when any AS is registered:
+  `403 M_FORBIDDEN` for a bad token or unregistered user, `403
+  M_EXCLUSIVE` outside the namespace.
+- **Exclusivity.** Aliases inside another AS's exclusive namespace (and
+  an AS creating aliases outside its own) are `400 M_EXCLUSIVE` on
+  `PUT /directory/room/{alias}` and `createRoom` `room_alias_name`.
+- **Rate limits.** `CsRateLimiter::with_appservices`: the AS sender is
+  never limited; masqueraded users only when `rate_limited: true`.
+- **Devices / cross-signing (v1.17).** `PUT /devices/{id}` creates a device
+  for the asserted user (201, 200 on update); `DELETE /devices/{id}`,
+  `POST /delete_devices` and replacement `keys/device_signing/upload` skip
+  UIA for application services.

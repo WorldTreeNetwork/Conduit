@@ -116,6 +116,9 @@ pub async fn create_room<S: AuthState>(
         }
         Some(name) => {
             let alias = format!("#{name}:{server_name}");
+            if let Some(refusal) = super::appservice_auth::alias_exclusivity_error(&state, &authed, &alias) {
+                return refusal;
+            }
             match state.storage().get_room_for_alias(&alias).await {
                 Ok(None) => Some(alias),
                 Ok(Some(_)) => {

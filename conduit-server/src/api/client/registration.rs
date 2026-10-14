@@ -171,6 +171,9 @@ pub struct RegisterQuery {
 #[derive(Debug, Deserialize, Default)]
 struct RegisterBody {
     auth: Option<Value>,
+    /// `m.login.application_service` for AS registration (spec v1.17).
+    #[serde(rename = "type")]
+    login_type: Option<String>,
     username: Option<String>,
     password: Option<String>,
     device_id: Option<String>,
@@ -282,6 +285,16 @@ fn calling_app_service<S: AuthState>(
 async fn register_user<S: AuthState>(state: &S, body: RegisterBody, headers: &HeaderMap) -> Response {
     let server_name = state.server_name().to_owned();
     let appservice = calling_app_service(state, headers);
+    // The application-service registration type needs a valid as_token.
+    if body.login_type.as_deref() == Some(super::APPSERVICE_LOGIN_TYPE) && appservice.is_none() {
+        let (errcode, error) = if bearer(headers).is_some() {
+            ("M_UNKNOWN_TOKEN", "Unrecognised application service token")
+        } else {
+            ("M_MISSING_TOKEN", "m.login.application_service requires the as_token")
+        };
+        return (StatusCode::UNAUTHORIZED, Json(json!({"errcode": errcode, "error": error})))
+            .into_response();
+    }
     if appservice.is_none() && !AccountConfig::get().allow_registration {
         return registration_disabled();
     }

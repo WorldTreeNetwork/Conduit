@@ -70,7 +70,16 @@ impl<S: AuthState + Send + Sync> RoomEventSender for RoomEventSenderWrapper<'_, 
 // Internal helpers
 // ---------------------------------------------------------------------------
 
+tokio::task_local! {
+    /// `origin_server_ts` override for events authored in this task:
+    /// application-service timestamp massaging (`?ts=`, conduit-y99.35).
+    pub static ORIGIN_SERVER_TS: u64;
+}
+
 fn now_ms() -> u64 {
+    if let Ok(ts) = ORIGIN_SERVER_TS.try_with(|ts| *ts) {
+        return ts;
+    }
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)

@@ -63,6 +63,10 @@ pub struct CsRateLimiter {
     /// a single host can't flood /register or /login.
     anon_rate: f64,
     anon_burst: f64,
+    /// Application-service token hashes -> (sender user ID, `rate_limited`).
+    /// The AS sender is never limited; masqueraded users only when the
+    /// registration sets `rate_limited: true` (conduit-y99.35).
+    appservices: Arc<HashMap<String, (String, bool)>>,
 }
 
 impl CsRateLimiter {
@@ -75,6 +79,7 @@ impl CsRateLimiter {
             auth_burst: 200.0,
             anon_rate: 10.0,
             anon_burst: 20.0,
+            appservices: Arc::default(),
         }
     }
 
@@ -86,6 +91,36 @@ impl CsRateLimiter {
             auth_burst,
             anon_rate,
             anon_burst,
+            appservices: Arc::default(),
+        }
+    }
+
+    /// Exempt application services per their registration
+    /// (`rate_limited`: "Whether requests from masqueraded users are
+    /// rate-limited. The sender is excluded.").
+    pub fn with_appservices(
+        mut self,
+        services: &[crate::app_service::AppService],
+        server_name: &str,
+    ) -> Self {
+        self.appservices = Arc::new(
+            services
+                .iter()
+                .map(|s| (token_hash(&s.as_token), (s.sender_user_id(server_name), s.rate_limited)))
+                .collect(),
+        );
+        self
+    }
+
+    /// Whether a request with this token hash and `user_id` query is exempt.
+    fn exempt(&self, hash: &str, user_id: Option<&str>) -> bool {
+        match self.appservices.get(hash) {
+            None => false,
+            Some((sender, rate_limited)) => match user_id {
+                None => true,
+                Some(u) if u == sender => true,
+                Some(_) => !rate_limited,
+            },
         }
     }
 
@@ -129,7 +164,18 @@ pub async fn cs_rate_limit(
     next: Next,
 ) -> Response {
     let (key, authed) = match bearer_token(&req) {
-        Some(t) => (format!("tok:{}", token_hash(&t)), true),
+        Some(t) => {
+            let hash = token_hash(&t);
+            let user_id = req.uri().query().and_then(|q| {
+                url::form_urlencoded::parse(q.as_bytes())
+                    .find(|(k, _)| k == "user_id")
+                    .map(|(_, v)| v.into_owned())
+            });
+            if limiter.exempt(&hash, user_id.as_deref()) {
+                return next.run(req).await;
+            }
+            (format!("tok:{hash}"), true)
+        }
         None => {
             let ip = addr
                 .map(|Extension(ConnectInfo(a))| a.ip().to_string())
@@ -171,6 +217,35 @@ mod tests {
             assert!(rl.try_consume("tok:abc", true).await);
         }
         assert!(!rl.try_consume("tok:abc", true).await);
+    }
+
+    #[test]
+    fn appservice_sender_is_exempt_and_masquerade_follows_rate_limited() {
+        let svc = |id: &str, rate_limited: bool| crate::app_service::AppService {
+            id: id.into(),
+            url: String::new(),
+            as_token: format!("as_{id}"),
+            hs_token: "hs".into(),
+            sender_localpart: format!("{id}bot"),
+            rate_limited,
+            user_namespaces: vec![],
+            alias_namespaces: vec![],
+            room_namespaces: vec![],
+            protocols: vec![],
+            receive_ephemeral: false,
+        };
+        let rl = CsRateLimiter::new(1.0, 1.0, 1.0, 1.0)
+            .with_appservices(&[svc("free", false), svc("limited", true)], "hs.test");
+        let free = token_hash("as_free");
+        let limited = token_hash("as_limited");
+        assert!(rl.exempt(&free, None));
+        assert!(rl.exempt(&free, Some("@free_x:hs.test")));
+        // The sender is excluded from rate limiting either way.
+        assert!(rl.exempt(&limited, None));
+        assert!(rl.exempt(&limited, Some("@limitedbot:hs.test")));
+        assert!(!rl.exempt(&limited, Some("@limited_x:hs.test")));
+        // Ordinary tokens are never exempt.
+        assert!(!rl.exempt(&token_hash("user-token"), None));
     }
 
     #[tokio::test]

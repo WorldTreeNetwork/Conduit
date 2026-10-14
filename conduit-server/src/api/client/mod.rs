@@ -10,6 +10,7 @@
 pub mod account;
 pub mod account_config;
 pub mod account_data;
+pub mod appservice_auth;
 pub mod appservice_ping;
 pub mod auth_fallback;
 pub mod devices;
@@ -348,7 +349,11 @@ pub struct AuthedUser {
     /// Carried so a handler can authorize a narrower operation — a room,
     /// an op — without re-verifying the signature chain.  The in-process
     /// client (`add-in-process-client`) is the consumer that attenuates.
-    pub grant: agency::Grant,
+    /// `None` for application-service identity assertion (`as_token`).
+    pub grant: Option<agency::Grant>,
+    /// The application service asserting this identity, if any
+    /// (conduit-y99.35).
+    pub appservice: Option<Arc<crate::app_service::AppService>>,
 }
 
 /// We cannot implement `FromRequestParts` with a generic `S: AuthState`
@@ -371,6 +376,10 @@ impl<S: AuthState> FromRequestParts<S> for AuthedUser {
         let token = extract_access_token(parts)
             .ok_or_else(|| MatrixError::missing_token().into_response())?;
 
+        if let Some(svc) = appservice_auth::appservice_for_token(state, &token) {
+            return appservice_auth::assert_identity(state, parts, svc).await;
+        }
+
         let grant = verify_access_token(state, &token).await?;
 
         session::guest_gate(state, parts, &grant.user_id).await?;
@@ -380,7 +389,8 @@ impl<S: AuthState> FromRequestParts<S> for AuthedUser {
         Ok(AuthedUser {
             user_id: grant.user_id.clone(),
             device_id: grant.device_id.clone(),
-            grant,
+            grant: Some(grant),
+            appservice: None,
         })
     }
 }
@@ -530,9 +540,14 @@ pub async fn get_login_flows<S: AuthState>(State(state): State<S>) -> Json<serde
     }
     // Tokens come from SSO and from POST /login/get_token.
     flows.push(json!({ "type": "m.login.token", "get_login_token": true }));
+    if state.registered_app_services().is_some_and(|s| !s.is_empty()) {
+        flows.push(json!({ "type": APPSERVICE_LOGIN_TYPE }));
+    }
     Json(json!({ "flows": flows }))
 }
 
+/// The login `type` for application services (`as_token` + namespace user).
+pub const APPSERVICE_LOGIN_TYPE: &str = "m.login.application_service";
 /// The login `type` for identikey-auth challenge/response.
 pub const IDENTIKEY_LOGIN_TYPE: &str = "io.identikey.auth";
 /// The login `type` for a verified identikey-core (OIDC) ID token.
@@ -561,8 +576,12 @@ async fn login_response<S: AuthState>(state: &S, user_id: &str, body: &LoginRequ
 
 pub async fn login<S: AuthState>(
     State(state): State<S>,
+    headers: HeaderMap,
     Json(body): Json<LoginRequest>,
 ) -> Response {
+    if body.login_type == APPSERVICE_LOGIN_TYPE {
+        return appservice_auth::login(&state, &headers, &body).await;
+    }
     if body.login_type == IDENTIKEY_LOGIN_TYPE {
         return identikey_login(state, body).await;
     }
@@ -787,6 +806,11 @@ pub async fn identikey_bind<S: AuthState>(
     authed: AuthedUser,
     Json(body): Json<BindRequest>,
 ) -> Response {
+    // Binding needs the user's own capability token, not an AS assertion.
+    let Some(grant) = authed.grant.as_ref() else {
+        return MatrixError::forbidden("identity binding requires a user access token")
+            .into_response();
+    };
     let Ok(bytes) = URL_SAFE_NO_PAD.decode(&body.response) else {
         return MatrixError::bad_json("response is not url-safe base64").into_response();
     };
@@ -801,7 +825,7 @@ pub async fn identikey_bind<S: AuthState>(
 
     match conduit::identity::bind_fingerprint(
         state.storage().as_ref(),
-        &authed.grant,
+        grant,
         &fingerprint,
         &authed.user_id,
     )
@@ -817,10 +841,12 @@ pub async fn identikey_bind<S: AuthState>(
 // ---------------------------------------------------------------------------
 
 pub async fn whoami(authed: AuthedUser) -> Json<serde_json::Value> {
-    Json(json!({
-        "user_id": authed.user_id,
-        "device_id": authed.device_id,
-    }))
+    let mut body = json!({ "user_id": authed.user_id });
+    // Device-less application-service requests omit device_id (spec).
+    if !authed.device_id.is_empty() {
+        body["device_id"] = json!(authed.device_id);
+    }
+    Json(body)
 }
 
 // ---------------------------------------------------------------------------
