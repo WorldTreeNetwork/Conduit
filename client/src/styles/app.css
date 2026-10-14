@@ -181,7 +181,7 @@ select {
 }
 .button-danger:hover:not(:disabled) {
   background: var(--color-signal);
-  color: #fff;
+  color: var(--color-signal-on);
 }
 
 .button-board {

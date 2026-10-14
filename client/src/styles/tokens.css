@@ -44,6 +44,7 @@
   --color-signal: #b02a20;
   --color-signal-surface: #f8e4e1;
   --color-signal-ink: #7d1a12;
+  --color-signal-on: #ffffff;
   --color-clear: #2c7148;
   --color-caution-surface: #f6ebcf;
   --color-caution-ink: #5c4108;
@@ -139,6 +140,7 @@
     --color-signal: #f07a6e;
     --color-signal-surface: #3a1714;
     --color-signal-ink: #ffb4aa;
+    --color-signal-on: #1b0705;
     --color-clear: #6cc08f;
     --color-caution-surface: #33280e;
     --color-caution-ink: #f1d18a;
@@ -192,6 +194,7 @@
   --color-signal: #f07a6e;
   --color-signal-surface: #3a1714;
   --color-signal-ink: #ffb4aa;
+  --color-signal-on: #1b0705;
   --color-clear: #6cc08f;
   --color-caution-surface: #33280e;
   --color-caution-ink: #f1d18a;

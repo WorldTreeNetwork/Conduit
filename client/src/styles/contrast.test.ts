@@ -59,6 +59,7 @@ const TEXT: [string, string][] = [
   ["lamp-ink", "lamp"],
   ["signal-ink", "signal-surface"],
   ["signal", "surface"],
+  ["signal-on", "signal"],
   ["clear", "surface"],
   ["caution-ink", "caution-surface"],
   ["tint-0-ink", "tint-0"],
