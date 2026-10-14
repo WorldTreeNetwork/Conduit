@@ -1775,6 +1775,17 @@ async fn production_lazy_members_include_self_and_timeline_senders() {
             200,
         )
         .await;
+    // A named room has no heroes, whose memberships lazy loading would
+    // otherwise also include (conduit-y99.13.4).
+    server
+        .request(
+            Method::PUT,
+            &format!("/_matrix/client/v3/rooms/{room}/state/m.room.name"),
+            Some(alice["access_token"].as_str().unwrap()),
+            Some(json!({"name": "Lazy room"})),
+            200,
+        )
+        .await;
     server
         .request(
             Method::PUT,

@@ -176,6 +176,10 @@ struct SyncResponse {
     has_key_changes: bool,
     body: Value,
     next_expiry: Option<std::time::Instant>,
+    /// Member events sent under lazy loading, `(room, member, event_id)`,
+    /// recorded only once this response is actually returned.
+    lazy_sent: Vec<(String, String, String)>,
+    events_pos: i64,
 }
 
 fn has_updates(body: &Value) -> bool {
@@ -304,6 +308,13 @@ struct JoinedRoomBlock {
     account_data: AccountDataBlock,
     ephemeral: EphemeralBlock,
     unread_notifications: UnreadNotifications,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    unread_thread_notifications: Option<serde_json::Map<String, Value>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    summary: Option<Value>,
+    /// Hero members whose membership lazy loading must include.
+    #[serde(skip)]
+    heroes: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -358,6 +369,11 @@ pub async fn sync<S: AuthState>(
 
     // Clamp timeout: 0–30000 ms.
     let timeout_ms = query.timeout.unwrap_or(0).min(30_000);
+    // A client without a since token (or asking for full state) has no
+    // remembered membership: nothing it was sent before is redundant.
+    if since_token.is_none() || query.full_state {
+        super::room_summary::forget_device(user_id, &authed.device_id);
+    }
 
     // Subscribe and enable the notification before observing any streams.
     // A wakeup is a hint to rebuild the response, never a fake room position.
@@ -391,6 +407,7 @@ pub async fn sync<S: AuthState>(
             || response.has_key_changes
             || tokio::time::Instant::now() >= deadline
         {
+            super::room_summary::record_sent(user_id, &authed.device_id, response.lazy_sent, response.events_pos);
             return (StatusCode::OK, Json(response.body)).into_response();
         }
         let expiry = response
@@ -402,6 +419,7 @@ pub async fn sync<S: AuthState>(
             _ = &mut notified => {},
             result = events.recv() => {
                 if matches!(result, Err(tokio::sync::broadcast::error::RecvError::Closed)) {
+                    super::room_summary::record_sent(user_id, &authed.device_id, response.lazy_sent, response.events_pos);
                     return (StatusCode::OK, Json(response.body)).into_response();
                 }
             },
@@ -495,21 +513,6 @@ async fn build_sync_response<S: AuthState>(
         Ok(v) => v,
         Err(error) => return Err(MatrixError::unknown(error.to_string()).into_response()),
     };
-    let mut next_receipts_pos = receipt_changes
-        .iter()
-        .map(|receipt| receipt.stream_pos)
-        .max()
-        .unwrap_or(receipts_since);
-
-    // Group receipts by room.
-    let mut receipts_by_room: HashMap<String, Vec<conduit::storage::ReceiptRecord>> = HashMap::new();
-    for receipt in receipt_changes {
-        // Private read receipts must never be shown to another user.
-        if receipt.receipt_type == "m.read.private" && receipt.user_id != user_id {
-            continue;
-        }
-        receipts_by_room.entry(receipt.room_id.clone()).or_default().push(receipt);
-    }
 
     // Collect all new events since `since` (large limit for correctness; v0).
     let new_events = match storage.events_since(since, i64::MAX).await {
@@ -530,6 +533,44 @@ async fn build_sync_response<S: AuthState>(
     let (mut next_presence_pos, presence_changes, presence_expiry) =
         state.presence_store().snapshot(presence_since).await;
     let next_expiry = typing_expiry.into_iter().chain(presence_expiry).min();
+    let room_index = super::device_lists::JoinedRoomIndex::load(storage.as_ref(), user_id)
+        .await
+        .map_err(|error| MatrixError::unknown(error.to_string()).into_response())?;
+
+    // Group receipts by room as a stream-ordered prefix: each room's
+    // ephemeral limit counts its typing event and one m.receipt event per
+    // thread scope. A receipt that would exceed a room's limit stops the
+    // batch there, and the cursor stays before it so it arrives next time.
+    let ephemeral_rule = &filter.definition.room.ephemeral;
+    let ephemeral_limit = ephemeral_rule.events.limit.map(|limit| limit.min(5000));
+    let mut next_receipts_pos = receipts_since;
+    let mut receipts_by_room: HashMap<String, Vec<conduit::storage::ReceiptRecord>> = HashMap::new();
+    let mut receipt_scopes: HashMap<String, std::collections::HashSet<Option<String>>> = HashMap::new();
+    for receipt in receipt_changes {
+        let room = receipt.room_id.clone();
+        // Private read receipts must never be shown to another user.
+        let visible = !(receipt.receipt_type == "m.read.private" && receipt.user_id != user_id)
+            && room_index.rooms.contains_key(&room)
+            && filter.definition.room.allows(&room)
+            && ephemeral_rule.matches(&room, &json!({"type": "m.receipt", "room_id": room}));
+        if visible {
+            let scopes = receipt_scopes.entry(room.clone()).or_default();
+            if !scopes.contains(&receipt.thread_id) {
+                let typing_slot = usize::from(
+                    (typing_changes.contains_key(&room) || !epoch_matches)
+                        && ephemeral_rule.matches(&room, &json!({"type": "m.typing"})),
+                );
+                if ephemeral_limit.is_some_and(|limit| scopes.len() + typing_slot >= limit) {
+                    break;
+                }
+                scopes.insert(receipt.thread_id.clone());
+            }
+            next_receipts_pos = receipt.stream_pos;
+            receipts_by_room.entry(room).or_default().push(receipt);
+        } else {
+            next_receipts_pos = receipt.stream_pos;
+        }
+    }
     let memberships = storage
         .current_memberships(user_id)
         .await
@@ -598,6 +639,7 @@ async fn build_sync_response<S: AuthState>(
                 .await?;
                 decorate_block(storage.as_ref(), user_id, filter, &mut block).await?;
                 filter_room_block(&mut block, filter, &membership.room_id, user_id);
+                project_room_block(&mut block, filter);
                 left_rooms.insert(membership.room_id.clone(), block);
             }
             _ => {}
@@ -625,9 +667,35 @@ async fn build_sync_response<S: AuthState>(
 
     // For each room, check if user is currently joined.
     let mut joined_rooms: HashMap<String, JoinedRoomBlock> = HashMap::new();
-    let room_index = super::device_lists::JoinedRoomIndex::load(storage.as_ref(), user_id)
+
+    // Advance to observed event rows, never a later MAX read that could skip
+    // an event committed after we collected this batch.
+    let ids: Vec<_> = new_events
+        .iter()
+        .map(|event| event.event_id.clone())
+        .collect();
+    let positions = storage
+        .event_stream_positions(&ids)
         .await
         .map_err(|error| MatrixError::unknown(error.to_string()).into_response())?;
+    let next_events_pos = positions.values().copied().max().unwrap_or(since);
+
+    // Push rules and display name for unread counts (once per response).
+    let push_rules = super::notification_counts::effective_push_rules(storage.as_ref(), user_id)
+        .await
+        .map_err(|error| MatrixError::unknown(error.to_string()).into_response())?;
+    let displayname = storage
+        .get_account(user_id)
+        .await
+        .map_err(|error| MatrixError::unknown(error.to_string()).into_response())?
+        .and_then(|account| account.displayname);
+    let thread_counts = filter.definition.room.timeline.unread_thread_notifications;
+    let lazy = filter.definition.room.state.lazy_load_members;
+    let drop_redundant = lazy
+        && !filter.definition.room.state.include_redundant_members
+        && since_token.is_some()
+        && !full_state;
+    let mut lazy_sent = Vec::new();
 
     for room_id in &rooms_to_check {
         // Check current membership.
@@ -713,6 +781,38 @@ async fn build_sync_response<S: AuthState>(
             block.ephemeral.events.extend(receipt_events(room_id, room_receipts));
         }
 
+        // Room summary (heroes feed lazy loading) and unread counts.
+        let (summary, heroes) = super::room_summary::summary(storage.as_ref(), room_id, user_id)
+            .await
+            .map_err(|error| MatrixError::unknown(error.to_string()).into_response())?;
+        block.summary = Some(summary);
+        block.heroes = heroes;
+        let counts = super::notification_counts::room_counts(
+            storage.as_ref(),
+            user_id,
+            room_id,
+            &push_rules,
+            displayname.as_deref(),
+        )
+        .await
+        .map_err(|error| MatrixError::unknown(error.to_string()).into_response())?;
+        let unread = if thread_counts {
+            block.unread_thread_notifications = Some(
+                counts
+                    .threads
+                    .iter()
+                    .map(|(root, counts)| (root.clone(), counts.to_json()))
+                    .collect(),
+            );
+            counts.main
+        } else {
+            counts.total()
+        };
+        block.unread_notifications = UnreadNotifications {
+            highlight_count: unread.highlight_count,
+            notification_count: unread.notification_count,
+        };
+
         decorate_block(state.storage().as_ref(), user_id, filter, &mut block).await?;
         add_lazy_members(
             state.storage().as_ref(),
@@ -729,20 +829,34 @@ async fn build_sync_response<S: AuthState>(
         if held_typing {
             next_typing_pos = typing_since.unwrap_or(0);
         }
+        if lazy {
+            // Skip member events this device already holds, unless the
+            // filter asks for redundant members; remember what is sent.
+            if drop_redundant {
+                block.state.events.retain(|event| {
+                    !(event["type"] == "m.room.member"
+                        && super::room_summary::already_sent(
+                            user_id,
+                            authed_device_id,
+                            room_id,
+                            event["state_key"].as_str().unwrap_or_default(),
+                            event["event_id"].as_str().unwrap_or_default(),
+                            since,
+                        ))
+                });
+            }
+            for event in block.state.events.iter().chain(block.timeline.events.iter()) {
+                if event["type"] == "m.room.member" {
+                    if let (Some(member), Some(id)) = (event["state_key"].as_str(), event["event_id"].as_str()) {
+                        lazy_sent.push((room_id.clone(), member.to_owned(), id.to_owned()));
+                    }
+                }
+            }
+        }
+        project_room_block(&mut block, filter);
         joined_rooms.insert(room_id.clone(), block);
     }
 
-    // Advance to observed event rows, never a later MAX read that could skip
-    // an event committed after we collected this batch.
-    let ids: Vec<_> = new_events
-        .iter()
-        .map(|event| event.event_id.clone())
-        .collect();
-    let positions = storage
-        .event_stream_positions(&ids)
-        .await
-        .map_err(|error| MatrixError::unknown(error.to_string()).into_response())?;
-    let next_events_pos = positions.values().copied().max().unwrap_or(since);
     // Capture the device-list boundary before fetching its changes.
     let next_device_pos = storage
         .device_list_max_position()
@@ -916,6 +1030,8 @@ async fn build_sync_response<S: AuthState>(
         has_key_changes,
         next_expiry,
         body,
+        lazy_sent,
+        events_pos: next_events_pos,
     })
 }
 
@@ -1049,6 +1165,9 @@ async fn departed_room_block(
             notification_count: 0,
             highlight_count: 0,
         },
+        unread_thread_notifications: None,
+        summary: None,
+        heroes: Vec::new(),
     })
 }
 
@@ -1111,6 +1230,9 @@ async fn build_initial_room_block<S: AuthState>(
             highlight_count: 0,
             notification_count: 0,
         },
+        unread_thread_notifications: None,
+        summary: None,
+        heroes: Vec::new(),
     })
 }
 
@@ -1241,6 +1363,9 @@ async fn build_incremental_room_block<S: AuthState>(
             highlight_count: 0,
             notification_count: 0,
         },
+        unread_thread_notifications: None,
+        summary: None,
+        heroes: Vec::new(),
     })
 }
 
@@ -1261,6 +1386,7 @@ async fn add_lazy_members(
         .filter_map(|event| event["sender"].as_str().map(str::to_owned))
         .collect();
     senders.insert(user.to_owned());
+    senders.extend(block.heroes.iter().cloned());
     let member_snapshot = if let Some(first) = block
         .timeline
         .events
@@ -1365,6 +1491,7 @@ fn filter_room_block(
         .filter_map(|event| event["sender"].as_str().map(str::to_owned))
         .collect();
     senders.insert(user.to_owned());
+    senders.extend(block.heroes.iter().cloned());
     let state_rule = &filter.definition.room.state;
     block.state.events.retain(|event| {
         state_rule.matches(room, event)
@@ -1378,6 +1505,18 @@ fn filter_room_block(
                 || event["event_id"]
                     .as_str()
                     .is_none_or(|id| !timeline_members.contains(id)))
+    });
+    // Deterministic order: members the client needs (own, timeline senders,
+    // heroes) first, then by type and state key, so a state limit trims the
+    // least necessary events.
+    block.state.events.sort_by_key(|event| {
+        let required = event["type"] == "m.room.member"
+            && event["state_key"].as_str().is_some_and(|member| senders.contains(member));
+        (
+            !required,
+            event["type"].as_str().unwrap_or_default().to_owned(),
+            event["state_key"].as_str().unwrap_or_default().to_owned(),
+        )
     });
     if let Some(limit) = state_rule.events.limit {
         block.state.events.truncate(limit.min(5000));
@@ -1406,6 +1545,11 @@ fn filter_room_block(
             events.truncate(limit.min(5000));
         }
     }
+    held
+}
+
+/// Apply `event_fields` projection, after every filter that reads fields.
+fn project_room_block(block: &mut JoinedRoomBlock, filter: &SyncFilter) {
     for events in [
         &mut block.timeline.events,
         &mut block.state.events,
@@ -1416,7 +1560,6 @@ fn filter_room_block(
             *event = filter.definition.project(std::mem::take(event));
         }
     }
-    held
 }
 
 #[cfg(test)]

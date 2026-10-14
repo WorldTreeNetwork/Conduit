@@ -122,6 +122,31 @@ historical membership events with different event IDs. Redundant sender membersh
 may still be resent, as permitted by the specification. Further federation-format
 and state/ephemeral limit edge auditing remains under `conduit-y99.13.4`.
 
+### Summaries, unread counts and lazy-loading redundancy (conduit-y99.13.4)
+
+Every joined room block carries `summary` (`m.joined_member_count`,
+`m.invited_member_count`, and `m.heroes` when the room has no name or
+canonical alias: up to five other joined/invited members in membership order,
+else departed ones). Heroes join the requester and timeline senders as the
+members lazy loading must include.
+
+`unread_notifications` evaluates the user's effective push rules (stored rules
+plus unstored defaults, by kind then priority) over events after the read-up-to
+point: the later of the unthreaded receipt and the scope's threaded receipt
+(`m.read` or `m.read.private`, whichever is ahead), with the user's own latest
+event in a scope also marking it read. Thread membership follows relations up
+to three hops. With `unread_thread_notifications` on the timeline filter the
+main count excludes threads and `unread_thread_notifications` holds per-root
+counts (`room_summary.rs`, `notification_counts.rs`).
+
+Lazy loading omits member events already delivered to the device unless
+`include_redundant_members` is set. A delivery counts only once the client's
+`since` reaches the response that carried it, so a retried token re-sends;
+initial and full-state syncs forget the device's deliveries. Ephemeral limits
+take receipts as a stream-ordered prefix (typing plus one `m.receipt` per
+thread scope per room) and leave the cursor before the first receipt that does
+not fit; state limits trim after sorting required members first.
+
 ## Directories and knocking
 
 Implemented in `room_directory.rs`, `directory.rs`, `user_directory.rs` and

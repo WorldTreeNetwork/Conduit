@@ -1001,3 +1001,313 @@ async fn sync_never_skips_non_room_streams_committed_out_of_order() {
     )
     .await;
 }
+
+// ---------------------------------------------------------------------------
+// conduit-y99.13.4: summaries, unread counts, lazy redundancy, limit edges
+// ---------------------------------------------------------------------------
+
+fn filtered(filter: Value, since: Option<&str>) -> String {
+    let mut query = url::form_urlencoded::Serializer::new(String::new());
+    query.append_pair("filter", &filter.to_string());
+    if let Some(since) = since {
+        query.append_pair("since", since);
+    }
+    format!("/_matrix/client/v3/sync?{}", query.finish())
+}
+
+async fn sync_with(server: &Server, login: &Value, filter: Value, since: Option<&str>) -> Value {
+    server.request(Method::GET, &filtered(filter, since), Some(token(login)), None, 200).await
+}
+
+async fn send_text(server: &Server, login: &Value, room: &str, txn: &str, content: Value) -> String {
+    server
+        .request(
+            Method::PUT,
+            &format!("/_matrix/client/v3/rooms/{room}/send/m.room.message/{txn}"),
+            Some(token(login)),
+            Some(content),
+            200,
+        )
+        .await["event_id"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+fn state_members(sync: &Value, room: &str) -> Vec<String> {
+    let mut members: Vec<String> = sync["rooms"]["join"][room]["state"]["events"]
+        .as_array()
+        .map(|events| {
+            events
+                .iter()
+                .filter(|event| event["type"] == "m.room.member")
+                .filter_map(|event| event["state_key"].as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
+    members.sort();
+    members
+}
+
+#[tokio::test]
+async fn room_summary_reports_counts_and_heroes() {
+    let server = Server::new().await;
+    let (alice, bob, room, _) = server.chat_pair().await;
+    let carol = server.register("carol").await;
+    server
+        .request(
+            Method::POST,
+            &format!("/_matrix/client/v3/rooms/{room}/invite"),
+            Some(token(&alice)),
+            Some(json!({"user_id": user(&carol)})),
+            200,
+        )
+        .await;
+    let initial = sync(&server, &bob, None).await;
+    let summary = &initial["rooms"]["join"][&room]["summary"];
+    assert_eq!(summary["m.joined_member_count"], 2, "{summary}");
+    assert_eq!(summary["m.invited_member_count"], 1, "{summary}");
+    // Other joined/invited members in membership order, never the requester.
+    assert_eq!(summary["m.heroes"], json!([user(&alice), user(&carol)]), "{summary}");
+
+    // Lazy loading must carry the heroes' memberships.
+    let lazy = sync_with(
+        &server,
+        &bob,
+        json!({"room": {"timeline": {"limit": 1}, "state": {"lazy_load_members": true}}}),
+        None,
+    )
+    .await;
+    let carol_member = |sync: &Value| {
+        let in_timeline = sync["rooms"]["join"][&room]["timeline"]["events"]
+            .as_array()
+            .is_some_and(|events| events.iter().any(|event| event["type"] == "m.room.member" && event["state_key"] == user(&carol)));
+        in_timeline || state_members(sync, &room).contains(&user(&carol).to_owned())
+    };
+    assert!(carol_member(&lazy), "hero membership missing: {lazy}");
+
+    // A named room needs no heroes.
+    server
+        .request(
+            Method::PUT,
+            &format!("/_matrix/client/v3/rooms/{room}/state/m.room.name"),
+            Some(token(&alice)),
+            Some(json!({"name": "Planning"})),
+            200,
+        )
+        .await;
+    let named = sync(&server, &bob, Some(&next_batch(&initial))).await;
+    let summary = &named["rooms"]["join"][&room]["summary"];
+    assert!(summary.get("m.heroes").is_none(), "{summary}");
+    assert_eq!(summary["m.joined_member_count"], 2);
+}
+
+#[tokio::test]
+async fn unread_counts_follow_push_rules_receipts_and_threads() {
+    let server = Server::new().await;
+    let (alice, bob, room, initial_event) = server.chat_pair().await;
+    server
+        .request(
+            Method::PUT,
+            &format!("/_matrix/client/v3/profile/{}/displayname", user(&bob)),
+            Some(token(&bob)),
+            Some(json!({"displayname": "Bobby"})),
+            200,
+        )
+        .await;
+    let counts = |sync: &Value| sync["rooms"]["join"][&room]["unread_notifications"].clone();
+
+    // The initial message notifies (one-to-one underride); a mention of the
+    // display name also highlights; notices do not notify.
+    send_text(&server, &alice, &room, "mention", json!({"msgtype": "m.text", "body": "hi Bobby"})).await;
+    send_text(&server, &alice, &room, "notice", json!({"msgtype": "m.notice", "body": "bot"})).await;
+    let first = sync(&server, &bob, None).await;
+    assert_eq!(counts(&first), json!({"notification_count": 2, "highlight_count": 1}), "{first}");
+
+    // A receipt clears notifications up to and including its event; a
+    // private receipt that is further ahead wins.
+    let mention = send_text(&server, &alice, &room, "after", json!({"msgtype": "m.text", "body": "later"})).await;
+    server
+        .request(
+            Method::POST,
+            &format!("/_matrix/client/v3/rooms/{room}/receipt/m.read/{initial_event}"),
+            Some(token(&bob)),
+            Some(json!({})),
+            200,
+        )
+        .await;
+    let partly = sync(&server, &bob, Some(&next_batch(&first))).await;
+    assert_eq!(counts(&partly), json!({"notification_count": 2, "highlight_count": 1}), "{partly}");
+    server
+        .request(
+            Method::POST,
+            &format!("/_matrix/client/v3/rooms/{room}/receipt/m.read.private/{mention}"),
+            Some(token(&bob)),
+            Some(json!({})),
+            200,
+        )
+        .await;
+    let read = sync(&server, &bob, Some(&next_batch(&partly))).await;
+    assert_eq!(counts(&read), json!({"notification_count": 0, "highlight_count": 0}), "{read}");
+
+    // Thread replies are partitioned when the filter asks for it.
+    send_text(
+        &server,
+        &alice,
+        &room,
+        "thread",
+        json!({"msgtype": "m.text", "body": "in a thread",
+            "m.relates_to": {"rel_type": "m.thread", "event_id": initial_event}}),
+    )
+    .await;
+    let threaded_filter = json!({"room": {"timeline": {"unread_thread_notifications": true}}});
+    let threaded = sync_with(&server, &bob, threaded_filter.clone(), None).await;
+    let block = &threaded["rooms"]["join"][&room];
+    assert_eq!(block["unread_notifications"]["notification_count"], 0, "{block}");
+    assert_eq!(block["unread_thread_notifications"][&initial_event]["notification_count"], 1, "{block}");
+    let whole = sync(&server, &bob, Some(&next_batch(&read))).await;
+    assert_eq!(counts(&whole)["notification_count"], 1, "{whole}");
+    assert!(whole["rooms"]["join"][&room].get("unread_thread_notifications").is_none());
+
+    // Bob's own reply in the thread marks the thread read.
+    send_text(
+        &server,
+        &bob,
+        &room,
+        "reply",
+        json!({"msgtype": "m.text", "body": "replying",
+            "m.relates_to": {"rel_type": "m.thread", "event_id": initial_event}}),
+    )
+    .await;
+    let after_reply = sync_with(&server, &bob, threaded_filter, None).await;
+    let block = &after_reply["rooms"]["join"][&room];
+    assert!(block["unread_thread_notifications"][&initial_event].is_null()
+        || block["unread_thread_notifications"][&initial_event]["notification_count"] == 0, "{block}");
+}
+
+#[tokio::test]
+async fn lazy_loading_skips_redundant_members_unless_asked() {
+    let server = Server::new().await;
+    let (alice, bob, room, _) = server.chat_pair().await;
+    server
+        .request(
+            Method::PUT,
+            &format!("/_matrix/client/v3/rooms/{room}/state/m.room.name"),
+            Some(token(&alice)),
+            Some(json!({"name": "Lazy"})),
+            200,
+        )
+        .await;
+    let lazy = json!({"room": {"timeline": {"limit": 1}, "state": {"lazy_load_members": true}}});
+    let redundant = json!({"room": {"timeline": {"limit": 1}, "state": {"lazy_load_members": true, "include_redundant_members": true}}});
+    let initial = sync_with(&server, &bob, lazy.clone(), None).await;
+    assert_eq!(state_members(&initial, &room), vec![user(&alice).to_owned(), user(&bob).to_owned()]);
+    let since = next_batch(&initial);
+
+    send_text(&server, &alice, &room, "again", json!({"msgtype": "m.text", "body": "again"})).await;
+    let quiet = sync_with(&server, &bob, lazy.clone(), Some(&since)).await;
+    assert_eq!(state_members(&quiet, &room), Vec::<String>::new(), "already-sent members are redundant: {quiet}");
+    let full = sync_with(&server, &bob, redundant, Some(&since)).await;
+    assert!(state_members(&full, &room).contains(&user(&alice).to_owned()), "{full}");
+
+    // A new sender's membership is sent; if that response is lost and the
+    // client retries from the older token, it is sent again.
+    let carol = server.register("carol").await;
+    join(&server, &carol, &room).await;
+    send_text(&server, &carol, &room, "carol", json!({"msgtype": "m.text", "body": "hello"})).await;
+    let first_try = sync_with(&server, &bob, lazy.clone(), Some(&since)).await;
+    let carol_seen = |sync: &Value| {
+        state_members(sync, &room).contains(&user(&carol).to_owned())
+            || sync["rooms"]["join"][&room]["timeline"]["events"]
+                .as_array()
+                .is_some_and(|events| events.iter().any(|event| event["type"] == "m.room.member" && event["state_key"] == user(&carol)))
+    };
+    assert!(carol_seen(&first_try), "{first_try}");
+    let retry = sync_with(&server, &bob, lazy.clone(), Some(&since)).await;
+    assert!(carol_seen(&retry), "a lost response must not make members redundant: {retry}");
+    // Once the client has moved past that response, Carol is redundant.
+    send_text(&server, &carol, &room, "carol2", json!({"msgtype": "m.text", "body": "again"})).await;
+    let later = sync_with(&server, &bob, lazy, Some(&next_batch(&retry))).await;
+    assert!(!state_members(&later, &room).contains(&user(&carol).to_owned()), "{later}");
+}
+
+#[tokio::test]
+async fn limited_ephemeral_and_state_windows_make_progress() {
+    let server = Server::new().await;
+    let (alice, bob, room, root) = server.chat_pair().await;
+    let reply = send_text(
+        &server,
+        &alice,
+        &room,
+        "reply",
+        json!({"msgtype": "m.text", "body": "thread", "m.relates_to": {"rel_type": "m.thread", "event_id": root}}),
+    )
+    .await;
+    let start = next_batch(&sync(&server, &alice, None).await);
+    for (thread, event) in [(None, &root), (Some("main"), &root), (Some(root.as_str()), &reply)] {
+        let body = thread.map(|thread| json!({"thread_id": thread})).unwrap_or(json!({}));
+        server
+            .request(
+                Method::POST,
+                &format!("/_matrix/client/v3/rooms/{room}/receipt/m.read/{event}"),
+                Some(token(&bob)),
+                Some(body),
+                200,
+            )
+            .await;
+    }
+    // With one ephemeral event per room, the three receipt scopes arrive
+    // over three syncs instead of being held forever.
+    let filter = json!({"room": {"ephemeral": {"limit": 1}}});
+    let mut since = start;
+    let mut scopes = Vec::new();
+    for _ in 0..3 {
+        let response = sync_with(&server, &alice, filter.clone(), Some(&since)).await;
+        let receipts = ephemeral(&response, &room, "m.receipt");
+        assert_eq!(receipts.len(), 1, "{response}");
+        scopes.push(receipts[0].to_string());
+        since = next_batch(&response);
+    }
+    let rest = sync_with(&server, &alice, filter, Some(&since)).await;
+    assert!(ephemeral(&rest, &room, "m.receipt").is_empty(), "{rest}");
+    assert!(scopes.iter().any(|scope| scope.contains("\"main\"")) && scopes.iter().any(|scope| scope.contains(&root)));
+
+    // A state limit trims the least necessary state: with lazy loading the
+    // kept events are the members the timeline needs.
+    let trimmed = sync_with(
+        &server,
+        &alice,
+        json!({"room": {"timeline": {"limit": 1}, "state": {"limit": 2, "lazy_load_members": true}}}),
+        None,
+    )
+    .await;
+    let state = trimmed["rooms"]["join"][&room]["state"]["events"].as_array().unwrap();
+    assert_eq!(state.len(), 2, "{trimmed}");
+    assert!(state.iter().all(|event| event["type"] == "m.room.member"), "{trimmed}");
+}
+
+#[tokio::test]
+async fn key_inventory_fields_are_always_present() {
+    let server = Server::new().await;
+    let alice = server.register("alice").await;
+    let device = Device::from_login(&alice);
+    let initial = sync(&server, &alice, None).await;
+    assert_eq!(initial["device_one_time_keys_count"], json!({}));
+    assert_eq!(initial["device_unused_fallback_key_types"], json!([]));
+    server
+        .request(
+            Method::POST,
+            "/_matrix/client/v3/keys/upload",
+            Some(token(&alice)),
+            Some(json!({
+                "device_keys": device.keys,
+                "one_time_keys": {"signed_curve25519:A": device.signed_key("YQ", false), "signed_curve25519:B": device.signed_key("Yg", false)},
+                "fallback_keys": {"signed_curve25519:F": device.signed_key("Zg", true)},
+            })),
+            200,
+        )
+        .await;
+    let after = sync(&server, &alice, Some(&next_batch(&initial))).await;
+    assert_eq!(after["device_one_time_keys_count"], json!({"signed_curve25519": 2}));
+    assert_eq!(after["device_unused_fallback_key_types"], json!(["signed_curve25519"]));
+}
