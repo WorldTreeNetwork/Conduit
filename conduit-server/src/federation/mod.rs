@@ -45,7 +45,7 @@ pub use recent::RecentEventCache;
 pub use middleware::XMatrixMiddlewareState;
 pub use rate_limit::RateLimiter;
 pub use server::FedState;
-pub use server::federation_router;
+pub use server::{authenticated_federation_router, federation_router};
 
 // ---------------------------------------------------------------------------
 // Shared utility

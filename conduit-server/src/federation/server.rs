@@ -1,13 +1,13 @@
 //! Inbound federation HTTP handlers (x2r.2, x2r.5–x2r.10).
 //!
-//! Exposes a subrouter mounted at `/_matrix/federation/v1` with X-Matrix
+//! Exposes versioned subrouters mounted at `/_matrix/federation` with X-Matrix
 //! auth and per-origin rate-limiting middleware applied to all routes.
 //!
 //! Endpoints implemented:
 //! - `PUT  /send/:txnId`
 //! - `GET  /make_join/:roomId/:userId`
-//! - `PUT  /send_join/v2/:roomId/:eventId`
-//! - `PUT  /invite/v2/:roomId/:eventId`
+//! - `PUT  /v2/send_join/:roomId/:eventId`
+//! - `PUT  /v2/invite/:roomId/:eventId`
 //! - `GET  /state/:roomId`
 //! - `GET  /state_ids/:roomId`
 //! - `GET  /backfill/:roomId`
@@ -399,7 +399,7 @@ pub async fn send_join(
 }
 
 // ---------------------------------------------------------------------------
-// x2r.6 — PUT /invite/v2/:roomId/:eventId
+// x2r.6 — PUT /v2/invite/:roomId/:eventId
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
@@ -899,15 +899,14 @@ pub async fn fed_send_to_device(
     let sender = body.sender.unwrap_or_else(|| format!("@federation:{}", origin));
 
     for (target_user, devices) in &body.messages {
-        let target_server = target_user.split(':').nth(1).unwrap_or("");
+        let target_server = target_user.split_once(':').map(|(_, server)| server).unwrap_or("");
         if target_server != &*state.server_name {
             continue; // Not our user — skip.
         }
         for (target_device, content) in devices {
-            if let Err(e) = state
-                .storage
-                .enqueue_to_device(target_user, target_device, &sender, &event_type, content)
-                .await
+            if let Err(e) = crate::api::client::keys::enqueue_local_to_device(
+                state.storage.as_ref(), target_user, target_device, &sender, &event_type, content,
+            ).await
             {
                 tracing::warn!(error = %e, "failed to enqueue federated to-device message");
             }
@@ -962,18 +961,17 @@ pub(crate) async fn handle_edu(state: &FedState, edu: &serde_json::Value) {
 
 /// Build the federation inbound subrouter.
 ///
-/// Returns a `Router<FedState>` — callers should apply middleware and then
-/// call `.with_state(fed_state)` to convert it to `Router<()>` for nesting.
+/// Paths include the API version. Mount at `/_matrix/federation`.
+/// Prefer [`authenticated_federation_router`] for the production mount and
+/// authentication/rate-limit layers.
 pub fn federation_router() -> axum::Router<FedState> {
     use axum::routing::{get, post, put};
     use crate::api::client::media::{federation_download, federation_thumbnail};
 
-    axum::Router::new()
+    let v1 = axum::Router::new()
         .route("/send/:txnId", put(send_transaction))
         .route("/send_to_device/:txnId", put(fed_send_to_device))
         .route("/make_join/:roomId/:userId", get(make_join))
-        .route("/send_join/v2/:roomId/:eventId", put(send_join))
-        .route("/invite/v2/:roomId/:eventId", put(invite))
         .route("/state/:roomId", get(state))
         .route("/state_ids/:roomId", get(state_ids))
         .route("/backfill/:roomId", get(backfill))
@@ -983,5 +981,34 @@ pub fn federation_router() -> axum::Router<FedState> {
         .route("/query/directory", get(query_directory))
         // Media (E07 h9n.8): federation download + thumbnail
         .route("/media/download/:mediaId", get(federation_download::<FedState>))
-        .route("/media/thumbnail/:mediaId", get(federation_thumbnail::<FedState>))
+        .route("/media/thumbnail/:mediaId", get(federation_thumbnail::<FedState>));
+    let v2 = axum::Router::new()
+        .route("/send_join/:roomId/:eventId", put(send_join))
+        .route("/invite/:roomId/:eventId", put(invite));
+    axum::Router::new().nest("/v1", v1).nest("/v2", v2)
+}
+
+/// Mount the federation APIs with the same middleware used by the binary.
+/// Nested routers preserve `OriginalUri`, which must be signed in full.
+pub fn authenticated_federation_router<S>(
+    state: FedState,
+    limiter: super::rate_limit::RateLimiter,
+) -> axum::Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    use super::middleware::{verify_xmatrix, XMatrixMiddlewareState};
+    use super::rate_limit::rate_limit;
+    use axum::middleware;
+
+    let auth = XMatrixMiddlewareState {
+        server_name: Arc::clone(&state.server_name),
+        remote_keys: Arc::clone(&state.remote_keys),
+        http: state.http.clone(),
+    };
+    let routes = federation_router()
+        .layer(middleware::from_fn_with_state(limiter, rate_limit))
+        .layer(middleware::from_fn_with_state(auth, verify_xmatrix))
+        .with_state::<S>(state);
+    axum::Router::new().nest("/_matrix/federation", routes)
 }

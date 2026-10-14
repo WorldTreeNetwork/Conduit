@@ -1,0 +1,198 @@
+{
+  "schema_version": 1,
+  "target_specification": "https://spec.matrix.org/v1.19/",
+  "inventory_complete": false,
+  "full_compliance_proven": false,
+  "verification_command": "SQLX_OFFLINE=true cargo test --workspace",
+  "coverage_note": "This is a starting evidence register, not an exhaustive requirement inventory. Passing tests cover only the assertions named below. Endpoint presence does not establish semantic conformance.",
+  "requirements": [
+    {
+      "id": "v11-event-cryptographic-bytes",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/server-server-api/#signing-events",
+      "assertions": [
+        "Content hashes cover unredacted typed-event content",
+        "Reference hashes redact then omit signatures and unsigned",
+        "Local event_id is excluded from hashes and signatures",
+        "Ed25519 bytes match an independent OpenSSL vector"
+      ],
+      "implementation": [
+        "conduit/src/hashing.rs",
+        "conduit/src/signing.rs"
+      ],
+      "tests": [
+        "conduit/tests/matrix_v11_crypto.rs"
+      ],
+      "status": "covered_for_typed_event_model",
+      "limitations": [
+        "Unknown PDU fields are not retained; no separate PDU wire model"
+      ],
+      "gap_issue": "conduit-embed-pdu"
+    },
+    {
+      "id": "v11-redaction",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/rooms/v11/#redactions",
+      "assertions": [
+        "Known event types retain the v11 content subset",
+        "Create content is retained",
+        "Only third_party_invite.signed survives member pruning",
+        "Unsigned data is removed"
+      ],
+      "implementation": [
+        "conduit/src/redaction.rs"
+      ],
+      "tests": [
+        "conduit/tests/matrix_v11_crypto.rs::v11_redaction_protects_exact_protocol_content_fields"
+      ],
+      "status": "covered_for_typed_event_model",
+      "limitations": [
+        "Top-level unknown fields and other room-version rules still need a wire-model audit"
+      ],
+      "gap_issue": "conduit-embed-pdu"
+    },
+    {
+      "id": "federation-v2-paths-and-authentication",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/server-server-api/#joining-rooms",
+      "assertions": [
+        "v2 send_join and invite resolve at standard paths",
+        "Missing authentication is rejected",
+        "Authentication covers the full URI through nesting",
+        "Former incorrectly versioned paths are absent"
+      ],
+      "implementation": [
+        "conduit-server/src/federation/server.rs",
+        "conduit-server/src/main.rs"
+      ],
+      "tests": [
+        "conduit-server/tests/federation_inbound.rs::standard_v2_routes_require_authentication",
+        "conduit-server/tests/federation_inbound.rs::standard_v2_routes_verify_the_full_signed_uri",
+        "conduit-server/tests/federation_inbound.rs::incorrectly_versioned_routes_are_not_exposed",
+        "conduit-server/tests/production_e2e.rs::production_chat_survives_restart"
+      ],
+      "status": "covered_assertions_only",
+      "limitations": [
+        "This does not prove complete join/invite authorization, PDU shape, or independent peer interoperability"
+      ]
+    },
+    {
+      "id": "local-to-device-delivery-and-acknowledgement",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#send-to-device-messaging",
+      "assertions": [
+        "Device-list positions do not skip queued messages",
+        "Messages persist until a following sync acknowledges their cursor",
+        "Repeated sync and process restart preserve unacknowledged messages",
+        "Acknowledging an earlier batch retains later messages",
+        "Wildcard targets expand to actual devices",
+        "Acknowledgement by one device preserves other device queues"
+      ],
+      "implementation": [
+        "conduit-server/src/api/client/keys.rs",
+        "conduit-server/src/api/client/sync.rs",
+        "conduit-server/src/federation/server.rs"
+      ],
+      "tests": [
+        "conduit-server/src/api/client/keys.rs::fanout_tests::wildcard_delivery_preserves_each_device_queue",
+        "conduit-server/src/api/client/sync.rs::token_tests",
+        "conduit-server/tests/production_e2e.rs::production_to_device_sync_retries_until_acknowledged"
+      ],
+      "status": "covered_assertions_only",
+      "limitations": [
+        "Prompt long-poll wakeups, durable transaction deduplication, and standard remote EDUs remain open"
+      ],
+      "gap_issues": [
+        "conduit-y99.8",
+        "conduit-y99.10"
+      ]
+    },
+    {
+      "id": "production-http-chat-and-durability",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/",
+      "assertions": [
+        "Normal UIA registration and password login work through the binary",
+        "Profile and message Unicode survives HTTP/storage",
+        "Two users create/join/send/sync",
+        "Retry before restart returns the same event",
+        "Restart preserves tokens, signing keys and message history",
+        "Logout invalidates the device token"
+      ],
+      "implementation": [
+        "conduit-server/src/main.rs",
+        "conduit-server/src/api/client",
+        "conduit-server/src/storage_pg.rs"
+      ],
+      "tests": [
+        "conduit-server/tests/production_e2e.rs::production_chat_survives_restart"
+      ],
+      "status": "covered_assertions_only",
+      "limitations": [
+        "These journeys do not establish complete client-server conformance or durable transaction deduplication"
+      ]
+    },
+    {
+      "id": "unattended-server-startup",
+      "role": "test-infrastructure",
+      "source": "openspec/specs/server-automation/spec.md",
+      "assertions": [
+        "Port zero reports actual bound address after migrations",
+        "Malformed/occupied addresses and unwritable readiness files fail startup",
+        "Fixture owns and cleans up isolated process/database/media"
+      ],
+      "implementation": [
+        "conduit-server/src/main.rs"
+      ],
+      "tests": [
+        "conduit-server/tests/production_e2e.rs::production_startup_rejects_invalid_hooks",
+        "conduit-server/tests/production_e2e.rs"
+      ],
+      "status": "covered_assertions_only"
+    },
+    {
+      "id": "complete-server-requirement-inventory",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/",
+      "status": "incomplete",
+      "issue": "conduit-y99.3",
+      "scope": [
+        "Client-server modules and endpoint semantics",
+        "Server-server API and independent interoperability",
+        "All applicable stable room versions",
+        "Canonical JSON and PDU validation/authorization/state resolution",
+        "Application-service API",
+        "Identity-service integration",
+        "Push gateway interactions",
+        "Olm/Megolm and encrypted client interactions"
+      ]
+    },
+    {
+      "id": "client-implementation-and-ux",
+      "role": "client",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/",
+      "status": "missing",
+      "issue": "conduit-y99.9",
+      "evidence": [
+        "conduit/src/api.rs contains API-version constants and placeholders; no client application exists in the workspace"
+      ],
+      "scope": [
+        "Complete applicable client protocol behavior",
+        "Usable and accessible client interfaces",
+        "Unattended unit, integration and browser e2e verification"
+      ]
+    },
+    {
+      "id": "independent-conformance-and-ci",
+      "role": "test-infrastructure",
+      "source": "https://spec.matrix.org/v1.19/",
+      "status": "missing",
+      "issue": "conduit-y99.4.2",
+      "scope": [
+        "Independent Matrix peer conformance",
+        "CI execution and prerequisite provisioning",
+        "Client UX/accessibility automation"
+      ]
+    }
+  ]
+}

@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use axum::{middleware, routing::get, Json, Router};
+use axum::{routing::get, Json, Router};
 use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine as _};
 use serde_json::json;
 use tokio::sync::broadcast;
@@ -26,9 +26,8 @@ use conduit::storage::{MemoryStorage, Storage};
 use conduit::transport::iroh as iroh_transport;
 
 use conduit_server::federation::iroh_server::spawn_iroh_accept_loop;
-use conduit_server::federation::middleware::{XMatrixMiddlewareState, verify_xmatrix};
-use conduit_server::federation::rate_limit::{RateLimiter, rate_limit};
-use conduit_server::federation::server::{FedState, federation_router};
+use conduit_server::federation::rate_limit::RateLimiter;
+use conduit_server::federation::server::{FedState, authenticated_federation_router};
 use conduit_server::BlobStore;
 use conduit_server::RemoteKeyCache;
 
@@ -94,6 +93,8 @@ async fn spawn_iroh_server(server_name: &str) -> IrohTestServer {
         http: http.clone(),
         events_tx: events_tx.clone(),
         fed_client: Arc::clone(&fed_client),
+        recent: Arc::new(conduit_server::federation::RecentEventCache::new()),
+        app_services: Arc::new(Vec::new()),
         blob_store: BlobStore::new(std::env::temp_dir().join(format!(
             "conduit_iroh_test_{}_{}",
             server_name.replace('.', "_"),
@@ -105,11 +106,6 @@ async fn spawn_iroh_server(server_name: &str) -> IrohTestServer {
         .unwrap(),
     };
 
-    let xmatrix_state = XMatrixMiddlewareState {
-        server_name: Arc::from(server_name),
-        remote_keys: Arc::clone(&remote_keys),
-        http: http.clone(),
-    };
     let rate_limiter = RateLimiter::new(10000.0, 10000.0);
 
     let sk_clone = Arc::clone(&server_key);
@@ -145,13 +141,10 @@ async fn spawn_iroh_server(server_name: &str) -> IrohTestServer {
         }),
     );
 
-    let fed_router = federation_router()
-        .layer(middleware::from_fn_with_state(rate_limiter, rate_limit))
-        .layer(middleware::from_fn_with_state(xmatrix_state, verify_xmatrix))
-        .with_state::<()>(fed_state);
+    let fed_router = authenticated_federation_router::<()>(fed_state, rate_limiter);
 
     let app = keys_router.merge(
-        Router::new().nest("/_matrix/federation/v1", fed_router),
+        fed_router,
     );
 
     // Spawn the iroh accept loop (routes incoming QUIC streams through the app).

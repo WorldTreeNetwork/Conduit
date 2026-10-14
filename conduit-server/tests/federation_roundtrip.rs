@@ -13,7 +13,7 @@
 
 use std::sync::Arc;
 
-use axum::{middleware, routing::get, Json, Router};
+use axum::{routing::get, Json, Router};
 use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine as _};
 use serde_json::{json, Value};
 use tokio::net::TcpListener;
@@ -25,9 +25,8 @@ use conduit::signing::sign_event;
 use conduit::storage::{MemoryStorage, Storage};
 
 use conduit_server::federation::auth::sign_request;
-use conduit_server::federation::middleware::{XMatrixMiddlewareState, verify_xmatrix};
-use conduit_server::federation::rate_limit::{RateLimiter, rate_limit};
-use conduit_server::federation::server::{FedState, federation_router};
+use conduit_server::federation::rate_limit::RateLimiter;
+use conduit_server::federation::server::{FedState, authenticated_federation_router};
 use conduit_server::BlobStore;
 use conduit_server::RemoteKeyCache;
 
@@ -90,11 +89,6 @@ async fn spawn_server(server_name: &str) -> TestServer {
         app_services: Arc::new(Vec::new()),
     };
 
-    let xmatrix_state = XMatrixMiddlewareState {
-        server_name: Arc::from(server_name),
-        remote_keys: Arc::clone(&remote_keys),
-        http: http.clone(),
-    };
     let rate_limiter = RateLimiter::new(10000.0, 10000.0);
 
     let sk_clone = Arc::clone(&server_key);
@@ -125,13 +119,10 @@ async fn spawn_server(server_name: &str) -> TestServer {
         }),
     );
 
-    let fed_router = federation_router()
-        .layer(middleware::from_fn_with_state(rate_limiter, rate_limit))
-        .layer(middleware::from_fn_with_state(xmatrix_state, verify_xmatrix))
-        .with_state::<()>(fed_state);
+    let fed_router = authenticated_federation_router::<()>(fed_state, rate_limiter);
 
     let app = keys_router.merge(
-        Router::new().nest("/_matrix/federation/v1", fed_router),
+        fed_router,
     );
 
     tokio::spawn(async move {
@@ -196,9 +187,9 @@ async fn rt2_b_sends_transaction_to_a() {
         event_id: "$rt2_pdu:a.test".to_owned(),
         room_id: "!rt2_room:a.test".to_owned(),
         sender: "@alice:a.test".to_owned(),
-        event_type: "m.room.message".to_owned(),
-        content: json!({ "msgtype": "m.text", "body": "RT2 hello" }),
-        state_key: None,
+        event_type: "m.room.create".to_owned(),
+        content: json!({ "room_version": "11" }),
+        state_key: Some(String::new()),
         origin_server_ts: 2_000_000,
         auth_events: vec![],
         prev_events: vec![],
@@ -229,6 +220,8 @@ async fn rt2_b_sends_transaction_to_a() {
         .unwrap();
 
     assert_eq!(resp.status().as_u16(), 200);
+    let result: Value = resp.json().await.unwrap();
+    assert_eq!(result["pdus"]["$rt2_pdu:a.test"], json!({}), "{result}");
 
     let stored = server_a
         .storage
@@ -334,7 +327,7 @@ async fn rt3_join_room_on_a() {
     let join_eid = join_ev.event_id.clone();
 
     let send_join_path = format!(
-        "/_matrix/federation/v1/send_join/v2/{}/{}",
+        "/_matrix/federation/v2/send_join/{}/{}",
         pct_encode(room_id),
         pct_encode(&join_eid),
     );

@@ -59,9 +59,25 @@ The shape of a real Matrix homeserver is in. Working subsystems:
 - **Application services** — YAML registration loading, namespace enforcement, AS-authenticated calls, per-AS transaction queue.
 - **Admin** — `/_matrix/conduit/admin/v1/...` for users / rooms / media / federation, with audit log.
 
-**Tests:** ~180 across the workspace (unit + integration). `DATABASE_URL=postgresql://postgres@localhost/conduit cargo test --workspace`.
+**Tests:** `SQLX_OFFLINE=true DATABASE_URL=postgresql://postgres@localhost/postgres cargo test --workspace`.
+PostgreSQL must permit `CREATE DATABASE`, and `psql` must be on `PATH`.
+Storage and production HTTP tests create and remove isolated databases.
+`conduit-server/tests/production_e2e.rs` launches the shipped binary, verifies
+registration/login, profile, chat/sync, federation authentication, and to-device
+retry/acknowledgement behavior, then restarts it to check durable state and keys.
+Run it alone with `SQLX_OFFLINE=true cargo test -p conduit-server --test production_e2e`.
 
-**Status caveats** — there are known gaps tracked as P2/P3 follow-ups in `bd`:
+For isolated runtime automation, set `CONDUIT_LISTEN_ADDR=127.0.0.1:0` and
+`CONDUIT_READY_FILE=/path/to/ready.json`. The server writes
+`{"address":"127.0.0.1:<bound-port>"}` after migrations and socket binding;
+automation can then probe `/health`. Defaults are `0.0.0.0:8008` and no readiness
+file. Each restart must use a fresh or removed readiness file. These hooks use
+the normal HTTP routes and authentication.
+
+**Status caveats** — full Matrix compliance is not yet established. The initial
+[requirement evidence register](docs/matrix-compliance.json) records verified
+assertions and uncovered scope; the complete server/client effort is tracked in
+`conduit-y99`. Known gaps include:
 
 - v11 cryptographic bytes and redaction have independent protocol-vector tests. The separate PDU wire model (including unknown-field preservation) remains tracked as `conduit-embed-pdu`.
 - AS ghost user auto-creation (`conduit-5vr`) and AS query endpoints (`conduit-dhd`) are stubbed.

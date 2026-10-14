@@ -64,8 +64,13 @@ clients exchange `m.key.verification.start` → `accept` → `key` → `mac` →
 `done` events over the to-device queue. The server's only job is to
 deliver those opaque blobs to the right device.
 
-Local: `PUT /sendToDevice` writes straight into the to-device queue
-(mrm.6) and `/sync` drains it.
+Local: `PUT /sendToDevice` writes into each recipient device's queue. A `*`
+target expands to all known devices for that user. `/sync` returns at most 100
+pending messages in arrival order and retains them until a subsequent request
+acknowledges the response's `next_batch` token. The `t` cursor tracks to-device
+delivery independently of the `d` device-list cursor. Repeating a sync after a
+lost response or process restart preserves unacknowledged messages. Older sync
+tokens without `t` acknowledge no to-device messages.
 
 Remote: the same `PUT /sendToDevice` handler groups any
 remote-targeted user IDs by destination server and dispatches each

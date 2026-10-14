@@ -371,12 +371,12 @@ pub async fn send_to_device<S: AuthState>(
         HashMap::new();
 
     for (target_user, devices) in &body.messages {
-        let target_server = target_user.split(':').nth(1).unwrap_or("");
+        let target_server = target_user.split_once(':').map(|(_, server)| server).unwrap_or("");
         if target_server == state.server_name() {
             for (target_device, content) in devices {
-                if let Err(e) = storage
-                    .enqueue_to_device(target_user, target_device, sender, &event_type, content)
-                    .await
+                if let Err(e) = enqueue_local_to_device(
+                    storage.as_ref(), target_user, target_device, sender, &event_type, content,
+                ).await
                 {
                     return MatrixError::unknown(e.to_string()).into_response();
                 }
@@ -414,6 +414,33 @@ pub async fn send_to_device<S: AuthState>(
     let _ = txn_id;
 
     (StatusCode::OK, Json(json!({}))).into_response()
+}
+
+/// Expand wildcard recipients before writing device-specific queue entries.
+pub(crate) async fn enqueue_local_to_device(
+    storage: &dyn Storage,
+    target_user: &str,
+    target_device: &str,
+    sender: &str,
+    event_type: &str,
+    content: &Value,
+) -> conduit::Result<()> {
+    let devices = if target_device == "*" {
+        storage
+            .list_devices_for_user(target_user)
+            .await?
+            .into_iter()
+            .map(|device| device.device_id)
+            .collect()
+    } else {
+        vec![target_device.to_owned()]
+    };
+    for device_id in devices {
+        storage
+            .enqueue_to_device(target_user, &device_id, sender, event_type, content)
+            .await?;
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -962,6 +989,81 @@ mod fanout_tests {
     use super::*;
     use conduit::event::Event;
     use conduit::storage::MemoryStorage;
+
+    #[tokio::test]
+    async fn wildcard_delivery_preserves_each_device_queue() {
+        let storage = conduit::storage::MemoryStorage::default();
+        let user = "@bob:local.test";
+        for device in ["ONE", "TWO"] {
+            storage.upsert_device(user, device, None).await.unwrap();
+        }
+        let content = json!({"body": "verification"});
+        super::enqueue_local_to_device(
+            &storage,
+            user,
+            "*",
+            "@alice:local.test",
+            "m.test",
+            &content,
+        )
+        .await
+        .unwrap();
+        let first = storage.drain_to_device(user, "ONE", 0, 100).await.unwrap();
+        let second = storage.drain_to_device(user, "TWO", 0, 100).await.unwrap();
+        assert_eq!(first.len(), 1);
+        assert_eq!(second.len(), 1);
+        assert_eq!(first[0].content, content);
+        assert_eq!(second[0].content, content);
+        storage
+            .delete_to_device_before(user, "ONE", first[0].id)
+            .await
+            .unwrap();
+        assert!(storage
+            .drain_to_device(user, "ONE", 0, 100)
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            storage
+                .drain_to_device(user, "TWO", 0, 100)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+
+        super::enqueue_local_to_device(
+            &storage,
+            user,
+            "ONE",
+            "@alice:local.test",
+            "m.test",
+            &content,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            storage
+                .drain_to_device(user, "ONE", 0, 100)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            storage
+                .drain_to_device(user, "TWO", 0, 100)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(storage
+            .drain_to_device(user, "*", 0, 100)
+            .await
+            .unwrap()
+            .is_empty());
+    }
 
     fn member_event(room: &str, user: &str, membership: &str) -> Event {
         Event {

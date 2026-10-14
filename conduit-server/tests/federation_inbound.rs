@@ -8,7 +8,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use axum::{middleware, routing::get, Json, Router};
+use axum::{routing::get, Json, Router};
 use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine as _};
 use serde_json::{json, Value};
 use tokio::net::TcpListener;
@@ -19,9 +19,8 @@ use conduit::keys::{generate_server_key, public_bytes};
 use conduit::signing::sign_event;
 use conduit::storage::{MemoryStorage, Storage};
 
-use conduit_server::federation::middleware::{XMatrixMiddlewareState, verify_xmatrix};
-use conduit_server::federation::rate_limit::{RateLimiter, rate_limit};
-use conduit_server::federation::server::{FedState, federation_router};
+use conduit_server::federation::rate_limit::RateLimiter;
+use conduit_server::federation::server::{FedState, authenticated_federation_router};
 use conduit_server::federation::auth::sign_request;
 use conduit_server::{BlobStore, RemoteKeyCache};
 
@@ -77,11 +76,6 @@ async fn spawn_test_server(
         app_services: Arc::new(Vec::new()),
     };
 
-    let xmatrix_state = XMatrixMiddlewareState {
-        server_name: Arc::from(server_name),
-        remote_keys: Arc::clone(&remote_keys),
-        http: http.clone(),
-    };
     let rate_limiter = RateLimiter::new(1000.0, 1000.0); // permissive for tests
 
     // Key endpoint so remote_keys can verify server identity.
@@ -115,13 +109,10 @@ async fn spawn_test_server(
         }),
     );
 
-    let fed_router = federation_router()
-        .layer(middleware::from_fn_with_state(rate_limiter, rate_limit))
-        .layer(middleware::from_fn_with_state(xmatrix_state, verify_xmatrix))
-        .with_state::<()>(fed_state);
+    let fed_router = authenticated_federation_router::<()>(fed_state, rate_limiter);
 
     let app = keys_router.merge(
-        Router::new().nest("/_matrix/federation/v1", fed_router),
+        fed_router,
     );
 
     tokio::spawn(async move {
@@ -271,6 +262,50 @@ async fn send_transaction_persists_pdus() {
     let (addr_a, storage_a, key_a) = spawn_test_server("server-a.test").await;
     let base_a = format!("http://{}", addr_a);
 
+    // Seed the room and sender membership needed to authorize a message.
+    let mut create = Event {
+        event_id: String::new(),
+        room_id: "!room1:server-a.test".into(),
+        sender: "@alice:server-a.test".into(),
+        event_type: "m.room.create".into(),
+        content: json!({"room_version": "11"}),
+        state_key: Some(String::new()),
+        origin_server_ts: 999_998,
+        auth_events: vec![],
+        prev_events: vec![],
+        hashes: json!({}),
+        signatures: json!({}),
+        depth: 1,
+        unsigned: None,
+    };
+    sign_event(&mut create, &key_a, "server-a.test").unwrap();
+    create.event_id = conduit::hashing::event_id(&create).unwrap();
+    let mut member = Event {
+        event_id: String::new(),
+        event_type: "m.room.member".into(),
+        content: json!({"membership": "join"}),
+        state_key: Some(create.sender.clone()),
+        origin_server_ts: 999_999,
+        auth_events: vec![create.event_id.clone()],
+        prev_events: vec![create.event_id.clone()],
+        depth: 2,
+        ..create.clone()
+    };
+    sign_event(&mut member, &key_a, "server-a.test").unwrap();
+    member.event_id = conduit::hashing::event_id(&member).unwrap();
+    for event in [&create, &member] {
+        storage_a.put_event(event).await.unwrap();
+        storage_a
+            .set_state_entry(
+                &event.room_id,
+                &event.event_type,
+                event.state_key.as_deref().unwrap(),
+                &event.event_id,
+            )
+            .await
+            .unwrap();
+    }
+
     // Build a minimal valid PDU to send to server-a.
     // Sender must be on server-a so that the signature from server-a's key
     // validates as the originating server signature.
@@ -282,11 +317,11 @@ async fn send_transaction_persists_pdus() {
         content: json!({ "msgtype": "m.text", "body": "Hello" }),
         state_key: None,
         origin_server_ts: 1_000_000,
-        auth_events: vec![],
-        prev_events: vec![],
+        auth_events: vec![create.event_id.clone(), member.event_id.clone()],
+        prev_events: vec![member.event_id.clone()],
         hashes: json!({}),
         signatures: json!({}),
-        depth: 1,
+        depth: 3,
         unsigned: None,
     };
     sign_event(&mut pdu, &key_a, "server-a.test").unwrap();
@@ -299,7 +334,14 @@ async fn send_transaction_persists_pdus() {
     });
 
     let path = "/_matrix/federation/v1/send/txn1";
-    let auth = sign_req("PUT", path, "server-a.test", "server-a.test", Some(&txn_body), &key_a);
+    let auth = sign_req(
+        "PUT",
+        path,
+        "server-a.test",
+        "server-a.test",
+        Some(&txn_body),
+        &key_a,
+    );
 
     let client = reqwest::Client::new();
     let resp = client
@@ -312,14 +354,116 @@ async fn send_transaction_persists_pdus() {
 
     let status = resp.status().as_u16();
     let body_text = resp.text().await.unwrap_or_default();
-    assert_eq!(status, 200, "send transaction should succeed; body={body_text}");
+    assert_eq!(
+        status, 200,
+        "send transaction should succeed; body={body_text}"
+    );
+    let result: Value = serde_json::from_str(&body_text).unwrap();
+    assert_eq!(
+        result["pdus"]["$test_pdu_1:server-a.test"],
+        json!({}),
+        "{result}"
+    );
 
     // Verify the PDU landed in storage.
     let stored = storage_a
         .get_event("$test_pdu_1:server-a.test")
         .await
         .unwrap();
-    assert!(stored.is_some(), "PDU should be in storage after send_transaction");
+    assert!(
+        stored.is_some(),
+        "PDU should be in storage after send_transaction"
+    );
+}
+
+#[tokio::test]
+async fn standard_v2_routes_require_authentication() {
+    let (addr, _, _) = spawn_test_server("routes.test").await;
+    let client = reqwest::Client::new();
+    for path in [
+        "/_matrix/federation/v1/send/txn",
+        "/_matrix/federation/v2/send_join/!room:routes.test/$join",
+        "/_matrix/federation/v2/invite/!room:routes.test/$invite",
+    ] {
+        let response = client
+            .put(format!("http://{addr}{path}"))
+            .json(&json!({}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), 401, "{path}");
+        assert_eq!(
+            response.json::<Value>().await.unwrap()["errcode"],
+            "M_UNAUTHORIZED"
+        );
+    }
+}
+
+#[tokio::test]
+async fn standard_v2_routes_verify_the_full_signed_uri() {
+    let (addr, _, key) = spawn_test_server("routes.test").await;
+    let client = reqwest::Client::new();
+    for (path, body) in [
+        (
+            "/_matrix/federation/v2/send_join/!room:routes.test/$join",
+            json!({}),
+        ),
+        (
+            "/_matrix/federation/v2/invite/!room:routes.test/$invite",
+            json!({"event": {}}),
+        ),
+    ] {
+        // Valid authentication reaches the handler's PDU validation.
+        let auth = sign_req("PUT", path, "routes.test", "routes.test", Some(&body), &key);
+        let response = client
+            .put(format!("http://{addr}{path}"))
+            .header("Authorization", auth)
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), 400, "{path}");
+        assert_eq!(
+            response.json::<Value>().await.unwrap()["errcode"],
+            "M_BAD_JSON"
+        );
+
+        // Signing a different URI must fail even though the body/key are valid.
+        let auth = sign_req(
+            "PUT",
+            "/send_join/!room:routes.test/$join",
+            "routes.test",
+            "routes.test",
+            Some(&body),
+            &key,
+        );
+        let response = client
+            .put(format!("http://{addr}{path}"))
+            .header("Authorization", auth)
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), 401, "{path}");
+    }
+}
+
+#[tokio::test]
+async fn incorrectly_versioned_routes_are_not_exposed() {
+    let (addr, _, _) = spawn_test_server("routes.test").await;
+    let client = reqwest::Client::new();
+    for path in [
+        "/_matrix/federation/v1/send_join/v2/!room:routes.test/$join",
+        "/_matrix/federation/v1/invite/v2/!room:routes.test/$invite",
+    ] {
+        let response = client
+            .put(format!("http://{addr}{path}"))
+            .json(&json!({}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), 404, "{path}");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -423,7 +567,7 @@ async fn make_send_join_roundtrip() {
     let join_event_id = join_template.event_id.clone();
 
     let send_join_path = format!(
-        "/_matrix/federation/v1/send_join/v2/{}/{}",
+        "/_matrix/federation/v2/send_join/{}/{}",
         urlencoding::encode(room_id),
         urlencoding::encode(&join_event_id),
     );
@@ -612,11 +756,6 @@ async fn rate_limit_kicks_in_after_burst() {
         app_services: Arc::new(Vec::new()),
     };
 
-    let xmatrix_state = XMatrixMiddlewareState {
-        server_name: Arc::from("rl-server.test"),
-        remote_keys: Arc::clone(&remote_keys),
-        http: http.clone(),
-    };
 
     // Tight rate limit: 1 req/s, burst 2.
     let rate_limiter = RateLimiter::new(1.0, 2.0);
@@ -646,13 +785,10 @@ async fn rate_limit_kicks_in_after_burst() {
         }),
     );
 
-    let fed_router = federation_router()
-        .layer(middleware::from_fn_with_state(rate_limiter, rate_limit))
-        .layer(middleware::from_fn_with_state(xmatrix_state, verify_xmatrix))
-        .with_state::<()>(fed_state);
+    let fed_router = authenticated_federation_router::<()>(fed_state, rate_limiter);
 
     let app = keys_router.merge(
-        Router::new().nest("/_matrix/federation/v1", fed_router),
+        fed_router,
     );
 
     tokio::spawn(async move {

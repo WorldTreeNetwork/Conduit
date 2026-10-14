@@ -26,13 +26,14 @@ use super::{AuthState, AuthedUser, MatrixError};
 // Token helpers (il0.17)
 // ---------------------------------------------------------------------------
 
-/// Combined sync token: `"s{events_pos}_d{device_pos}_a{account_data_pos}_r{receipts_pos}"`.
+/// Combined sync token: `"s{events_pos}_d{device_pos}_a{account_data_pos}_r{receipts_pos}_t{to_device_pos}"`.
 ///
 /// Streams and their cursor positions:
 ///   - `s` — event stream_position
 ///   - `d` — device list change stream position
 ///   - `a` — account_data stream_pos (default 0)
 ///   - `r` — receipts stream_pos (default 0)
+///   - `t` — last delivered to-device queue ID (default 0)
 ///
 /// Old formats (`s{e}` and `s{e}_d{d}`) are accepted on parse and
 /// extended with default zero cursors.
@@ -41,13 +42,18 @@ struct SyncToken {
     device_pos: i64,
     account_data_pos: i64,
     receipts_pos: i64,
+    to_device_pos: i64,
 }
 
 impl SyncToken {
     fn encode(&self) -> String {
         format!(
-            "s{}_d{}_a{}_r{}",
-            self.events_pos, self.device_pos, self.account_data_pos, self.receipts_pos
+            "s{}_d{}_a{}_r{}_t{}",
+            self.events_pos,
+            self.device_pos,
+            self.account_data_pos,
+            self.receipts_pos,
+            self.to_device_pos
         )
     }
 }
@@ -56,7 +62,8 @@ impl SyncToken {
 /// Accepts:
 ///   - `"s{events}"` (legacy)
 ///   - `"s{events}_d{device}"` (previous format)
-///   - `"s{events}_d{device}_a{acct}_r{rcpts}"` (current format)
+///   - `"s{events}_d{device}_a{acct}_r{rcpts}"` (previous format)
+///   - `"s{events}_d{device}_a{acct}_r{rcpts}_t{to_device}"` (current format)
 fn parse_since(raw: &str) -> Result<SyncToken, Response> {
     let bad = || {
         (
@@ -71,11 +78,12 @@ fn parse_since(raw: &str) -> Result<SyncToken, Response> {
 
     let s_part = raw.strip_prefix('s').ok_or_else(bad)?;
 
-    // Split by '_' into up to 4 parts: events, d{device}, a{acct}, r{rcpts}
+    // Stream cursors are independent; absent cursors default to zero.
     let events_pos: i64;
     let mut device_pos = 0i64;
     let mut account_data_pos = 0i64;
     let mut receipts_pos = 0i64;
+    let mut to_device_pos = 0i64;
 
     // Parse the events part (everything before the first '_').
     let rest = if let Some(idx) = s_part.find('_') {
@@ -96,11 +104,31 @@ fn parse_since(raw: &str) -> Result<SyncToken, Response> {
             account_data_pos = v.parse::<i64>().map_err(|_| bad())?;
         } else if let Some(v) = segment.strip_prefix('r') {
             receipts_pos = v.parse::<i64>().map_err(|_| bad())?;
+        } else if let Some(v) = segment.strip_prefix('t') {
+            to_device_pos = v.parse::<i64>().map_err(|_| bad())?;
         }
         // Unknown segments are ignored for forward-compat.
     }
 
-    Ok(SyncToken { events_pos, device_pos, account_data_pos, receipts_pos })
+    if [
+        events_pos,
+        device_pos,
+        account_data_pos,
+        receipts_pos,
+        to_device_pos,
+    ]
+    .iter()
+    .any(|position| *position < 0)
+    {
+        return Err(bad());
+    }
+    Ok(SyncToken {
+        events_pos,
+        device_pos,
+        account_data_pos,
+        receipts_pos,
+        to_device_pos,
+    })
 }
 
 fn encode_token(pos: i64) -> String {
@@ -286,6 +314,7 @@ async fn build_sync_response<S: AuthState>(
     let device_since = since_token.as_ref().map(|t| t.device_pos).unwrap_or(0);
     let account_data_since = since_token.as_ref().map(|t| t.account_data_pos).unwrap_or(0);
     let receipts_since = since_token.as_ref().map(|t| t.receipts_pos).unwrap_or(0);
+    let to_device_since = since_token.as_ref().map(|t| t.to_device_pos).unwrap_or(0);
 
     // --- Global account data (1mo.8) ---
     // Must be computed before the room loop so per-room data is available.
@@ -502,31 +531,38 @@ async fn build_sync_response<S: AuthState>(
         })
         .collect();
 
+    // --- To-device messages (mrm.7) ---
+    // Only the since token acknowledges a previously delivered batch. Keep
+    // newly returned messages so an interrupted response can be retried.
+    if to_device_since > 0 {
+        if let Err(error) = storage
+            .delete_to_device_before(user_id, authed_device_id, to_device_since)
+            .await
+        {
+            return MatrixError::unknown(error.to_string()).into_response();
+        }
+    }
+    let to_device_events = match storage
+        .drain_to_device(user_id, authed_device_id, to_device_since, 100)
+        .await
+    {
+        Ok(msgs) => msgs,
+        Err(error) => return MatrixError::unknown(error.to_string()).into_response(),
+    };
+
+    let next_to_device_pos = to_device_events
+        .iter()
+        .map(|m| m.id)
+        .max()
+        .unwrap_or(to_device_since);
     let next_batch = SyncToken {
         events_pos: next_events_pos,
         device_pos: next_device_pos,
         account_data_pos: next_account_data_pos,
         receipts_pos: next_receipts_pos,
+        to_device_pos: next_to_device_pos,
     }
     .encode();
-
-    // --- To-device messages (mrm.7) ---
-    // Drain queued to-device messages for this device.
-    // We use since_id=0 on initial sync (all messages) or the last delivered id
-    // encoded in... actually since_id tracked separately requires state. For v0
-    // we always drain from 0 and delete up to max returned id. The client
-    // handles deduplication via the next_batch cursor it provides on next /sync.
-    // Using device_since as the since_id for to-device queue.
-    let to_device_events = match storage
-        .drain_to_device(user_id, &authed_device_id, device_since, 100)
-        .await
-    {
-        Ok(msgs) => msgs,
-        Err(_) => vec![],
-    };
-
-    // Compute max to-device id for cleanup.
-    let max_to_device_id = to_device_events.iter().map(|m| m.id).max().unwrap_or(0);
 
     let to_device_json: Vec<Value> = to_device_events
         .iter()
@@ -538,13 +574,6 @@ async fn build_sync_response<S: AuthState>(
             })
         })
         .collect();
-
-    // Delete delivered messages.
-    if max_to_device_id > 0 {
-        let _ = storage
-            .delete_to_device_before(user_id, &authed_device_id, max_to_device_id)
-            .await;
-    }
 
     // --- Device list changes (mrm.12) ---
     let device_list_changed = match storage.device_list_changes_since(device_since).await {
@@ -727,5 +756,42 @@ fn apply_type_filter(
             .into_iter()
             .filter(|e| filter.timeline_types.contains(&e.event_type))
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod token_tests {
+    use super::parse_since;
+
+    #[test]
+    fn legacy_tokens_do_not_acknowledge_the_to_device_queue() {
+        for raw in ["s7", "s7_d99", "s7_d99_a3_r4"] {
+            let token = parse_since(raw).unwrap_or_else(|_| panic!("legacy token {raw}"));
+            assert_eq!(token.events_pos, 7);
+            assert_eq!(token.to_device_pos, 0);
+        }
+    }
+
+    #[test]
+    fn to_device_cursor_is_independent_of_device_list_cursor() {
+        let token = parse_since("s7_d99_a3_r4_t2").unwrap_or_else(|_| panic!("valid token"));
+        assert_eq!(token.device_pos, 99);
+        assert_eq!(token.to_device_pos, 2);
+        assert_eq!(token.encode(), "s7_d99_a3_r4_t2");
+    }
+
+    #[test]
+    fn negative_and_malformed_cursors_are_rejected() {
+        for raw in [
+            "s-1",
+            "s0_d-1",
+            "s0_a-1",
+            "s0_r-1",
+            "s0_t-1",
+            "s0_tbad",
+            "s0_t9223372036854775808",
+        ] {
+            assert!(parse_since(raw).is_err(), "{raw}");
+        }
     }
 }

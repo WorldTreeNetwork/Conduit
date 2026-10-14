@@ -31,9 +31,7 @@ use conduit_server::{
     app_service::{self, AppService, AsQueues},
     federation,
     federation::{
-        FedState, XMatrixMiddlewareState, RateLimiter, federation_router,
-        middleware::verify_xmatrix,
-        rate_limit::rate_limit,
+        FedState, RateLimiter, authenticated_federation_router,
     },
     keys, push_worker, BlobStore, PostgresStorage, RemoteKeyCache,
 };
@@ -470,13 +468,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tracing::info!("AS transaction pusher workers started");
     }
 
-    // Build the X-Matrix middleware state (for inbound federation auth).
-    let xmatrix_state = XMatrixMiddlewareState {
-        server_name: Arc::clone(&state.server_name),
-        remote_keys: Arc::clone(&state.remote_keys),
-        http: state.http.clone(),
-    };
-
     // Build the per-origin rate limiter.
     let rate_limiter = RateLimiter::default_federation();
 
@@ -494,13 +485,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         app_services: Arc::clone(&state.app_services),
     };
 
-    // Federation inbound subrouter: X-Matrix auth → rate limit → handlers.
-    // Layers are applied before with_state so the middleware state is bound.
-    // with_state::<AppState> converts Router<FedState> → Router<AppState>.
-    let fed_router: Router<AppState> = federation_router()
-        .layer(middleware::from_fn_with_state(rate_limiter, rate_limit))
-        .layer(middleware::from_fn_with_state(xmatrix_state, verify_xmatrix))
-        .with_state::<AppState>(fed_state);
+    let fed_router: Router<AppState> = authenticated_federation_router(fed_state, rate_limiter);
 
     let app = Router::new()
         .route("/health", get(health))
@@ -699,7 +684,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             cs_rate_limit,
         ))
         // Federation inbound (E09)
-        .nest("/_matrix/federation/v1", fed_router)
+        .merge(fed_router)
         .with_state(state.clone())
         .layer(TraceLayer::new_for_http())
         // CORS (conduit-cws): browser Matrix clients (Element) are served from a
@@ -772,10 +757,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    let addr: SocketAddr = "0.0.0.0:8008".parse()?;
-    tracing::info!(%addr, "conduit-server listening");
-
+    let addr: SocketAddr = env::var("CONDUIT_LISTEN_ADDR")
+        .unwrap_or_else(|_| "0.0.0.0:8008".to_owned())
+        .parse()?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
+    let addr = listener.local_addr()?;
+    // Report the actual bound port, including when port zero was requested.
+    // Automation still uses normal HTTP requests and authentication.
+    if let Ok(path) = env::var("CONDUIT_READY_FILE") {
+        std::fs::write(path, serde_json::to_vec(&json!({"address": addr.to_string()}))?)?;
+    }
+    tracing::info!(%addr, "conduit-server listening");
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),

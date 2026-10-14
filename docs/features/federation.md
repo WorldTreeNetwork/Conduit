@@ -49,8 +49,8 @@ room.
 | Endpoint                                  | Purpose                                |
 |-------------------------------------------|----------------------------------------|
 | `/make_join/{roomId}/{userId}`            | Half-build a join PDU on the remote.   |
-| `/send_join/v2/{roomId}/{eventId}`        | Send the signed join + receive state.  |
-| `/invite/v2/{roomId}/{eventId}`           | Invite a remote user.                  |
+| `/_matrix/federation/v2/send_join/{roomId}/{eventId}` | Send the signed join + receive state. |
+| `/_matrix/federation/v2/invite/{roomId}/{eventId}` | Invite a remote user. |
 | `/state/{roomId}`, `/state_ids/{roomId}`  | Fetch state at a point.                |
 | `/backfill/{roomId}`, `/event/{eventId}`  | DAG repair.                            |
 | `/get_missing_events/{roomId}`            | Fill a gap between known events.       |
@@ -79,8 +79,13 @@ Each incoming PDU goes through:
 ### Join handshake
 
 A remote `/make_join` returns a half-built join PDU; the remote signs
-it and sends it back via `/send_join/v2`; we run state-res and accept
+it and sends it back via `/_matrix/federation/v2/send_join`; we run state-res and accept
 both the new member and the resolved state.
+
+The binary and inbound/roundtrip tests share `authenticated_federation_router`,
+which mounts v1 and v2 under `/_matrix/federation` and applies X-Matrix auth and
+per-origin rate limiting. Signed requests use the full original URI, including
+the API version. The former `/v1/send_join/v2` and `/v1/invite/v2` paths are absent.
 
 ### Backfill
 
