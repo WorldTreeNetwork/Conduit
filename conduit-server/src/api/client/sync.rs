@@ -226,42 +226,21 @@ fn encode_token(pos: i64) -> String {
 // Filter parsing (il0.16 — best-effort)
 // ---------------------------------------------------------------------------
 
-#[derive(Default)]
 struct SyncFilter {
-    /// Max number of timeline events per room. Default 10.
+    definition: conduit::filter::Filter,
     timeline_limit: i64,
-    /// If non-empty, only include these event types in timeline.
-    timeline_types: Vec<String>,
-    /// If non-empty, only include these room IDs.
-    rooms: Vec<String>,
 }
 
-fn parse_filter(raw: &str) -> SyncFilter {
-    let mut f = SyncFilter {
-        timeline_limit: 10,
-        ..Default::default()
-    };
-    // If it parses as JSON use it; otherwise treat as an opaque filter ID
-    // (stored filters not yet implemented — return defaults).
-    let Ok(v) = serde_json::from_str::<Value>(raw) else {
-        return f;
-    };
-    if let Some(limit) = v.pointer("/room/timeline/limit").and_then(Value::as_i64) {
-        f.timeline_limit = limit.max(0).min(500);
+impl SyncFilter {
+    fn parse(value: Value) -> Result<Self, Response> {
+        let definition: conduit::filter::Filter = serde_json::from_value(value)
+            .map_err(|error| MatrixError::bad_json(error.to_string()).into_response())?;
+        let timeline_limit = definition.room.timeline.events.limit.unwrap_or(10).min(500) as i64;
+        Ok(Self {
+            definition,
+            timeline_limit,
+        })
     }
-    if let Some(types) = v.pointer("/room/timeline/types").and_then(Value::as_array) {
-        f.timeline_types = types
-            .iter()
-            .filter_map(|t| t.as_str().map(str::to_owned))
-            .collect();
-    }
-    if let Some(rooms) = v.pointer("/room/rooms").and_then(Value::as_array) {
-        f.rooms = rooms
-            .iter()
-            .filter_map(|r| r.as_str().map(str::to_owned))
-            .collect();
-    }
-    f
 }
 
 // ---------------------------------------------------------------------------
@@ -331,15 +310,28 @@ pub async fn sync<S: AuthState>(
     Query(query): Query<SyncQuery>,
 ) -> Response {
     let user_id = &authed.user_id;
-    // Parse filter (best-effort).
-    let filter = query
-        .filter
-        .as_deref()
-        .map(parse_filter)
-        .unwrap_or_else(|| SyncFilter {
-            timeline_limit: 10,
-            ..Default::default()
-        });
+    let value = match query.filter.as_deref() {
+        None => json!({}),
+        Some(raw) if raw.starts_with('{') => match serde_json::from_str::<Value>(raw) {
+            Ok(value) => value,
+            Err(error) => return MatrixError::bad_json(error.to_string()).into_response(),
+        },
+        Some(id) => match state.storage().get_filter(user_id, id).await {
+            Ok(Some(value)) => value,
+            Ok(None) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"errcode": "M_INVALID_PARAM", "error": "unknown filter ID"})),
+                )
+                    .into_response()
+            }
+            Err(error) => return MatrixError::unknown(error.to_string()).into_response(),
+        },
+    };
+    let filter = match SyncFilter::parse(value) {
+        Ok(filter) => filter,
+        Err(error) => return error,
+    };
 
     // Parse `since` token.
     let since_token: Option<SyncToken> = match &query.since {
@@ -371,7 +363,7 @@ pub async fn sync<S: AuthState>(
             since_token.as_ref(),
             &filter,
             query.full_state,
-            query.include_leave,
+            query.include_leave || filter.definition.room.include_leave,
         )
         .await
         {
@@ -438,13 +430,36 @@ async fn build_sync_response<S: AuthState>(
         Ok(v) => v,
         Err(error) => return Err(MatrixError::unknown(error.to_string()).into_response()),
     };
-    let next_account_data_pos = acct_data_changes
-        .iter()
-        .map(|(_, _, _, position)| *position)
-        .max()
-        .unwrap_or(account_data_since);
+    let mut next_account_data_pos = account_data_since;
+    let mut quotas: HashMap<Option<String>, usize> = HashMap::new();
+    let mut included = Vec::new();
+    for change in acct_data_changes {
+        let (room, kind, content, position) = &change;
+        let event = json!({"type": kind, "content": content});
+        let (matches, limit) = match room {
+            None => (
+                filter.definition.account_data.matches(&event),
+                filter.definition.account_data.limit,
+            ),
+            Some(room) => (
+                filter.definition.room.allows(room)
+                    && filter.definition.room.account_data.matches(room, &event),
+                filter.definition.room.account_data.events.limit,
+            ),
+        };
+        let used = quotas.entry(room.clone()).or_default();
+        if matches && limit.is_some_and(|limit| *used >= limit.min(5000)) {
+            break;
+        }
+        next_account_data_pos = *position;
+        if matches {
+            *used += 1;
+            included.push(change);
+        }
+    }
+    let acct_data_changes = included;
 
-    let global_account_data_events: Vec<Value> = acct_data_changes
+    let mut global_account_data_events: Vec<Value> = acct_data_changes
         .iter()
         .filter(|(room_id, _, _, _)| room_id.is_none())
         .map(|(_, event_type, content, _)| json!({ "type": event_type, "content": content }))
@@ -466,7 +481,7 @@ async fn build_sync_response<S: AuthState>(
         Ok(v) => v,
         Err(error) => return Err(MatrixError::unknown(error.to_string()).into_response()),
     };
-    let next_receipts_pos = receipt_changes
+    let mut next_receipts_pos = receipt_changes
         .iter()
         .map(|(_, _, _, _, _, position)| *position)
         .max()
@@ -501,9 +516,9 @@ async fn build_sync_response<S: AuthState>(
     let presence_since = since_token
         .filter(|_| epoch_matches)
         .map(|token| token.presence_pos);
-    let (next_typing_pos, typing_changes, typing_expiry) =
+    let (mut next_typing_pos, typing_changes, typing_expiry) =
         state.typing_store().snapshot(typing_since).await;
-    let (next_presence_pos, presence_changes, presence_expiry) =
+    let (mut next_presence_pos, presence_changes, presence_expiry) =
         state.presence_store().snapshot(presence_since).await;
     let next_expiry = typing_expiry.into_iter().chain(presence_expiry).min();
     let memberships = storage
@@ -527,7 +542,7 @@ async fn build_sync_response<S: AuthState>(
     let mut knocked_rooms = HashMap::new();
     let mut left_rooms = HashMap::new();
     for membership in &memberships {
-        if !filter.rooms.is_empty() && !filter.rooms.contains(&membership.room_id) {
+        if !filter.definition.room.allows(&membership.room_id) {
             continue;
         }
         let position = *member_positions.get(&membership.event_id).unwrap_or(&0);
@@ -553,7 +568,7 @@ async fn build_sync_response<S: AuthState>(
                 if (since_token.is_some() && position > since)
                     || (since_token.is_none() && include_leave) =>
             {
-                let block = departed_room_block(
+                let mut block = departed_room_block(
                     storage.as_ref(),
                     user_id,
                     membership,
@@ -562,6 +577,7 @@ async fn build_sync_response<S: AuthState>(
                     filter,
                 )
                 .await?;
+                filter_room_block(&mut block, filter, &membership.room_id, user_id);
                 left_rooms.insert(membership.room_id.clone(), block);
             }
             _ => {}
@@ -582,15 +598,10 @@ async fn build_sync_response<S: AuthState>(
         .cloned()
         .collect();
 
-    // Apply room filter.
-    let rooms_to_check: Vec<String> = if filter.rooms.is_empty() {
-        all_rooms_to_check
-    } else {
-        all_rooms_to_check
-            .into_iter()
-            .filter(|r| filter.rooms.contains(r))
-            .collect()
-    };
+    let rooms_to_check: Vec<_> = all_rooms_to_check
+        .into_iter()
+        .filter(|room| filter.definition.room.allows(room))
+        .collect();
 
     // For each room, check if user is currently joined.
     let mut joined_rooms: HashMap<String, JoinedRoomBlock> = HashMap::new();
@@ -686,6 +697,21 @@ async fn build_sync_response<S: AuthState>(
             }));
         }
 
+        add_lazy_members(
+            state.storage().as_ref(),
+            &mut block,
+            filter,
+            room_id,
+            user_id,
+        )
+        .await?;
+        let (held_receipts, held_typing) = filter_room_block(&mut block, filter, room_id, user_id);
+        if held_receipts {
+            next_receipts_pos = receipts_since;
+        }
+        if held_typing {
+            next_typing_pos = typing_since.unwrap_or(0);
+        }
         joined_rooms.insert(room_id.clone(), block);
     }
 
@@ -722,10 +748,25 @@ async fn build_sync_response<S: AuthState>(
             }
         }
     }
-    let all_presence = presence_changes
-        .into_iter()
-        .filter(|(user, _)| visible_users.contains(user));
-    let presence_events: Vec<Value> = all_presence
+    let mut selected_presence = Vec::new();
+    for (uid, entry) in presence_changes {
+        let event = json!({"type": "m.presence", "sender": uid});
+        if !visible_users.contains(&uid) || !filter.definition.presence.matches(&event) {
+            continue;
+        }
+        if filter
+            .definition
+            .presence
+            .limit
+            .is_some_and(|limit| selected_presence.len() >= limit.min(5000))
+        {
+            next_presence_pos = entry.stream_position.saturating_sub(1);
+            break;
+        }
+        selected_presence.push((uid, entry));
+    }
+    let all_presence = selected_presence.into_iter();
+    let mut presence_events: Vec<Value> = all_presence
         .into_iter()
         .map(|(uid, entry)| {
             let last_active_ago = entry.last_changed_at.elapsed().as_millis() as u64;
@@ -827,6 +868,16 @@ async fn build_sync_response<S: AuthState>(
     }
     .encode();
 
+    apply_value_filter(
+        &mut global_account_data_events,
+        &filter.definition.account_data,
+    );
+    apply_value_filter(&mut presence_events, &filter.definition.presence);
+    for events in [&mut global_account_data_events, &mut presence_events] {
+        for event in events {
+            *event = filter.definition.project(std::mem::take(event));
+        }
+    }
     let rooms_obj = json!({
         "join": joined_rooms,
         "invite": invited_rooms,
@@ -1151,18 +1202,155 @@ async fn build_incremental_room_block<S: AuthState>(
     })
 }
 
+async fn add_lazy_members(
+    storage: &dyn conduit::storage::Storage,
+    block: &mut JoinedRoomBlock,
+    filter: &SyncFilter,
+    room: &str,
+    user: &str,
+) -> Result<(), Response> {
+    if !filter.definition.room.state.lazy_load_members {
+        return Ok(());
+    }
+    let mut senders: std::collections::HashSet<_> = block
+        .timeline
+        .events
+        .iter()
+        .filter_map(|event| event["sender"].as_str().map(str::to_owned))
+        .collect();
+    senders.insert(user.to_owned());
+    let member_snapshot = if let Some(first) = block
+        .timeline
+        .events
+        .first()
+        .and_then(|event| event["event_id"].as_str())
+    {
+        let positions = storage
+            .event_stream_positions(&[first.to_owned()])
+            .await
+            .map_err(|error| MatrixError::unknown(error.to_string()).into_response())?;
+        state_before(storage, room, *positions.get(first).unwrap_or(&i64::MAX)).await?
+    } else {
+        state_before(storage, room, i64::MAX).await?
+    };
+    for member in senders {
+        if block
+            .state
+            .events
+            .iter()
+            .any(|event| event["type"] == "m.room.member" && event["state_key"] == member)
+            || block
+                .timeline
+                .events
+                .iter()
+                .any(|event| event["type"] == "m.room.member" && event["state_key"] == member)
+        {
+            continue;
+        }
+        if let Some(event) = member_snapshot.get(&("m.room.member".to_owned(), member)) {
+            block
+                .state
+                .events
+                .push(serde_json::to_value(event).expect("member JSON"));
+        }
+    }
+    Ok(())
+}
+
 fn apply_type_filter(
     events: Vec<conduit::event::Event>,
     filter: &SyncFilter,
 ) -> Vec<conduit::event::Event> {
-    if filter.timeline_types.is_empty() {
-        events
-    } else {
-        events
-            .into_iter()
-            .filter(|e| filter.timeline_types.contains(&e.event_type))
-            .collect()
+    events
+        .into_iter()
+        .filter(|event| {
+            filter.definition.room.timeline.matches(
+                &event.room_id,
+                &serde_json::to_value(event).expect("event JSON"),
+            )
+        })
+        .collect()
+}
+
+fn apply_value_filter(events: &mut Vec<Value>, rule: &conduit::filter::EventFilter) {
+    events.retain(|event| rule.matches(event));
+    if let Some(limit) = rule.limit {
+        events.truncate(limit.min(5000));
     }
+}
+
+fn filter_room_block(
+    block: &mut JoinedRoomBlock,
+    filter: &SyncFilter,
+    room: &str,
+    user: &str,
+) -> (bool, bool) {
+    let timeline_members: std::collections::HashSet<_> = block
+        .timeline
+        .events
+        .iter()
+        .filter(|event| event["type"] == "m.room.member")
+        .filter_map(|event| event["event_id"].as_str().map(str::to_owned))
+        .collect();
+    let mut senders: std::collections::HashSet<_> = block
+        .timeline
+        .events
+        .iter()
+        .filter_map(|event| event["sender"].as_str().map(str::to_owned))
+        .collect();
+    senders.insert(user.to_owned());
+    let state_rule = &filter.definition.room.state;
+    block.state.events.retain(|event| {
+        state_rule.matches(room, event)
+            && (!state_rule.lazy_load_members
+                || event["type"] != "m.room.member"
+                || event["state_key"]
+                    .as_str()
+                    .is_some_and(|member| senders.contains(member)))
+            && (state_rule.include_redundant_members
+                || event["type"] != "m.room.member"
+                || event["event_id"]
+                    .as_str()
+                    .is_none_or(|id| !timeline_members.contains(id)))
+    });
+    if let Some(limit) = state_rule.events.limit {
+        block.state.events.truncate(limit.min(5000));
+    }
+    let mut held = (false, false);
+    for (events, rule) in [
+        (
+            &mut block.ephemeral.events,
+            &filter.definition.room.ephemeral,
+        ),
+        (
+            &mut block.account_data.events,
+            &filter.definition.room.account_data,
+        ),
+    ] {
+        events.retain(|event| rule.matches(room, event));
+        if let Some(limit) = rule.events.limit {
+            for event in events.iter().skip(limit.min(5000)) {
+                if event["type"] == "m.receipt" {
+                    held.0 = true;
+                }
+                if event["type"] == "m.typing" {
+                    held.1 = true;
+                }
+            }
+            events.truncate(limit.min(5000));
+        }
+    }
+    for events in [
+        &mut block.timeline.events,
+        &mut block.state.events,
+        &mut block.ephemeral.events,
+        &mut block.account_data.events,
+    ] {
+        for event in events {
+            *event = filter.definition.project(std::mem::take(event));
+        }
+    }
+    held
 }
 
 #[cfg(test)]

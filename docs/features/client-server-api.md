@@ -93,14 +93,31 @@ State snapshots precede the returned timeline. Clients fold timeline state
 events into them; a short initial timeline may contain the create/join events
 rather than duplicating them in the state array. Limited gaps include state
 changes omitted from the timeline. `full_state=true` returns room state
-immediately, and a zero timeline limit supports state-only requests.
+immediately, and filter limits are validated as strictly positive, as required by the specification.
 
 `prev_batch` uses the actual insertion position before the first timeline event.
 The messages endpoint accepts these opaque sync prefixes and validates malformed
 cursors. Backward pagination fetches omitted events without repeating the boundary.
 MemoryStorage now uses immutable insertion positions independently of DAG depth,
 as PostgreSQL does. Purges retain a durable high-water mark instead of moving the
-global stream backwards. Full DAG-resolved historical state snapshots, complete
-filters/lazy loading, and knock endpoints remain under `conduit-y99.13` and the
+global stream backwards. Full DAG-resolved historical state snapshots, remaining
+filter/format edges, and knock endpoints remain under `conduit-y99.13` and the
 persist/state-resolution audit; these local-history checks are not whole-protocol
 conformance proof.
+
+## Stored and inline filters
+
+POST/GET `/user/{userId}/filter` persist a user's filter definition in PostgreSQL
+and require the authenticated owner. Sync resolves an opaque ID for that user;
+unknown IDs and malformed inline definitions produce Matrix errors. Type wildcard
+patterns, inclusion/exclusion lists, URL predicates, event field paths (including
+escaped dots), room selection and positive limits share the same model for both
+forms. Exclusions win; an empty allowed list selects no events.
+
+Presence/account data, room state, timeline, ephemeral and room account-data
+criteria are applied on their own streams. Limited account-data and presence
+responses retain cursors before omitted updates so the next request delivers the
+remainder. Lazy state selects the syncing user and timeline senders, preserving
+historical membership events with different event IDs. Redundant sender memberships
+may still be resent, as permitted by the specification. Further federation-format
+and state/ephemeral limit edge auditing remains under `conduit-y99.13.4`.

@@ -556,6 +556,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .delete(directory_api::delete_alias::<AppState>))
         .route("/_matrix/client/v3/rooms/:roomId/messages",
             get(rooms::get_messages::<AppState>))
+        .route("/_matrix/client/v3/user/:userId/filter", post(conduit_server::api::client::filters::create::<AppState>))
+        .route("/_matrix/client/v3/user/:userId/filter/:filterId", get(conduit_server::api::client::filters::get::<AppState>))
         // Client-Server API: sync
         .route("/_matrix/client/v3/sync",
             get(sync_api::sync::<AppState>))

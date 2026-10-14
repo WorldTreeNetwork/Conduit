@@ -25,6 +25,7 @@ pub mod canonical_json;
 pub mod config;
 pub mod error;
 pub mod event;
+pub mod filter;
 pub mod hashing;
 pub mod identity;
 pub mod keys;

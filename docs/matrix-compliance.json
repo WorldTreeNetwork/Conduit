@@ -494,7 +494,7 @@
         "Acceptance introduces joined-room state",
         "Kick/leave timelines include own transition and exclude later messages",
         "Limited gaps carry state changes before the returned timeline",
-        "full_state returns immediately and zero-limit timelines support state-only snapshots",
+        "full_state returns immediately; filter limits must be strictly positive",
         "prev_batch fetches omitted events without repeating the timeline boundary"
       ],
       "implementation": [
@@ -507,8 +507,8 @@
         "conduit-server/tests/production_e2e.rs::production_sync_pagination_covers_a_limited_gap_and_full_state"
       ],
       "limitations": [
-        "Historical state currently reconstructs local stream history; full resolved DAG state snapshots remain required",
-        "Stored/full filters, lazy member loading and knock API journeys remain incomplete"
+        "Full DAG historical snapshots remain required",
+        "Remaining filter/format edges and knock API journeys remain incomplete"
       ],
       "gap_issues": [
         "conduit-y99.13",
@@ -531,6 +531,41 @@
         "Prepared add-pdu-wire change awaits independent review; configured Opus authentication expired and Grok fallback timed out"
       ],
       "gap_issues": [
+        "conduit-embed-pdu"
+      ]
+    },
+    {
+      "id": "owned-stored-and-inline-sync-filters",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#filtering",
+      "status": "covered_assertions_only",
+      "assertions": [
+        "Filter creation/read are scoped to the authenticated owner",
+        "Definitions survive restart and inline/stored criteria agree",
+        "Wildcard type patterns, sender inclusion and exclusions, URL predicates and escaped field paths are supported",
+        "Empty lists select none; exclusions win; malformed and nonpositive limits reject",
+        "Lazy membership state includes self/timeline senders and omits unrelated members",
+        "Limited account-data/presence windows deliver remainder on following sync",
+        "Lazy membership lookup uses the snapshot before the timeline, not later profile updates"
+      ],
+      "implementation": [
+        "conduit/src/filter.rs",
+        "conduit-server/src/api/client/filters.rs",
+        "conduit-server/src/api/client/sync.rs",
+        "conduit-server/src/storage_pg.rs"
+      ],
+      "tests": [
+        "conduit/src/filter.rs::tests",
+        "conduit-server/tests/production_e2e.rs::production_filters_are_owned_durable_and_shared_by_inline_and_stored_sync",
+        "conduit-server/tests/production_e2e.rs::production_lazy_members_include_self_and_timeline_senders",
+        "conduit-server/tests/production_e2e.rs::production_filter_stream_limits_do_not_skip_pending_updates"
+      ],
+      "limitations": [
+        "Raw federation event format is still the legacy snapshot pending PDU wire work",
+        "Broader state/ephemeral limit and lazy member edge auditing remains required"
+      ],
+      "gap_issues": [
+        "conduit-y99.13.4",
         "conduit-embed-pdu"
       ]
     }

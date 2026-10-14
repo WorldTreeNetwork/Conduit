@@ -32,6 +32,7 @@ pub struct PresenceEntry {
     pub presence: String,
     pub status_msg: Option<String>,
     pub last_changed_at: Instant,
+    pub stream_position: i64,
 }
 
 impl PresenceEntry {
@@ -40,6 +41,7 @@ impl PresenceEntry {
             presence,
             status_msg,
             last_changed_at: Instant::now(),
+            stream_position: 0,
         }
     }
 
@@ -89,10 +91,9 @@ impl PresenceStore {
         let mut state = self.inner.write().await;
         state.position += 1;
         let position = state.position;
-        state.entries.insert(
-            user_id.to_owned(),
-            (position, PresenceEntry::new(presence, status_msg)),
-        );
+        let mut entry = PresenceEntry::new(presence, status_msg);
+        entry.stream_position = position;
+        state.entries.insert(user_id.to_owned(), (position, entry));
         self.changed.send_replace(position);
     }
 
@@ -126,18 +127,20 @@ impl PresenceStore {
             let position = state.position;
             if let Some((pos, entry)) = state.entries.get_mut(user) {
                 *pos = position;
+                entry.stream_position = position;
                 entry.presence = "offline".into();
             }
         }
         if !expired.is_empty() {
             self.changed.send_replace(state.position);
         }
-        let entries = state
+        let mut entries: Vec<_> = state
             .entries
             .iter()
             .filter(|(_, (pos, _))| since.is_none_or(|since| *pos > since))
             .map(|(user, (_, entry))| (user.clone(), entry.clone()))
             .collect();
+        entries.sort_by_key(|(_, entry)| entry.stream_position);
         let next_expiry = state
             .entries
             .values()

@@ -10,6 +10,7 @@
 pub mod account_data;
 pub mod directory;
 pub mod event_pipeline;
+pub mod filters;
 pub mod keys;
 pub mod media;
 pub mod presence;

@@ -264,6 +264,8 @@ pub struct AuditEntry {
 
 #[async_trait]
 pub trait Storage: Send + Sync + 'static {
+    async fn put_filter(&self, user: &str, id: &str, definition: &Value) -> Result<()>;
+    async fn get_filter(&self, user: &str, id: &str) -> Result<Option<Value>>;
     async fn lock_transaction(&self, key: &TransactionKey) -> Result<Box<dyn TransactionGuard>>;
 
     async fn transaction_original(&self, key: &TransactionKey) -> Result<Option<Value>>;
@@ -954,6 +956,7 @@ struct MemoryOutbound {
 }
 
 struct MemoryInner {
+    filters: HashMap<(String, String), Value>,
     requests: HashMap<TransactionKey, Value>,
     transactions: HashMap<TransactionKey, Value>,
     events: HashMap<String, Event>,
@@ -1019,6 +1022,7 @@ impl Default for MemoryInner {
     fn default() -> Self {
         Self {
             events: HashMap::new(),
+            filters: HashMap::new(),
             event_positions: HashMap::new(),
             event_next_position: 0,
             requests: HashMap::new(),
@@ -1059,6 +1063,16 @@ impl Default for MemoryInner {
 
 #[async_trait]
 impl Storage for MemoryStorage {
+    async fn put_filter(&self, user: &str, id: &str, definition: &Value) -> Result<()> {
+        let mut inner = self.inner.write().await;
+        let key = (user.into(), id.into());
+        if inner.filters.contains_key(&key) { return Err(crate::Error::Storage("filter ID already exists".into())); }
+        inner.filters.insert(key, definition.clone());
+        Ok(())
+    }
+    async fn get_filter(&self, user: &str, id: &str) -> Result<Option<Value>> {
+        Ok(self.inner.read().await.filters.get(&(user.into(), id.into())).cloned())
+    }
     async fn lock_transaction(&self, key: &TransactionKey) -> Result<Box<dyn TransactionGuard>> {
         let lock = {
             let mut locks = self.transaction_locks.lock().map_err(|_| crate::Error::Storage("transaction lock registry poisoned".into()))?;

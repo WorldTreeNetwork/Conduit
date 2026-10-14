@@ -65,6 +65,17 @@ fn map_sqlx(e: sqlx::Error) -> Error {
 
 #[async_trait]
 impl Storage for PostgresStorage {
+    async fn put_filter(&self, user: &str, id: &str, definition: &Value) -> Result<()> {
+        sqlx::query!("INSERT INTO client_filters (user_id, filter_id, definition) VALUES ($1, $2, $3)", user, id, definition)
+            .execute(&self.pool).await.map_err(map_sqlx)?;
+        Ok(())
+    }
+    async fn get_filter(&self, user: &str, id: &str) -> Result<Option<Value>> {
+        let row = sqlx::query!("SELECT definition FROM client_filters WHERE user_id = $1 AND filter_id = $2", user, id)
+            .fetch_optional(&self.pool).await.map_err(map_sqlx)?;
+        Ok(row.map(|row| row.definition))
+    }
+
     async fn lock_transaction(&self, key: &conduit::storage::TransactionKey) -> Result<Box<dyn conduit::storage::TransactionGuard>> {
         use sha2::{Digest, Sha256};
         let identity = serde_json::json!(["conduit-replay", key.scope, key.owner, key.endpoint, key.txn_id]).to_string();

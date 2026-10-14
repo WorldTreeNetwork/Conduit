@@ -1744,27 +1744,15 @@ async fn production_sync_pagination_covers_a_limited_gap_and_full_state() {
     let filter = url::form_urlencoded::Serializer::new(String::new())
         .append_pair("filter", r#"{"room":{"timeline":{"limit":0}}}"#)
         .finish();
-    let state_only = server
+    server
         .request(
             Method::GET,
-            &format!(
-                "/_matrix/client/v3/sync?since={}&full_state=true&{filter}",
-                full["next_batch"].as_str().unwrap()
-            ),
+            &format!("/_matrix/client/v3/sync?{filter}"),
             Some(bob_token),
             None,
-            200,
+            400,
         )
         .await;
-    assert_eq!(
-        state_only["rooms"]["join"][&room]["timeline"]["events"],
-        json!([])
-    );
-    assert!(state_only["rooms"]["join"][&room]["state"]["events"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|event| event["type"] == "m.room.create"));
 }
 
 #[tokio::test]
@@ -1917,4 +1905,306 @@ async fn production_invite_accept_and_kick_are_visible_in_sync() {
         )
         .await;
     assert_eq!(quiet["rooms"]["leave"], json!({}));
+}
+
+#[tokio::test]
+async fn production_filters_are_owned_durable_and_shared_by_inline_and_stored_sync() {
+    let mut server = Server::new().await;
+    let (alice, bob, room, _) = server.chat_pair().await;
+    let token = bob["access_token"].as_str().unwrap();
+    let alice_token = alice["access_token"].as_str().unwrap();
+    let filter = json!({"room": {"rooms": [room], "timeline": {
+        "types": ["m.room.*"], "not_types": ["m.room.member"], "senders": [alice["user_id"]], "contains_url": true
+    }}, "event_fields": ["type", "event_id", "content.body"]});
+    let created = server
+        .request(
+            Method::POST,
+            "/_matrix/client/v3/user/@bob:production.test/filter",
+            Some(token),
+            Some(filter.clone()),
+            200,
+        )
+        .await;
+    let id = created["filter_id"].as_str().unwrap();
+    server
+        .request(
+            Method::GET,
+            &format!("/_matrix/client/v3/user/@bob:production.test/filter/{id}"),
+            Some(alice_token),
+            None,
+            403,
+        )
+        .await;
+    let body = server
+        .request(
+            Method::GET,
+            &format!("/_matrix/client/v3/user/@bob:production.test/filter/{id}"),
+            Some(token),
+            None,
+            200,
+        )
+        .await;
+    assert_eq!(body, filter);
+    for (value, content, sender) in [
+        (
+            0,
+            json!({"msgtype": "m.text", "body": "Selected", "url": "mxc://example/file"}),
+            alice_token,
+        ),
+        (
+            1,
+            json!({"msgtype": "m.text", "body": "No URL"}),
+            alice_token,
+        ),
+        (
+            2,
+            json!({"msgtype": "m.text", "body": "Wrong sender", "url": "mxc://example/file"}),
+            token,
+        ),
+    ] {
+        server
+            .request(
+                Method::PUT,
+                &format!("/_matrix/client/v3/rooms/{room}/send/m.room.message/filter{value}"),
+                Some(sender),
+                Some(content),
+                200,
+            )
+            .await;
+    }
+    server.stop();
+    server.start().await;
+    let stored = server
+        .request(
+            Method::GET,
+            &format!("/_matrix/client/v3/sync?filter={id}"),
+            Some(token),
+            None,
+            200,
+        )
+        .await;
+    let query = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("filter", &filter.to_string())
+        .finish();
+    let inline = server
+        .request(
+            Method::GET,
+            &format!("/_matrix/client/v3/sync?{query}"),
+            Some(token),
+            None,
+            200,
+        )
+        .await;
+    let events = &stored["rooms"]["join"][&room]["timeline"]["events"];
+    assert_eq!(events.as_array().unwrap().len(), 1);
+    assert_eq!(events[0]["content"], json!({"body": "Selected"}));
+    assert!(events[0].get("sender").is_none());
+    assert_eq!(
+        events,
+        &inline["rooms"]["join"][&room]["timeline"]["events"]
+    );
+    server
+        .request(
+            Method::GET,
+            "/_matrix/client/v3/sync?filter=missing",
+            Some(token),
+            None,
+            400,
+        )
+        .await;
+    server
+        .request(
+            Method::POST,
+            "/_matrix/client/v3/user/@bob:production.test/filter",
+            Some(token),
+            Some(json!({"room":{"timeline":{"limit":-1}}})),
+            400,
+        )
+        .await;
+}
+
+#[tokio::test]
+async fn production_lazy_members_include_self_and_timeline_senders() {
+    let server = Server::new().await;
+    let (alice, bob, room, _) = server.chat_pair().await;
+    let carol = server.register("carol").await;
+    server
+        .request(
+            Method::POST,
+            &format!("/_matrix/client/v3/join/{room}"),
+            Some(carol["access_token"].as_str().unwrap()),
+            Some(json!({})),
+            200,
+        )
+        .await;
+    server
+        .request(
+            Method::PUT,
+            &format!("/_matrix/client/v3/rooms/{room}/send/m.room.message/lazy"),
+            Some(alice["access_token"].as_str().unwrap()),
+            Some(json!({"msgtype":"m.text", "body":"Latest sender"})),
+            200,
+        )
+        .await;
+    let query = url::form_urlencoded::Serializer::new(String::new()).append_pair("filter", &json!({"room":{"timeline":{"limit":1,"types":["m.room.message"]},"state":{"lazy_load_members":true}}}).to_string()).finish();
+    let sync = server
+        .request(
+            Method::GET,
+            &format!("/_matrix/client/v3/sync?{query}"),
+            Some(bob["access_token"].as_str().unwrap()),
+            None,
+            200,
+        )
+        .await;
+    let members: Vec<_> = sync["rooms"]["join"][&room]["state"]["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|event| event["type"] == "m.room.member")
+        .map(|event| event["state_key"].clone())
+        .collect();
+    assert!(members.contains(&alice["user_id"]));
+    assert!(members.contains(&bob["user_id"]));
+    assert!(!members.contains(&carol["user_id"]));
+    let member_path = format!(
+        "/_matrix/client/v3/rooms/{room}/state/m.room.member/{}",
+        alice["user_id"].as_str().unwrap()
+    );
+    let alice_token = alice["access_token"].as_str().unwrap();
+    let bob_token = bob["access_token"].as_str().unwrap();
+    server
+        .request(
+            Method::PUT,
+            &member_path,
+            Some(alice_token),
+            Some(json!({"membership":"join", "displayname":"Before"})),
+            200,
+        )
+        .await;
+    let baseline = server
+        .request(
+            Method::GET,
+            "/_matrix/client/v3/sync",
+            Some(bob_token),
+            None,
+            200,
+        )
+        .await;
+    server
+        .request(
+            Method::PUT,
+            &format!("/_matrix/client/v3/rooms/{room}/send/m.room.message/historical"),
+            Some(alice_token),
+            Some(json!({"msgtype":"m.text", "body":"Earlier profile"})),
+            200,
+        )
+        .await;
+    server
+        .request(
+            Method::PUT,
+            &member_path,
+            Some(alice_token),
+            Some(json!({"membership":"join", "displayname":"After"})),
+            200,
+        )
+        .await;
+    let historical = server
+        .request(
+            Method::GET,
+            &format!(
+                "/_matrix/client/v3/sync?{query}&since={}",
+                baseline["next_batch"].as_str().unwrap()
+            ),
+            Some(bob_token),
+            None,
+            200,
+        )
+        .await;
+    let sender = historical["rooms"]["join"][&room]["state"]["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["type"] == "m.room.member" && event["state_key"] == alice["user_id"])
+        .unwrap();
+    assert_eq!(
+        sender["content"]["displayname"], "Before",
+        "later membership must not rewrite earlier timeline attribution"
+    );
+}
+
+#[tokio::test]
+async fn production_filter_stream_limits_do_not_skip_pending_updates() {
+    let server = Server::new().await;
+    let (alice, bob, _, _) = server.chat_pair().await;
+    let token = bob["access_token"].as_str().unwrap();
+    for kind in ["m.one", "m.two"] {
+        server
+            .request(
+                Method::PUT,
+                &format!("/_matrix/client/v3/user/@bob:production.test/account_data/{kind}"),
+                Some(token),
+                Some(json!({"kind":kind})),
+                200,
+            )
+            .await;
+    }
+    for (user, bearer) in [
+        (&alice, alice["access_token"].as_str().unwrap()),
+        (&bob, token),
+    ] {
+        server
+            .request(
+                Method::PUT,
+                &format!(
+                    "/_matrix/client/v3/presence/{}/status",
+                    user["user_id"].as_str().unwrap()
+                ),
+                Some(bearer),
+                Some(json!({"presence":"online"})),
+                200,
+            )
+            .await;
+    }
+    let query = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair(
+            "filter",
+            r#"{"presence":{"limit":1},"account_data":{"limit":1}}"#,
+        )
+        .finish();
+    let first = server
+        .request(
+            Method::GET,
+            &format!("/_matrix/client/v3/sync?{query}"),
+            Some(token),
+            None,
+            200,
+        )
+        .await;
+    let second = server
+        .request(
+            Method::GET,
+            &format!(
+                "/_matrix/client/v3/sync?{query}&since={}",
+                first["next_batch"].as_str().unwrap()
+            ),
+            Some(token),
+            None,
+            200,
+        )
+        .await;
+    assert_eq!(first["account_data"]["events"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        second["account_data"]["events"].as_array().unwrap().len(),
+        1
+    );
+    assert_ne!(
+        first["account_data"]["events"][0]["type"],
+        second["account_data"]["events"][0]["type"]
+    );
+    assert_eq!(first["presence"]["events"].as_array().unwrap().len(), 1);
+    assert_eq!(second["presence"]["events"].as_array().unwrap().len(), 1);
+    assert_ne!(
+        first["presence"]["events"][0]["sender"],
+        second["presence"]["events"][0]["sender"]
+    );
 }
