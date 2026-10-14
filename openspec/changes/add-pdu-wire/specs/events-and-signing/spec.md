@@ -34,13 +34,24 @@ On receipt, before signature checks, the system SHALL:
 - strip `unsigned` to `age` (any type) and `invite_room_state` /
   `knock_room_state` (`m.room.member` only);
 - validate canonical JSON over the entire remaining object;
-- enforce the v11 event format, including `auth_events` of at most 10,
-  `prev_events` of at most 20, `depth` below 2^53-1, and the absence of a
-  top-level `event_id` key.
+- enforce the v11 event format:
+  - `auth_events` holds at most 10 entries, and `prev_events` at most 20;
+  - `depth` is an integer in `[0, 2^53-1]`, inclusive at both ends;
+  - the canonical PDU, excluding unsigned `age`, is at most 65536 bytes;
+  - `sender`, `room_id`, `type` and `state_key` are each at most 255 bytes
+    of UTF-8;
+  - `state_key` is either absent or a string;
+  - there is no U+0000 in `sender`, `room_id`, `type`, `state_key`,
+    `auth_events` or `prev_events`;
+  - there is no top-level `event_id` key;
+- require that re-encoding the decoded `Pdu` as canonical JSON reproduces
+  the received object, minus `unsigned`.
 
-A PDU that fails SHALL be dropped. On `/send` it SHALL be omitted from the
-`pdus` result map. On `/send_join` and `/invite` the response SHALL be
-`400 M_BAD_JSON`.
+A PDU that fails SHALL be dropped. The drop SHALL be deterministic and
+SHALL NOT cause a 5xx. On `/send` the PDU SHALL be omitted from the `pdus`
+result map, and the transaction's other PDUs and EDUs SHALL still be
+processed. On `/send_join` and `/invite` the response SHALL be
+`400 M_BAD_JSON`. Error strings SHALL NOT echo values taken from the PDU.
 
 #### Scenario: Explicit event_id is invalid
 
@@ -52,10 +63,47 @@ A PDU that fails SHALL be dropped. On `/send` it SHALL be omitted from the
 
 #### Scenario: Non-canonical values are dropped
 
-- GIVEN PDUs carrying an integer of 2^53, a float, 11 `auth_events`, or 21
-  `prev_events`
+- GIVEN PDUs carrying an integer of 2^53, a float, 11 `auth_events`, 21
+  `prev_events`, `"state_key": null`, or a value that does not round-trip
 - WHEN each is received
 - THEN each is dropped and nothing is stored
+
+#### Scenario: Depth bounds are inclusive
+
+- GIVEN otherwise valid PDUs with `depth` -1, 0, 2^53-1 and 2^53
+- WHEN each is received
+- THEN the PDUs with depth 0 and 2^53-1 are accepted, and those with -1 and
+  2^53 are dropped
+
+#### Scenario: PDU size limit
+
+- GIVEN otherwise valid PDUs whose canonical size is exactly 65536 bytes
+  and 65537 bytes
+- WHEN each is received
+- THEN the 65536-byte PDU is accepted and the 65537-byte PDU is dropped
+
+#### Scenario: Field byte limits
+
+- GIVEN otherwise valid PDUs whose `sender`, `room_id`, `type` or
+  `state_key` is 255 bytes, and others where that field is 256 bytes (using
+  multi-byte UTF-8 so the counts are bytes, not code points)
+- WHEN each is received
+- THEN every 255-byte PDU is accepted and every 256-byte PDU is dropped
+
+#### Scenario: U+0000 over /send
+
+- GIVEN one `/send` transaction holding four items: a valid PDU with
+  `\u0000` in a `content` string, a valid PDU with `\u0000` in `state_key`,
+  an ordinary PDU, and an EDU
+- WHEN it is PUT against PostgreSQL storage
+- THEN:
+  - the response is 200;
+  - the content-NUL PDU has a success entry and is persisted, and federation
+    `/event` and the client API read it back byte-exact;
+  - the state_key-NUL PDU has no result entry and is not stored;
+  - the ordinary PDU and the EDU are processed;
+  - a replay of the same transaction ID returns the identical stored
+    response
 
 #### Scenario: Remote unsigned allow-list
 
@@ -102,10 +150,17 @@ redacted `Pdu` with the same derived ID and unchanged `hashes` and
 The system SHALL provide `add_signature`. It SHALL add one signature over the
 v11-redacted bytes and SHALL leave `hashes` and every other field unchanged.
 The system SHALL co-sign foreign PDUs only with `add_signature`. Before it
-co-signs or persists an inbound `/invite` PDU, the system SHALL verify the
-inviter's signatures and content hash, and SHALL require that the derived ID
-equals the path `eventId`. A failure SHALL return `400 M_INVALID_PARAM` with
-nothing persisted.
+co-signs or persists an inbound `/invite` PDU, the system SHALL require all
+of the following:
+- the inviter's signatures verify;
+- the content hash matches; inbound `/invite` SHALL NOT take the
+  redact-on-mismatch path;
+- the derived ID equals the path `eventId`;
+- the sender's server name equals the authenticated origin.
+
+A failure SHALL return `400 M_INVALID_PARAM`, with nothing co-signed and
+nothing persisted. On success, the returned event SHALL be the received
+`Pdu` with exactly one signature added.
 
 #### Scenario: Co-sign is hash-neutral
 
@@ -117,19 +172,49 @@ nothing persisted.
 #### Scenario: Forged invite is refused before co-sign
 
 - GIVEN an invite PDU whose inviter signature does not verify, or whose
-  derived ID differs from the path `eventId`
+  derived ID differs from the path `eventId`, or whose sender is not on the
+  requesting origin
 - WHEN it is PUT to `/v2/invite`
 - THEN the response is `400 M_INVALID_PARAM`, no signature is added, and
   nothing is stored
 
+#### Scenario: Invite with a content-hash mismatch is refused
+
+- GIVEN an invite PDU that is validly signed but whose content was changed
+  after its content hash was computed
+- WHEN it is PUT to `/v2/invite`
+- THEN the response is `400 M_INVALID_PARAM`, no signature is added, and
+  nothing is stored, in either redacted or unredacted form
+
 ### Requirement: Fetch-by-ID integrity
 
-Every remote PDU that Conduit fetched by ID, or received as an answer to a
-request naming IDs, SHALL be decoded as a `Pdu`. Before it is persisted, its
-derived ID SHALL equal the requested ID, or be in the referenced set, and its
-signatures SHALL verify. This covers `/event`, auth-event fetches,
-`get_missing_events`, `backfill`, `state`, the `send_join` response `state`
-and `auth_chain`, and the `invite` response.
+Every remote PDU that Conduit receives as the answer to a federation request
+SHALL be decoded as a `Pdu`. Before it is persisted, the PDU SHALL pass the
+received-PDU validity checks and signature verification, and it SHALL then
+meet its endpoint's expectation:
+
+- **`Exactly(id)`**: the derived ID equals the requested ID. This applies to
+  `GET /event/{id}`, including auth-event fetches, the outbound `/invite`
+  response, and the `/send_join` response `event`. For the `/invite`
+  response, `hashes` SHALL also be unchanged and the invitee server's
+  signature SHALL verify.
+- **`/state_ids`**: SHALL persist nothing. Its `pdu_ids ∪ auth_chain_ids`
+  SHALL become the expected set for `/state` about the same room and event.
+- **`/state`**: the derived ID is in that set, and a `/state_ids` call SHALL
+  precede it.
+- **`/send_join` response `state`**: no expected ID. Each event's ID is
+  derived and its signatures verified. Each SHALL be a state event of the
+  joined room, with at most one event per `(type, state_key)`.
+- **`/send_join` response `auth_chain`**: the derived ID is in the
+  `auth_events` closure of `state ∪ {join}`.
+- **`backfill` and `get_missing_events`**: the derived ID is a requested
+  seed, or is named in `prev_events` by an event already admitted from the
+  same response or held locally. Admission SHALL repeat until no new event
+  is admitted, and SHALL NOT depend on response order.
+
+Response events that are outside the expectation SHALL NOT be stored. A
+fetched event whose content hash mismatches SHALL be stored in redacted form
+under its derived ID.
 
 #### Scenario: Substituted event is refused
 
@@ -138,6 +223,28 @@ and `auth_chain`, and the `invite` response.
 - WHEN Conduit fetches `$A` as a missing auth event
 - THEN the fetch fails with an ID mismatch and storage holds neither `$A`
   nor `$B`
+
+#### Scenario: Unreferenced extra event is not stored
+
+- GIVEN a `get_missing_events` response that holds the requested ancestor
+  chain plus one extra, validly signed event that nothing in the chain or in
+  local storage references
+- WHEN Conduit admits the response
+- THEN every event in the chain is stored, and the extra event is not
+
+#### Scenario: Auth chain outside the closure is not stored
+
+- GIVEN a `/send_join` response whose `auth_chain` holds an event outside
+  the `auth_events` closure of `state ∪ {join}`
+- WHEN Conduit admits the response
+- THEN that event is not stored, and the in-closure events are stored
+
+#### Scenario: Fetched event redacted on receipt
+
+- GIVEN a peer that answers `GET /event/$A` with `$A`, validly signed, whose
+  content hash mismatches
+- WHEN Conduit fetches `$A`
+- THEN the redacted form is stored under `$A`
 
 ### Requirement: Received join validation
 
@@ -159,12 +266,28 @@ contain `event_id`.
 
 PostgreSQL SHALL store each event's `Pdu` as canonical JSON text, which is
 authoritative. The existing columns SHALL be projections only. Every `events`
-read SHALL go through one row decoder. The migration SHALL add its columns
-without rewriting the table. A one-shot check SHALL recompute the reference
-hash and the content hash of every legacy row. It SHALL classify each row as
-`verified`, `content_mismatch` or `id_mismatch`, report the counts and each ID
-mismatch, and SHALL NOT rewrite any primary key. Rows that are not `verified`
-SHALL NOT be served over federation.
+read SHALL go through one row decoder. The `events` migration SHALL add its
+columns without rewriting the table.
+
+No spec-valid PDU SHALL fail on a U+0000 at any PostgreSQL sink:
+- `transactions.request`, `transactions.result` and
+  `fed_outbound_queue.payload` SHALL hold canonical JSON as `TEXT`;
+- the JSONB projections of `content`, `hashes` and `signatures` SHALL map
+  U+0000 to U+FFFD, and reads SHALL NOT decode them;
+- an unsigned value containing U+0000 SHALL be dropped;
+- U+0000 in `room_id`, `sender`, `type`, `state_key`, `auth_events` or
+  `prev_events` SHALL be refused at decode;
+- on `/send`, an EDU whose persistence fails with a PostgreSQL data
+  exception (SQLSTATE class 22) SHALL be dropped without failing the
+  transaction.
+
+A legacy-row check SHALL recompute the reference hash and the content hash
+of every legacy row. It SHALL classify each row as `verified`,
+`content_mismatch` or `id_mismatch`, report the counts and each ID mismatch,
+and SHALL NOT rewrite any primary key. The check SHALL NOT block startup,
+and a federation read of an unchecked row SHALL classify that row inline.
+Over federation, `id_mismatch` rows SHALL NOT be served, and
+`content_mismatch` rows SHALL be served only as their v11 redaction.
 
 #### Scenario: Pool restart
 
@@ -183,6 +306,20 @@ SHALL NOT be served over federation.
 - WHEN the integrity check runs
 - THEN the row is marked `id_mismatch` and logged with both IDs, its primary
   key is unchanged, and federation `/event` for it returns 404
+
+#### Scenario: Lossy legacy row is served redacted
+
+- GIVEN a legacy remote row whose ID reproduces but whose content hash does
+  not, and which the background sweep has not yet reached
+- WHEN a peer requests it with federation `/event`
+- THEN the row is classified `content_mismatch` inline, and the response is
+  its v11 redaction under the same derived ID
+
+#### Scenario: Local NUL content federates
+
+- GIVEN a local state event whose `topic` content contains `\u0000`
+- WHEN it is persisted and enqueued for a remote destination
+- THEN the outbox payload reads back byte-exact and the event is sent
 
 ### Requirement: Typed outbound boundary
 

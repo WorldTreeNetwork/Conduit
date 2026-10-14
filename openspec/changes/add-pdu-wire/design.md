@@ -1,9 +1,10 @@
 # PDU contract
 
-Amended 2026-10-14 after the send-back in
-`reviews/2026-10-14-advise.md`. The section "Review disposition" at the end
-records how each amendment and note was handled, with spec citations. The
-sections before it are the contract that `act` implements.
+Amended twice on 2026-10-14: after the send-back in
+`reviews/2026-10-14-advise.md` (A1–A7), and after the second send-back in
+`reviews/2026-10-14-advise-2.md` (B1–B4). The "Review disposition" sections
+at the end record how each amendment and note was handled, with citations.
+The sections before them are the contract that `act` implements.
 
 ## Types
 
@@ -52,19 +53,57 @@ format of its room version. Inbound decode runs these steps in order.
    must lie in `[-(2^53)+1, 2^53-1]`; floats, NaN and infinities are refused
    (Appendices, Canonical JSON; room v11 "Servers MUST strictly enforce the
    JSON format ... discarding of events over federation").
-3. Enforce the v11 format. All required fields are present and correctly
-   typed. `auth_events.len() <= 10`, `prev_events.len() <= 20`, and
-   `depth < 2^53 - 1` (room v11 event format). A top-level `event_id` key is
-   refused: room v3+ "When events are sent over federation, the `event_id`
-   field is no longer included", and Synapse >= 1.155 (pinned peer 1.162.0)
-   refuses it ("v2/v3 events must not have an explicit event_id",
-   `rust/src/events/formats/v2v3.rs`). See disposition A1.
+3. Enforce the v11 format and its limits. Each failure has its own
+   `PduDecodeError` variant:
+   - All required fields are present and correctly typed. `state_key` is
+     either absent or a string; `"state_key": null` is refused, as Synapse
+     does with `AllowMissing<Box<str>>`.
+   - `auth_events.len() <= 10` and `prev_events.len() <= 20`.
+   - `depth` is an integer in `[0, 2^53-1]`, inclusive at both ends. The
+     v11 text reads "less than the maximum", then "If the room's depth is at
+     the limit, the depth must be set to the limit", so `2^53-1` is legal.
+     Synapse refuses `depth < 0` and `depth > MAX_DEPTH`, where
+     `MAX_DEPTH = 2^53-1` (`federation_base.py:362-369`,
+     `api/constants.py`).
+   - The whole PDU is at most 65536 bytes. Measure the canonical JSON of the
+     received object after the unsigned allow-list, without `unsigned.age`
+     or `age_ts`. This is what Synapse measures in `_check_size_limits` with
+     `get_pdu_json()` and `MAX_PDU_SIZE`.
+   - `sender`, `room_id`, `type`, and `state_key` when present, are each at
+     most 255 bytes of UTF-8. A byte limit also bounds the code-point count,
+     so Synapse's code-point check is covered. For v11 Synapse treats all of
+     these as `unpersistable` (`event_auth.py:451-501`, and
+     `strict_event_byte_limits_room_versions` for V11) and drops the PDU.
+   - No U+0000 in `sender`, `room_id`, `type`, `state_key`, or any entry of
+     `auth_events` or `prev_events`. These values reach PostgreSQL `TEXT` /
+     `TEXT[]` key columns, which cannot hold NUL (see B1 sink table).
+     Synapse on PostgreSQL cannot persist them either, so refusing them keeps
+     Conduit on Synapse's side of the drop/accept line.
+   - A top-level `event_id` key is refused: room v3+ "When events are sent
+     over federation, the `event_id` field is no longer included", and
+     Synapse >= 1.155 (pinned peer 1.162.0) refuses it ("v2/v3 events must
+     not have an explicit event_id", `rust/src/events/formats/v2v3.rs`). See
+     disposition A1.
 4. Every other unknown top-level key goes into `extensions` verbatim.
+5. Round-trip identity: `canonical(decoded Pdu)` must equal `canonical(the
+   received object minus unsigned)`. Otherwise decode fails with
+   `PduDecodeError::NonRoundTrip`. This one check catches any
+   normalisation by the typed fields, which would otherwise change both
+   hashes without anyone noticing.
 
-A decode failure is a typed `PduDecodeError`. On `/send`, the PDU is skipped:
-it gets no entry in the `pdus` result map, because its ID cannot be trusted,
-and the error is logged. This is what Synapse does in `_handle_pdus_in_txn`.
-On `/send_join` and `/invite` the request fails with `400 M_BAD_JSON`.
+A decode failure is a typed `PduDecodeError`. The failure is deterministic:
+the same bytes always fail the same way, and a decode failure is never a
+500. On `/send` the PDU is skipped and gets no entry in the `pdus` result
+map, because its ID cannot be trusted. The error is logged, and the other
+PDUs and EDUs in the transaction are processed normally. This is what
+Synapse does in `_handle_pdus_in_txn`. Synapse checks size limits later, in
+auth, and so may report an error entry under the derived ID; both servers
+leave the PDU unpersisted. On `/send_join` and `/invite` a decode failure
+returns `400 M_BAD_JSON`.
+
+`PduDecodeError` messages and every other per-PDU error string have a fixed
+vocabulary: the variant name, a field name, and numeric limits. They never
+echo a value taken from the PDU.
 
 ## Received-event checks
 
@@ -78,50 +117,67 @@ bool }`. Nothing reads a wire-provided ID anywhere.
 
 ### Fetch-by-ID
 
-Every remote PDU that Conduit asked for by ID is admitted only through
-`admit_fetched(pdu, Expect::Exactly(id) | Expect::OneOf(&set), lookup)`. That
-function runs `check_received` and requires `derived == requested`, or that
-the derived ID is in the referenced set. It runs before any `put_event`. This
-covers:
+Every remote PDU that Conduit receives as the answer to a request is
+persisted only after it passes `admit_fetched`. The fetch clients return
+`Pdu` or `Vec<Pdu>`, never `Event`, so the caller cannot skip deriving the
+ID. `admit_fetched` decodes the PDU (see "Wire decode"), runs
+`check_received` (signatures, derived ID, content hash), and then applies
+the expectation for that endpoint from the table below. Only then can
+`put_event` run.
 
-- `client.event()`. It now returns `Pdu` and never `Event`, so the caller has
-  to derive the ID.
-- the auth-event fetch in `pipeline.rs::fetch_missing_auth_events`. This is
-  the only fetch whose result is persisted today, and it is DAG poisoning.
-- `get_missing_events`, `backfill`, `state`, the `send_join` response
-  `state`/`auth_chain`, and the `invite` response. These fetch clients return
-  `Vec<Pdu>`. No result is persisted until it is admitted. Results from
-  `state` and `auth_chain` use `Expect::OneOf`, with the set taken from the
-  matching `state_ids` response or from the auth references of the events
-  that requested them. Results from `get_missing_events` and `backfill` must
-  be named by the `prev_events` of an event that is already admitted, or
-  returned as direct ancestors in the requested range.
+An event that was redacted on receipt is still admitted. Its derived ID
+equals the unredacted ID, so `Exactly` passes, and the redacted form is what
+gets stored.
 
-A mismatch is `FetchError::IdMismatch { requested, derived }`. Nothing is
-stored and the peer's answer is discarded. Deep recursive auth verification
-of fetched events stays with `conduit-g12` / `conduit-embed-persist`. This
-change requires only the ID and signature gate.
+| endpoint (client fn) | expectation | how a response event is accepted |
+|---|---|---|
+| `GET /event/{id}` (`client.event`) | `Exactly(id)` | `derived == id`. This includes the auth-event fetch in `pipeline.rs::fetch_missing_auth_events`, the only fetch that is persisted today. |
+| `PUT /v2/invite` response (`client.invite`, outbound) | `Exactly(our_invite_id)` | `derived == id`. `hashes` must be byte-identical to what we sent, and the invitee server's signature must be present and must verify. |
+| `PUT /v2/send_join` response `event` (restricted join, resident co-signed) | `Exactly(our_join_id)` | `derived == id`, `hashes` unchanged, and the resident server's signature verifies. |
+| `GET /state_ids?event_id=E` (`client.state_ids`) | none (IDs only) | Returns `pdu_ids` and `auth_chain_ids` and stores nothing. Those sets become the expectation for the follow-up `/state` or `/event` calls about the same `(room, E)`. |
+| `GET /state?event_id=E` (`client.state`) | `OneOf(state_ids ∪ auth_chain_ids)` | A `state_ids` call for the same `(room, E)` must come first. Events in `pdus` must also be state events (they have a `state_key`) and have `room_id == room`. |
+| `PUT /v2/send_join` response `state` | `Asserted` (no expected ID) | Each event's ID is derived and its signatures verified. Each must be a state event with `room_id == room`, and at most one may exist per `(type, state_key)`. The resident server is asserting this state; we did not request any of these IDs. |
+| `PUT /v2/send_join` response `auth_chain` | `Closure(auth_events of state ∪ {join})` | Admitted by walking the closure: start from the `auth_events` of the admitted `state` and of our join, admit any `auth_chain` event whose derived ID is in the frontier, add that event's `auth_events`, and repeat until nothing changes. |
+| `GET /backfill?v=..&limit=` (`client.backfill`) | `Closure(prev_events from v)` | Seeds are the requested `v` IDs. A response event is admitted if its derived ID is a seed, or is named in `prev_events` by an event already admitted from this response or held locally. Same fixed-point walk. |
+| `POST /get_missing_events` (`client.get_missing_events`) | `Closure(prev_events from latest_events)` | Seeds are the `prev_events` of the requested `latest_events`, which we hold. The walk stops at `earliest_events`. Same fixed-point walk. |
+
+The closure walk does not depend on the order of the response. It repeats
+until no new event is admitted. Anything left over is not stored: an event
+that nothing references, or one outside the closure. It is logged once per
+response with a count. A failure on `Exactly` or `OneOf` is
+`FetchError::IdMismatch { requested, derived }`. Nothing from that answer is
+stored, and the peer's answer is discarded. The closure is cut off at the
+spec page sizes (`limit`) and at 10 `auth_events` / 20 `prev_events` per
+event, so a peer cannot make it grow without bound.
+
+Deep recursive auth verification of fetched events stays with `conduit-g12`
+and `conduit-embed-persist`. This change requires only the decode,
+signature, ID and expectation gate.
 
 ### `/invite` (inbound, v2)
 
-1. Decode as Pdu (see "Wire decode").
+1. Decode as Pdu (see "Wire decode"). A failure returns `400 M_BAD_JSON`.
 2. Check `room_id` against the path, `type == m.room.member`,
-   `membership == invite`, and that the `state_key` is on our server.
-3. Run `check_received` with the inviter's keys. A signature failure is
-   refused with `400 M_INVALID_PARAM`.
-4. Require `derived ID == path :eventId`. A mismatch gets
-   `400 M_INVALID_PARAM`, matching Synapse "Invite event ID must match event
-   ID specified in the federation `/invite` request".
-5. Run `add_signature(&mut original_pdu, our_key, our_name)` on the Pdu as
-   received. Spec: "The event with the invited server's signature added. All
-   other fields of the events should remain untouched."
-6. Persist the received form. That is the redacted form when the hash did not
-   match, still under the derived ID, now carrying our co-signature. Return
-   `{"event": original_pdu_with_cosignature}`.
+   `membership == invite`, that the `state_key` is on our server, and that
+   the sender's server name equals the authenticated X-Matrix origin. A
+   failure returns `400 M_INVALID_PARAM`.
+3. Verify the inviter's signatures. A failure returns
+   `400 M_INVALID_PARAM`.
+4. Require `derived ID == path :eventId`. A mismatch returns
+   `400 M_INVALID_PARAM`, matching Synapse's "Invite event ID must match
+   event ID specified in the federation `/invite` request".
+5. Require the content hash to match. A mismatch returns
+   `400 M_INVALID_PARAM`; nothing is co-signed and nothing is persisted.
+6. Run `add_signature(&mut pdu, our_key, our_name)`. Spec: "The event with
+   the invited server's signature added. All other fields of the events
+   should remain untouched."
+7. Persist the co-signed Pdu under the derived ID, then return
+   `{"event": pdu}`.
 
-The add_signature co-signature is identical over the redacted and the
-unredacted form, because signatures cover the redacted bytes. Step 5 is
-therefore valid for whichever form a peer ends up holding.
+The `/invite` path never takes the redact-on-mismatch route. A PDU that
+reaches step 6 is byte-identical to what was received, apart from the one
+signature that step adds. This differs from Synapse, which redacts and
+continues (B2 disposition).
 
 ### `/send_join` (inbound, v2)
 
@@ -141,6 +197,12 @@ Step 2's sender, state_key and origin checks are folded into this change. The
 handler is rewritten for Pdu decode and the path-ID check anyway, the checks
 are three comparisons on the same 400 path, and leaving `state_key != sender`
 open would leave a membership-forgery hole in a handler this lane owns.
+
+Error codes are a deliberate choice. Synapse returns `403` for a sender that
+is not on the origin, and `400 M_BAD_JSON` for `state_key != sender`. We
+return `400 M_INVALID_PARAM` for both. The v1.19 `send_join` v2 400 response
+names `M_INVALID_PARAM` for exactly these cases, and peers treat any 4xx
+from `send_join` as a failed join.
 
 ### `make_join`
 
@@ -177,31 +239,63 @@ at implementation time.
 ```sql
 ALTER TABLE events ADD COLUMN pdu_json TEXT;                 -- NULL = legacy row
 ALTER TABLE events ADD COLUMN id_integrity TEXT NOT NULL DEFAULT 'unchecked';
+ALTER TABLE transactions       ALTER COLUMN request TYPE TEXT USING request::text;
+ALTER TABLE transactions       ALTER COLUMN result  TYPE TEXT USING result::text;
+ALTER TABLE fed_outbound_queue ALTER COLUMN payload TYPE TEXT USING payload::text;
 ```
 
-Both adds are metadata-only on PostgreSQL 11 and later: a nullable column,
-and a constant default. Neither rewrites the table. CI runs postgres:16.
+- **`events` adds.** Both are metadata-only on PostgreSQL 11 and later (a
+  nullable column, and a constant default), so neither rewrites the table.
+  CI runs postgres:16.
+- **Column type changes.** These rewrite `transactions` and
+  `fed_outbound_queue`. Both are bounded caches, not history: replay
+  results, and an outbox whose `sent` rows can be collected. A short
+  exclusive lock on them during the migration is acceptable.
+- **Existing JSONB text.** JSONB rows cannot contain U+0000, so `::text`
+  always produces valid JSON.
+- **Constraints.** The `transaction_has_request_or_result` CHECK keeps
+  working unchanged on TEXT.
 
-- `pdu_json` is the canonical JSON of the Pdu, with extensions and without
-  `unsigned`. It is the authoritative wire form. The existing columns
-  (`content`, `hashes`, `signatures`, `auth_events`, ...) become projections
-  that are kept for SQL predicates. Text was chosen over a JSONB extension
-  map because PostgreSQL JSONB rejects the `\u0000` escape ("unsupported
-  Unicode escape sequence"), while canonical JSON allows U+0000 in strings. A
-  spec-valid event with a NUL in its content would otherwise be refused at
-  the database, and every event naming it would then be stuck. In text, the
-  NUL stays the six ASCII characters `\u0000`.
-- The `content` JSONB projection replaces U+0000 with U+FFFD, in the
-  projection only. The only SQL readers of `content` are the
-  `content->>'membership' = 'join'` predicates, and a membership value that
-  contains NUL is not `join` either way. Reads never decode from this
-  projection when `pdu_json` is present.
-- The `unsigned` JSONB column holds only local, allow-listed unsigned data. An
-  unsigned value that contains U+0000 is dropped with a warning: `unsigned`
-  is unprotected ("Keys under `unsigned` can be modified by other servers").
-- Numbers: after decode step 2 only safe integers remain, and JSONB stores
-  them exactly, so the projections lose nothing. `pdu_json` is canonical text
-  anyway.
+Text was chosen over JSONB as the authoritative form because PostgreSQL
+JSONB refuses the `\u0000` escape ("unsupported Unicode escape sequence",
+SQLSTATE 22P05), while canonical JSON allows U+0000 in strings. In text, a
+NUL is the six ASCII characters `\u0000`; Conduit's canonical encoder and
+serde_json both escape it that way. PostgreSQL `TEXT` refuses only a raw
+0x00 byte (SQLSTATE 22021), which escaped JSON text never contains.
+
+#### PostgreSQL sinks that PDU strings reach (B1)
+
+Each sink lists its rule for U+0000. "Refuse at decode" means a
+deterministic per-PDU drop from the decode step, never a database error.
+
+| sink | holds | rule for U+0000 |
+|---|---|---|
+| `transactions.request` | the whole inbound `/send` body (and client txn bodies), stored by `Replay::body` before any PDU is parsed | TEXT holding the canonical JSON of the body. Never refuses a spec-valid body. |
+| `transactions.result` | the `/send` response, including per-PDU error strings | TEXT canonical JSON. Error strings use the fixed vocabulary and never echo PDU values. |
+| `fed_outbound_queue.payload` | outbox envelope `{"pdus": [Pdu], "edus": [...]}`, and to-device envelopes | TEXT canonical JSON. A local event with a NUL in its content (e.g. `topic`) federates. |
+| `fed_outbound_queue.last_error` | transport error text | Passed through `pg_safe_text`, which maps U+0000 to U+FFFD. It is diagnostic only. |
+| `events.pdu_json` | authoritative Pdu, without `unsigned` | TEXT canonical JSON. Stored exactly. |
+| `events.content` (JSONB) | projection for SQL predicates | U+0000 becomes U+FFFD in strings and keys, in the projection only. The only SQL readers are `content->>'membership' = 'join'`, and a membership value containing NUL is not `join` either way. Reads decode `pdu_json`. |
+| `events.hashes`, `events.signatures` (JSONB) | projections | Same U+FFFD projection. No SQL predicate reads them, and reads decode `pdu_json`. Unverified signature entries from third servers may carry NUL and are kept exactly in `pdu_json`. |
+| `events.unsigned` (JSONB) | local allow-listed unsigned | An unsigned value that contains U+0000 is dropped with a warning. `unsigned` is unprotected ("Keys under `unsigned` can be modified by other servers"). |
+| `events.room_id`, `sender`, `type`, `state_key` (TEXT) | key projections | Refused at decode (decode step 3). A U+FFFD substitution here could merge two distinct state keys into one `room_current_state` key. |
+| `events.auth_events`, `prev_events` (TEXT[]) | ID projections | Refused at decode. A derived ID is URL-safe base64, so an ID containing NUL can never refer to a real event. |
+| `events.event_id` (TEXT PK) | derived ID | Cannot contain NUL: it is `$` plus URL-safe base64. |
+| `room_current_state(room_id, type, state_key, event_id)` | current-state key | Covered by the decode refusals above, plus the derived ID. |
+| client-authored PDUs | `PUT /rooms/{id}/state/{type}/{stateKey}`, `/send/{type}` | A NUL in `type` or `state_key` is refused with `400 M_INVALID_PARAM` before the event is built. A NUL in `content` is stored under the projection rules above. |
+
+Numbers: after decode step 2 only safe integers remain. JSONB stores those
+exactly, so the projections lose nothing, and `pdu_json` is canonical text
+anyway.
+
+EDU sinks (`to_device_queue`, `receipts`, presence, device lists) are not
+PDU sinks. One rule is folded in because it belongs to the same `/send`
+wedge. If persisting an EDU fails with SQLSTATE class 22 (a data exception,
+such as 22P05 or 22021), the failure is deterministic: that EDU is dropped
+and logged, and the transaction goes on. Only transient errors (connection
+loss, serialization failure, and the like) still return 500, so that the
+origin retries. Per-sink NUL handling for EDUs is filed as
+`conduit-y99.22.4`.
 
 ### One row decoder
 
@@ -227,31 +321,52 @@ Legacy rows cannot be trusted to reproduce their own IDs.
 - Remote rows lost their unknown top-level keys at ingest.
 - Remote auth events were stored unverified, under the wire ID.
 
-A one-shot startup task, `verify_legacy_event_ids`, walks the rows where
-`id_integrity = 'unchecked'` in batches of 1000 by `stream_position`. For
-each row it rebuilds the Pdu from the projections, recomputes the reference
-hash and the content hash, and writes one of the following.
+One function, `classify_legacy_row`, rebuilds the Pdu from the projection
+columns, recomputes the reference hash and the content hash, and writes one
+of the following.
 
 - `verified`: the reference hash equals the `event_id` primary key and the
   content hash matches. `pdu_json` is backfilled from the rebuilt Pdu.
 - `content_mismatch`: the ID matches but the content hash does not. Either
   the row lost extensions, or it was legitimately redacted on receipt; the
-  two cannot be told apart. `pdu_json` stays NULL.
+  two cannot be told apart. `pdu_json` is backfilled with
+  `canonical(redact(rebuilt Pdu))`.
 - `id_mismatch`: the reference hash differs from the primary key.
   `pdu_json` stays NULL.
 
-The task logs a count for each class, and logs every `id_mismatch` row at
-WARN with both IDs. It never rewrites a primary key or any reference to one.
-Rows written after this change are inserted with `pdu_json` set and
-`id_integrity = 'verified'`.
+It runs in two ways, so the check never blocks startup and never leaves a
+window where history is invisible.
 
-Never serve: federation emitters read through `Storage::get_wire_pdu(id) ->
-Option<Pdu>`. It returns `None` unless `id_integrity = 'verified'`. A row
-that is not verified behaves like a missing event: `/event` returns 404, and
-`/state`, `/backfill` and `/get_missing_events` omit it. Client-facing reads
-are unchanged; local history stays visible to local users. Re-fetching
-`content_mismatch` rows from their origin through `admit_fetched` is
-possible, but it is not part of this change.
+- **Background sweep.** `verify_legacy_event_ids` starts after the listener
+  is up and walks `id_integrity = 'unchecked'` rows in batches of 1000 by
+  `stream_position`. It logs a count for each class, and logs every
+  `id_mismatch` row at WARN with both IDs.
+- **On demand.** When `get_wire_pdu` meets an `unchecked` row, it runs
+  `classify_legacy_row` inline, persists the class, and answers from the
+  result. Federation never answers 404 just because the sweep has not
+  reached a row yet.
+
+Neither path ever rewrites a primary key or any reference to one. Rows
+written after this change are inserted with `pdu_json` set and
+`id_integrity = 'verified'`. That includes rows redacted on receipt, which
+store the redacted form. For those rows `verified` means "ID verified and
+`pdu_json` authoritative". It does not mean the content hash matches.
+
+Serving rule: federation emitters read through `Storage::get_wire_pdu(id) ->
+Option<Pdu>`.
+
+- `verified` returns the `pdu_json` Pdu.
+- `content_mismatch` returns its redaction (the stored `pdu_json`). A peer
+  that receives it sees a hash mismatch, redacts, and derives the same ID.
+  That is the same outcome as for a post-change row redacted on receipt, so
+  auth-chain members are not withheld for nothing.
+- `id_mismatch` returns `None`. The row behaves like a missing event:
+  `/event` returns 404, and `/state`, `/backfill` and `/get_missing_events`
+  omit it.
+
+Client-facing reads are unchanged, so local history stays visible to local
+users. Re-fetching `content_mismatch` rows in full from their origin through
+`admit_fetched` is possible, but it is not part of this change.
 
 ## Redaction
 
@@ -300,21 +415,52 @@ asserts Conduit's spec behaviour.
     the input;
   - a `{event_id, pdu}` Event that wraps a signed Pdu verifies whatever its
     `event_id` holds.
-- Fetch-by-ID: a peer that answers `/event/$A` with a different event that is
-  validly signed is refused with `IdMismatch`, and storage is unchanged.
-- `/invite`: a forged inviter signature is refused before co-sign and before
-  persist. A path-ID mismatch gets `M_INVALID_PARAM`. The returned event's
-  `hashes` equal the request's.
+- Fetch-by-ID:
+  - A peer that answers `/event/$A` with a different event that is validly
+    signed is refused with `IdMismatch`, and storage is unchanged.
+  - A fetched event whose content hash does not match is stored in redacted
+    form under the requested ID.
+  - A `get_missing_events` response that also contains a validly signed
+    event that nothing references stores every referenced event and not
+    the extra one.
+  - A `send_join` `auth_chain` event that lies outside the closure is not
+    stored.
+  - `/state` without a prior `state_ids` is refused.
+- `/invite`:
+  - A forged inviter signature, a path-ID mismatch, a content-hash mismatch,
+    or a sender that is not on the origin each get `400 M_INVALID_PARAM`,
+    with no co-sign and no persist.
+  - On success the returned event's `hashes` and derived ID equal the
+    request's.
 - `/send_join`: `state_key != sender`, a sender domain other than the
   origin, and a path-ID mismatch each get `400 M_INVALID_PARAM`.
-- Decode: a top-level `event_id` gets `PduDecodeError::ExplicitEventId`, and
-  on `/send` it is skipped with no result entry. Out-of-range integers,
-  floats, 11 `auth_events` and 21 `prev_events` are refused. Disallowed
-  unsigned keys are not persisted.
-- Storage: the round-trip test across all reads described above, and a
-  legacy-row integrity test. That test seeds rows the way the pre-`56498e3`
-  code hashed them, plus one lossy remote row, and asserts the
-  classification and that federation returns 404 for them.
+- Decode:
+  - A top-level `event_id` gets `PduDecodeError::ExplicitEventId`, and on
+    `/send` it is skipped with no result entry.
+  - These are refused: out-of-range integers, floats, 11 `auth_events`,
+    21 `prev_events`, `depth` of -1 and of 2^53, a 65537-byte PDU, a
+    256-byte `sender`, `room_id`, `type` or `state_key`, `"state_key": null`,
+    and a PDU that does not round-trip.
+  - These are accepted: `depth` of 0 and of 2^53-1, a PDU of exactly 65536
+    bytes, and fields of exactly 255 bytes.
+  - Disallowed unsigned keys are not persisted.
+- U+0000 over `/send`, against real PostgreSQL:
+  - A transaction with one PDU that has `\u0000` in `content`, one with
+    `\u0000` in `state_key`, one ordinary PDU and one EDU returns 200.
+  - The content-NUL PDU is persisted, and both `/event` and the client API
+    read it back byte-exact.
+  - The state_key-NUL PDU has no result entry and is not stored.
+  - The ordinary PDU and the EDU are processed.
+  - A replay of the same txn ID returns the identical stored response.
+  - A local state event with `\u0000` in `topic` is enqueued and its
+    outbox payload reads back byte-exact.
+- Storage:
+  - The round-trip test across all reads described above.
+  - A legacy-row integrity test. It seeds rows the way the pre-`56498e3`
+    code hashed them, plus one lossy remote row. It asserts the
+    classification, that federation returns 404 for `id_mismatch` rows, and
+    that it returns the redaction for the `content_mismatch` row.
+  - A `get_wire_pdu` call on an `unchecked` row classifies it inline.
 - The live Synapse check `conduit-server/tests/peers/synapse_pdu_wire.py`
   stays.
 
@@ -419,3 +565,100 @@ covers every response and body.
 5. The Synapse fixture is checked in.
 6. The property tests listed under "Fixtures and tests" replace the trivial
    "sign, fill, verify" check.
+
+## Review disposition, round 2 (2026-10-14 advise-2 send-back)
+
+The round-1 disposition above is kept as history. Where round 2 changes it,
+the contract sections above win. Two such places: `/invite` now refuses a
+hash mismatch (this changes A2's flow), and `content_mismatch` rows are
+served as their redaction (this changes A4's "must not be served").
+
+**A1 rebuttal: upheld by the reviewer.** No change.
+
+**B1. U+0000 in every PostgreSQL sink: adopted.** The design now lists every
+sink that PDU strings reach, each with a rule.
+
+- **TEXT canonical JSON** for the replay-cache columns
+  `transactions.request` and `transactions.result`, and for
+  `fed_outbound_queue.payload`. These are column type changes that rewrite
+  only those bounded tables.
+- **U+FFFD in projections only** for `events.content`, `hashes` and
+  `signatures`. Reads decode `pdu_json`.
+- **Drop with a warning** for unsigned values.
+- **Deterministic per-PDU refusal at decode** for NUL in `room_id`,
+  `sender`, `type`, `state_key`, `auth_events` and `prev_events`. Synapse on
+  PostgreSQL cannot persist these either.
+- **Client API refusal** (`400 M_INVALID_PARAM`) for NUL in an authored
+  `type` or `state_key`.
+- **Fixed-vocabulary error strings** that never echo PDU values.
+- **EDU data errors (SQLSTATE class 22)** drop that EDU instead of returning
+  500 for the whole transaction. Wider EDU-sink work is `conduit-y99.22.4`.
+
+The new `/send` scenario covers a content-NUL PDU that is persisted and
+readable, a state_key-NUL PDU dropped with no result entry, and the
+remaining PDUs and EDUs processed normally.
+
+**B2. `/invite` hash mismatch: refuse.** A content-hash mismatch on inbound
+`/invite` returns `400 M_INVALID_PARAM`, with no co-sign and no persist. The
+design and the delta now say the same thing, and each has a scenario.
+
+- Why refuse is safe: an invite is freshly authored by the inviting server,
+  so a mismatch means that server is broken or an intermediary changed the
+  PDU, and the inviter gets an explicit error. Refusing creates no DAG
+  partition: the inviter does not send the invite on unless we answer, and
+  if Conduit is already in the room, any copy of the event that arrives
+  over `/send` goes through the normal redact-on-mismatch path.
+- Divergence from Synapse, recorded: Synapse's `on_invite_request` runs
+  `_check_sigs_and_hash`, redacts, and co-signs the redacted copy.
+- Why not mirror Synapse: returning a redacted event would break the spec's
+  "All other fields of the events should remain untouched".
+
+**B3. Per-endpoint `admit_fetched` expectations: adopted.** The fetch-by-ID
+table defines the expectation for each endpoint.
+
+- `Exactly`: `/event`, the auth fetch, the outbound `invite` response, and
+  the `send_join` `event`.
+- `state_ids`: stores nothing. It defines the set for `/state`, which uses
+  `OneOf(state_ids ∪ auth_chain_ids)` and requires `state_ids` to come
+  first.
+- `send_join` `state`: `Asserted`. The ID is derived and the signatures
+  verified. Each event must be a state event in this room, with no
+  duplicate `(type, state_key)`.
+- `send_join` `auth_chain`: `Closure` over `auth_events` of state ∪
+  {join}.
+- `backfill` and `get_missing_events`: a `Closure` over `prev_events`
+  seeded from the requested IDs. The fixed-point walk does not depend on
+  response order.
+
+Extras that nothing references are not stored. That has a scenario
+(`get_missing_events` with an unreferenced, validly signed extra event).
+
+**B4. v11 limits: adopted.**
+- `depth` is an integer in `[0, 2^53-1]`, inclusive, and both ends are
+  tested.
+- The canonical PDU is at most 65536 bytes, measured as Synapse's
+  `get_pdu_json()` measures it.
+- `sender`, `room_id`, `type` and `state_key` are each at most 255 bytes of
+  UTF-8.
+
+All of these sit in decode step 3, are dropped deterministically, and have
+a scenario each, with boundary values on both sides.
+
+**Non-blocking notes (round 2), as decisions:**
+
+1. **Serve `content_mismatch` rows as their redaction: adopted.** The design
+   now documents that `verified` also covers post-change rows redacted on
+   receipt, and why.
+2. **Startup blocking: decided against.** The legacy check is a background
+   sweep plus an inline check on demand in `get_wire_pdu`. Startup is not
+   blocked, and there is no 404 window.
+3. **Round-trip identity at decode: adopted** as decode step 5
+   (`NonRoundTrip`). `"state_key": null` is refused.
+4. **Outbound `invite` response: adopted.** `Exactly(id)`, unchanged
+   `hashes`, and the invitee server's signature present and verified.
+   Inbound `/invite` now requires the sender's server to be the X-Matrix
+   origin, with `400 M_INVALID_PARAM`.
+5. **`send_join` error codes: recorded as deliberate.** We use the spec's
+   `M_INVALID_PARAM` rather than Synapse's 403 / `M_BAD_JSON`.
+6. **Fetched results redacted on receipt: adopted.** They are stored
+   redacted under the requested ID, with a test assertion.
