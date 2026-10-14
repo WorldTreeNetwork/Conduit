@@ -362,7 +362,8 @@ def main(pdu_wire=False):
         raw_transaction("maximum-edus", transaction_body([{"edu_type": "unknown", "content": {}}] * 100))
         large = dict(transaction_body([]), pdus=[{"unknown": "x" * 60_000}] * 50)
         result = raw_transaction("large-frame", large)
-        assert len(result["pdus"]) == 50
+        # Invalid PDUs are dropped with no result entry (Synapse _handle_pdus_in_txn).
+        assert result["pdus"] == {}, result
         print("Federation required fields, count limits and >2MB frame assertions passed", flush=True)
 
         if pdu_wire:
@@ -391,6 +392,50 @@ def main(pdu_wire=False):
             assert stored["org.conduit.test"] == wire["org.conduit.test"]
             assert make_event_from_dict(stored, RoomVersions.V11).event_id == event_id
             print("Independent v11 PDU signing/reference ID, no-ID wire and extension persistence passed", flush=True)
+
+            def fetch_event(eid, status=200):
+                path = "/_matrix/federation/v1/event/" + urllib.parse.quote(eid, safe="")
+                signed = sign_json({"method": "GET", "uri": path, "origin": synapse_name,
+                    "destination": conduit_name}, synapse_name, signing_key)
+                key_id, signature = next(iter(signed["signatures"][synapse_name].items()))
+                auth = f'X-Matrix origin="{synapse_name}",destination="{conduit_name}",key="{key_id}",sig="{signature}"'
+                return request("conduit", "GET", path, extra_headers={"Authorization": auth}, status=status)
+
+            def synapse_pdu(room, extra=None, **overrides):
+                pdu = {"auth_events": [], "prev_events": [], "depth": 1, "room_id": room,
+                    "sender": bob["user_id"], "type": "m.room.create", "state_key": "",
+                    "content": {"room_version": "11"}, "origin_server_ts": int(time.time() * 1000)}
+                pdu.update(overrides)
+                pdu.update(extra or {})
+                add_hashes_and_signatures(RoomVersions.V11, pdu, synapse_name, signing_key)
+                return pdu
+
+            # Synapse 1.162 refuses an explicit event_id on a v11 PDU; Conduit drops it too.
+            explicit = synapse_pdu(f"!explicit:{synapse_name}")
+            explicit_id = make_event_from_dict(dict(explicit), RoomVersions.V11).event_id
+            explicit["event_id"] = explicit_id
+            try:
+                from synapse.events import make_event_from_dict as rebuild
+                rebuild(explicit, RoomVersions.V11)
+                raise AssertionError("Synapse accepted an explicit event_id")
+            except (ValueError, Exception) as error:
+                chain, cause = [], error
+                while cause is not None:
+                    chain.append(str(cause))
+                    cause = cause.__cause__ or cause.__context__
+                assert any("explicit event_id" in text for text in chain), chain
+            nul_content = synapse_pdu(f"!nul:{synapse_name}", content={"room_version": "11", "org.test": "a\u0000b"})
+            nul_id = make_event_from_dict(dict(nul_content), RoomVersions.V11).event_id
+            nul_key = synapse_pdu(f"!nulkey:{synapse_name}", type="org.test.state", state_key="a\u0000b")
+            result = raw_transaction("explicit-and-nul", dict(transaction_body([]), pdus=[explicit, nul_content, nul_key]))
+            assert explicit_id not in result["pdus"], result
+            assert result["pdus"].get(nul_id) == {}, result
+            assert len(result["pdus"]) == 1, result
+            served = fetch_event(nul_id)["pdus"][0]
+            assert served["content"]["org.test"] == "a\u0000b", served
+            assert make_event_from_dict(served, RoomVersions.V11).event_id == nul_id
+            fetch_event(explicit_id, status=404)
+            print("Explicit event_id refusal (both peers) and U+0000 content round trip passed", flush=True)
 
 
 if __name__ == "__main__":

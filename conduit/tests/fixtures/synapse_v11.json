@@ -1,0 +1,457 @@
+{
+  "explicit_event_id": {
+    "pdu": {
+      "auth_events": [
+        "$auth"
+      ],
+      "content": {
+        "body": "Hello, 世界",
+        "msgtype": "m.text"
+      },
+      "depth": 2,
+      "event_id": "$dud1GxOpMRdlGo4C1V1JuVbqKqDPNMalv2M7f7ADF8E",
+      "hashes": {
+        "sha256": "ndZhRe6C5ih9WlrvWpzYFrF56lKxbERxdvOMOJBRa6M"
+      },
+      "org.example.extension": {
+        "opaque": true,
+        "unicode": "世界"
+      },
+      "origin_server_ts": 1700000000000,
+      "prev_events": [
+        "$prev"
+      ],
+      "room_id": "!room:a.example",
+      "sender": "@alice:a.example",
+      "signatures": {
+        "a.example": {
+          "ed25519:a1": "KAHdUJ/XjX8W+wCENAQ8ffZMObMKqGcHct8LSbHPUIEeJv0+WtwHmaNmyuHWbVXaN1Hli0eeRJ7noL8SC4xyDA"
+        }
+      },
+      "type": "m.room.message"
+    },
+    "synapse": "400: Invalid event JSON / Failed to parse event for room version 11: v2/v3 events must not have an explicit event_id / v2/v3 events must not have an explicit event_id"
+  },
+  "extended": {
+    "event_id": "$dud1GxOpMRdlGo4C1V1JuVbqKqDPNMalv2M7f7ADF8E",
+    "name": "extended",
+    "pdu": {
+      "auth_events": [
+        "$auth"
+      ],
+      "content": {
+        "body": "Hello, 世界",
+        "msgtype": "m.text"
+      },
+      "depth": 2,
+      "hashes": {
+        "sha256": "ndZhRe6C5ih9WlrvWpzYFrF56lKxbERxdvOMOJBRa6M"
+      },
+      "org.example.extension": {
+        "opaque": true,
+        "unicode": "世界"
+      },
+      "origin_server_ts": 1700000000000,
+      "prev_events": [
+        "$prev"
+      ],
+      "room_id": "!room:a.example",
+      "sender": "@alice:a.example",
+      "signatures": {
+        "a.example": {
+          "ed25519:a1": "KAHdUJ/XjX8W+wCENAQ8ffZMObMKqGcHct8LSbHPUIEeJv0+WtwHmaNmyuHWbVXaN1Hli0eeRJ7noL8SC4xyDA"
+        }
+      },
+      "type": "m.room.message"
+    },
+    "synapse_signature_stage": "accepted"
+  },
+  "generated_by": "matrix-synapse 1.162.0 via conduit/tests/fixtures/gen_synapse_v11.py",
+  "keys": {
+    "a.example": {
+      "key_id": "ed25519:a1",
+      "public": "iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w",
+      "seed_byte": 1
+    },
+    "c.example": {
+      "key_id": "ed25519:c1",
+      "public": "7UkoxijRwsbq6QM4kFmVYSlZJzpcY/k2NsFGFKyHN9E",
+      "seed_byte": 3
+    },
+    "x.example": {
+      "key_id": "ed25519:x1",
+      "public": "6kpsY+KcUgq+9VB7Ey7F+ZVHdq6+vnuSQh7qaRRG0iw",
+      "seed_byte": 7
+    }
+  },
+  "non_join_authoriser": [
+    {
+      "event_id": "$88F5mIShYw9sto0cez3dcdi0PvgBn49XglcRHEuzgOQ",
+      "name": "invite_missing",
+      "pdu": {
+        "auth_events": [
+          "$auth"
+        ],
+        "content": {
+          "join_authorised_via_users_server": "@admin:c.example",
+          "membership": "invite"
+        },
+        "depth": 2,
+        "hashes": {
+          "sha256": "essEC/DMNDyWWQY/BiaVeiuLGZDNQlBvfXuBr+lIbho"
+        },
+        "origin_server_ts": 1700000000000,
+        "prev_events": [
+          "$prev"
+        ],
+        "room_id": "!room:a.example",
+        "sender": "@joiner:a.example",
+        "signatures": {
+          "a.example": {
+            "ed25519:a1": "nKLsLYNr7Lq2+r11iF8xQHKmAB59BEF3DUEH4LoHK+MN8u7anuqmnxU5XJPXBIQmKyaAS371Vq5Zcnw94NqRBA"
+          }
+        },
+        "state_key": "@joiner:a.example",
+        "type": "m.room.member"
+      },
+      "synapse_signature_stage": "accepted"
+    },
+    {
+      "event_id": "$88F5mIShYw9sto0cez3dcdi0PvgBn49XglcRHEuzgOQ",
+      "name": "invite_valid",
+      "pdu": {
+        "auth_events": [
+          "$auth"
+        ],
+        "content": {
+          "join_authorised_via_users_server": "@admin:c.example",
+          "membership": "invite"
+        },
+        "depth": 2,
+        "hashes": {
+          "sha256": "essEC/DMNDyWWQY/BiaVeiuLGZDNQlBvfXuBr+lIbho"
+        },
+        "origin_server_ts": 1700000000000,
+        "prev_events": [
+          "$prev"
+        ],
+        "room_id": "!room:a.example",
+        "sender": "@joiner:a.example",
+        "signatures": {
+          "a.example": {
+            "ed25519:a1": "nKLsLYNr7Lq2+r11iF8xQHKmAB59BEF3DUEH4LoHK+MN8u7anuqmnxU5XJPXBIQmKyaAS371Vq5Zcnw94NqRBA"
+          },
+          "c.example": {
+            "ed25519:c1": "QWgnlnORDdwLGdAUQqeh2HPYlDanYwad4qyg8LifODeSi77pujldHsyNvNuUK3IQ8Qk4n0S5sezTVNvkqbxMDw"
+          }
+        },
+        "state_key": "@joiner:a.example",
+        "type": "m.room.member"
+      },
+      "synapse_signature_stage": "accepted"
+    },
+    {
+      "event_id": "$88F5mIShYw9sto0cez3dcdi0PvgBn49XglcRHEuzgOQ",
+      "name": "invite_invalid",
+      "pdu": {
+        "auth_events": [
+          "$auth"
+        ],
+        "content": {
+          "join_authorised_via_users_server": "@admin:c.example",
+          "membership": "invite"
+        },
+        "depth": 2,
+        "hashes": {
+          "sha256": "essEC/DMNDyWWQY/BiaVeiuLGZDNQlBvfXuBr+lIbho"
+        },
+        "origin_server_ts": 1700000000000,
+        "prev_events": [
+          "$prev"
+        ],
+        "room_id": "!room:a.example",
+        "sender": "@joiner:a.example",
+        "signatures": {
+          "a.example": {
+            "ed25519:a1": "nKLsLYNr7Lq2+r11iF8xQHKmAB59BEF3DUEH4LoHK+MN8u7anuqmnxU5XJPXBIQmKyaAS371Vq5Zcnw94NqRBA"
+          },
+          "c.example": {
+            "ed25519:c1": "nKLsLYNr7Lq2+r11iF8xQHKmAB59BEF3DUEH4LoHK+MN8u7anuqmnxU5XJPXBIQmKyaAS371Vq5Zcnw94NqRBA"
+          }
+        },
+        "state_key": "@joiner:a.example",
+        "type": "m.room.member"
+      },
+      "synapse_signature_stage": "accepted"
+    },
+    {
+      "event_id": "$dhkyFx1ybEeNlHXP0zw31fbGWkIyhawAOJ_E5GID2J4",
+      "name": "leave_missing",
+      "pdu": {
+        "auth_events": [
+          "$auth"
+        ],
+        "content": {
+          "join_authorised_via_users_server": "@admin:c.example",
+          "membership": "leave"
+        },
+        "depth": 2,
+        "hashes": {
+          "sha256": "V0e8KKBEsOGpv6SpIUVkQhSfx2HDE82akx5q8f+6S9I"
+        },
+        "origin_server_ts": 1700000000000,
+        "prev_events": [
+          "$prev"
+        ],
+        "room_id": "!room:a.example",
+        "sender": "@joiner:a.example",
+        "signatures": {
+          "a.example": {
+            "ed25519:a1": "MfLQwSVrb8Y5JFHlNLiVAW3GwbLQeeQ0wBUtf/9bHF2ny8q4AuEYc/dGTLqPhRZUHIIvzpQifxQCca5b2ObmDg"
+          }
+        },
+        "state_key": "@joiner:a.example",
+        "type": "m.room.member"
+      },
+      "synapse_signature_stage": "accepted"
+    },
+    {
+      "event_id": "$dhkyFx1ybEeNlHXP0zw31fbGWkIyhawAOJ_E5GID2J4",
+      "name": "leave_valid",
+      "pdu": {
+        "auth_events": [
+          "$auth"
+        ],
+        "content": {
+          "join_authorised_via_users_server": "@admin:c.example",
+          "membership": "leave"
+        },
+        "depth": 2,
+        "hashes": {
+          "sha256": "V0e8KKBEsOGpv6SpIUVkQhSfx2HDE82akx5q8f+6S9I"
+        },
+        "origin_server_ts": 1700000000000,
+        "prev_events": [
+          "$prev"
+        ],
+        "room_id": "!room:a.example",
+        "sender": "@joiner:a.example",
+        "signatures": {
+          "a.example": {
+            "ed25519:a1": "MfLQwSVrb8Y5JFHlNLiVAW3GwbLQeeQ0wBUtf/9bHF2ny8q4AuEYc/dGTLqPhRZUHIIvzpQifxQCca5b2ObmDg"
+          },
+          "c.example": {
+            "ed25519:c1": "F7LEHUJNJjDZiZ3B2T+YqXmnODMAdNpgeRSAb6qmdy6eW0sYtQE0+Ip+3BOcOiyIM62tBjEOa24DSt0Gxm1FDQ"
+          }
+        },
+        "state_key": "@joiner:a.example",
+        "type": "m.room.member"
+      },
+      "synapse_signature_stage": "accepted"
+    },
+    {
+      "event_id": "$dhkyFx1ybEeNlHXP0zw31fbGWkIyhawAOJ_E5GID2J4",
+      "name": "leave_invalid",
+      "pdu": {
+        "auth_events": [
+          "$auth"
+        ],
+        "content": {
+          "join_authorised_via_users_server": "@admin:c.example",
+          "membership": "leave"
+        },
+        "depth": 2,
+        "hashes": {
+          "sha256": "V0e8KKBEsOGpv6SpIUVkQhSfx2HDE82akx5q8f+6S9I"
+        },
+        "origin_server_ts": 1700000000000,
+        "prev_events": [
+          "$prev"
+        ],
+        "room_id": "!room:a.example",
+        "sender": "@joiner:a.example",
+        "signatures": {
+          "a.example": {
+            "ed25519:a1": "MfLQwSVrb8Y5JFHlNLiVAW3GwbLQeeQ0wBUtf/9bHF2ny8q4AuEYc/dGTLqPhRZUHIIvzpQifxQCca5b2ObmDg"
+          },
+          "c.example": {
+            "ed25519:c1": "MfLQwSVrb8Y5JFHlNLiVAW3GwbLQeeQ0wBUtf/9bHF2ny8q4AuEYc/dGTLqPhRZUHIIvzpQifxQCca5b2ObmDg"
+          }
+        },
+        "state_key": "@joiner:a.example",
+        "type": "m.room.member"
+      },
+      "synapse_signature_stage": "accepted"
+    }
+  ],
+  "outlier": {
+    "event_id": "$_pHOECcD8t1blEoQ_UO64ao0hcjEy9ZnRFre9fgZ9QA",
+    "name": "outlier",
+    "pdu": {
+      "auth_events": [
+        "$auth"
+      ],
+      "content": {
+        "body": "Hello, 世界",
+        "msgtype": "m.text"
+      },
+      "depth": 2,
+      "hashes": {
+        "sha256": "4Tfp6uVXSah+ln9yyZqB7vNjIx2ctsjd1cpSzrSz35A"
+      },
+      "origin_server_ts": 1700000000000,
+      "outlier": true,
+      "prev_events": [
+        "$prev"
+      ],
+      "room_id": "!room:a.example",
+      "sender": "@alice:a.example",
+      "signatures": {
+        "a.example": {
+          "ed25519:a1": "E8q3GLe9lVGd6vJ4zh4mH+7qH+//h70QuoQz7efOUiH3tSLuVSHAllJAIkHjTryWVBnjRaaUE9Ypow2XASoPDA"
+        }
+      },
+      "type": "m.room.message"
+    },
+    "synapse_signature_stage": "accepted"
+  },
+  "restricted_join": [
+    {
+      "event_id": "$p0qRW2iquk2KFzBVVakduX1ikmPhsbJeLYcPAy2kw9Y",
+      "name": "sender_only",
+      "pdu": {
+        "auth_events": [
+          "$auth"
+        ],
+        "content": {
+          "join_authorised_via_users_server": "@admin:c.example",
+          "membership": "join"
+        },
+        "depth": 2,
+        "hashes": {
+          "sha256": "diHVQ5+yKNmkbNpCZFUbgiWXegqYZCMjND4AA8yaVlU"
+        },
+        "origin_server_ts": 1700000000000,
+        "prev_events": [
+          "$prev"
+        ],
+        "room_id": "!room:a.example",
+        "sender": "@joiner:a.example",
+        "signatures": {
+          "a.example": {
+            "ed25519:a1": "ABUBb1FzBRNEpjmBdzisgZs7DJ7zOr5ROd065f4mV7rl8P8dBIfaqd6IULrflg3/1yjTJIGH8qH9J0N2CqAGBA"
+          }
+        },
+        "state_key": "@joiner:a.example",
+        "type": "m.room.member"
+      },
+      "synapse_signature_stage": "dropped: InvalidEventSignatureError"
+    },
+    {
+      "event_id": "$p0qRW2iquk2KFzBVVakduX1ikmPhsbJeLYcPAy2kw9Y",
+      "name": "invalid_authoriser",
+      "pdu": {
+        "auth_events": [
+          "$auth"
+        ],
+        "content": {
+          "join_authorised_via_users_server": "@admin:c.example",
+          "membership": "join"
+        },
+        "depth": 2,
+        "hashes": {
+          "sha256": "diHVQ5+yKNmkbNpCZFUbgiWXegqYZCMjND4AA8yaVlU"
+        },
+        "origin_server_ts": 1700000000000,
+        "prev_events": [
+          "$prev"
+        ],
+        "room_id": "!room:a.example",
+        "sender": "@joiner:a.example",
+        "signatures": {
+          "a.example": {
+            "ed25519:a1": "ABUBb1FzBRNEpjmBdzisgZs7DJ7zOr5ROd065f4mV7rl8P8dBIfaqd6IULrflg3/1yjTJIGH8qH9J0N2CqAGBA"
+          },
+          "c.example": {
+            "ed25519:c1": "ABUBb1FzBRNEpjmBdzisgZs7DJ7zOr5ROd065f4mV7rl8P8dBIfaqd6IULrflg3/1yjTJIGH8qH9J0N2CqAGBA"
+          }
+        },
+        "state_key": "@joiner:a.example",
+        "type": "m.room.member"
+      },
+      "synapse_signature_stage": "dropped: InvalidEventSignatureError"
+    },
+    {
+      "event_id": "$p0qRW2iquk2KFzBVVakduX1ikmPhsbJeLYcPAy2kw9Y",
+      "name": "co_signed",
+      "pdu": {
+        "auth_events": [
+          "$auth"
+        ],
+        "content": {
+          "join_authorised_via_users_server": "@admin:c.example",
+          "membership": "join"
+        },
+        "depth": 2,
+        "hashes": {
+          "sha256": "diHVQ5+yKNmkbNpCZFUbgiWXegqYZCMjND4AA8yaVlU"
+        },
+        "origin_server_ts": 1700000000000,
+        "prev_events": [
+          "$prev"
+        ],
+        "room_id": "!room:a.example",
+        "sender": "@joiner:a.example",
+        "signatures": {
+          "a.example": {
+            "ed25519:a1": "ABUBb1FzBRNEpjmBdzisgZs7DJ7zOr5ROd065f4mV7rl8P8dBIfaqd6IULrflg3/1yjTJIGH8qH9J0N2CqAGBA"
+          },
+          "c.example": {
+            "ed25519:c1": "Wm0B/uPl4qam/dhSf/ueFhTW1MumljLikib4xie2I0bxyHfJSrkeoRgGSxmQdZcOHU6JxIKWmCBnyIepkdOmCw"
+          }
+        },
+        "state_key": "@joiner:a.example",
+        "type": "m.room.member"
+      },
+      "synapse_signature_stage": "accepted"
+    }
+  ],
+  "third_party_invite": {
+    "event_id": "$JxNWkmdTXSGz4VMzUC9-F-q2XT_XILMGqtzFJl2-nfU",
+    "name": "third_party_invite_signed_elsewhere",
+    "pdu": {
+      "auth_events": [
+        "$auth"
+      ],
+      "content": {
+        "membership": "invite",
+        "third_party_invite": {
+          "display_name": "I",
+          "signed": {
+            "mxid": "@invitee:a.example",
+            "signatures": {},
+            "token": "t"
+          }
+        }
+      },
+      "depth": 2,
+      "hashes": {
+        "sha256": "NeFcXxwoyUYf/3hflZ45bb1mJZLJCQvRzDeReVBjBDE"
+      },
+      "origin_server_ts": 1700000000000,
+      "prev_events": [
+        "$prev"
+      ],
+      "room_id": "!room:a.example",
+      "sender": "@inviter:x.example",
+      "signatures": {
+        "a.example": {
+          "ed25519:a1": "X0/7nM4Ra4yhAwVY/YF4hwhKXNYr3Nx7cxgWuvB2FU2S5ctI7GysZfvLRmEPqcHuHgHi4/KDv8h1b5vfpXk2Ag"
+        }
+      },
+      "state_key": "@invitee:a.example",
+      "type": "m.room.member"
+    },
+    "synapse_signature_stage": "accepted"
+  }
+}

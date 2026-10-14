@@ -502,6 +502,11 @@ async fn send_state_event_inner<S: AuthState + conduit::room::RoomEventSender>(
     state_key: &str,
     content: Value,
 ) -> Response {
+    // add-pdu-wire: U+0000 cannot live in the TEXT key columns, and a U+FFFD
+    // stand-in could merge two state keys; refuse before building the event.
+    if event_type.contains('\0') || state_key.contains('\0') {
+        return MatrixError::invalid_param("event type and state key must not contain U+0000").into_response();
+    }
     if event_type == "m.room.member" && content.get("membership").and_then(Value::as_str) == Some("invite") {
         if let Err(blocked) = super::room_membership::check_invite_allowed(state, state_key).await {
             return blocked;

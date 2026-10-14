@@ -1,0 +1,19 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE transactions SET result_text = $5, result = $6 WHERE scope = $1 AND owner = $2 AND endpoint = $3 AND txn_id = $4",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Jsonb"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "4f845e7e0c8c153a92b3ebc398f44ac86ed1b47567cca246bedc8f75844e7f61"
+}

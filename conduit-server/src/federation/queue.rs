@@ -426,6 +426,58 @@ fn backoff_for(attempts: i32) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use conduit::keys::generate_server_key;
+    use conduit::signing::sign_authored;
+
+    fn signed(body: &str) -> (String, Pdu) {
+        let mut pdu = Pdu::new("!r:a.test", "@a:a.test", "m.room.message", None,
+            json!({"body": body}), 1, vec![], vec![], 1);
+        sign_authored(&mut pdu, &generate_server_key(), "a.test").unwrap();
+        (conduit::hashing::event_id(&pdu).unwrap(), pdu)
+    }
+
+    fn lossy(pdu: &Pdu) -> Pdu {
+        let mut changed = pdu.clone();
+        changed.content = json!({"body": "lost"});
+        changed
+    }
+
+    #[test]
+    fn verified_snapshot_wins_over_a_lossy_row() {
+        let (id, pdu) = signed("full");
+        let row = Some((IntegrityClass::ContentMismatch, WirePdu::checked(&id, lossy(&pdu))));
+        let wire = choose_emission(&id, classify(&id, &pdu), pdu.clone(), row).unwrap();
+        assert_eq!(wire.pdu(), &pdu, "the full snapshot is sent");
+    }
+
+    #[test]
+    fn verified_row_replaces_a_snapshot_that_does_not_reproduce_its_id() {
+        let (id, pdu) = signed("row");
+        let (_, other) = signed("snapshot");
+        assert_eq!(classify(&id, &other), IntegrityClass::IdMismatch);
+        let row = Some((IntegrityClass::Verified, WirePdu::checked(&id, pdu.clone())));
+        let wire = choose_emission(&id, IntegrityClass::IdMismatch, other, row).unwrap();
+        assert_eq!(wire.pdu(), &pdu, "the stored row is sent, never the re-identified snapshot");
+    }
+
+    #[test]
+    fn redacted_snapshot_when_the_row_does_not_reproduce_its_id() {
+        let (id, pdu) = signed("x");
+        let snapshot = lossy(&pdu);
+        let class = classify(&id, &snapshot);
+        assert_eq!(class, IntegrityClass::ContentMismatch);
+        let wire = choose_emission(&id, class, snapshot, Some((IntegrityClass::IdMismatch, None))).unwrap();
+        assert_eq!(wire.content, json!({}));
+        assert_eq!(wire.event_id(), id);
+    }
+
+    #[test]
+    fn withheld_when_nothing_reproduces_the_saved_id() {
+        let (id, _) = signed("x");
+        let (_, other) = signed("y");
+        assert!(choose_emission(&id, IntegrityClass::IdMismatch, other.clone(), None).is_none());
+        assert!(choose_emission(&id, IntegrityClass::IdMismatch, other, Some((IntegrityClass::IdMismatch, None))).is_none());
+    }
 
     #[test]
     fn backoff_grows_then_caps() {

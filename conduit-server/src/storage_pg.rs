@@ -354,10 +354,14 @@ impl Storage for PostgresStorage {
 
     async fn put_event_once(&self, key: &conduit::storage::TransactionKey, event: &Event) -> Result<(String, bool)> {
         let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
-        let result = json_text(&serde_json::json!({"event_id": event.event_id}));
+        // The client event-transaction result is a fixed, NUL-free object
+        // ({"event_id": "$<base64>"}); it is also kept in the JSONB column
+        // for the 0051 event -> transaction_id lookup index.
+        let result_json = serde_json::json!({"event_id": event.event_id});
+        let result = json_text(&result_json);
         let inserted = sqlx::query!(
-            "INSERT INTO transactions (scope, owner, endpoint, txn_id, result_text) VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING",
-            key.scope, key.owner, key.endpoint, key.txn_id, result
+            "INSERT INTO transactions (scope, owner, endpoint, txn_id, result_text, result) VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING",
+            key.scope, key.owner, key.endpoint, key.txn_id, result, result_json
         ).execute(&mut *transaction).await.map_err(map_sqlx)?.rows_affected() > 0;
         if !inserted {
             let row = sqlx::query!(
@@ -370,8 +374,8 @@ impl Storage for PostgresStorage {
                 transaction.commit().await.map_err(map_sqlx)?;
                 return Ok((id, false));
             }
-            sqlx::query!("UPDATE transactions SET result_text = $5 WHERE scope = $1 AND owner = $2 AND endpoint = $3 AND txn_id = $4",
-                key.scope, key.owner, key.endpoint, key.txn_id, result).execute(&mut *transaction).await.map_err(map_sqlx)?;
+            sqlx::query!("UPDATE transactions SET result_text = $5, result = $6 WHERE scope = $1 AND owner = $2 AND endpoint = $3 AND txn_id = $4",
+                key.scope, key.owner, key.endpoint, key.txn_id, result, result_json).execute(&mut *transaction).await.map_err(map_sqlx)?;
         }
         if event.state_key.is_some() {
             return Err(Error::InvalidEvent("put_event_once accepts non-state events only".into()));

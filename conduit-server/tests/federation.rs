@@ -510,3 +510,89 @@ async fn queue_retries_on_failure() {
         "expected at least 2 calls (1 failure + 1 retry), got {calls}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// add-pdu-wire: a pending pre-56498e3 outbox envelope
+// ---------------------------------------------------------------------------
+/// A legacy flattened envelope holds one snapshot whose ID was computed the
+/// pre-56498e3 way (`"event_id": ""` included, unredacted) and one verifiable
+/// snapshot. Draining sends only the verifiable PDU (without `event_id`),
+/// withholds the other without re-signing it, and records both snapshot
+/// verdicts on the queue row only.
+#[tokio::test]
+async fn legacy_outbox_envelope_withholds_non_reproducible_snapshots() {
+    use conduit::event::{Event, Pdu};
+    use conduit_server::federation::Queue;
+    use std::sync::Mutex;
+
+    let bodies: Arc<Mutex<Vec<Value>>> = Arc::default();
+    let seen = Arc::clone(&bodies);
+    let (listener, base_url) = bind_random().await;
+    tokio::spawn(async move {
+        let app = Router::new().route(
+            "/_matrix/federation/v1/send/:txn_id",
+            put(move |Json(body): Json<Value>| {
+                let seen = Arc::clone(&seen);
+                async move {
+                    seen.lock().unwrap().push(body);
+                    Json(json!({ "pdus": {} }))
+                }
+            }),
+        );
+        axum::serve(listener, app).await.ok();
+    });
+
+    let db = TempDb::new().await;
+    let storage = db.storage();
+    let server_key = Arc::new(conduit_server::keys::load_or_generate(&storage).await.unwrap());
+
+    let sign = |body: &str| {
+        let mut pdu = Pdu::new("!r:my.server", "@a:my.server", "m.room.message", None,
+            json!({"body": body}), 1, vec![], vec![], 1);
+        conduit::signing::sign_authored(&mut pdu, &server_key, "my.server").unwrap();
+        pdu
+    };
+    let good_pdu = sign("good");
+    let good = Event::new(conduit::hashing::event_id(&good_pdu).unwrap(), good_pdu);
+    let old_pdu = sign("old");
+    let old_id = {
+        let mut value = serde_json::to_value(&old_pdu).unwrap();
+        value["event_id"] = json!("");
+        value.as_object_mut().unwrap().remove("signatures");
+        let digest = <sha2::Sha256 as sha2::Digest>::digest(to_canonical_bytes(&value).unwrap());
+        format!("${}", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest))
+    };
+    let old = Event::new(old_id.clone(), old_pdu);
+
+    let payload = json!({ "pdus": [old, good], "edus": [] });
+    let row_id = conduit::storage::Storage::enqueue_outbound(&storage, "remote.server", "transaction", "legacy-txn", &payload)
+        .await.unwrap();
+
+    let storage_arc: Arc<dyn conduit::storage::Storage> = Arc::new(db.storage());
+    let fed_client = Arc::new(make_test_client(Arc::clone(&server_key), "my.server", base_url).await);
+    let queue = Queue::new(fed_client, Arc::clone(&storage_arc));
+    queue.start().await;
+    for _ in 0..50 {
+        if !bodies.lock().unwrap().is_empty() { break; }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    let sent = bodies.lock().unwrap().clone();
+    assert_eq!(sent.len(), 1, "one transaction sent");
+    let pdus = sent[0]["pdus"].as_array().unwrap();
+    assert_eq!(pdus.len(), 1, "only the verifiable snapshot is sent: {pdus:?}");
+    assert!(pdus[0].get("event_id").is_none());
+    assert_eq!(pdus[0]["content"]["body"], "good");
+    let resent: Pdu = serde_json::from_value(pdus[0].clone()).unwrap();
+    assert_eq!(conduit::hashing::event_id(&resent).unwrap(), good.event_id, "same identity, never re-signed");
+
+    let (verdicts,): (Option<String>,) = sqlx::query_as("SELECT legacy_snapshot_verdicts FROM fed_outbound_queue WHERE id = $1")
+        .bind(row_id).fetch_one(&db.pool).await.unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&verdicts.unwrap()).unwrap(),
+        json!({ old_id.clone(): "id_mismatch", good.event_id.clone(): "verified" })
+    );
+    // Snapshot classification never writes events.id_integrity (no rows here).
+    let (count,): (i64,) = sqlx::query_as("SELECT count(*) FROM events").fetch_one(&db.pool).await.unwrap();
+    assert_eq!(count, 0);
+}
