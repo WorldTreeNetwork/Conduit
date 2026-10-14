@@ -15,6 +15,24 @@ use serde_json::{Value, json};
 
 use super::{AuthState, AuthedUser, MatrixError};
 
+/// Account data types the server manages itself. Clients may read them
+/// but setting them is `405 M_BAD_JSON` (v1.19 Client Config, server
+/// behaviour; m.push_rules joined the list in v1.10).
+pub const SERVER_MANAGED_TYPES: &[&str] = &["m.fully_read", "m.push_rules"];
+
+fn reject_server_managed(event_type: &str) -> Option<Response> {
+    SERVER_MANAGED_TYPES.contains(&event_type).then(|| {
+        (
+            StatusCode::METHOD_NOT_ALLOWED,
+            Json(json!({
+                "errcode": "M_BAD_JSON",
+                "error": format!("Cannot set {event_type} through this API."),
+            })),
+        )
+            .into_response()
+    })
+}
+
 // ---------------------------------------------------------------------------
 // PUT /user/:userId/account_data/:type
 // ---------------------------------------------------------------------------
@@ -27,6 +45,9 @@ pub async fn put_account_data<S: AuthState>(
 ) -> Response {
     if authed.user_id != user_id {
         return MatrixError::forbidden("cannot set another user's account data").into_response();
+    }
+    if let Some(rejection) = reject_server_managed(&event_type) {
+        return rejection;
     }
     if let Err(e) = state
         .storage()
@@ -70,6 +91,9 @@ pub async fn put_room_account_data<S: AuthState>(
 ) -> Response {
     if authed.user_id != user_id {
         return MatrixError::forbidden("cannot set another user's account data").into_response();
+    }
+    if let Some(rejection) = reject_server_managed(&event_type) {
+        return rejection;
     }
     if let Err(e) = state
         .storage()

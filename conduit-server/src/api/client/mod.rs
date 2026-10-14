@@ -36,6 +36,7 @@ pub mod room_content;
 pub mod rooms;
 pub mod safe_fetch;
 pub mod sso;
+pub mod standards;
 pub mod sync;
 pub mod thirdparty;
 pub mod typing;

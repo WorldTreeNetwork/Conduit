@@ -506,7 +506,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let app = Router::new()
         .route("/health", get(health))
-        .route("/_matrix/client/versions", get(versions))
         .route("/_matrix/key/v2/server", get(server_keys))
         .route("/_matrix/key/v2/server/:key_id", get(server_keys))
         // Client-Server API: auth
@@ -685,6 +684,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .merge(conduit_server::api::client::appservice_ping::router::<AppState>())
         .merge(conduit_server::api::client::room_content::router::<AppState>())
         .merge(conduit_server::api::client::account::router::<AppState>())
+        .merge(conduit_server::api::client::standards::router::<AppState>())
         // Apply CS-API rate limiter to everything above (conduit-9m4).
         // Federation routes are nested below and use their own per-origin
         // limiter, so they bypass this one.
@@ -695,6 +695,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Federation inbound (E09)
         .merge(fed_router)
         .with_state(state.clone())
+        // 404/405 -> M_UNRECOGNIZED, Retry-After on 429 (conduit-y99.28).
+        .layer(middleware::map_response(
+            conduit_server::api::client::standards::normalize_errors,
+        ))
         .layer(TraceLayer::new_for_http())
         // CORS (conduit-cws): browser Matrix clients (Element) are served from a
         // different origin and call the CS-API cross-origin. The Matrix spec
@@ -837,10 +841,6 @@ mod oidc_issuer_tests {
         assert_eq!(iss, "https://idp.example");
         assert!(explicit);
     }
-}
-
-async fn versions() -> Json<serde_json::Value> {
-    Json(json!({ "versions": conduit::api::client::SUPPORTED_VERSIONS }))
 }
 
 /// `GET /_matrix/key/v2/server` and `GET /_matrix/key/v2/server/{keyId}`

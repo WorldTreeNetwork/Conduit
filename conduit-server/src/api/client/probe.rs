@@ -46,21 +46,11 @@ pub async fn capabilities<S: AuthState>(
                 "m.set_avatar_url":   { "enabled": !is_guest },
                 "m.3pid_changes":     { "enabled": false },
                 "m.get_login_token":  { "enabled": !is_guest },
+                // Only versions the kernel can actually create and
+                // validate (conduit-y99.28; more arrive with y99.23).
                 "m.room_versions": {
-                    "default": "11",
-                    "available": {
-                        "1":  "stable",
-                        "2":  "stable",
-                        "3":  "stable",
-                        "4":  "stable",
-                        "5":  "stable",
-                        "6":  "stable",
-                        "7":  "stable",
-                        "8":  "stable",
-                        "9":  "stable",
-                        "10": "stable",
-                        "11": "stable",
-                    }
+                    "default": conduit::ROOM_VERSION,
+                    "available": { conduit::ROOM_VERSION: "stable" }
                 }
             }
         })),

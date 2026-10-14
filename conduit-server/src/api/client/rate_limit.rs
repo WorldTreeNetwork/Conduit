@@ -139,8 +139,11 @@ pub async fn cs_rate_limit(
     };
 
     if !limiter.try_consume(&key, authed).await {
+        // Retry-After is the v1.10+ signal; retry_after_ms stays for
+        // older clients (deprecated, MAY).
         return (
             StatusCode::TOO_MANY_REQUESTS,
+            [(axum::http::header::RETRY_AFTER, super::standards::retry_after_header(1000))],
             Json(json!({
                 "errcode": "M_LIMIT_EXCEEDED",
                 "error": "Too many requests",

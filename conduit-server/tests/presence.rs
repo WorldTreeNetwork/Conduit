@@ -442,11 +442,11 @@ async fn account_data_global_round_trip() {
     let token = reg["access_token"].as_str().unwrap();
     let user_id = reg["user_id"].as_str().unwrap();
 
-    let content = json!({"push_rules": {"global": {}}});
+    let content = json!({"theme": {"dark": true}});
 
     let req = Request::builder()
         .method("PUT")
-        .uri(format!("/_matrix/client/v3/user/{user_id}/account_data/m.push_rules"))
+        .uri(format!("/_matrix/client/v3/user/{user_id}/account_data/org.example.settings"))
         .header("content-type", "application/json")
         .header("authorization", format!("Bearer {token}"))
         .body(Body::from(serde_json::to_vec(&content).unwrap()))
@@ -456,7 +456,7 @@ async fn account_data_global_round_trip() {
 
     let req = Request::builder()
         .method("GET")
-        .uri(format!("/_matrix/client/v3/user/{user_id}/account_data/m.push_rules"))
+        .uri(format!("/_matrix/client/v3/user/{user_id}/account_data/org.example.settings"))
         .header("authorization", format!("Bearer {token}"))
         .body(Body::empty())
         .unwrap();

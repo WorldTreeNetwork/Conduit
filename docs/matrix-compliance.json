@@ -1840,6 +1840,82 @@
         "Writers of one stream are serialised from position allocation to commit (throughput trade-off)"
       ],
       "gap_issues": []
+    },
+    {
+      "id": "cs-api-standards-unrecognized-and-retry-after",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#api-standards",
+      "status": "covered_assertions_only",
+      "assertions": [
+        "unknown endpoints answer 404 M_UNRECOGNIZED and known endpoints with a wrong method answer 405 M_UNRECOGNIZED keeping Allow",
+        "handler-produced JSON errors keep their own errcode",
+        "every 429 carries a Retry-After header in whole seconds plus the deprecated retry_after_ms"
+      ],
+      "implementation": [
+        "conduit-server/src/api/client/standards.rs",
+        "conduit-server/src/api/client/rate_limit.rs"
+      ],
+      "tests": [
+        "conduit-server/tests/production_basics.rs::unknown_endpoints_and_methods_answer_m_unrecognized",
+        "conduit-server/tests/production_basics.rs::rate_limited_responses_carry_retry_after",
+        "conduit-server/src/api/client/standards.rs::empty_404_and_405_become_m_unrecognized",
+        "conduit-server/src/api/client/standards.rs::rate_limited_responses_gain_retry_after"
+      ],
+      "limitations": []
+    },
+    {
+      "id": "cs-versions-and-auth-discovery",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#api-versions",
+      "status": "covered_assertions_only",
+      "assertions": [
+        "/versions lists v1.1 through v1.19 with an unstable_features object, identical with or without authentication",
+        "GET /_matrix/client/v1/auth_metadata answers 404 M_UNRECOGNIZED because the OAuth 2.0 API is unsupported, while GET /login advertises the legacy API"
+      ],
+      "implementation": [
+        "conduit/src/api.rs",
+        "conduit-server/src/api/client/standards.rs"
+      ],
+      "tests": [
+        "conduit-server/tests/production_basics.rs::versions_advertise_v1_19_and_unstable_features",
+        "conduit-server/tests/production_basics.rs::auth_metadata_reports_oauth_unsupported"
+      ],
+      "limitations": []
+    },
+    {
+      "id": "cs-capabilities-room-versions-accurate",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#mroom_versions-capability",
+      "status": "covered_assertions_only",
+      "assertions": [
+        "m.room_versions advertises default 11 and only {\"11\": \"stable\"}",
+        "every advertised version can be created; an unadvertised version is 400 M_UNSUPPORTED_ROOM_VERSION"
+      ],
+      "implementation": [
+        "conduit-server/src/api/client/probe.rs"
+      ],
+      "tests": [
+        "conduit-server/tests/production_basics.rs::capabilities_advertise_only_supported_room_versions"
+      ],
+      "limitations": [
+        "Room versions other than 11 are conduit-y99.23"
+      ]
+    },
+    {
+      "id": "cs-client-config-server-managed-types",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#client-config",
+      "status": "covered_assertions_only",
+      "assertions": [
+        "PUT of m.fully_read or m.push_rules account data, global or per room, is 405 M_BAD_JSON; other types are stored"
+      ],
+      "implementation": [
+        "conduit-server/src/api/client/account_data.rs"
+      ],
+      "tests": [
+        "conduit-server/tests/production_basics.rs::server_managed_account_data_is_rejected_with_405"
+      ],
+      "limitations": []
     }
   ]
 }

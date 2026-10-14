@@ -16,17 +16,17 @@
  "summary": {
   "cs": {
    "endpoint": {
-    "implemented+tested": 92,
+    "implemented+tested": 97,
     "implemented-untested": 8,
-    "partial": 45,
-    "missing": 18,
+    "partial": 41,
+    "missing": 17,
     "not-applicable": 1,
     "total": 164
    },
    "requirement": {
-    "implemented+tested": 28,
+    "implemented+tested": 34,
     "implemented-untested": 3,
-    "partial": 36,
+    "partial": 30,
     "missing": 10,
     "not-applicable": 9,
     "total": 86
@@ -125,10 +125,10 @@
    }
   },
   "all": {
-   "implemented+tested": 154,
+   "implemented+tested": 165,
    "implemented-untested": 14,
-   "partial": 124,
-   "missing": 136,
+   "partial": 114,
+   "missing": 135,
    "not-applicable": 37,
    "total": 465
   }
@@ -285,21 +285,20 @@
    "rate_limited": "No",
    "deprecated": false,
    "role": "homeserver",
-   "status": "partial",
+   "status": "implemented+tested",
    "code": [
     {
-     "loc": "conduit-server/src/main.rs:509",
-     "handler": "versions",
+     "loc": "conduit-server/src/api/client/standards.rs:36",
+     "handler": "standards::versions",
      "kind": "exact"
     }
    ],
-   "tests": [],
-   "tests_total": 0,
-   "gap_beads": [
-    "conduit-y99.28",
-    "conduit-y99.46"
+   "tests": [
+    "conduit-server/tests/production_basics.rs::versions_advertise_v1_19_and_unstable_features"
    ],
-   "notes": "Advertises only v1.11; target v1.19. No test."
+   "tests_total": 1,
+   "gap_beads": [],
+   "notes": "v1.1-v1.19 and an empty unstable_features map; same answer with or without auth."
   },
   {
    "id": "cs.ep.get_matrixclientv1registermloginregistration_tokenvalidity",
@@ -781,14 +780,20 @@
    "rate_limited": "No",
    "deprecated": false,
    "role": "homeserver",
-   "status": "missing",
-   "code": [],
-   "tests": [],
-   "tests_total": 0,
-   "gap_beads": [
-    "conduit-y99.28"
+   "status": "implemented+tested",
+   "code": [
+    {
+     "loc": "conduit-server/src/api/client/standards.rs:41",
+     "handler": "standards::auth_metadata",
+     "kind": "exact"
+    }
    ],
-   "notes": "OAuth 2.0 API is optional; endpoint must answer 404 M_UNRECOGNIZED while unsupported."
+   "tests": [
+    "conduit-server/tests/production_basics.rs::auth_metadata_reports_oauth_unsupported"
+   ],
+   "tests_total": 1,
+   "gap_beads": [],
+   "notes": "OAuth 2.0 API unsupported: 404 M_UNRECOGNIZED per authentication API discovery."
   },
   {
    "id": "cs.ep.get_matrixclientv3account3pid",
@@ -1072,7 +1077,7 @@
    "rate_limited": "Yes",
    "deprecated": false,
    "role": "homeserver",
-   "status": "partial",
+   "status": "implemented+tested",
    "code": [
     {
      "loc": "conduit-server/src/main.rs:529",
@@ -1084,14 +1089,14 @@
     "conduit-server/tests/production_account.rs::production_get_login_token_reprompts_and_logs_in_once",
     "conduit-server/tests/production_account.rs::production_guest_access_is_restricted_and_upgradable",
     "conduit-server/tests/production_account.rs::production_password_change_revokes_other_devices",
-    "conduit-server/tests/production_account.rs::production_threepid_endpoints_answer_honestly"
+    "conduit-server/tests/production_account.rs::production_threepid_endpoints_answer_honestly",
+    "conduit-server/tests/production_basics.rs::capabilities_advertise_only_supported_room_versions"
    ],
-   "tests_total": 4,
+   "tests_total": 5,
    "gap_beads": [
-    "conduit-y99.28",
     "conduit-y99.23"
    ],
-   "notes": "Account capabilities now per-account (y99.18); m.room_versions still claims 1-10 stable although only v11 is supported."
+   "notes": "Per-account capabilities (y99.18); m.room_versions advertises only v11, the one version the kernel creates. More versions arrive with y99.23."
   },
   {
    "id": "cs.ep.post_matrixclientv3useruseridfilter",
@@ -4264,7 +4269,7 @@
    "rate_limited": "No",
    "deprecated": false,
    "role": "homeserver",
-   "status": "partial",
+   "status": "implemented+tested",
    "code": [
     {
      "loc": "conduit-server/src/main.rs:610",
@@ -4278,13 +4283,12 @@
     "conduit-server/tests/production_e2e.rs::production_account_data_overwrites_advance_real_cursors_without_replay",
     "conduit-server/tests/production_e2e.rs::production_filter_stream_limits_do_not_skip_pending_updates",
     "conduit-server/tests/production_e2e.rs::production_long_poll_wakes_for_each_non_room_stream",
-    "conduit-server/tests/production_rooms.rs::ignored_users_are_filtered_from_sync_messages_and_invites"
+    "conduit-server/tests/production_rooms.rs::ignored_users_are_filtered_from_sync_messages_and_invites",
+    "conduit-server/tests/production_basics.rs::server_managed_account_data_is_rejected_with_405"
    ],
-   "tests_total": 6,
-   "gap_beads": [
-    "conduit-y99.28"
-   ],
-   "notes": "Accepts m.fully_read / m.push_rules (MUST be 405)."
+   "tests_total": 7,
+   "gap_beads": [],
+   "notes": "m.fully_read and m.push_rules are server-managed: 405 M_BAD_JSON."
   },
   {
    "id": "cs.ep.get_matrixclientv3useruseridroomsroomidaccount_datatype",
@@ -4326,7 +4330,7 @@
    "rate_limited": "No",
    "deprecated": false,
    "role": "homeserver",
-   "status": "partial",
+   "status": "implemented+tested",
    "code": [
     {
      "loc": "conduit-server/src/main.rs:613",
@@ -4338,13 +4342,12 @@
     "conduit-server/tests/presence.rs::account_data_per_room_round_trip",
     "conduit-server/tests/production_e2e.rs::production_account_data_overwrites_advance_real_cursors_without_replay",
     "conduit-server/tests/production_e2e.rs::production_long_poll_wakes_for_each_non_room_stream",
-    "conduit-server/tests/production_rooms.rs::read_markers_and_room_tags"
+    "conduit-server/tests/production_rooms.rs::read_markers_and_room_tags",
+    "conduit-server/tests/production_basics.rs::server_managed_account_data_is_rejected_with_405"
    ],
-   "tests_total": 4,
-   "gap_beads": [
-    "conduit-y99.28"
-   ],
-   "notes": "Accepts m.fully_read / m.push_rules (MUST be 405)."
+   "tests_total": 5,
+   "gap_beads": [],
+   "notes": "m.fully_read and m.push_rules are server-managed: 405 M_BAD_JSON."
   },
   {
    "id": "cs.ep.get_matrixclientv1adminlockuserid",
@@ -6619,20 +6622,23 @@
    "title": "Standard error response JSON (errcode/error) and common error codes",
    "source": "https://spec.matrix.org/v1.19/client-server-api/#standard-error-response",
    "role": "homeserver",
-   "status": "partial",
+   "status": "implemented+tested",
    "code": [
     {
      "loc": "conduit-server/src/api/client/mod.rs (MatrixError)"
+    },
+    {
+     "loc": "conduit-server/src/api/client/standards.rs"
     }
    ],
    "tests": [
-    "conduit-server/tests/auth.rs::whoami_with_no_token"
+    "conduit-server/tests/auth.rs::whoami_with_no_token",
+    "conduit-server/tests/production_basics.rs::unknown_endpoints_and_methods_answer_m_unrecognized",
+    "conduit-server/src/api/client/standards.rs::empty_404_and_405_become_m_unrecognized"
    ],
-   "tests_total": 1,
-   "gap_beads": [
-    "conduit-y99.28"
-   ],
-   "notes": "Unknown endpoints/methods return empty axum 404/405 instead of M_UNRECOGNIZED."
+   "tests_total": 3,
+   "gap_beads": [],
+   "notes": "Unknown endpoints 404 M_UNRECOGNIZED, wrong method 405 M_UNRECOGNIZED (Allow kept); handler errors keep their errcode."
   },
   {
    "id": "cs.std.rate-limiting",
@@ -6641,20 +6647,23 @@
    "title": "Rate limiting (429 M_LIMIT_EXCEEDED, retry_after_ms, Retry-After header)",
    "source": "https://spec.matrix.org/v1.19/client-server-api/#rate-limiting",
    "role": "homeserver",
-   "status": "partial",
+   "status": "implemented+tested",
    "code": [
     {
      "loc": "conduit-server/src/api/client/rate_limit.rs"
+    },
+    {
+     "loc": "conduit-server/src/api/client/standards.rs"
     }
    ],
    "tests": [
-    "conduit-server/src/api/client/rate_limit.rs::authed_and_anon_have_separate_limits"
+    "conduit-server/src/api/client/rate_limit.rs::authed_and_anon_have_separate_limits",
+    "conduit-server/tests/production_basics.rs::rate_limited_responses_carry_retry_after",
+    "conduit-server/src/api/client/standards.rs::rate_limited_responses_gain_retry_after"
    ],
-   "tests_total": 1,
-   "gap_beads": [
-    "conduit-y99.28"
-   ],
-   "notes": "No Retry-After header."
+   "tests_total": 3,
+   "gap_beads": [],
+   "notes": "429 M_LIMIT_EXCEEDED with Retry-After header (all sources, derived from retry_after_ms) plus deprecated retry_after_ms."
   },
   {
    "id": "cs.std.transaction-ids",
@@ -6725,17 +6734,20 @@
    "title": "API versions (/versions accuracy, unstable_features)",
    "source": "https://spec.matrix.org/v1.19/client-server-api/#api-versions",
    "role": "homeserver",
-   "status": "partial",
+   "status": "implemented+tested",
    "code": [
     {
      "loc": "conduit/src/api.rs SUPPORTED_VERSIONS"
+    },
+    {
+     "loc": "conduit-server/src/api/client/standards.rs"
     }
    ],
-   "tests": [],
-   "tests_total": 0,
-   "gap_beads": [
-    "conduit-y99.28"
+   "tests": [
+    "conduit-server/tests/production_basics.rs::versions_advertise_v1_19_and_unstable_features"
    ],
+   "tests_total": 1,
+   "gap_beads": [],
    "notes": ""
   },
   {
@@ -6745,14 +6757,18 @@
    "title": "Authentication API discovery (legacy vs OAuth 2.0)",
    "source": "https://spec.matrix.org/v1.19/client-server-api/#authentication-api-discovery",
    "role": "homeserver",
-   "status": "partial",
-   "code": [],
-   "tests": [],
-   "tests_total": 0,
-   "gap_beads": [
-    "conduit-y99.28"
+   "status": "implemented+tested",
+   "code": [
+    {
+     "loc": "conduit-server/src/api/client/standards.rs"
+    }
    ],
-   "notes": "Legacy API served; auth_metadata must say M_UNRECOGNIZED."
+   "tests": [
+    "conduit-server/tests/production_basics.rs::auth_metadata_reports_oauth_unsupported"
+   ],
+   "tests_total": 1,
+   "gap_beads": [],
+   "notes": "Legacy API served (GET /login flows); auth_metadata answers 404 M_UNRECOGNIZED."
   },
   {
    "id": "cs.auth.uia",
@@ -7066,7 +7082,7 @@
    "title": "Capabilities negotiation (accurate m.room_versions, m.change_password, m.set_displayname, m.3pid_changes, m.get_login_token, m.profile_fields)",
    "source": "https://spec.matrix.org/v1.19/client-server-api/#capabilities-negotiation",
    "role": "homeserver",
-   "status": "partial",
+   "status": "implemented+tested",
    "code": [
     {
      "loc": "conduit-server/src/api/client/probe.rs"
@@ -7074,14 +7090,14 @@
    ],
    "tests": [
     "conduit-server/tests/production_account.rs::production_password_change_revokes_other_devices",
-    "conduit-server/tests/production_account.rs::production_get_login_token_reprompts_and_logs_in_once"
+    "conduit-server/tests/production_account.rs::production_get_login_token_reprompts_and_logs_in_once",
+    "conduit-server/tests/production_basics.rs::capabilities_advertise_only_supported_room_versions"
    ],
-   "tests_total": 2,
+   "tests_total": 3,
    "gap_beads": [
-    "conduit-y99.28",
     "conduit-y99.23"
    ],
-   "notes": "Per-account capabilities correct; m.room_versions over-claims."
+   "notes": "Per-account capabilities; m.room_versions lists only supported versions (v11). m.profile_fields arrives with y99.38."
   },
   {
    "id": "cs.filtering",
@@ -7921,20 +7937,19 @@
    "title": "Client config (account data; 405 for m.fully_read/m.push_rules)",
    "source": "https://spec.matrix.org/v1.19/client-server-api/#client-config",
    "role": "homeserver",
-   "status": "partial",
+   "status": "implemented+tested",
    "code": [
     {
      "loc": "conduit-server/src/api/client/account_data.rs"
     }
    ],
    "tests": [
-    "conduit-server/tests/presence.rs::account_data_per_room_round_trip"
+    "conduit-server/tests/presence.rs::account_data_per_room_round_trip",
+    "conduit-server/tests/production_basics.rs::server_managed_account_data_is_rejected_with_405"
    ],
-   "tests_total": 1,
-   "gap_beads": [
-    "conduit-y99.28"
-   ],
-   "notes": ""
+   "tests_total": 2,
+   "gap_beads": [],
+   "notes": "405 M_BAD_JSON for m.fully_read/m.push_rules, global and per-room."
   },
   {
    "id": "cs.mod.server-admin",
@@ -10612,13 +10627,14 @@
      "loc": "conduit-server/src/api/client/probe.rs"
     }
    ],
-   "tests": [],
-   "tests_total": 0,
-   "gap_beads": [
-    "conduit-y99.23",
-    "conduit-y99.28"
+   "tests": [
+    "conduit-server/tests/production_basics.rs::capabilities_advertise_only_supported_room_versions"
    ],
-   "notes": "Capabilities advertise 1-11 stable."
+   "tests_total": 1,
+   "gap_beads": [
+    "conduit-y99.23"
+   ],
+   "notes": "Capabilities advertise only v11 (y99.28 done); other versions are y99.23."
   },
   {
    "id": "app.base64",

@@ -286,3 +286,17 @@ M_THREEPID_DENIED`, and deactivation reports `success` (nothing to unbind).
 `CONDUIT_SUPPORT_PAGE`, defaulting to local admins; 404 when nothing is known.
 CORS is the global `*` layer. `GET /admin/whois/{userId}` is limited to the user
 and server admins and reports last-seen IP, timestamp and user agent per device.
+
+## API standards and discovery (conduit-y99.28)
+
+`conduit-server/src/api/client/standards.rs` owns the cross-cutting rules.
+`normalize_errors` is a `map_response` layer on the whole app: axum's empty
+404/405 become `404|405 M_UNRECOGNIZED` (the `Allow` header survives), JSON
+error bodies from handlers pass through untouched, and every `429` gains a
+`Retry-After` header (seconds, rounded up) derived from `retry_after_ms` when a
+source did not set one. `/versions` lists v1.1-v1.19 from
+`conduit::api::client::SUPPORTED_VERSIONS` with an empty `unstable_features`.
+`GET /_matrix/client/v1/auth_metadata` answers `404 M_UNRECOGNIZED` (OAuth 2.0
+unsupported; legacy `/login` is the advertised API). Capabilities advertise
+only `conduit::ROOM_VERSION`. `PUT` account data of the server-managed types
+`m.fully_read`/`m.push_rules` (global or per room) is `405 M_BAD_JSON`.
