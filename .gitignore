@@ -16,3 +16,4 @@ target/
 .spawns/
 .omx/
 groups/*/inventory.json
+.claude/worktrees/
