@@ -16,18 +16,18 @@
  "summary": {
   "cs": {
    "endpoint": {
-    "implemented+tested": 97,
+    "implemented+tested": 99,
     "implemented-untested": 8,
-    "partial": 41,
-    "missing": 17,
+    "partial": 42,
+    "missing": 14,
     "not-applicable": 1,
     "total": 164
    },
    "requirement": {
-    "implemented+tested": 34,
+    "implemented+tested": 35,
     "implemented-untested": 3,
-    "partial": 30,
-    "missing": 10,
+    "partial": 32,
+    "missing": 7,
     "not-applicable": 9,
     "total": 86
    }
@@ -125,10 +125,10 @@
    }
   },
   "all": {
-   "implemented+tested": 165,
+   "implemented+tested": 168,
    "implemented-untested": 14,
-   "partial": 114,
-   "missing": 135,
+   "partial": 117,
+   "missing": 129,
    "not-applicable": 37,
    "total": 465
   }
@@ -1710,14 +1710,14 @@
     "conduit-server/tests/production_account.rs::production_device_lifecycle_with_uia_keys_and_device_lists",
     "conduit-server/tests/production_account.rs::production_guest_access_is_restricted_and_upgradable",
     "conduit-server/tests/production_account.rs::production_logout_deletes_devices",
-    "conduit-server/tests/production_account.rs::production_password_change_revokes_other_devices"
+    "conduit-server/tests/production_account.rs::production_password_change_revokes_other_devices",
+    "conduit-server/tests/production_basics.rs::invite_blocking_rejects_invites_and_hides_pending_ones"
    ],
-   "tests_total": 67,
+   "tests_total": 68,
    "gap_beads": [
-    "conduit-y99.36",
-    "conduit-y99.29"
+    "conduit-y99.36"
    ],
-   "notes": "Supports preset/initial_state/invite/alias/is_direct/room_version/power_level_content_override/creation_content; no invite_3pid, no invite blocking."
+   "notes": "Supports preset/initial_state/invite/alias/is_direct/room_version/power_level_content_override/creation_content; invitees blocking invites are 403 M_INVITE_BLOCKED before creation. No invite_3pid (y99.36)."
   },
   {
    "id": "cs.ep.get_matrixclientv3directoryroomroomalias",
@@ -1880,11 +1880,13 @@
     "conduit-server/tests/production_directory.rs::knock_accept_deny_and_rescind",
     "conduit-server/tests/production_e2e.rs::production_invite_accept_and_kick_are_visible_in_sync",
     "conduit-server/tests/production_rooms.rs::ignored_users_are_filtered_from_sync_messages_and_invites",
-    "conduit-server/tests/rooms.rs::invite_then_join_succeeds"
+    "conduit-server/tests/rooms.rs::invite_then_join_succeeds",
+    "conduit-server/tests/production_basics.rs::invite_blocking_rejects_invites_and_hides_pending_ones",
+    "conduit-server/tests/production_basics.rs::join_by_room_id_and_membership_reasons_reach_member_events"
    ],
-   "tests_total": 4,
+   "tests_total": 6,
    "gap_beads": [],
-   "notes": "Invite by user_id. Invite blocking (M_INVITE_BLOCKED) is conduit-y99.29."
+   "notes": "Invite by user_id with reason; 403 M_INVITE_BLOCKED for local users blocking invites."
   },
   {
    "id": "cs.ep.post_matrixclientv3joinroomidoralias",
@@ -1936,14 +1938,20 @@
    "rate_limited": "Yes",
    "deprecated": false,
    "role": "homeserver",
-   "status": "missing",
-   "code": [],
-   "tests": [],
-   "tests_total": 0,
-   "gap_beads": [
-    "conduit-y99.29"
+   "status": "implemented+tested",
+   "code": [
+    {
+     "loc": "conduit-server/src/api/client/room_membership.rs:80",
+     "handler": "room_membership::join_by_room_id",
+     "kind": "exact"
+    }
    ],
-   "notes": ""
+   "tests": [
+    "conduit-server/tests/production_basics.rs::join_by_room_id_and_membership_reasons_reach_member_events"
+   ],
+   "tests_total": 1,
+   "gap_beads": [],
+   "notes": "Room ID only (alias is 400 M_INVALID_PARAM); reason recorded on the member event; same join path as /join. third_party_signed belongs to conduit-y99.36."
   },
   {
    "id": "cs.ep.post_matrixclientv3knockroomidoralias",
@@ -2241,14 +2249,22 @@
    "rate_limited": "No",
    "deprecated": false,
    "role": "homeserver",
-   "status": "missing",
-   "code": [],
-   "tests": [],
-   "tests_total": 0,
-   "gap_beads": [
-    "conduit-y99.29"
+   "status": "partial",
+   "code": [
+    {
+     "loc": "conduit-server/src/api/client/room_membership.rs:120",
+     "handler": "room_membership::room_summary",
+     "kind": "exact"
+    }
    ],
-   "notes": ""
+   "tests": [
+    "conduit-server/tests/production_basics.rs::room_summary_respects_visibility_and_reports_state"
+   ],
+   "tests_total": 1,
+   "gap_beads": [
+    "conduit-y99.29.2"
+   ],
+   "notes": "Local rooms by ID or alias with every RoomSummary field; optional auth (anonymous only for public/knock/world_readable); invisible rooms 404. Remote rooms via federation are y99.29.2."
   },
   {
    "id": "cs.ep.post_matrixclientv3user_directorysearch",
@@ -4917,14 +4933,20 @@
    "rate_limited": "Yes",
    "deprecated": false,
    "role": "homeserver",
-   "status": "missing",
-   "code": [],
-   "tests": [],
-   "tests_total": 0,
-   "gap_beads": [
-    "conduit-y99.29"
+   "status": "implemented+tested",
+   "code": [
+    {
+     "loc": "conduit-server/src/api/client/room_membership.rs:287",
+     "handler": "room_membership::mutual_rooms",
+     "kind": "exact"
+    }
    ],
-   "notes": ""
+   "tests": [
+    "conduit-server/tests/production_basics.rs::mutual_rooms_lists_shared_joins_in_batches"
+   ],
+   "tests_total": 1,
+   "gap_beads": [],
+   "notes": "count + joined + next_batch (user-bound tokens valid 1h); 400 M_MISSING_PARAM/M_INVALID_PARAM for missing, invalid or own user_id and bad tokens; unknown users share nothing."
   },
   {
    "id": "ss.ep.getwell-knownmatrixserver",
@@ -5428,9 +5450,9 @@
    "tests_total": 3,
    "gap_beads": [
     "conduit-embed-pdu",
-    "conduit-y99.29"
+    "conduit-y99.29.1"
    ],
-   "notes": "Inviter signature/hash verification before co-signing is in conduit-embed-pdu amendments; invite blocking is conduit-y99.29."
+   "notes": "Inviter signature/hash verification before co-signing is in conduit-embed-pdu amendments; invite blocking hook is conduit-y99.29.1."
   },
   {
    "id": "ss.ep.get_matrixfederationv1make_leaveroomiduserid",
@@ -7417,18 +7439,21 @@
     },
     {
      "loc": "conduit-server/src/api/client/knock.rs"
+    },
+    {
+     "loc": "conduit-server/src/api/client/room_membership.rs"
     }
    ],
    "tests": [
     "conduit-server/tests/production_e2e.rs::production_invite_accept_and_kick_are_visible_in_sync",
-    "conduit-server/tests/production_rooms.rs::forget_hides_departed_rooms_until_rejoin"
+    "conduit-server/tests/production_rooms.rs::forget_hides_departed_rooms_until_rejoin",
+    "conduit-server/tests/production_basics.rs::join_by_room_id_and_membership_reasons_reach_member_events"
    ],
-   "tests_total": 2,
+   "tests_total": 3,
    "gap_beads": [
-    "conduit-y99.29",
     "conduit-jt5"
    ],
-   "notes": ""
+   "notes": "POST /rooms/{roomId}/join added; reason recorded on join/invite/leave/kick/ban/unban."
   },
   {
    "id": "cs.rooms.directory",
@@ -7459,14 +7484,20 @@
    "title": "Room summaries",
    "source": "https://spec.matrix.org/v1.19/client-server-api/#room-summaries",
    "role": "homeserver",
-   "status": "missing",
-   "code": [],
-   "tests": [],
-   "tests_total": 0,
-   "gap_beads": [
-    "conduit-y99.29"
+   "status": "partial",
+   "code": [
+    {
+     "loc": "conduit-server/src/api/client/room_membership.rs"
+    }
    ],
-   "notes": ""
+   "tests": [
+    "conduit-server/tests/production_basics.rs::room_summary_respects_visibility_and_reports_state"
+   ],
+   "tests_total": 1,
+   "gap_beads": [
+    "conduit-y99.29.2"
+   ],
+   "notes": "Local rooms complete; remote summaries via federation are y99.29.2."
   },
   {
    "id": "cs.user.directory",
@@ -8069,14 +8100,26 @@
    "title": "Invite permission (M_INVITE_BLOCKED)",
    "source": "https://spec.matrix.org/v1.19/client-server-api/#invite-permission",
    "role": "homeserver",
-   "status": "missing",
-   "code": [],
-   "tests": [],
-   "tests_total": 0,
-   "gap_beads": [
-    "conduit-y99.29"
+   "status": "partial",
+   "code": [
+    {
+     "loc": "conduit-server/src/api/client/room_membership.rs"
+    },
+    {
+     "loc": "conduit-server/src/api/client/rooms.rs"
+    },
+    {
+     "loc": "conduit-server/src/api/client/sync.rs"
+    }
    ],
-   "notes": ""
+   "tests": [
+    "conduit-server/tests/production_basics.rs::invite_blocking_rejects_invites_and_hides_pending_ones"
+   ],
+   "tests_total": 1,
+   "gap_beads": [
+    "conduit-y99.29.1"
+   ],
+   "notes": "m.invite_permission_config default_action=block: 403 M_INVITE_BLOCKED on /invite, createRoom invite list and PUT state member invite; pending invites hidden from /sync and restored on unblock. Federation /invite hook is y99.29.1."
   },
   {
    "id": "cs.mod.sticker",
@@ -8395,13 +8438,17 @@
    "title": "Mutual rooms",
    "source": "https://spec.matrix.org/v1.19/client-server-api/#mutual-rooms",
    "role": "homeserver",
-   "status": "missing",
-   "code": [],
-   "tests": [],
-   "tests_total": 0,
-   "gap_beads": [
-    "conduit-y99.29"
+   "status": "implemented+tested",
+   "code": [
+    {
+     "loc": "conduit-server/src/api/client/room_membership.rs"
+    }
    ],
+   "tests": [
+    "conduit-server/tests/production_basics.rs::mutual_rooms_lists_shared_joins_in_batches"
+   ],
+   "tests_total": 1,
+   "gap_beads": [],
    "notes": ""
   },
   {

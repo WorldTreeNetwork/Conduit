@@ -547,6 +547,9 @@ async fn build_sync_response<S: AuthState>(
         .event_stream_positions(&member_ids)
         .await
         .map_err(|error| MatrixError::unknown(error.to_string()).into_response())?;
+    // Invite blocking (v1.18): pending invites MUST NOT be served.
+    let invites_blocked =
+        super::room_membership::blocks_invites(storage.as_ref(), user_id).await;
     let mut invited_rooms = HashMap::new();
     let mut knocked_rooms = HashMap::new();
     let mut left_rooms = HashMap::new();
@@ -559,7 +562,7 @@ async fn build_sync_response<S: AuthState>(
         // Forgotten departures and invites from ignored users stay hidden.
         if filter.forgotten.get(&membership.room_id) == Some(&membership.event_id)
             || (membership.content["membership"] == "invite"
-                && filter.ignored.contains(&membership.sender))
+                && (invites_blocked || filter.ignored.contains(&membership.sender)))
         {
             continue;
         }

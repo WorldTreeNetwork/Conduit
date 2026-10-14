@@ -300,3 +300,25 @@ source did not set one. `/versions` lists v1.1-v1.19 from
 unsupported; legacy `/login` is the advertised API). Capabilities advertise
 only `conduit::ROOM_VERSION`. `PUT` account data of the server-managed types
 `m.fully_read`/`m.push_rules` (global or per room) is `405 M_BAD_JSON`.
+
+## Membership, summaries, mutual rooms, invite permission (conduit-y99.29)
+
+`conduit-server/src/api/client/room_membership.rs`:
+
+- `POST /rooms/{roomId}/join` shares `rooms::join_room`; aliases are
+  `400 M_INVALID_PARAM`. `reason` is written to the member event on join,
+  invite, leave, kick, ban and unban (`Room::*_with_reason`).
+- `GET /v1/room_summary/{roomIdOrAlias}` builds the summary from local
+  current state. Authentication is optional; anonymous callers see only
+  public/knock/knock_restricted or world-readable rooms, members see rooms they
+  are joined/invited/knocked in or (restricted) can join through an allowed
+  room. Anything else is `404 M_NOT_FOUND` so existence is not leaked. Remote
+  rooms (`via`) are conduit-y99.29.2.
+- `GET /v1/mutual_rooms` pages sorted room IDs; `next_batch` is a base64 token
+  bound to the queried user and valid for an hour. Batch size defaults to 100
+  (`CONDUIT_MUTUAL_ROOMS_BATCH` overrides it, used by tests).
+- Invite permission: `m.invite_permission_config` with `default_action: block`
+  makes `/invite`, PUT `m.room.member` invite state and `createRoom` (checked
+  before the room is created) answer `403 M_INVITE_BLOCKED`; `/sync` hides the
+  user's pending invites while blocked. The federation `/invite` hook is
+  conduit-y99.29.1.

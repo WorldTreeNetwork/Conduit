@@ -685,6 +685,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .merge(conduit_server::api::client::room_content::router::<AppState>())
         .merge(conduit_server::api::client::account::router::<AppState>())
         .merge(conduit_server::api::client::standards::router::<AppState>())
+        .merge(conduit_server::api::client::room_membership::router::<AppState>())
         // Apply CS-API rate limiter to everything above (conduit-9m4).
         // Federation routes are nested below and use their own per-origin
         // limiter, so they bypass this one.

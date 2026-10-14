@@ -158,7 +158,15 @@ impl Room {
 
     /// Join the room.
     pub async fn join(&self, user_id: &str, sender_: &dyn RoomEventSender) -> Result<String> {
-        let content = json!({ "membership": "join" });
+        self.join_with_reason(user_id, None, sender_).await
+    }
+
+    /// Join the room, recording an optional `reason` on the member event.
+    pub async fn join_with_reason(&self, user_id: &str, reason: Option<&str>, sender_: &dyn RoomEventSender) -> Result<String> {
+        let mut content = json!({ "membership": "join" });
+        if let Some(r) = reason {
+            content["reason"] = json!(r);
+        }
         sender_.send_event(user_id, &self.room_id, "m.room.member", Some(user_id), content).await
     }
 
@@ -191,16 +199,32 @@ impl Room {
 
     /// Unban a user (set membership to leave).
     pub async fn unban(&self, sender: &str, target_user_id: &str, sender_: &dyn RoomEventSender) -> Result<String> {
-        let content = json!({ "membership": "leave" });
+        self.unban_with_reason(sender, target_user_id, None, sender_).await
+    }
+
+    /// Unban a user, recording an optional `reason`.
+    pub async fn unban_with_reason(&self, sender: &str, target_user_id: &str, reason: Option<&str>, sender_: &dyn RoomEventSender) -> Result<String> {
+        let mut content = json!({ "membership": "leave" });
+        if let Some(r) = reason {
+            content["reason"] = json!(r);
+        }
         sender_.send_event(sender, &self.room_id, "m.room.member", Some(target_user_id), content).await
     }
 
     /// Invite a user.
     pub async fn invite(&self, sender: &str, target_user_id: &str, is_direct: bool, sender_: &dyn RoomEventSender) -> Result<String> {
-        let content = json!({
+        self.invite_with_reason(sender, target_user_id, is_direct, None, sender_).await
+    }
+
+    /// Invite a user, recording an optional `reason`.
+    pub async fn invite_with_reason(&self, sender: &str, target_user_id: &str, is_direct: bool, reason: Option<&str>, sender_: &dyn RoomEventSender) -> Result<String> {
+        let mut content = json!({
             "membership": "invite",
             "is_direct": is_direct,
         });
+        if let Some(r) = reason {
+            content["reason"] = json!(r);
+        }
         sender_.send_event(sender, &self.room_id, "m.room.member", Some(target_user_id), content).await
     }
 

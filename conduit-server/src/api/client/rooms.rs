@@ -151,6 +151,13 @@ pub async fn create_room<S: AuthState>(
         return MatrixError::from_conduit(e).into_response();
     }
 
+    // Invite blocking (v1.18): refuse before anything is created.
+    for invitee in &body.invite {
+        if let Err(blocked) = super::room_membership::check_invite_allowed(&state, invitee).await {
+            return blocked;
+        }
+    }
+
     // Invite users listed in `invite`.
     for invitee in &body.invite {
         let room = Room::new(&room_id);
@@ -218,7 +225,7 @@ pub async fn join_room<S: AuthState>(
     State(state): State<S>,
     authed: AuthedUser,
     Path(room_id_or_alias): Path<String>,
-    Json(_body): Json<JoinRequest>,
+    Json(body): Json<JoinRequest>,
 ) -> Response {
     let sender = &authed.user_id;
 
@@ -239,7 +246,7 @@ pub async fn join_room<S: AuthState>(
     };
 
     let room = Room::new(&room_id);
-    match room.join(sender, &RoomEventSenderWrapper(&state)).await {
+    match room.join_with_reason(sender, body.reason.as_deref(), &RoomEventSenderWrapper(&state)).await {
         Ok(_) => (StatusCode::OK, Json(json!({ "room_id": room_id }))).into_response(),
         Err(e) => MatrixError::from_conduit(e).into_response(),
     }
@@ -334,7 +341,7 @@ pub async fn unban_user<S: AuthState>(
 ) -> Response {
     let sender = &authed.user_id;
     let room = Room::new(&room_id);
-    match room.unban(sender, &body.user_id, &RoomEventSenderWrapper(&state)).await {
+    match room.unban_with_reason(sender, &body.user_id, body.reason.as_deref(), &RoomEventSenderWrapper(&state)).await {
         Ok(_) => (StatusCode::OK, Json(json!({}))).into_response(),
         Err(e) => MatrixError::from_conduit(e).into_response(),
     }
@@ -357,8 +364,11 @@ pub async fn invite_user<S: AuthState>(
     Json(body): Json<InviteRequest>,
 ) -> Response {
     let sender = &authed.user_id;
+    if let Err(blocked) = super::room_membership::check_invite_allowed(&state, &body.user_id).await {
+        return blocked;
+    }
     let room = Room::new(&room_id);
-    match room.invite(sender, &body.user_id, false, &RoomEventSenderWrapper(&state)).await {
+    match room.invite_with_reason(sender, &body.user_id, false, body.reason.as_deref(), &RoomEventSenderWrapper(&state)).await {
         Ok(_) => (StatusCode::OK, Json(json!({}))).into_response(),
         Err(e) => MatrixError::from_conduit(e).into_response(),
     }
@@ -467,6 +477,11 @@ async fn send_state_event_inner<S: AuthState + conduit::room::RoomEventSender>(
     state_key: &str,
     content: Value,
 ) -> Response {
+    if event_type == "m.room.member" && content.get("membership").and_then(Value::as_str) == Some("invite") {
+        if let Err(blocked) = super::room_membership::check_invite_allowed(state, state_key).await {
+            return blocked;
+        }
+    }
     let room = Room::new(room_id);
     match room.send_state_event(sender, event_type, state_key, content, &RoomEventSenderWrapper(state)).await {
         Ok(event_id) => (StatusCode::OK, Json(json!({ "event_id": event_id }))).into_response(),

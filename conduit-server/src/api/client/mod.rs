@@ -32,6 +32,7 @@ pub mod profile;
 pub mod push;
 pub mod receipts;
 pub mod room_directory;
+pub mod room_membership;
 pub mod room_content;
 pub mod rooms;
 pub mod safe_fetch;

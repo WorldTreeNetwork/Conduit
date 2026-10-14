@@ -2027,6 +2027,87 @@
         "conduit-server/tests/production_basics.rs::server_managed_account_data_is_rejected_with_405"
       ],
       "limitations": []
+    },
+    {
+      "id": "cs-join-by-room-id-and-membership-reasons",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#post_matrixclientv3roomsroomidjoin",
+      "status": "covered_assertions_only",
+      "assertions": [
+        "POST /rooms/{roomId}/join joins and returns room_id; an alias is 400 M_INVALID_PARAM; invite-only rooms are 403 M_FORBIDDEN",
+        "reason reaches the m.room.member content for join, /join/{roomIdOrAlias}, invite, leave, kick, ban and unban"
+      ],
+      "implementation": [
+        "conduit-server/src/api/client/room_membership.rs",
+        "conduit-server/src/api/client/rooms.rs",
+        "conduit/src/room/mod.rs"
+      ],
+      "tests": [
+        "conduit-server/tests/production_basics.rs::join_by_room_id_and_membership_reasons_reach_member_events"
+      ],
+      "limitations": [
+        "third_party_signed joins are conduit-y99.36"
+      ]
+    },
+    {
+      "id": "cs-room-summary-local",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#get_matrixclientv1room_summaryroomidoralias",
+      "status": "covered_assertions_only",
+      "assertions": [
+        "summary by alias or ID carries room_id, name, topic, canonical_alias, avatar_url, encryption, room_type, room_version, join_rule, num_joined_members, world_readable, guest_can_join",
+        "membership present only when authenticated (join/invite/leave)",
+        "private rooms are 404 M_NOT_FOUND to anonymous callers and non-members, visible to invitees; unknown rooms 404"
+      ],
+      "implementation": [
+        "conduit-server/src/api/client/room_membership.rs"
+      ],
+      "tests": [
+        "conduit-server/tests/production_basics.rs::room_summary_respects_visibility_and_reports_state"
+      ],
+      "limitations": [
+        "Rooms without local state are not fetched over federation (conduit-y99.29.2)"
+      ]
+    },
+    {
+      "id": "cs-mutual-rooms",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#get_matrixclientv1mutual_rooms",
+      "status": "covered_assertions_only",
+      "assertions": [
+        "joined lists rooms where both users are joined; count is the total across batches; next_batch pages without duplicates",
+        "unknown users yield count 0 and an empty list",
+        "missing user_id is 400 M_MISSING_PARAM; own, malformed user_id and invalid or foreign batch tokens are 400 M_INVALID_PARAM"
+      ],
+      "implementation": [
+        "conduit-server/src/api/client/room_membership.rs"
+      ],
+      "tests": [
+        "conduit-server/tests/production_basics.rs::mutual_rooms_lists_shared_joins_in_batches"
+      ],
+      "limitations": []
+    },
+    {
+      "id": "cs-invite-permission-blocking",
+      "role": "homeserver",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#invite-permission",
+      "status": "covered_assertions_only",
+      "assertions": [
+        "default_action block makes /invite, PUT state m.room.member invite and createRoom with the user in invite answer 403 M_INVITE_BLOCKED without writing an invite",
+        "invites already stored are hidden from /sync while blocked but remain room state",
+        "removing default_action or setting an unknown value restores normal invites"
+      ],
+      "implementation": [
+        "conduit-server/src/api/client/room_membership.rs",
+        "conduit-server/src/api/client/rooms.rs",
+        "conduit-server/src/api/client/sync.rs"
+      ],
+      "tests": [
+        "conduit-server/tests/production_basics.rs::invite_blocking_rejects_invites_and_hides_pending_ones"
+      ],
+      "limitations": [
+        "Federation /invite v1/v2 hook is conduit-y99.29.1"
+      ]
     }
   ]
 }
