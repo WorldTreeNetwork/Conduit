@@ -6,11 +6,13 @@ import { realClock, type Clock } from "./clock";
 import { noCrypto, type CryptoBackend } from "./crypto";
 import { MatrixError, describeError } from "./errors";
 import { enc, HttpClient, type Transport } from "./http";
+import { relatesTo } from "./relations";
+import { downloadPath, msgtypeFor, parseMxc, thumbnailPath, uploadMedia } from "./media";
 import { Room, type RoomSnapshot } from "./room";
 import { SendQueue, type PendingEvent } from "./sendQueue";
 import { KEYS, readJson, writeJson, type KeyValueStore } from "./store";
 import { SyncEngine, type SyncHealth } from "./sync";
-import type { JsonObject, MatrixEvent, MessagesResponse, Session, SyncResponse } from "./types";
+import type { DeviceInfo, JsonObject, MatrixEvent, MessagesResponse, Session, SyncResponse } from "./types";
 
 /** Filter sent with every /sync. Inline JSON keeps the since token valid. */
 export const SYNC_FILTER = JSON.stringify({
@@ -33,10 +35,31 @@ export interface RoomListEntry {
   membership: Room["membership"];
   unread: number;
   highlights: number;
-  preview?: { sender: string; body: string; ts: number };
+  preview?: { sender: string; body: string; ts: number; status?: PendingEvent["status"] };
+  /** Unsent messages that failed in this room. */
+  failedSends: number;
   lastActivityTs: number;
   inviter?: string;
   topic?: string;
+}
+
+export interface PublicRoom {
+  room_id: string;
+  name?: string;
+  topic?: string;
+  canonical_alias?: string;
+  num_joined_members: number;
+  world_readable?: boolean;
+  guest_can_join?: boolean;
+  join_rule?: string;
+  avatar_url?: string;
+}
+
+export interface PublicRoomsPage {
+  chunk: PublicRoom[];
+  next_batch?: string;
+  prev_batch?: string;
+  total_room_count_estimate?: number;
 }
 
 export interface ClientOptions {
@@ -53,7 +76,7 @@ export interface ClientOptions {
 type Listener = () => void;
 
 export class MatrixClient {
-  readonly session: Session;
+  session: Session;
   readonly http: HttpClient;
   readonly clock: Clock;
   readonly rooms = new Map<string, Room>();
@@ -61,15 +84,24 @@ export class MatrixClient {
   readonly sync: SyncEngine;
   readonly crypto: CryptoBackend;
   private readonly store: KeyValueStore;
+  private readonly transport: Transport | undefined;
   private readonly listeners = new Set<Listener>();
   private version = 0;
   private health: SyncHealth;
   private inflight = 0;
   private readonly lastReceipt = new Map<string, string>();
+  /** userId -> latest m.presence content. */
+  readonly presence = new Map<string, { presence: string; lastActiveAgo?: number; currentlyActive?: boolean; receivedTs: number }>();
+  private readonly typingSent = new Map<string, { active: boolean; at: number }>();
+  private readonly mediaCache = new Map<string, Promise<string>>();
   private readonly roomWaiters = new Set<() => void>();
   /** Set when the server rejects our token. */
   loggedOutReason: string | undefined;
   onLoggedOut?: (reason: string) => void;
+  /** Soft logout: the session expired but this device and its data remain. */
+  softLoggedOut = false;
+  /** Persist rotated tokens (refresh) and re-authentication. */
+  onSessionChanged?: (session: Session) => void;
 
   constructor(options: ClientOptions) {
     this.session = options.session;
@@ -83,6 +115,7 @@ export class MatrixClient {
       clock: this.clock,
     });
     this.http.onUnknownToken = (error) => this.handleLoggedOut(error);
+    this.http.refreshAccessToken = () => this.refreshAccessToken();
     this.sendQueue = new SendQueue({
       http: this.http,
       clock: this.clock,
@@ -91,6 +124,7 @@ export class MatrixClient {
       persist: (items) => writeJson(this.store, KEYS.pending, items),
       hasRemoteEcho: (roomId, eventId) => !!this.rooms.get(roomId)?.hasEvent(eventId),
       isRoomEncrypted: (roomId) => !!this.rooms.get(roomId)?.isEncrypted,
+      upload: (data, name, mimetype) => uploadMedia(this.http, data, name, mimetype),
     });
     this.sync = new SyncEngine({
       http: this.http,
@@ -105,6 +139,7 @@ export class MatrixClient {
       },
       onLoggedOut: (error) => this.handleLoggedOut(error),
     });
+    this.transport = options.transport;
     this.health = this.sync.status;
   }
 
@@ -169,9 +204,18 @@ export class MatrixClient {
     await this.sync.stop();
   }
 
+  /** Release object URLs created for media previews. */
+  private releaseMedia(): void {
+    for (const pending of this.mediaCache.values()) {
+      void pending.then((url) => URL.revokeObjectURL(url)).catch(() => undefined);
+    }
+    this.mediaCache.clear();
+  }
+
   /** Sign out on the server (best effort) and wipe local state. */
   async logout(): Promise<void> {
     await this.stop();
+    this.releaseMedia();
     try {
       await auth.logout(this.http);
     } catch (error) {
@@ -184,7 +228,49 @@ export class MatrixClient {
     clearStoredSession(this.store);
   }
 
+  private async refreshAccessToken(): Promise<boolean> {
+    const refreshToken = this.session.refreshToken;
+    if (!refreshToken) return false;
+    const plain = new HttpClient({ baseUrl: this.session.homeserverUrl, clock: this.clock, transport: this.transport });
+    const next = await auth.refreshSession(plain, refreshToken, this.clock.now());
+    this.updateSession({ ...this.session, ...next });
+    return true;
+  }
+
+  private updateSession(session: Session): void {
+    this.session = session;
+    this.http.accessToken = session.accessToken;
+    saveSessionInStore(this.store, session);
+    this.onSessionChanged?.(session);
+  }
+
+  /**
+   * After a soft logout: sign in again on the same device, keeping its
+   * cached rooms, pending messages and (later) encryption keys.
+   */
+  async reauthenticate(password: string): Promise<void> {
+    const plain = new HttpClient({ baseUrl: this.session.homeserverUrl, clock: this.clock, transport: this.transport });
+    const next = await auth.loginWithPassword(plain, this.userId, password, this.session.deviceId);
+    if (next.userId !== this.userId) throw new Error("That password belongs to a different account.");
+    this.updateSession({ ...next, homeserverUrl: this.session.homeserverUrl });
+    this.softLoggedOut = false;
+    this.loggedOutReason = undefined;
+    this.health = { ...this.sync.status, state: "connecting" };
+    this.sendQueue.start();
+    this.sync.start();
+    this.emit();
+  }
+
   private handleLoggedOut(error: MatrixError): void {
+    if (error.isSoftLogout) {
+      if (this.softLoggedOut) return;
+      // Keep everything; ask the person to sign in again on this device.
+      this.softLoggedOut = true;
+      this.sendQueue.stop();
+      void this.sync.stop();
+      this.emit();
+      return;
+    }
     if (this.loggedOutReason) return;
     this.loggedOutReason = describeError(error);
     this.health = { ...this.health, state: "error", lastError: this.loggedOutReason };
@@ -248,6 +334,18 @@ export class MatrixClient {
       this.sendQueue.dropRoom(roomId);
     }
 
+    for (const event of response.presence?.events ?? []) {
+      const sender = (event as { sender?: unknown }).sender;
+      if (typeof sender !== "string" || event.type !== "m.presence") continue;
+      const content = event.content;
+      this.presence.set(sender, {
+        presence: typeof content.presence === "string" ? content.presence : "offline",
+        lastActiveAgo: typeof content.last_active_ago === "number" ? content.last_active_ago : undefined,
+        currentlyActive: content.currently_active === true,
+        receivedTs: this.clock.now(),
+      });
+    }
+
     this.persistSnapshot(response.next_batch);
     this.emit();
   }
@@ -296,11 +394,18 @@ export class MatrixClient {
     const entries: RoomListEntry[] = [];
     for (const room of this.rooms.values()) {
       const last = room.lastMessage();
-      const pending = this.sendQueue.forRoom(room.roomId);
+      const pending = this.sendQueue
+        .forRoom(room.roomId)
+        .filter((p) => p.type === "m.room.message" && !relatesTo(p).relType);
       const lastPending = pending[pending.length - 1];
       let preview: RoomListEntry["preview"];
       if (lastPending && (!last || lastPending.createdTs >= last.origin_server_ts)) {
-        preview = { sender: this.userId, body: String(lastPending.content.body ?? ""), ts: lastPending.createdTs };
+        preview = {
+          sender: this.userId,
+          body: String(lastPending.content.body ?? ""),
+          ts: lastPending.createdTs,
+          status: lastPending.status,
+        };
       } else if (last) {
         preview = { sender: last.sender, body: String(last.content.body), ts: last.origin_server_ts };
       }
@@ -313,6 +418,7 @@ export class MatrixClient {
         preview,
         lastActivityTs: Math.max(room.lastActivityTs, preview?.ts ?? 0),
         inviter: room.membership === "invite" ? room.inviter(this.userId) : undefined,
+        failedSends: this.sendQueue.forRoom(room.roomId).filter((p) => p.status === "failed").length,
         topic: room.topic,
       });
     }
@@ -360,6 +466,275 @@ export class MatrixClient {
 
   sendMessage(roomId: string, body: string, msgtype: "m.text" | "m.emote" | "m.notice" = "m.text"): PendingEvent {
     return this.sendQueue.enqueue(roomId, "m.room.message", { msgtype, body });
+  }
+
+  /** Reply to an event (no fallback body; removed from the spec in v1.13). */
+  sendReply(roomId: string, replyTo: string, body: string, msgtype: "m.text" | "m.emote" = "m.text"): PendingEvent {
+    const room = this.rooms.get(roomId);
+    const target = room?.findEvent(replyTo);
+    const targetThread = target ? relatesTo(target) : {};
+    const content: JsonObject = { msgtype, body, "m.relates_to": { "m.in_reply_to": { event_id: replyTo } } };
+    // Replying to an event inside a thread keeps the reply in that thread.
+    if (targetThread.relType === "m.thread" && targetThread.eventId) {
+      content["m.relates_to"] = {
+        rel_type: "m.thread",
+        event_id: targetThread.eventId,
+        is_falling_back: false,
+        "m.in_reply_to": { event_id: replyTo },
+      };
+    }
+    return this.sendQueue.enqueue(roomId, "m.room.message", content);
+  }
+
+  /** Post into a thread; m.in_reply_to points at the latest reply as a fallback for thread-unaware clients. */
+  sendThreadMessage(roomId: string, rootId: string, body: string, msgtype: "m.text" | "m.emote" = "m.text"): PendingEvent {
+    const room = this.rooms.get(roomId);
+    const replies = room?.threadReplies(rootId, this.userId) ?? [];
+    const latest = replies[replies.length - 1]?.event_id ?? rootId;
+    return this.sendQueue.enqueue(roomId, "m.room.message", {
+      msgtype,
+      body,
+      "m.relates_to": { rel_type: "m.thread", event_id: rootId, is_falling_back: true, "m.in_reply_to": { event_id: latest } },
+    });
+  }
+
+  /** Replace the text of one of our own messages (m.replace). */
+  editMessage(roomId: string, eventId: string, body: string, msgtype: "m.text" | "m.emote" = "m.text"): PendingEvent {
+    const original = this.rooms.get(roomId)?.findEvent(eventId);
+    const relates: JsonObject = { rel_type: "m.replace", event_id: eventId };
+    const content: JsonObject = {
+      msgtype,
+      body: `* ${body}`,
+      "m.new_content": { msgtype, body },
+      "m.relates_to": relates,
+    };
+    if (original && original.sender !== this.userId) throw new Error("Only your own messages can be edited.");
+    return this.sendQueue.enqueue(roomId, "m.room.message", content);
+  }
+
+  /** React with an annotation key (usually an emoji). */
+  react(roomId: string, eventId: string, key: string): PendingEvent {
+    return this.sendQueue.enqueue(roomId, "m.reaction", {
+      "m.relates_to": { rel_type: "m.annotation", event_id: eventId, key },
+    });
+  }
+
+  /** Redact an event (delete a message, remove a reaction). */
+  redact(roomId: string, eventId: string, reason?: string): Promise<void> {
+    return this.track(async () => {
+      const txnId = this.sendQueue.newTxnId();
+      await this.http.request(
+        "PUT",
+        `/_matrix/client/v3/rooms/${enc(roomId)}/redact/${enc(eventId)}/${enc(txnId)}`,
+        { body: reason ? { reason } : {}, maxRetries: 2 },
+      );
+      // The server-side redaction arrives through sync; wait for it so the
+      // UI never shows a deleted message as still present.
+      await this.waitFor(() => !!this.rooms.get(roomId)?.findEvent(eventId)?.unsigned?.redacted_because, 15_000).catch(
+        () => undefined,
+      );
+    });
+  }
+
+  /** Fetch a thread's replies through /relations (all pages, capped). */
+  loadThread(roomId: string, rootId: string): Promise<void> {
+    return this.track(async () => {
+      const room = this.rooms.get(roomId);
+      if (!room) return;
+      let from: string | undefined;
+      for (let page = 0; page < 10; page++) {
+        const response = await this.http.request<{ chunk?: MatrixEvent[]; next_batch?: string }>(
+          "GET",
+          `/_matrix/client/v1/rooms/${enc(roomId)}/relations/${enc(rootId)}/m.thread`,
+          { query: { dir: "b", limit: 50, from } },
+        );
+        room.addThreadHistory(rootId, await this.decryptAll(response.chunk ?? []));
+        if (!response.next_batch) break;
+        from = response.next_batch;
+      }
+      this.emit();
+    });
+  }
+
+  /** Upload and send a file; images and other types get the right msgtype. */
+  sendAttachment(roomId: string, file: File, info: { w?: number; h?: number } = {}): PendingEvent {
+    const mimetype = file.type || "application/octet-stream";
+    const msgtype = msgtypeFor(mimetype);
+    const content: JsonObject = {
+      msgtype,
+      body: file.name,
+      filename: file.name,
+      info: { mimetype, size: file.size, ...(info.w ? { w: info.w, h: info.h } : {}) },
+    };
+    const localUrl = msgtype === "m.image" && typeof URL.createObjectURL === "function" ? URL.createObjectURL(file) : undefined;
+    return this.sendQueue.enqueueAttachment(roomId, file, file.name, content, localUrl);
+  }
+
+  /**
+   * An object URL for media (authenticated v1 download or thumbnail),
+   * cached per URI and size.
+   */
+  mediaUrl(mxc: string, thumbnail?: { width: number; height: number }): Promise<string> {
+    const parts = parseMxc(mxc);
+    if (!parts) return Promise.reject(new Error("Not a valid media URI."));
+    const key = thumbnail ? `${mxc}@${thumbnail.width}x${thumbnail.height}` : mxc;
+    let pending = this.mediaCache.get(key);
+    if (!pending) {
+      pending = (
+        thumbnail
+          ? this.http.download(thumbnailPath(parts), { width: thumbnail.width, height: thumbnail.height, method: "scale" })
+          : this.http.download(downloadPath(parts))
+      ).then((blob) => URL.createObjectURL(blob));
+      pending.catch(() => this.mediaCache.delete(key));
+      this.mediaCache.set(key, pending);
+    }
+    return pending;
+  }
+
+  /** Typing notifications: true while composing (refreshed every 20s), false when done. */
+  setTyping(roomId: string, typing: boolean): void {
+    const last = this.typingSent.get(roomId);
+    const now = this.clock.now();
+    if (typing && last?.active && now - last.at < 20_000) return;
+    if (!typing && !last?.active) return;
+    this.typingSent.set(roomId, { active: typing, at: now });
+    void this.http
+      .request("PUT", `/_matrix/client/v3/rooms/${enc(roomId)}/typing/${enc(this.userId)}`, {
+        body: typing ? { typing: true, timeout: 30_000 } : { typing: false },
+        maxRetries: 0,
+      })
+      .catch(() => this.typingSent.delete(roomId));
+  }
+
+  /** Users (other than us) whose latest m.read receipt is on each event. */
+  readersByEvent(roomId: string): Map<string, string[]> {
+    const out = new Map<string, string[]>();
+    const room = this.rooms.get(roomId);
+    if (!room) return out;
+    for (const [userId, receipt] of room.receipts) {
+      if (userId === this.userId) continue;
+      const list = out.get(receipt.eventId) ?? [];
+      list.push(userId);
+      out.set(receipt.eventId, list);
+    }
+    return out;
+  }
+
+  setPresence(presence: "online" | "offline" | "unavailable"): Promise<void> {
+    return this.http
+      .request<void>("PUT", `/_matrix/client/v3/presence/${enc(this.userId)}/status`, {
+        body: { presence },
+        maxRetries: 1,
+      })
+      .then(() => undefined);
+  }
+
+  /** Send a room state event (name, topic, rules, power levels...). */
+  setRoomState(roomId: string, type: string, content: JsonObject, stateKey = ""): Promise<void> {
+    return this.track(async () => {
+      const { event_id } = await this.http.request<{ event_id?: string }>(
+        "PUT",
+        // An empty state key may omit the trailing slash (spec); some
+        // servers only route the slash-less form.
+        `/_matrix/client/v3/rooms/${enc(roomId)}/state/${enc(type)}${stateKey ? `/${enc(stateKey)}` : ""}`,
+        { body: content, maxRetries: 1 },
+      );
+      if (event_id) await this.waitFor(() => !!this.rooms.get(roomId)?.hasEvent(event_id), 15_000).catch(() => undefined);
+    });
+  }
+
+  /** Set one user's power level, keeping the rest of the event. */
+  setPowerLevel(roomId: string, userId: string, level: number): Promise<void> {
+    const room = this.rooms.get(roomId);
+    const current = (room?.getStateContent("m.room.power_levels") ?? {}) as JsonObject;
+    const users = { ...((current.users as JsonObject | undefined) ?? {}) };
+    if (level === (typeof current.users_default === "number" ? current.users_default : 0)) delete users[userId];
+    else users[userId] = level;
+    return this.setRoomState(roomId, "m.room.power_levels", { ...current, users });
+  }
+
+  async uploadFile(file: Blob, name: string): Promise<string> {
+    return this.track(() => uploadMedia(this.http, file, name, file.type));
+  }
+
+  /** Public room directory (POST so a search term can filter). */
+  publicRooms(options: { term?: string; since?: string; limit?: number } = {}): Promise<PublicRoomsPage> {
+    return this.http.request<PublicRoomsPage>("POST", "/_matrix/client/v3/publicRooms", {
+      body: {
+        limit: options.limit ?? 30,
+        ...(options.since ? { since: options.since } : {}),
+        ...(options.term ? { filter: { generic_search_term: options.term } } : {}),
+      },
+      maxRetries: 1,
+    });
+  }
+
+  searchUsers(term: string, limit = 10): Promise<{ results: { user_id: string; display_name?: string; avatar_url?: string }[]; limited: boolean }> {
+    return this.http.request("POST", "/_matrix/client/v3/user_directory/search", {
+      body: { search_term: term, limit },
+      maxRetries: 1,
+    });
+  }
+
+  // ---- account and devices (UIA with the account password) -------------
+
+  listDevices(): Promise<DeviceInfo[]> {
+    return this.http
+      .request<{ devices?: DeviceInfo[] }>("GET", "/_matrix/client/v3/devices")
+      .then((body) => body.devices ?? []);
+  }
+
+  renameDevice(deviceId: string, displayName: string): Promise<void> {
+    return this.track(async () => {
+      await this.http.request("PUT", `/_matrix/client/v3/devices/${enc(deviceId)}`, {
+        body: { display_name: displayName.trim() },
+        maxRetries: 1,
+      });
+    });
+  }
+
+  /** Sign out other devices (one or many) after confirming the password. */
+  deleteDevices(deviceIds: string[], password: string): Promise<void> {
+    return this.track(async () => {
+      await auth.withUia(
+        (uia) =>
+          this.http.request("POST", "/_matrix/client/v3/delete_devices", {
+            body: { devices: deviceIds, ...(uia ? { auth: uia } : {}) },
+            maxRetries: 0,
+          }),
+        { userId: this.userId, password },
+      );
+    });
+  }
+
+  changePassword(currentPassword: string, newPassword: string, logoutOtherDevices: boolean): Promise<void> {
+    return this.track(async () => {
+      await auth.withUia(
+        (uia) =>
+          this.http.request("POST", "/_matrix/client/v3/account/password", {
+            body: { new_password: newPassword, logout_devices: logoutOtherDevices, ...(uia ? { auth: uia } : {}) },
+            maxRetries: 0,
+          }),
+        { userId: this.userId, password: currentPassword },
+      );
+    });
+  }
+
+  /** Permanently deactivate the account; local state is wiped afterwards. */
+  deactivate(password: string, erase: boolean): Promise<void> {
+    return this.track(async () => {
+      await auth.withUia(
+        (uia) =>
+          this.http.request("POST", "/_matrix/client/v3/account/deactivate", {
+            body: { erase, ...(uia ? { auth: uia } : {}) },
+            maxRetries: 0,
+          }),
+        { userId: this.userId, password },
+      );
+      await this.stop();
+      this.releaseMedia();
+      clearStoredSession(this.store);
+    });
   }
 
   retrySend(txnId: string): void {
@@ -555,6 +930,8 @@ export function loadStoredSession(store: KeyValueStore): Session | undefined {
 export function saveSession(store: KeyValueStore, session: Session): void {
   writeJson(store, KEYS.session, session);
 }
+
+const saveSessionInStore = saveSession;
 
 export function clearStoredSession(store: KeyValueStore): void {
   store.remove(KEYS.session);

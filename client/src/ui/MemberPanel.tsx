@@ -2,6 +2,7 @@ import { X } from "lucide-react";
 import type { MemberInfo, Room } from "../core";
 import { useClient, useClientVersion } from "./hooks";
 import { initialOf, tintIndex } from "./format";
+import { PresenceLamp } from "./Presence";
 
 function role(level: number): string | undefined {
   if (level >= 100) return "Admin";
@@ -69,6 +70,7 @@ function MemberRow({ member, room, self }: { member: MemberInfo; room: Room; sel
           {self && <span className="member-you"> (you)</span>}
         </span>
         {name !== member.userId && <span className="member-id">{member.userId}</span>}
+        {member.membership === "join" && <PresenceLamp userId={member.userId} />}
       </span>
       {badge && <span className="badge">{badge}</span>}
     </li>

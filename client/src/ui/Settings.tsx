@@ -3,8 +3,17 @@ import { describeError } from "../core";
 import { Field } from "./Field";
 import { useClient } from "./hooks";
 import { loadTheme, saveTheme, type ThemeChoice } from "./theme";
+import { DeactivateSection, DevicesSection, PasswordSection } from "./Account";
 
-export function Settings({ onSignOut, onProfileChanged }: { onSignOut: () => Promise<void>; onProfileChanged: (name: string) => void }) {
+export function Settings({
+  onSignOut,
+  onDeactivated,
+  onProfileChanged,
+}: {
+  onSignOut: () => Promise<void>;
+  onDeactivated: () => void;
+  onProfileChanged: (name: string) => void;
+}) {
   const client = useClient();
   const headingRef = useRef<HTMLHeadingElement>(null);
   const [name, setName] = useState("");
@@ -135,9 +144,7 @@ export function Settings({ onSignOut, onProfileChanged }: { onSignOut: () => Pro
           <dt>Homeserver</dt>
           <dd>{client.session.homeserverUrl}</dd>
         </dl>
-        <p className="muted">
-          Device management, notification settings and end-to-end encryption are not available in this version yet.
-        </p>
+        <p className="muted">Notification settings and end-to-end encryption are not available in this version yet.</p>
         <button
           type="button"
           className="button button-danger"
@@ -152,6 +159,9 @@ export function Settings({ onSignOut, onProfileChanged }: { onSignOut: () => Pro
           {signingOut ? "Signing out…" : "Sign out"}
         </button>
       </section>
+      <DevicesSection />
+      <PasswordSection />
+      <DeactivateSection onDeactivated={onDeactivated} />
     </section>
   );
 }

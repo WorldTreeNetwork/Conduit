@@ -10,6 +10,8 @@ interface LoginResponse {
   user_id: string;
   access_token: string;
   device_id: string;
+  refresh_token?: string;
+  expires_in_ms?: number;
   well_known?: { "m.homeserver"?: { base_url?: string } };
 }
 
@@ -26,6 +28,8 @@ export async function loginWithPassword(
   http: HttpClient,
   user: string,
   password: string,
+  /** Re-login on an existing device (soft logout) keeps its keys. */
+  deviceId?: string,
 ): Promise<Session> {
   const trimmed = user.trim();
   const identifier = { type: "m.id.user", user: trimmed };
@@ -36,10 +40,27 @@ export async function loginWithPassword(
       type: "m.login.password",
       identifier,
       password,
-      initial_device_display_name: DEVICE_DISPLAY_NAME,
+      refresh_token: true,
+      ...(deviceId ? { device_id: deviceId } : { initial_device_display_name: DEVICE_DISPLAY_NAME }),
     },
   });
   return toSession(http, body);
+}
+
+/** Exchange a refresh token: POST /refresh (spec v1.3+). */
+export async function refreshSession(http: HttpClient, refreshToken: string, now: number): Promise<Pick<Session, "accessToken" | "refreshToken" | "expiresAt">> {
+  const body = await http.request<{ access_token: string; refresh_token?: string; expires_in_ms?: number }>(
+    "POST",
+    "/_matrix/client/v3/refresh",
+    { auth: false, body: { refresh_token: refreshToken }, maxRetries: 1 },
+  );
+  if (!body.access_token) throw new Error("The server did not return a new access token.");
+  return {
+    accessToken: body.access_token,
+    // The spec lets the server keep the old refresh token by omitting it.
+    refreshToken: body.refresh_token ?? refreshToken,
+    expiresAt: typeof body.expires_in_ms === "number" ? now + body.expires_in_ms : undefined,
+  };
 }
 
 /** Stages this client can complete without further UI. */
@@ -137,6 +158,7 @@ export async function register(http: HttpClient, username: string, password: str
         username: username.trim(),
         password,
         initial_device_display_name: DEVICE_DISPLAY_NAME,
+        refresh_token: true,
         ...(auth ? { auth } : {}),
       },
     }),
@@ -164,6 +186,8 @@ function toSession(http: HttpClient, body: LoginResponse): Session {
     userId: body.user_id,
     accessToken: body.access_token,
     deviceId: body.device_id,
+    ...(body.refresh_token ? { refreshToken: body.refresh_token } : {}),
+    ...(typeof body.expires_in_ms === "number" ? { expiresAt: Date.now() + body.expires_in_ms } : {}),
   };
 }
 

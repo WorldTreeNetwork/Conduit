@@ -23,7 +23,12 @@ export interface PendingEvent {
   eventId?: string;
   error?: string;
   attempts: number;
+  /** An attachment to upload before sending; content.url is set after. */
+  attachment?: { name: string; mimetype: string; size: number; localUrl?: string };
 }
+
+/** Uploads an attachment's bytes and returns its mxc:// URI. */
+export type Uploader = (data: Blob, name: string, mimetype: string) => Promise<string>;
 
 export interface SendQueueOptions {
   http: HttpClient;
@@ -35,10 +40,13 @@ export interface SendQueueOptions {
   /** Is this event already in the room's timeline (remote echo arrived)? */
   hasRemoteEcho: (roomId: string, eventId: string) => boolean;
   isRoomEncrypted?: (roomId: string) => boolean;
+  upload?: Uploader;
 }
 
 export class SendQueue {
   private items: PendingEvent[] = [];
+  /** Attachment bytes by txn ID; memory only (never persisted). */
+  private readonly blobs = new Map<string, Blob>();
   private readonly busyRooms = new Set<string>();
   private counter = 0;
   private readonly options: SendQueueOptions;
@@ -52,7 +60,16 @@ export class SendQueue {
   restore(items: PendingEvent[]): void {
     this.items = items
       .filter((item) => item.status !== "sent")
-      .map((item) => ({ ...item, status: item.status === "sending" ? "queued" : item.status }));
+      .map((item) => {
+        const restored: PendingEvent = { ...item, status: item.status === "sending" ? "queued" : item.status };
+        // Bytes of an unfinished upload do not survive a reload.
+        if (restored.attachment && !restored.content.url) {
+          restored.status = "failed";
+          restored.error = "The upload was interrupted. Attach the file again.";
+          restored.attachment = { ...restored.attachment, localUrl: undefined };
+        }
+        return restored;
+      });
     this.changed();
   }
 
@@ -99,9 +116,29 @@ export class SendQueue {
     return item;
   }
 
+  /** Queue an attachment: upload first, then send with content.url. */
+  enqueueAttachment(roomId: string, file: Blob, name: string, content: JsonObject, localUrl?: string): PendingEvent {
+    const item: PendingEvent = {
+      txnId: this.newTxnId(),
+      roomId,
+      type: "m.room.message",
+      content,
+      status: "queued",
+      createdTs: this.options.clock.now(),
+      attempts: 0,
+      attachment: { name, mimetype: file.type, size: file.size, localUrl },
+    };
+    this.blobs.set(item.txnId, file);
+    this.items.push(item);
+    this.changed();
+    void this.pump(roomId);
+    return item;
+  }
+
   retry(txnId: string): void {
     const item = this.items.find((i) => i.txnId === txnId);
     if (!item || item.status !== "failed") return;
+    if (item.attachment && !item.content.url && !this.blobs.has(txnId)) return;
     item.status = "queued";
     item.error = undefined;
     this.changed();
@@ -113,6 +150,7 @@ export class SendQueue {
     const item = this.items.find((i) => i.txnId === txnId);
     if (!item || item.status === "sending" || item.status === "sent") return;
     this.items = this.items.filter((i) => i !== item);
+    this.blobs.delete(txnId);
     this.changed();
   }
 
@@ -156,6 +194,14 @@ export class SendQueue {
     item.attempts += 1;
     this.changed();
     try {
+      if (item.attachment && !item.content.url) {
+        const blob = this.blobs.get(item.txnId);
+        if (!blob || !this.options.upload) throw new Error("The upload was interrupted. Attach the file again.");
+        const url = await this.options.upload(blob, item.attachment.name, item.attachment.mimetype);
+        item.content = { ...item.content, url };
+        this.blobs.delete(item.txnId);
+        this.changed();
+      }
       let type = item.type;
       let content = item.content;
       if (this.options.isRoomEncrypted?.(item.roomId)) {

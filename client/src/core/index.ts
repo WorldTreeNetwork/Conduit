@@ -9,4 +9,6 @@ export * from "./room";
 export * from "./sendQueue";
 export * from "./sync";
 export * from "./crypto";
+export * from "./relations";
+export * from "./media";
 export * from "./client";

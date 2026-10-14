@@ -1,6 +1,7 @@
 // Room model: folds state events into current state and keeps an ordered,
 // de-duplicated timeline. Historical (back-paginated) events never change
 // current state; live events do.
+import { aggregate, redactEvent, redactsOf, type Aggregations } from "./relations";
 import type {
   JsonObject,
   MatrixEvent,
@@ -53,6 +54,11 @@ export class Room {
   readonly receipts = new Map<string, { eventId: string; ts: number }>();
   /** The latest event this user has read (own receipt or local mark). */
   readUpTo: string | undefined;
+  /** Thread replies fetched through /relations (older than the window). */
+  readonly threadHistory = new Map<string, MatrixEvent[]>();
+  /** Bumped on every timeline mutation; keys memoized views. */
+  revision = 0;
+  private aggregationCache: { revision: number; self: string; value: Aggregations } | undefined;
 
   constructor(roomId: string) {
     this.roomId = roomId;
@@ -223,8 +229,10 @@ export class Room {
       this.eventIds.add(event.event_id);
       this.timeline.push(event);
       if (event.state_key !== undefined) this.applyState(event);
+      if (event.type === "m.room.redaction") this.applyRedaction(event);
       added.push(event);
     }
+    if (added.length) this.revision++;
     return added;
   }
 
@@ -238,6 +246,7 @@ export class Room {
     }
     older.reverse();
     this.timeline = [...older, ...this.timeline];
+    if (older.length) this.revision++;
     return older.length;
   }
 
@@ -245,8 +254,65 @@ export class Room {
   resetTimeline(prevBatch: string | undefined): void {
     this.timeline = [];
     this.eventIds.clear();
+    this.revision++;
     this.prevBatch = prevBatch;
     this.historyExhausted = false;
+  }
+
+  /** Replace a redacted event's content in place (timeline and state). */
+  applyRedaction(redaction: MatrixEvent): void {
+    const target = redactsOf(redaction);
+    if (!target) return;
+    const index = this.timeline.findIndex((e) => e.event_id === target);
+    if (index >= 0) this.timeline[index] = redactEvent(this.timeline[index]!, redaction);
+    for (const [rootId, list] of this.threadHistory) {
+      this.threadHistory.set(
+        rootId,
+        list.map((e) => (e.event_id === target ? redactEvent(e, redaction) : e)),
+      );
+    }
+    for (const byKey of this.state.values()) {
+      for (const [key, event] of byKey) {
+        if (event.event_id === target) byKey.set(key, redactEvent(event, redaction));
+      }
+    }
+    this.revision++;
+  }
+
+  /** Relations over the loaded timeline (memoized per revision). */
+  aggregations(selfUserId: string, extra: MatrixEvent[] = []): Aggregations {
+    if (extra.length === 0 && this.aggregationCache?.revision === this.revision && this.aggregationCache.self === selfUserId) {
+      return this.aggregationCache.value;
+    }
+    const value = aggregate(extra.length ? [...this.timeline, ...extra] : this.timeline, selfUserId);
+    if (extra.length === 0) this.aggregationCache = { revision: this.revision, self: selfUserId, value };
+    return value;
+  }
+
+  findEvent(eventId: string): MatrixEvent | undefined {
+    const inTimeline = this.timeline.find((e) => e.event_id === eventId);
+    if (inTimeline) return inTimeline;
+    for (const list of this.threadHistory.values()) {
+      const hit = list.find((e) => e.event_id === eventId);
+      if (hit) return hit;
+    }
+    return undefined;
+  }
+
+  /** Every loaded reply in a thread, oldest first, de-duplicated. */
+  threadReplies(rootId: string, selfUserId: string): MatrixEvent[] {
+    const seen = new Map<string, MatrixEvent>();
+    for (const e of this.threadHistory.get(rootId) ?? []) seen.set(e.event_id, e);
+    for (const e of this.aggregations(selfUserId).threadEvents.get(rootId) ?? []) seen.set(e.event_id, e);
+    return [...seen.values()].sort((a, b) => a.origin_server_ts - b.origin_server_ts);
+  }
+
+  addThreadHistory(rootId: string, events: MatrixEvent[]): void {
+    const list = this.threadHistory.get(rootId) ?? [];
+    const ids = new Set(list.map((e) => e.event_id));
+    for (const e of events) if (e?.event_id && !ids.has(e.event_id)) list.push(e);
+    this.threadHistory.set(rootId, list);
+    this.revision++;
   }
 
   get lastEvent(): MatrixEvent | undefined {
@@ -257,6 +323,8 @@ export class Room {
   lastMessage(): MatrixEvent | undefined {
     for (let i = this.timeline.length - 1; i >= 0; i--) {
       const event = this.timeline[i]!;
+      const rel = (event.content["m.relates_to"] as { rel_type?: string } | undefined)?.rel_type;
+      if (rel === "m.replace" || rel === "m.thread") continue;
       if (event.type === "m.room.message" && typeof event.content.body === "string") return event;
     }
     return undefined;
@@ -272,7 +340,8 @@ export class Room {
     for (let i = this.timeline.length - 1; i >= 0; i--) {
       const event = this.timeline[i]!;
       if (event.event_id === this.readUpTo || event.sender === selfUserId) break;
-      if (event.type === "m.room.message" || event.type === "m.room.encrypted") {
+      const rel = (event.content["m.relates_to"] as { rel_type?: string } | undefined)?.rel_type;
+      if ((event.type === "m.room.message" || event.type === "m.room.encrypted") && rel !== "m.replace") {
         count++;
         if (count >= cap) break;
       }

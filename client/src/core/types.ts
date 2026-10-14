@@ -95,6 +95,17 @@ export interface Session {
   userId: string;
   accessToken: string;
   deviceId: string;
+  /** Present when the server issued a refresh token (spec v1.3+). */
+  refreshToken?: string;
+  /** Epoch ms when the access token expires, if the server said. */
+  expiresAt?: number;
+}
+
+export interface DeviceInfo {
+  device_id: string;
+  display_name?: string;
+  last_seen_ip?: string;
+  last_seen_ts?: number;
 }
 
 export type Membership = "join" | "invite" | "leave" | "ban" | "knock";

@@ -1,27 +1,12 @@
-import { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
-import { ArrowDown, ChevronRight, RotateCw, Trash2 } from "lucide-react";
-import { describeError, type MatrixEvent, type PendingEvent, type Room } from "../core";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
+import { ArrowDown, ChevronRight } from "lucide-react";
+import { describeError, type Aggregations, type Room } from "../core";
 import { useClient, useClientVersion } from "./hooks";
-import { eventKind, formatDay, formatTime, initialOf, messageView, tintIndex } from "./format";
-import { buildItems, type Item } from "./timelineItems";
-import { CarrierMark, type CarrierState } from "./Mark";
+import { eventKind, formatDay, formatTime } from "./format";
+import { buildItems, pendingRelationEvents, type Item } from "./timelineItems";
+import { MessageRow, PendingRow, currentView } from "./Message";
 
 const NEAR_BOTTOM_PX = 80;
-
-const URL_RE = /(https?:\/\/[^\s<]+[^\s<.,;:!?)\]'"])/g;
-
-function linkify(text: string): ReactNode {
-  const parts = text.split(URL_RE);
-  return parts.map((part, i) =>
-    i % 2 === 1 ? (
-      <a key={i} href={part} target="_blank" rel="noopener noreferrer">
-        {part}
-      </a>
-    ) : (
-      <Fragment key={i}>{part}</Fragment>
-    ),
-  );
-}
 
 export function Timeline({ room }: { room: Room }) {
   const client = useClient();
@@ -37,7 +22,9 @@ export function Timeline({ room }: { room: Room }) {
   const lastAnnounced = useRef<string | undefined>(room.lastEvent?.event_id);
 
   const pending = client.sendQueue.forRoom(room.roomId);
-  const items = buildItems(room, pending, client.userId);
+  const aggregations = room.aggregations(client.userId, pendingRelationEvents(pending, client.userId));
+  const items = buildItems(room, pending, client.userId, aggregations);
+  const readers = client.readersByEvent(room.roomId);
   const exhausted = room.historyExhausted;
 
   const paginate = useCallback(async () => {
@@ -108,7 +95,9 @@ export function Timeline({ room }: { room: Room }) {
     if (!last || last.event_id === lastAnnounced.current) return;
     lastAnnounced.current = last.event_id;
     if (last.sender === client.userId || eventKind(last) !== "message") return;
-    setAnnouncement(`${room.memberName(last.sender)}: ${messageView(last).body}`);
+    const agg = room.aggregations(client.userId);
+    if (agg.hidden.has(last.event_id)) return;
+    setAnnouncement(`${room.memberName(last.sender)}: ${currentView(last, agg).body}`);
   }, [client.userId, room, lastId]);
 
   const jumpToLatest = () => {
@@ -165,7 +154,14 @@ export function Timeline({ room }: { room: Room }) {
         )}
         <ol className="timeline" aria-label={`Messages in ${roomName}`} onKeyDown={onTimelineKeyDown}>
           {items.map((item) => (
-            <TimelineRow key={item.key} item={item} room={room} tabStop={item.key === lastItemKey} />
+            <TimelineRow
+              key={item.key}
+              item={item}
+              room={room}
+              tabStop={item.key === lastItemKey}
+              aggregations={aggregations}
+              readers={item.kind === "message" ? readers.get(item.event.event_id) : undefined}
+            />
           ))}
         </ol>
       </div>
@@ -202,7 +198,19 @@ function onTimelineKeyDown(event: KeyboardEvent<HTMLOListElement>) {
   focusItem(event.currentTarget, items[next]!);
 }
 
-function TimelineRow({ item, room, tabStop }: { item: Item; room: Room; tabStop: boolean }) {
+function TimelineRow({
+  item,
+  room,
+  tabStop,
+  aggregations,
+  readers,
+}: {
+  item: Item;
+  room: Room;
+  tabStop: boolean;
+  aggregations: Aggregations;
+  readers?: string[];
+}) {
   switch (item.kind) {
     case "day":
       return (
@@ -251,134 +259,10 @@ function TimelineRow({ item, room, tabStop }: { item: Item; room: Room; tabStop:
         </li>
       );
     case "message":
-      return <MessageRow event={item.event} grouped={item.grouped} room={room} tabStop={tabStop} />;
+      return (
+        <MessageRow event={item.event} grouped={item.grouped} room={room} tabStop={tabStop} aggregations={aggregations} readers={readers} />
+      );
     case "pending":
       return <PendingRow pending={item.pending} grouped={item.grouped} room={room} tabStop={tabStop} />;
   }
-}
-
-function MessageBody({ msgtype, body, sender }: { msgtype: string; body: string; sender: string }) {
-  if (msgtype === "m.emote") {
-    return (
-      <p className="msg-body msg-emote" data-testid="message-body">
-        <span className="emote-sender">{sender}</span> {linkify(body)}
-      </p>
-    );
-  }
-  return (
-    <p className={`msg-body${msgtype === "m.notice" ? " msg-notice" : ""}${msgtype === "m.redacted" || msgtype === "m.bad.encrypted" ? " msg-muted" : ""}`} data-testid="message-body">
-      {linkify(body)}
-    </p>
-  );
-}
-
-function MessageRow({ event, grouped, room, tabStop }: { event: MatrixEvent; grouped: boolean; room: Room; tabStop: boolean }) {
-  const client = useClient();
-  const view = messageView(event);
-  const sender = room.memberName(event.sender);
-  const mine = event.sender === client.userId;
-  const time = formatTime(event.origin_server_ts);
-  return (
-    <li
-      className={`msg${grouped ? " msg-grouped" : ""}${mine ? " msg-mine" : ""}`}
-      data-timeline-item
-      tabIndex={tabStop ? 0 : -1}
-      data-testid="timeline-item"
-      data-kind="message"
-      data-event-id={event.event_id}
-      data-sender={event.sender}
-      data-msgtype={view.msgtype}
-      aria-label={`${sender}, ${time}: ${view.msgtype === "m.emote" ? `${sender} ` : ""}${view.body}`}
-    >
-      {!grouped ? (
-        <span className={`avatar tint-${tintIndex(event.sender)}`} aria-hidden="true">
-          {initialOf(sender)}
-        </span>
-      ) : (
-        <span className="msg-gutter" aria-hidden="true">
-          <time className="stamp stamp-hover" dateTime={new Date(event.origin_server_ts).toISOString()}>
-            {time}
-          </time>
-        </span>
-      )}
-      <div className="msg-main">
-        {!grouped && (
-          <p className="msg-head">
-            <span className="msg-sender" data-testid="message-sender">
-              {sender}
-            </span>
-            <time className="stamp" dateTime={new Date(event.origin_server_ts).toISOString()}>
-              {time}
-            </time>
-          </p>
-        )}
-        <div className="msg-line">
-          <MessageBody msgtype={view.msgtype} body={view.body} sender={sender} />
-          {mine && <CarrierMark state="delivered" />}
-        </div>
-      </div>
-    </li>
-  );
-}
-
-function PendingRow({ pending, grouped, room, tabStop }: { pending: PendingEvent; grouped: boolean; room: Room; tabStop: boolean }) {
-  const client = useClient();
-  const sender = room.memberName(client.userId);
-  const body = String(pending.content.body ?? "");
-  const msgtype = String(pending.content.msgtype ?? "m.text");
-  const state: CarrierState = pending.status;
-  const failed = pending.status === "failed";
-  return (
-    <li
-      className={`msg msg-mine msg-pending${grouped ? " msg-grouped" : ""}${failed ? " msg-failed" : ""}`}
-      data-timeline-item
-      tabIndex={tabStop ? 0 : -1}
-      data-testid="pending-item"
-      data-kind="pending"
-      data-status={pending.status}
-      data-txn-id={pending.txnId}
-      aria-label={`${sender}: ${body}. ${failed ? "Not sent" : pending.status === "sent" ? "Sent" : "Sending"}`}
-    >
-      {!grouped ? (
-        <span className={`avatar tint-${tintIndex(client.userId)}`} aria-hidden="true">
-          {initialOf(sender)}
-        </span>
-      ) : (
-        <span className="msg-gutter" aria-hidden="true" />
-      )}
-      <div className="msg-main">
-        {!grouped && (
-          <p className="msg-head">
-            <span className="msg-sender">{sender}</span>
-            <span className="stamp">{failed ? "Not sent" : "Sending…"}</span>
-          </p>
-        )}
-        <div className="msg-line">
-          <MessageBody msgtype={msgtype} body={body} sender={sender} />
-          <CarrierMark state={state} />
-        </div>
-        {failed && (
-          <div className="send-failure" role="alert" data-testid="send-failure">
-            <span>Not sent. {pending.error}</span>
-            <button
-              type="button"
-              className="link-button link-signal"
-              onClick={() => client.retrySend(pending.txnId)}
-              data-testid="retry-send"
-            >
-              <RotateCw size={14} aria-hidden="true" /> Retry
-            </button>
-            <button
-              type="button"
-              className="link-button link-signal"
-              onClick={() => client.discardSend(pending.txnId)}
-              data-testid="discard-send"
-            >
-              <Trash2 size={14} aria-hidden="true" /> Delete
-            </button>
-          </div>
-        )}
-      </div>
-    </li>
-  );
 }

@@ -30,6 +30,8 @@ export function App() {
       setSession(undefined);
     };
     client.start();
+    // Best effort: tell the server we are here (presence is optional).
+    void client.setPresence("online").catch(() => undefined);
     const online = () => client.sync.retryNow();
     window.addEventListener("online", online);
     return () => {
@@ -57,10 +59,17 @@ export function App() {
     setSession(undefined);
   }, [client, store]);
 
+  const onDeactivated = useCallback(() => {
+    clearStoredSession(store);
+    window.location.hash = "";
+    setNotice("Your account has been deactivated.");
+    setSession(undefined);
+  }, [store]);
+
   if (!client) return <SignIn onSignedIn={onSignedIn} notice={notice} />;
   return (
     <ClientContext.Provider value={client}>
-      <Shell onSignOut={onSignedOut} />
+      <Shell onSignOut={onSignedOut} onDeactivated={onDeactivated} />
     </ClientContext.Provider>
   );
 }

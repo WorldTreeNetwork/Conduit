@@ -164,3 +164,35 @@ test("reduced motion stops the carrier animation", async ({ browser }) => {
   await expect(message(page, "slow carrier")).toBeVisible();
   await context.close();
 });
+
+test("phase 2 surfaces have no serious axe violations", async ({ browser }) => {
+  const { page } = await newUserPage(browser, "axe2");
+  await createRoomViaUi(page, { name: "Rich room" });
+  await sendViaUi(page, "react to me");
+  const row = page.getByTestId("timeline").locator('[data-testid="timeline-item"]', { hasText: "react to me" });
+  await row.hover();
+  await row.getByTestId("action-react").click();
+  await row.getByRole("button", { name: "React with 🎉" }).click();
+  await expect(row.getByTestId("reaction")).toHaveAttribute("data-count", "1");
+  await row.hover();
+  await row.getByTestId("action-thread").click();
+  await page.getByTestId("thread-composer-input").fill("threaded");
+  await page.keyboard.press("Enter");
+  await expect(page.getByTestId("thread-panel").getByTestId("message-body").filter({ hasText: "threaded" })).toBeVisible();
+  await row.hover();
+  await row.getByTestId("action-reply").click();
+  await expect(page.getByTestId("composer-context")).toBeVisible();
+  await expectNoSeriousViolations(page, "room with reactions, thread and reply context");
+  await page.getByTestId("open-room-settings").click();
+  await expect(page.getByTestId("room-settings-dialog")).toBeVisible();
+  await expectNoSeriousViolations(page, "room settings");
+  await page.keyboard.press("Escape");
+  await page.getByTestId("open-join-room").click();
+  await expect(page.getByTestId("room-directory")).toBeVisible();
+  await expectNoSeriousViolations(page, "join dialog with directory");
+  await page.keyboard.press("Escape");
+  await page.getByTestId("open-settings").click();
+  await expect(page.getByTestId("device-row")).toHaveCount(1);
+  await expectNoSeriousViolations(page, "settings with devices, password and deactivation");
+  await page.context().close();
+});

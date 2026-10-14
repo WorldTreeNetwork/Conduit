@@ -3,6 +3,7 @@ import { X } from "lucide-react";
 import { MatrixError, describeError } from "../core";
 import { Field } from "./Field";
 import { useClient } from "./hooks";
+import { RoomDirectory, UserSuggestions } from "./Directory";
 
 interface DialogProps {
   open: boolean;
@@ -11,6 +12,7 @@ interface DialogProps {
   description?: string;
   children: ReactNode;
   testId: string;
+  wide?: boolean;
 }
 
 /**
@@ -18,7 +20,7 @@ interface DialogProps {
  * inertness of the page behind and the top layer. Focus returns to the
  * element that opened it.
  */
-export function Dialog({ open, onClose, title, description, children, testId }: DialogProps) {
+export function Dialog({ open, onClose, title, description, children, testId, wide }: DialogProps) {
   const ref = useRef<HTMLDialogElement>(null);
   const opener = useRef<HTMLElement | null>(null);
   const titleId = `${testId}-title`;
@@ -53,7 +55,7 @@ export function Dialog({ open, onClose, title, description, children, testId }: 
   }, [onClose]);
 
   return (
-    <dialog ref={ref} className="dialog" aria-labelledby={titleId} aria-describedby={descId} data-testid={testId}>
+    <dialog ref={ref} className={`dialog${wide ? " dialog-wide" : ""}`} aria-labelledby={titleId} aria-describedby={descId} data-testid={testId}>
       {open && (
         <div className="dialog-plate">
           <header className="dialog-head">
@@ -231,7 +233,7 @@ export function JoinRoomDialog({ open, onClose, onJoined }: { open: boolean; onC
   }
 
   return (
-    <Dialog open={open} onClose={onClose} title="Join a room" testId="join-room-dialog">
+    <Dialog open={open} onClose={onClose} title="Join a room" testId="join-room-dialog" wide>
       <form onSubmit={submit} noValidate>
         <Field
           id="join-address"
@@ -247,6 +249,7 @@ export function JoinRoomDialog({ open, onClose, onJoined }: { open: boolean; onC
         <ErrorCallout error={error} testId="join-room-error" />
         <DialogActions pending={pending} submitLabel="Join" pendingLabel="Joining…" onCancel={onClose} testId="join-room-submit" />
       </form>
+      <RoomDirectory onJoined={onJoined} />
     </Dialog>
   );
 }
@@ -306,6 +309,7 @@ export function InviteDialog({ open, roomId, roomName, onClose }: { open: boolea
           spellCheck={false}
           testId="invite-user-id"
         />
+        <UserSuggestions term={userId} onPick={setUserId} />
         <ErrorCallout error={error} testId="invite-error" />
         <DialogActions pending={pending} submitLabel="Send invite" pendingLabel="Inviting…" onCancel={onClose} testId="invite-submit" />
       </form>
@@ -358,6 +362,58 @@ export function LeaveDialog({ open, roomId, roomName, onClose, onLeft }: {
       <form onSubmit={submit}>
         <ErrorCallout error={error} testId="leave-error" />
         <DialogActions pending={pending} submitLabel="Leave room" pendingLabel="Leaving…" onCancel={onClose} danger testId="leave-submit" />
+      </form>
+    </Dialog>
+  );
+}
+
+export function DeleteMessageDialog({ open, roomId, eventId, onClose }: {
+  open: boolean;
+  roomId: string;
+  eventId: string | null;
+  onClose: () => void;
+}) {
+  const client = useClient();
+  const [reason, setReason] = useState("");
+  const [error, setError] = useState<string | undefined>(undefined);
+  const [pending, setPending] = useState(false);
+  const event = eventId ? client.getRoom(roomId)?.findEvent(eventId) : undefined;
+  const mine = event?.sender === client.userId;
+
+  useEffect(() => {
+    if (open) {
+      setReason("");
+      setError(undefined);
+    }
+  }, [open]);
+
+  async function submit(e: FormEvent) {
+    e.preventDefault();
+    if (!eventId) return;
+    setPending(true);
+    setError(undefined);
+    try {
+      await client.redact(roomId, eventId, reason.trim() || undefined);
+      onClose();
+    } catch (err) {
+      setError(describeError(err));
+    } finally {
+      setPending(false);
+    }
+  }
+
+  return (
+    <Dialog
+      open={open}
+      onClose={onClose}
+      title="Delete this message?"
+      description={mine ? "It will be removed for everyone in the room." : "You are removing someone else's message as a moderator."}
+      testId="delete-dialog"
+    >
+      <form onSubmit={submit} noValidate>
+        <Field id="delete-reason" label="Reason" hint="Optional. Shown to people in the room." value={reason} onChange={setReason} testId="delete-reason" />
+        <ErrorCallout error={error} testId="delete-error" />
+        <DialogActions pending={pending} submitLabel="Delete" pendingLabel="Deleting…" onCancel={onClose} danger testId="delete-submit" />
       </form>
     </Dialog>
   );

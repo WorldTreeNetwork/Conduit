@@ -100,6 +100,7 @@ export function SignIn({ onSignedIn, notice }: { onSignedIn: (session: Session) 
   return (
     <div className="signin">
       <main className="signin-plate" aria-labelledby="signin-heading">
+        <div className="signin-body">
         <div className="signin-brand">
           <Mark />
           <span className="signin-wordmark">Conduit</span>
@@ -130,11 +131,7 @@ export function SignIn({ onSignedIn, notice }: { onSignedIn: (session: Session) 
               inputMode="url"
               testId="homeserver-input"
             />
-          ) : (
-            <p className="signin-server" data-testid="homeserver-pinned">
-              Server <span className="mono-ish">{homeserver}</span>
-            </p>
-          )}
+          ) : null}
           {pinned && errors.homeserver && (
             <p className="field-error" role="alert">
               {errors.homeserver}
@@ -199,6 +196,11 @@ export function SignIn({ onSignedIn, notice }: { onSignedIn: (session: Session) 
           >
             {mode === "login" ? "Create an account" : "Sign in instead"}
           </button>
+        </p>
+        </div>
+        <p className="signin-foot" data-testid={pinned ? "homeserver-pinned" : "signin-foot"}>
+          <span className="line-lamp" aria-hidden="true" />
+          Line to <span className="signin-foot-server">{homeserver || "no server yet"}</span>
         </p>
       </main>
     </div>

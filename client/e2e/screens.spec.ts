@@ -17,13 +17,19 @@ test("capture review screens", async ({ browser }) => {
   await setName(me, "Rowan Pike");
   await setName(friend, "Sasha Okafor");
   const room = await apiCreateRoom(me, { name: "Field crew", topic: "Saturday survey of the east ridge", preset: "public_chat" });
-  await apiCreateRoom(me, { name: "Equipment", preset: "private_chat" });
+  const equipment = await apiCreateRoom(me, { name: "Equipment", preset: "public_chat" });
   const join = await fetch(`${process.env.CONDUIT_E2E_HS}/_matrix/client/v3/join/${encodeURIComponent(room)}`, {
     method: "POST",
     headers: { Authorization: `Bearer ${friend.accessToken}`, "Content-Type": "application/json" },
     body: "{}",
   });
   expect(join.status).toBe(200);
+  const join2 = await fetch(`${process.env.CONDUIT_E2E_HS}/_matrix/client/v3/join/${encodeURIComponent(equipment)}`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${friend.accessToken}`, "Content-Type": "application/json" },
+    body: "{}",
+  });
+  expect(join2.status).toBe(200);
   const lines: [typeof me, string][] = [
     [friend, "Morning! Are we still on for the ridge survey?"],
     [me, "Yes. Meet at the trailhead at 7:30."],
@@ -53,10 +59,17 @@ test("capture review screens", async ({ browser }) => {
       if (label === "mobile") await page.screenshot({ path: `.impeccable/review/${label}-board-${scheme}.png` });
       await page.locator(`[data-testid="room-row"][data-room-id="${room}"]`).click();
       await expect(message(page, "Perfect. We should be off the exposed section by 11.")).toBeVisible();
+      await apiSend(friend, equipment, `Tripod legs are in the van (${scheme} ${label})`, `eq-${scheme}-${label}`);
+      await expect(page.locator(`[data-testid="room-row"][data-room-id="${equipment}"]`).getByTestId("unread-badge")).toHaveCount(1);
       await page.route("**/send/m.room.message/**", (route) => route.abort("connectionrefused"));
       await page.getByTestId("composer-input").fill("Running five minutes late");
       await page.getByTestId("composer-input").press("Enter");
       await expect(page.getByTestId("send-failure")).toBeVisible();
+      await page.unroute("**/send/m.room.message/**");
+      await page.route("**/send/m.room.message/**", () => undefined);
+      await page.getByTestId("composer-input").fill("On my way");
+      await page.getByTestId("composer-input").press("Enter");
+      await expect(page.locator('[data-testid="pending-item"][data-status="sending"]')).toBeVisible();
       await page.waitForFunction(() => document.getAnimations().every((a) => a.playState !== "running" || a.effect?.getComputedTiming().iterations === Infinity));
       await page.screenshot({ path: `.impeccable/review/${label === "desktop" ? "desktop" : "mobile"}-${scheme}.png` });
       await context.close();

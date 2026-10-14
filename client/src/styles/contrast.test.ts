@@ -40,11 +40,18 @@ const TEXT: [string, string][] = [
   ["ink-muted", "surface"],
   ["ink-faint", "surface"],
   ["ink-faint", "ground"],
+  ["ink-faint", "surface-hover"],
+  ["ink-muted", "surface-hover"],
+  ["ink-muted", "surface-sunk"],
+  ["ink-faint", "surface-sunk"],
+  ["signal-ink", "signal-surface"],
+  ["brass-text", "caution-surface"],
   ["board-ink", "board"],
   ["board-ink", "board-raised"],
   ["board-ink", "board-selected"],
   ["board-ink-muted", "board"],
   ["board-ink-muted", "board-selected"],
+  ["board-ink-muted", "board-raised"],
   ["brass-ink", "brass"],
   ["brass-ink", "brass-strong"],
   ["brass-text", "surface"],
@@ -54,6 +61,14 @@ const TEXT: [string, string][] = [
   ["signal", "surface"],
   ["clear", "surface"],
   ["caution-ink", "caution-surface"],
+  ["tint-0-ink", "tint-0"],
+  ["tint-1-ink", "tint-1"],
+  ["tint-2-ink", "tint-2"],
+  ["tint-3-ink", "tint-3"],
+  ["tint-4-ink", "tint-4"],
+  ["tint-5-ink", "tint-5"],
+  ["board-signal", "board"],
+  ["board-signal", "board-selected"],
 ];
 
 const NON_TEXT: [string, string][] = [
@@ -64,6 +79,11 @@ const NON_TEXT: [string, string][] = [
   ["board-signal", "board"],
   ["rule-strong", "surface"],
 ];
+
+it("keeps the media-query dark theme identical to the forced dark theme", () => {
+  const media = block(':root:not([data-theme="light"])');
+  expect(media).toEqual(block(':root[data-theme="dark"]'));
+});
 
 describe.each([
   ["light", light],

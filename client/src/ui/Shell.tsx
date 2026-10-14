@@ -8,10 +8,11 @@ import { ConnectionBanner, LineStatus } from "./ConnectionBanner";
 import { CreateRoomDialog, JoinRoomDialog } from "./Dialogs";
 import { Mark } from "./Mark";
 import { initialOf } from "./format";
+import { ReauthScreen } from "./Account";
 
 type DialogName = "create" | "join" | null;
 
-export function Shell({ onSignOut }: { onSignOut: () => Promise<void> }) {
+export function Shell({ onSignOut, onDeactivated }: { onSignOut: () => Promise<void>; onDeactivated: () => void }) {
   const client = useClient();
   useClientVersion();
   const [route, navigate] = useHashRoute();
@@ -25,19 +26,27 @@ export function Shell({ onSignOut }: { onSignOut: () => Promise<void> }) {
     if (roomGone) navigate({ name: "home" });
   }, [roomGone, navigate]);
 
+  // Profile is fetched once; local edits win over a slower in-flight fetch.
+  const profileEdited = useRef(false);
   useEffect(() => {
     let cancelled = false;
     client
       .getProfile(client.userId)
-      .then((p) => !cancelled && setProfileName(p.displayname))
+      .then((p) => !cancelled && !profileEdited.current && setProfileName(p.displayname || undefined))
       .catch(() => undefined);
     return () => {
       cancelled = true;
     };
-  }, [client, route.name]);
+  }, [client]);
+  const onProfileChanged = (name: string) => {
+    profileEdited.current = true;
+    setProfileName(name || undefined);
+  };
 
   const open = (next: Route) => navigate(next);
   const displayName = profileName ?? client.userId;
+
+  if (client.softLoggedOut) return <ReauthScreen onSignOut={onSignOut} />;
 
   return (
     <div className="shell" data-view={route.name === "room" && !client.getRoom(route.roomId) ? "home" : route.name}>
@@ -89,7 +98,7 @@ export function Shell({ onSignOut }: { onSignOut: () => Promise<void> }) {
         {route.name === "room" && client.getRoom(route.roomId) ? (
           <RoomView key={route.roomId} roomId={route.roomId} onLeft={() => open({ name: "home" })} />
         ) : route.name === "settings" ? (
-          <Settings onSignOut={onSignOut} onProfileChanged={setProfileName} />
+          <Settings onSignOut={onSignOut} onDeactivated={onDeactivated} onProfileChanged={onProfileChanged} />
         ) : (
           <Welcome onCreate={() => setDialog("create")} onJoin={() => setDialog("join")} />
         )}

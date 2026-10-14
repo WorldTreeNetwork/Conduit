@@ -1,7 +1,33 @@
 // Timeline rows from the room model: day plates, folded room setup, state
 // lines, sender-grouped messages and local echoes. Pure, so it is unit tested.
-import type { MatrixEvent, PendingEvent, Room } from "../core";
+import { relatesTo, type Aggregations, type MatrixEvent, type PendingEvent, type Room } from "../core";
 import { continuesGroup, dayKey, describeStateEvent, eventKind } from "./format";
+
+/** Is this pending send a change to another event (reaction or edit)? */
+export function isRelationSend(p: Pick<PendingEvent, "type" | "content">): boolean {
+  const rel = relatesTo(p).relType;
+  return p.type === "m.reaction" || rel === "m.replace" || rel === "m.annotation";
+}
+
+export function isThreadSend(p: Pick<PendingEvent, "content">): boolean {
+  return relatesTo(p).relType === "m.thread";
+}
+
+/**
+ * In-flight reactions and edits as provisional events, so the timeline shows
+ * them applied before the server confirms (failed ones are excluded).
+ */
+export function pendingRelationEvents(pending: PendingEvent[], selfId: string): MatrixEvent[] {
+  return pending
+    .filter((p) => isRelationSend(p) && p.status !== "failed")
+    .map((p) => ({
+      event_id: p.eventId ?? `~${p.txnId}`,
+      type: p.type,
+      sender: selfId,
+      origin_server_ts: p.createdTs,
+      content: p.content,
+    }));
+}
 
 export type Item =
   | { kind: "day"; key: string; ts: number }
@@ -52,7 +78,8 @@ export function foldCreation(items: Item[]): Item[] {
   return [...items.slice(0, start), { kind: "creation", key: `creation-${first.key}`, sender: creator, lines }, ...items.slice(end)];
 }
 
-export function buildItems(room: Room, pending: PendingEvent[], selfId: string): Item[] {
+export function buildItems(room: Room, pending: PendingEvent[], selfId: string, aggregations?: Aggregations): Item[] {
+  const hidden = aggregations?.hidden;
   let items: Item[] = [];
   const name = (id: string) => room.memberName(id);
   const memberContent = new Map<string, Record<string, unknown>>();
@@ -68,6 +95,7 @@ export function buildItems(room: Room, pending: PendingEvent[], selfId: string):
       text = describeStateEvent(event, name);
     }
     if (kind === "hidden" || (kind === "state" && !text)) continue;
+    if (hidden?.has(event.event_id)) continue;
     const day = dayKey(event.origin_server_ts);
     if (day !== lastDay) {
       items.push({ kind: "day", key: `day-${day}`, ts: event.origin_server_ts });
@@ -85,6 +113,10 @@ export function buildItems(room: Room, pending: PendingEvent[], selfId: string):
   let lastPending: PendingEvent | undefined;
   for (const p of pending) {
     if (p.eventId && room.hasEvent(p.eventId)) continue;
+    if (isThreadSend(p)) continue;
+    // Reactions and edits appear applied to their target; only failures
+    // need their own row (with retry / delete).
+    if (isRelationSend(p) && p.status !== "failed") continue;
     const day = dayKey(p.createdTs);
     if (day !== lastDay) {
       items.push({ kind: "day", key: `day-${day}`, ts: p.createdTs });

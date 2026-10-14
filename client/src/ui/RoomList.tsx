@@ -2,6 +2,7 @@ import { useState, type KeyboardEvent } from "react";
 import { describeError, type RoomListEntry } from "../core";
 import { useClient, useClientVersion } from "./hooks";
 import { formatPreviewTime, initialOf, tintIndex } from "./format";
+import { CarrierMark } from "./Mark";
 
 interface Props {
   selectedRoomId?: string;
@@ -119,9 +120,12 @@ function RoomRow({
       : room?.memberName(entry.preview.sender) ?? entry.preview.sender
     : undefined;
   const unread = entry.unread > 0 && !selected;
+  const status = entry.preview?.status;
+  const jammed = entry.failedSends > 0;
   const label = [
     entry.name,
     unread ? `${entry.unread} unread${entry.highlights ? `, ${entry.highlights} mentioning you` : ""}` : undefined,
+    jammed ? `${entry.failedSends} not sent` : undefined,
   ]
     .filter(Boolean)
     .join(", ");
@@ -151,9 +155,22 @@ function RoomRow({
             <span className="room-time">{formatPreviewTime(entry.preview?.ts ?? 0)}</span>
           </span>
           <span className="room-row-bottom">
+            {status && status !== "sent" && <CarrierMark state={status} />}
             <span className="room-preview" data-testid="room-preview">
-              {entry.preview ? `${senderName}: ${entry.preview.body}` : entry.topic ?? "No messages yet"}
+              {jammed && status === "failed" ? (
+                <>
+                  <span className="room-preview-jam" data-testid="room-jam">
+                    Not sent:
+                  </span>{" "}
+                  {entry.preview?.body}
+                </>
+              ) : entry.preview ? (
+                `${senderName}: ${entry.preview.body}`
+              ) : (
+                entry.topic ?? "No messages yet"
+              )}
             </span>
+            {selected && !unread && <span className="active-lamp" data-testid="active-lamp" />}
             {unread && (
               <span
                 className={`lamp${entry.highlights ? " lamp-highlight" : ""}`}

@@ -20,7 +20,7 @@
   /* Ink */
   --color-ink: #13201c;
   --color-ink-muted: #48594f;
-  --color-ink-faint: #5d6e66;
+  --color-ink-faint: #53635b;
 
   /* Destination board (navigation) */
   --color-board: #163a33;
@@ -30,7 +30,7 @@
   --color-board-ink-muted: #bfd2ca;
   --color-board-rule: #2d544b;
   --color-board-clear: #7fd3a0;
-  --color-board-signal: #ff9d92;
+  --color-board-signal: #ffb4ab;
 
   /* Brass: lamps and the primary action only */
   --color-brass: #c48f2c;
@@ -48,9 +48,28 @@
   --color-caution-surface: #f6ebcf;
   --color-caution-ink: #5c4108;
 
-  --color-focus: #1f6fd6;
+  --color-focus: #163a33;
   --color-selection: #f3d891;
   --color-scrim: rgb(10 22 19 / 0.45);
+
+  /* Halos around lit lamps */
+  --color-lamp-halo: rgb(226 173 69 / 0.28);
+  --color-signal-halo: rgb(255 157 146 / 0.3);
+  --color-clear-halo: rgb(127 211 160 / 0.24);
+
+  /* Enamel name plates (avatars): fill + ink */
+  --color-tint-0: #f0d9a0;
+  --color-tint-0-ink: #2b1d02;
+  --color-tint-1: #b9dccb;
+  --color-tint-1-ink: #0d2a23;
+  --color-tint-2: #f2c0b6;
+  --color-tint-2-ink: #3a120b;
+  --color-tint-3: #c3cdd8;
+  --color-tint-3-ink: #18232e;
+  --color-tint-4: #d3dbab;
+  --color-tint-4-ink: #252c06;
+  --color-tint-5: #a9d3d0;
+  --color-tint-5-ink: #0b2927;
 
   /* Type */
   --font-plate: "Barlow Condensed", "Arial Narrow", sans-serif;
@@ -123,9 +142,24 @@
     --color-clear: #6cc08f;
     --color-caution-surface: #33280e;
     --color-caution-ink: #f1d18a;
-    --color-focus: #6aa8ff;
+    --color-focus: #8fd4ab;
     --color-selection: #5b4613;
     --color-scrim: rgb(0 0 0 / 0.6);
+    --color-lamp-halo: rgb(232 179 77 / 0.35);
+    --color-signal-halo: rgb(240 122 110 / 0.35);
+    --color-clear-halo: rgb(108 192 143 / 0.3);
+    --color-tint-0: #5a4515;
+    --color-tint-0-ink: #f6e3b4;
+    --color-tint-1: #1f4a3c;
+    --color-tint-1-ink: #cfeee0;
+    --color-tint-2: #5a2620;
+    --color-tint-2-ink: #fbd3cb;
+    --color-tint-3: #2c3a48;
+    --color-tint-3-ink: #d8e3ee;
+    --color-tint-4: #3f4718;
+    --color-tint-4-ink: #e5edc2;
+    --color-tint-5: #1d4744;
+    --color-tint-5-ink: #c6ecea;
     --shadow-plate: 0 1px 2px rgb(0 0 0 / 0.4), 0 8px 24px -12px rgb(0 0 0 / 0.6);
     --shadow-dialog: 0 2px 6px rgb(0 0 0 / 0.5), 0 24px 48px -16px rgb(0 0 0 / 0.8);
   }
@@ -161,9 +195,24 @@
   --color-clear: #6cc08f;
   --color-caution-surface: #33280e;
   --color-caution-ink: #f1d18a;
-  --color-focus: #6aa8ff;
+  --color-focus: #8fd4ab;
   --color-selection: #5b4613;
   --color-scrim: rgb(0 0 0 / 0.6);
+  --color-lamp-halo: rgb(232 179 77 / 0.35);
+  --color-signal-halo: rgb(240 122 110 / 0.35);
+  --color-clear-halo: rgb(108 192 143 / 0.3);
+  --color-tint-0: #5a4515;
+  --color-tint-0-ink: #f6e3b4;
+  --color-tint-1: #1f4a3c;
+  --color-tint-1-ink: #cfeee0;
+  --color-tint-2: #5a2620;
+  --color-tint-2-ink: #fbd3cb;
+  --color-tint-3: #2c3a48;
+  --color-tint-3-ink: #d8e3ee;
+  --color-tint-4: #3f4718;
+  --color-tint-4-ink: #e5edc2;
+  --color-tint-5: #1d4744;
+  --color-tint-5-ink: #c6ecea;
   --shadow-plate: 0 1px 2px rgb(0 0 0 / 0.4), 0 8px 24px -12px rgb(0 0 0 / 0.6);
   --shadow-dialog: 0 2px 6px rgb(0 0 0 / 0.5), 0 24px 48px -16px rgb(0 0 0 / 0.8);
 }

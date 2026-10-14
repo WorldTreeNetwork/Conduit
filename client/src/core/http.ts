@@ -14,6 +14,7 @@ export interface TransportResponse {
   status: number;
   headers: { get(name: string): string | null };
   text(): Promise<string>;
+  blob?(): Promise<Blob>;
 }
 
 export type Transport = (request: TransportRequest) => Promise<TransportResponse>;
@@ -33,6 +34,8 @@ export type Query = Record<string, string | number | boolean | undefined>;
 export interface RequestOptions {
   query?: Query;
   body?: unknown;
+  /** Send bytes instead of JSON (media upload). */
+  raw?: { data: Blob | ArrayBuffer; contentType: string };
   /** Send the access token. Default true. */
   auth?: boolean;
   signal?: AbortSignal;
@@ -64,8 +67,27 @@ export class HttpClient {
   private readonly clock: Clock;
   private readonly baseBackoffMs: number;
   private readonly maxBackoffMs: number;
-  /** Fires on M_UNKNOWN_TOKEN from any authenticated request. */
+  /** Fires on M_UNKNOWN_TOKEN that refreshing could not cure. */
   onUnknownToken?: (error: MatrixError) => void;
+  /**
+   * Called on M_UNKNOWN_TOKEN with soft_logout: true. Returns true when a
+   * new access token is in place, so the request is retried once.
+   */
+  refreshAccessToken?: () => Promise<boolean>;
+  private refreshing: Promise<boolean> | undefined;
+
+  /** One refresh at a time; concurrent 401s share it. */
+  private refreshOnce(): Promise<boolean> {
+    if (!this.refreshAccessToken) return Promise.resolve(false);
+    if (!this.refreshing) {
+      this.refreshing = this.refreshAccessToken()
+        .catch(() => false)
+        .finally(() => {
+          this.refreshing = undefined;
+        });
+    }
+    return this.refreshing;
+  }
 
   constructor(options: HttpOptions) {
     this.baseUrl = options.baseUrl.replace(/\/+$/, "");
@@ -97,11 +119,31 @@ export class HttpClient {
   async request<T>(method: string, path: string, options: RequestOptions = {}): Promise<T> {
     const maxRetries = options.maxRetries ?? 2;
     let attempt = 0;
+    let refreshed = false;
     for (;;) {
       try {
         return await this.once<T>(method, path, options);
       } catch (error) {
         if (options.signal?.aborted || error instanceof AbortError) throw error;
+        if (
+          error instanceof MatrixError &&
+          error.isUnknownToken &&
+          options.auth !== false &&
+          !refreshed &&
+          this.refreshAccessToken
+        ) {
+          refreshed = true;
+          const tokenBeforeFailure = this.accessToken;
+          // Another request may already have rotated the token.
+          if (error.isSoftLogout && (await this.refreshOnce())) continue;
+          if (this.accessToken !== tokenBeforeFailure) continue;
+          this.onUnknownToken?.(error);
+          throw error;
+        }
+        if (error instanceof MatrixError && error.isUnknownToken && refreshed && options.auth !== false) {
+          this.onUnknownToken?.(error);
+          throw error;
+        }
         const retryable =
           error instanceof ConnectionError || (error instanceof MatrixError && error.isTransient);
         if (!retryable || attempt >= maxRetries) throw error;
@@ -115,10 +157,36 @@ export class HttpClient {
     }
   }
 
+  /** Authenticated binary download (v1 media). */
+  async download(path: string, query?: Query, signal?: AbortSignal): Promise<Blob> {
+    const headers: Record<string, string> = {};
+    if (this.accessToken) headers.Authorization = `Bearer ${this.accessToken}`;
+    let response: TransportResponse;
+    try {
+      response = await this.transport({ method: "GET", url: this.url(path, query), headers, signal });
+    } catch (cause) {
+      if (signal?.aborted) throw new AbortError();
+      throw new ConnectionError(`GET ${path} failed: ${String(cause)}`, cause);
+    }
+    if (response.status < 200 || response.status >= 300) {
+      let body: Record<string, unknown> = {};
+      try {
+        body = JSON.parse(await response.text()) as Record<string, unknown>;
+      } catch {
+        /* not JSON */
+      }
+      throw new MatrixError(response.status, body, response.headers.get("Retry-After"));
+    }
+    if (!response.blob) throw new Error("This transport cannot download binary content.");
+    return response.blob();
+  }
+
   private async once<T>(method: string, path: string, options: RequestOptions): Promise<T> {
     const headers: Record<string, string> = { Accept: "application/json" };
-    let body: string | undefined;
-    if (options.body !== undefined) {
+    let body: string | Blob | ArrayBuffer | undefined = options.raw?.data;
+    if (options.raw) {
+      headers["Content-Type"] = options.raw.contentType || "application/octet-stream";
+    } else if (options.body !== undefined) {
       headers["Content-Type"] = "application/json";
       body = JSON.stringify(options.body);
     }
@@ -163,7 +231,7 @@ export class HttpClient {
     }
     const errorBody = json && typeof json === "object" ? (json as Record<string, unknown>) : {};
     const error = new MatrixError(response.status, errorBody, response.headers.get("Retry-After"));
-    if (error.isUnknownToken && options.auth !== false && this.accessToken) {
+    if (error.isUnknownToken && options.auth !== false && this.accessToken && !this.refreshAccessToken) {
       this.onUnknownToken?.(error);
     }
     throw error;
