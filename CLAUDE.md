@@ -70,6 +70,15 @@ curl localhost:8008/_matrix/client/versions
 
 # Test (when there are tests)
 cargo test --workspace
+
+# Web client (client/, pnpm pinned via packageManager; see docs/features/client.md)
+cd client && pnpm install
+pnpm lint           # tsc -b typecheck + eslint
+pnpm test           # Vitest unit tests
+pnpm build          # production bundle
+pnpm e2e:install    # once: Playwright Chromium
+pnpm e2e            # Playwright vs real conduit-server + fresh Postgres (DATABASE_URL admin)
+pnpm dev            # http://localhost:5173/?hs=http://127.0.0.1:8008
 ```
 
 ## Architecture Overview

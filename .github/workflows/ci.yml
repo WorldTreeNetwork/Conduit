@@ -84,3 +84,68 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y postgresql-client openssl
       - name: Synapse to-device federation journey
         run: bash conduit-server/tests/peers/run_synapse_to_device.sh
+
+  client:
+    name: web client (typecheck, lint, unit, build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: client
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: client/package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: client/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm test
+      - run: pnpm build
+
+  client-e2e:
+    name: web client e2e against the real conduit-server
+    runs-on: ubuntu-latest
+    needs: [rust, client]
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 5s
+          --health-timeout 5s --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.CARGO_SSH_PRIVATE_KEY }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install PostgreSQL client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: client/package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: client/pnpm-lock.yaml
+      - name: Install client dependencies and Chromium
+        working-directory: client
+        run: pnpm install --frozen-lockfile && pnpm exec playwright install --with-deps chromium
+      - name: Playwright journeys (builds conduit-server, fresh database per run)
+        working-directory: client
+        run: pnpm e2e
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: client-e2e-report
+          path: |
+            client/playwright-report
+            client/test-results

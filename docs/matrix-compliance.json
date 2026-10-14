@@ -173,15 +173,222 @@
       "id": "client-implementation-and-ux",
       "role": "client",
       "source": "https://spec.matrix.org/v1.19/client-server-api/",
-      "status": "missing",
+      "status": "partial",
       "issue": "conduit-y99.9",
       "evidence": [
-        "conduit/src/api.rs contains API-version constants and placeholders; no client application exists in the workspace"
+        "client/ is a TypeScript/React web client with its own framework-free CS-API core (client/src/core) and an accessible UI (client/src/ui)",
+        "Unit: cd client && pnpm test (Vitest: core HTTP/auth/discovery/sync/room/send-queue, UI logic, WCAG token contrast)",
+        "E2E: cd client && pnpm e2e (Playwright against the real conduit-server binary and a fresh PostgreSQL database)"
+      ],
+      "implementation": [
+        "client/src/core",
+        "client/src/ui",
+        "client/src/testHook.ts"
+      ],
+      "tests": [
+        "client/e2e/chat.spec.ts",
+        "client/e2e/resilience.spec.ts",
+        "client/e2e/a11y.spec.ts"
       ],
       "scope": [
         "Complete applicable client protocol behavior",
         "Usable and accessible client interfaces",
         "Unattended unit, integration and browser e2e verification"
+      ],
+      "limitations": [
+        "Phase 1 only: no media, typing/receipt/presence UI, relations, device management, room settings, directory or E2EE yet (child beads of conduit-y99.9)",
+        "E2E runs Chromium only",
+        "Unread counts fall back to client-side counting while the server sends zeros (conduit-y99.24)"
+      ]
+    },
+    {
+      "id": "client-http-errors-and-rate-limits",
+      "role": "client",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#rate-limiting",
+      "assertions": [
+        "Matrix error bodies parse into errcode, message and HTTP status; non-JSON errors get a synthetic errcode",
+        "429 waits for Retry-After (seconds) in preference to retry_after_ms, then retries",
+        "5xx and connection failures back off exponentially and give up after the retry budget",
+        "4xx errors are not retried; M_UNKNOWN_TOKEN (incl. soft_logout) is reported to the session owner"
+      ],
+      "implementation": [
+        "client/src/core/http.ts",
+        "client/src/core/errors.ts"
+      ],
+      "tests": [
+        "client/src/core/http.test.ts"
+      ],
+      "status": "covered_assertions_only",
+      "issue": "conduit-y99.9"
+    },
+    {
+      "id": "client-server-discovery",
+      "role": "client",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#server-discovery",
+      "assertions": [
+        "Full URLs are validated through /_matrix/client/versions",
+        "Server names and Matrix IDs use .well-known/matrix/client m.homeserver.base_url",
+        "404 well-known is IGNOREd (falls back to https://server_name); malformed well-known is FAIL_PROMPT; a non-homeserver is FAIL_ERROR"
+      ],
+      "implementation": [
+        "client/src/core/discovery.ts"
+      ],
+      "tests": [
+        "client/src/core/auth.test.ts",
+        "client/e2e/resilience.spec.ts::an unreachable homeserver is reported on the homeserver field"
+      ],
+      "status": "covered_assertions_only",
+      "issue": "conduit-y99.9"
+    },
+    {
+      "id": "client-login-registration-uia",
+      "role": "client",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#user-interactive-authentication-api",
+      "assertions": [
+        "Password login uses an m.id.user identifier and honours a login well_known override",
+        "Registration completes UIA m.login.dummy with the server's session and fails clearly on unsupported stages",
+        "Logout revokes the token on the server (whoami afterwards returns M_UNKNOWN_TOKEN) and wipes local state"
+      ],
+      "implementation": [
+        "client/src/core/auth.ts",
+        "client/src/ui/SignIn.tsx"
+      ],
+      "tests": [
+        "client/src/core/auth.test.ts",
+        "client/e2e/chat.spec.ts::a session survives reload and sign-out revokes it",
+        "client/e2e/resilience.spec.ts::sign-in validates input and explains server errors"
+      ],
+      "status": "covered_assertions_only",
+      "issue": "conduit-y99.9"
+    },
+    {
+      "id": "client-sync-engine",
+      "role": "client",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#syncing",
+      "assertions": [
+        "Initial sync with timeout=0, then long-poll with the persisted since token and a stable inline filter",
+        "Room state is folded from state then timeline; limited timelines reset the window to prev_batch",
+        "Invites come from invite_state; rooms in leave are removed",
+        "Failures move to reconnecting with backoff, recover on retry, and M_UNKNOWN_TOKEN stops the session",
+        "since token and room snapshots persist across reloads"
+      ],
+      "implementation": [
+        "client/src/core/sync.ts",
+        "client/src/core/client.ts",
+        "client/src/core/room.ts"
+      ],
+      "tests": [
+        "client/src/core/client.test.ts",
+        "client/src/core/room.test.ts",
+        "client/e2e/resilience.spec.ts::losing the sync connection shows a reconnecting banner and recovers",
+        "client/e2e/chat.spec.ts::a session survives reload and sign-out revokes it"
+      ],
+      "status": "covered_assertions_only",
+      "issue": "conduit-y99.9"
+    },
+    {
+      "id": "client-room-and-member-names",
+      "role": "client",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#calculating-the-display-name-for-a-room",
+      "assertions": [
+        "Room names use m.room.name, then m.room.canonical_alias, then heroes (summary or members), then Empty room (was ...)",
+        "Invites are named from stripped state or the inviter",
+        "Clashing member display names are disambiguated with the user ID"
+      ],
+      "implementation": [
+        "client/src/core/room.ts"
+      ],
+      "tests": [
+        "client/src/core/room.test.ts"
+      ],
+      "status": "covered_assertions_only",
+      "issue": "conduit-y99.9"
+    },
+    {
+      "id": "client-local-echo-and-transactions",
+      "role": "client",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#transaction-identifiers",
+      "assertions": [
+        "Each message keeps one transaction ID across retries, failures and restarts",
+        "Local echoes reconcile by event ID, including when the remote echo arrives before the PUT response",
+        "Failed sends show inline retry and delete; retry delivers exactly once"
+      ],
+      "implementation": [
+        "client/src/core/sendQueue.ts",
+        "client/src/ui/Timeline.tsx"
+      ],
+      "tests": [
+        "client/src/core/client.test.ts",
+        "client/e2e/resilience.spec.ts::a failed send shows inline retry and delete, and retry delivers once",
+        "client/e2e/resilience.spec.ts::failed sends survive a reload and can be retried afterwards"
+      ],
+      "status": "covered_assertions_only",
+      "issue": "conduit-y99.9",
+      "limitations": [
+        "Reconciliation by unsigned.transaction_id is implemented but untested against Conduit, which omits it (conduit-y99.27)"
+      ]
+    },
+    {
+      "id": "client-history-pagination",
+      "role": "client",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#get_matrixclientv3roomsroomidmessages",
+      "assertions": [
+        "Back-pagination starts from the sync prev_batch, prepends oldest-first without changing current state and de-duplicates",
+        "An absent/empty end or empty chunk marks the start of the room",
+        "75 seeded messages page back to the beginning exactly once and in order"
+      ],
+      "implementation": [
+        "client/src/core/client.ts",
+        "client/src/ui/Timeline.tsx"
+      ],
+      "tests": [
+        "client/src/core/client.test.ts",
+        "client/e2e/resilience.spec.ts::scrolling back pages history until the start of the room"
+      ],
+      "status": "covered_assertions_only",
+      "issue": "conduit-y99.9"
+    },
+    {
+      "id": "client-membership-journeys",
+      "role": "client",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#room-membership",
+      "assertions": [
+        "Create (public/private, name, topic), invite, accept, decline, join by room ID and leave work end to end between two browser sessions"
+      ],
+      "implementation": [
+        "client/src/core/client.ts",
+        "client/src/ui/Dialogs.tsx",
+        "client/src/ui/RoomList.tsx"
+      ],
+      "tests": [
+        "client/e2e/chat.spec.ts::two people create a room, invite, accept and chat both ways",
+        "client/e2e/chat.spec.ts::declining an invite removes it",
+        "client/e2e/chat.spec.ts::join by room ID, validate addresses, and leave"
+      ],
+      "status": "covered_assertions_only",
+      "issue": "conduit-y99.9"
+    },
+    {
+      "id": "client-accessibility",
+      "role": "client",
+      "source": "https://www.w3.org/TR/WCAG22/",
+      "assertions": [
+        "axe reports zero serious or critical WCAG 2.x A/AA violations on sign-in, home, room, failed send, dialogs and settings in light and dark",
+        "Every design-token text pair meets 4.5:1 and indicators 3:1 in both themes",
+        "Room list and timeline are arrow-key navigable; focus moves on route changes; incoming messages are announced"
+      ],
+      "implementation": [
+        "client/src/styles/tokens.css",
+        "client/src/ui"
+      ],
+      "tests": [
+        "client/e2e/a11y.spec.ts",
+        "client/src/styles/contrast.test.ts"
+      ],
+      "status": "covered_assertions_only",
+      "issue": "conduit-y99.9",
+      "limitations": [
+        "Automated checks only; no manual screen-reader audit yet"
       ]
     },
     {

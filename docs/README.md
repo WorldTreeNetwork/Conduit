@@ -11,8 +11,8 @@ the same spec.
   an existing one.
 - Operators who want to understand which parts of their server do
   what.
-- (Later: client implementers — client docs will live in
-  `docs/client/`.)
+- Client implementers — the Conduit web client is documented in
+  [`features/client.md`](features/client.md).
 
 If you're new to Matrix, start with the [spec introduction] and then
 read [`architecture.md`](architecture.md).
@@ -45,6 +45,7 @@ checkpoints are marked 🚦.
 ### Local server (no federation)
 
 - 🚦 [`client-server-api`](features/client-server-api.md) — the API clients call (first usable server)
+- [`client`](features/client.md) — the Conduit web client (own CS-API core, React UI, real-server e2e)
 - [`presence-layer`](features/presence-layer.md) — profiles, typing, receipts, presence
 - [`media`](features/media.md) — uploads, downloads, thumbnails
 

@@ -40,7 +40,7 @@ test("scrolling back pages history until the start of the room", async ({ page }
   await expect(page.getByTestId("timeline-start")).toHaveText("This is the beginning of Archive.");
   await expect(message(page, "history 1")).toBeVisible();
   // (The room's create/join events are hidden by the server's history
-  // visibility filter today; tracked as a server bead, not asserted here.)
+  // visibility filter today: conduit-y99.26. Not asserted until fixed.)
 
   // Every message exactly once, in order.
   const bodies = await page.getByTestId("message-body").allTextContents();
