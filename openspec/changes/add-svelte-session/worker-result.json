@@ -1,0 +1,29 @@
+{
+  "node_id": "conduit-nl4.3",
+  "change_id": "add-svelte-session",
+  "surface": "packet-only",
+  "status": "infra-red",
+  "implementation": "complete",
+  "summary": "Implemented password registration/login, core-backed session persistence and profile shell, logout, advertised-only Identikey, and tab-bound single-use SSO returns.",
+  "artifacts": [
+    "web/src/lib/session.ts",
+    "web/src/lib/session.test.ts",
+    "web/src/routes/+page.svelte",
+    "web/tests/session-journey.ts",
+    "web/README.md",
+    "openspec/changes/add-svelte-session/tasks.md"
+  ],
+  "verification": {
+    "unit_tests": "pass: 17 tests, 70 assertions",
+    "svelte_check": "pass: zero errors and warnings",
+    "static_build": "pass",
+    "design_detector": "pass: no findings",
+    "live_journey": "infra-red: sandbox denies PostgreSQL shared memory, Vite loopback listening, and Chromium Mach-port registration"
+  },
+  "next_action": "Conductor: run the documented web/tests/session-journey.ts against a local Conduit server outside this sandbox, then persist the owned changes.",
+  "persistence": "Worker edited and stopped as requested; conductor owns persistence. The pre-existing proposal.md edit was left untouched.",
+  "signature": {
+    "signer": "codex:sol-implement",
+    "content_hash": "sha256:51389ed7e6cda8e196636dfe657015289c28c71ca323462509eb0ef1a39e57be"
+  }
+}

@@ -1,6 +1,6 @@
 # add-svelte-session
 
-> **PENDING**
+> **ACTIVE BUILD**
 
 ## Why
 

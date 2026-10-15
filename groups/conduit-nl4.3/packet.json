@@ -1,0 +1,24 @@
+{
+  "node_id": "conduit-nl4.3",
+  "change_id": "add-svelte-session",
+  "capability": "matrix-client",
+  "goal": "Add Matrix sign-in to the SvelteKit app in web/. Read openspec/specs/matrix-client/spec.md (Identikey sign-in, signed-out screen, protocol core) and openspec/changes/add-svelte-session/tasks.md. Import the existing framework-free core from client/src/core. Do not edit that core and do not add a UI-framework import to it. Offer Identikey only when GET /_matrix/client/v3/login lists m.login.sso. The password form is always available and is the primary action when SSO is absent. Before an SSO redirect, write a sessionStorage pending-SSO record naming the homeserver and put that same hs on redirectUrl. On return, strip loginToken with history.replaceState before render. Spend it once with m.login.token only when the pending record matches that hs. If the record is missing, mismatched, or there is no hs, strip the token and send no login request. A bad token shows the signed-out screen with a retry. Sign out clears the stored session. The shell shows the profile display name. Password registration and login must still work for tests. Check the task boxes when each is true. Stay inside web/ and openspec/changes/add-svelte-session/.",
+  "surface": "packet-only",
+  "assignee": {
+    "id": "sol-implement",
+    "harness": "codex",
+    "interface": "gpt-6.1-sol",
+    "family": "sol",
+    "effort": "medium"
+  },
+  "constraints": {
+    "permission": "write",
+    "paths": [
+      "web/",
+      "openspec/changes/add-svelte-session/"
+    ]
+  },
+  "acceptance": {
+    "journey": "Register and sign in with a password on a local conduit-server, and the Identikey return leg refuses a token this tab did not request"
+  }
+}
