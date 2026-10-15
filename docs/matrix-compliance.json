@@ -2725,6 +2725,71 @@
       "gap_issues": [
         "conduit-y99.9.6"
       ]
+    },
+    {
+      "id": "sync-state-after-boundaries-and-client-folding",
+      "role": "homeserver_and_client",
+      "source": "https://spec.matrix.org/v1.19/client-server-api/#get_matrixclientv3sync",
+      "status": "covered_assertions_only",
+      "assertions": [
+        "use_state_after=true returns required state_after and omits state for joined and left rooms, including empty sections",
+        "Initial/full_state snapshots and incremental deltas describe final state at the acknowledged cursor; departure snapshots stop at the leave event",
+        "Timeline-filtered state changes, redactions retaining state event IDs, and lazy memberships reach the authoritative state section",
+        "Stored/inline filters, field projection, retry and acknowledged lazy-member dedup preserve state_after semantics",
+        "The client requests state_after and exclusively applies it when present, falls back to legacy state/timeline when absent, and persists the authoritative state across reconnects",
+        "A state_after redaction refreshes cached timeline state even when the redaction event was filtered out"
+      ],
+      "implementation": [
+        "conduit-server/src/api/client/sync.rs",
+        "client/src/core/client.ts",
+        "client/src/core/room.ts",
+        "client/src/core/sync.ts"
+      ],
+      "tests": [
+        "conduit-server/tests/production_sync.rs::state_after_covers_timeline_and_filtered_state_changes",
+        "conduit-server/tests/production_sync.rs::state_after_is_required_when_empty_and_departure_state_is_frozen",
+        "conduit-server/tests/production_sync.rs::state_after_reports_redaction_of_unchanged_state_event_ids",
+        "conduit-server/tests/production_sync.rs::state_after_lazy_members_survive_timeline_dedup_and_owned_filters",
+        "conduit-server/src/api/client/sync.rs::state_tests::snapshots_do_not_include_state_or_membership_after_the_cursor",
+        "conduit-server/tests/production_e2e.rs::production_lazy_members_include_self_and_timeline_senders",
+        "client/src/core/client.test.ts",
+        "client/e2e/chat.spec.ts",
+        "client/e2e/features.spec.ts",
+        "client/e2e/resilience.spec.ts"
+      ],
+      "limitations": [
+        "State reconstruction uses local stream history; atomic event/current-state publication and persisted resolved-DAG snapshots remain under conduit-y99.13 and conduit-embed-persist.",
+        "Legacy state preserves before-timeline member attribution; the client uses state_after for authoritative final state."
+      ],
+      "gap_issues": [
+        "conduit-y99.13",
+        "conduit-embed-persist"
+      ]
+    },
+    {
+      "id": "unattended-macos-browser-sleep-guard",
+      "role": "test_automation",
+      "source": "User goal: unattended server/client verification",
+      "status": "covered_assertions_only",
+      "assertions": [
+        "Darwin browser setup creates an idle-sleep assertion tied to the Playwright parent PID",
+        "Teardown releases the guard; other platforms and Matrix authentication behavior are unchanged"
+      ],
+      "implementation": [
+        "client/e2e/global-setup.ts"
+      ],
+      "tests": [
+        "client/e2e/a11y.spec.ts",
+        "client/e2e/chat.spec.ts",
+        "client/e2e/features.spec.ts",
+        "client/e2e/resilience.spec.ts"
+      ],
+      "limitations": [
+        "The guard prevents idle system sleep; explicit user sleep or a closed lid can still suspend the machine."
+      ],
+      "evidence": [
+        "Full real-server Chromium run passed 26 assertions; setup logged guard PID 91747 and the guard was absent after teardown."
+      ]
     }
   ]
 }

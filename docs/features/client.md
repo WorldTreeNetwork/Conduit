@@ -29,7 +29,7 @@ client/
 | `discovery.ts` | Full URL → validate `/versions`; server name or `@user:server` → `.well-known/matrix/client` with IGNORE (404/unreachable falls back to `https://server`), FAIL_PROMPT (bad well-known) and FAIL_ERROR (not a homeserver). | [Server discovery](https://spec.matrix.org/v1.19/client-server-api/#server-discovery) |
 | `auth.ts` | `m.login.password` with `m.id.user`; registration through UIA, completing `m.login.dummy` (and `m.login.password` where credentials are supplied); unsupported flows fail with the stage names; `well_known` in the login response overrides the base URL. | [Login](https://spec.matrix.org/v1.19/client-server-api/#login), [UIA](https://spec.matrix.org/v1.19/client-server-api/#user-interactive-authentication-api) |
 | `sync.ts` | `/sync` loop: initial sync with `timeout=0`, long-poll (`timeout=30000`) once live, `timeout=0` again after any failure so "live" returns as soon as the server answers. Health states `connecting → live ⇄ reconnecting`, fatal `error` on `M_UNKNOWN_TOKEN`; backoff 1s doubling to 15s or the server's `Retry-After`; `retryNow()` skips the wait; a 400 on a stale `since` falls back to an initial sync. | [Syncing](https://spec.matrix.org/v1.19/client-server-api/#syncing) |
-| `room.ts` | Room model: state map folded from `state` then timeline state events; historical events (`/messages`) never change current state; de-duplication by event ID; a `limited` timeline resets the window and restarts history at `prev_batch`; room name per spec (name → canonical alias → heroes, "Empty room (was …)"); member display-name disambiguation; power levels; snapshots for persistence. | [Room display name](https://spec.matrix.org/v1.19/client-server-api/#calculating-the-display-name-for-a-room), [user display name](https://spec.matrix.org/v1.19/client-server-api/#calculating-the-display-name-for-a-user) |
+| `room.ts` | Room model: authoritative `state_after` when provided, otherwise `state` then timeline state; historical events (`/messages`) never change current state; de-duplication by event ID; a `limited` timeline resets the window and restarts history at `prev_batch`; room name per spec (name → canonical alias → heroes, "Empty room (was …)"); member display-name disambiguation; power levels; snapshots for persistence. | [Room display name](https://spec.matrix.org/v1.19/client-server-api/#calculating-the-display-name-for-a-room), [user display name](https://spec.matrix.org/v1.19/client-server-api/#calculating-the-display-name-for-a-user) |
 | `sendQueue.ts` | Local echo. Each send gets a transaction ID once and keeps it across retries, failures and restarts (server idempotency makes retries safe). Sends are serialized per room. Echoes are reconciled by event ID (or `unsigned.transaction_id`), including when the remote echo arrives before the PUT response. Failed sends stay with their error until retried or discarded; the queue is persisted. | [Transaction identifiers](https://spec.matrix.org/v1.19/client-server-api/#transaction-identifiers) |
 | `client.ts` | `MatrixClient` facade: owns HTTP, sync, rooms and queue; `subscribe`/`getVersion` for `useSyncExternalStore`; actions (create/join/leave/invite/accept/decline, paginate, receipts, profile); persistence of the session, the since token plus a room snapshot (last 50 events per room) and pending sends; `awaitIdle()`. | — |
 | `relations.ts` | Aggregates edits (`m.replace`, valid only from the original sender; bundled `unsigned.m.relations` fill gaps), reactions (`m.annotation`, grouped per key, de-duplicated per sender, own event kept for un-reacting), threads (`m.thread` replies hidden from the main timeline, summaries merged with bundled counts) and redactions (client-side redaction algorithm applied to timeline, thread history and state); strips legacy reply fallbacks. | [Relationships](https://spec.matrix.org/v1.19/client-server-api/#forming-relationships-between-events), [redactions](https://spec.matrix.org/v1.19/client-server-api/#redactions) |
@@ -56,6 +56,13 @@ optionally signing out other devices) and deactivation
 (`/account/deactivate`, optional erase).
 
 ### Persistence and reload
+
+Sync requests set `use_state_after=true`. When a room supplies `state_after`,
+including an empty section, the client applies only that section to current
+room state. Timeline state events remain available as history; redactions still
+update timeline content. When the server omits `state_after`, the client falls
+back to folding `state` and timeline state events. The persisted snapshot keeps
+the authoritative current state independently of the timeline window.
 
 `localStorage` keys (prefix `conduit:`): `session` (homeserver, user,
 token, device), `sync` (`since` + room snapshots), `pending` (unsent
@@ -170,6 +177,12 @@ database (`CONDUIT_E2E_KEEP_LOGS=1` keeps the server log). Set
 `CONDUIT_E2E_HS=<url>` to run against an already-running homeserver
 instead. `CONDUIT_CAPTURE=1` additionally writes review screenshots to
 `client/.impeccable/review/`.
+
+On macOS, setup starts `caffeinate -i -w <Playwright PID>` for the duration
+of the run, including external-homeserver mode. Teardown releases it; PID
+monitoring also releases it when the runner exits. This prevents idle system
+sleep from interrupting unattended browser assertions without changing system
+power settings.
 
 Tests wait only on observable state (DOM, `__conduitClient.awaitIdle()`,
 server responses); there are no fixed sleeps. Failures are simulated

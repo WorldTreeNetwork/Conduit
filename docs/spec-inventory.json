@@ -1181,18 +1181,21 @@
     "conduit-server/tests/presence.rs::account_data_appears_in_sync",
     "conduit-server/tests/presence.rs::read_receipt_round_trip",
     "conduit-server/tests/presence.rs::typing_emits_via_sync",
-    "conduit-server/tests/production_sync.rs::joining_preserves_state_across_a_history_visibility_gap"
+    "conduit-server/tests/production_sync.rs::joining_preserves_state_across_a_history_visibility_gap",
+    "conduit-server/tests/production_sync.rs::state_after_covers_timeline_and_filtered_state_changes",
+    "conduit-server/tests/production_sync.rs::state_after_is_required_when_empty_and_departure_state_is_frozen",
+    "conduit-server/tests/production_sync.rs::state_after_reports_redaction_of_unchanged_state_event_ids",
+    "conduit-server/tests/production_sync.rs::state_after_lazy_members_survive_timeline_dedup_and_owned_filters"
    ],
-   "tests_total": 42,
+   "tests_total": 46,
    "gap_beads": [
     "conduit-y99.13",
     "conduit-y99.13.4",
     "conduit-y99.14",
     "conduit-y99.16",
-    "conduit-y99.27",
-    "conduit-y99.13.6"
+    "conduit-y99.27"
    ],
-   "notes": "Core sync works with production journeys; open semantic gaps tracked by the sync beads. Initial/new-join state across history visibility gaps is regression-tested; use_state_after and independently filtered state/timeline consistency remain open under conduit-y99.13.6."
+   "notes": "Initial/new-join visibility-gap state, use_state_after initial/incremental/full_state/departure sections, filtered state, redactions and lazy/owned filter combinations are regression-tested. Complete resolved-DAG snapshots and remaining sync combinations remain under conduit-y99.13."
   },
   {
    "id": "cs.ep.get_matrixclientv3events",
@@ -7284,17 +7287,20 @@
    "tests": [
     "conduit-server/tests/production_e2e.rs::production_sync_pagination_covers_a_limited_gap_and_full_state",
     "conduit-server/tests/production_e2e.rs::production_invite_accept_and_kick_are_visible_in_sync",
-    "conduit-server/tests/production_sync.rs::joining_preserves_state_across_a_history_visibility_gap"
+    "conduit-server/tests/production_sync.rs::joining_preserves_state_across_a_history_visibility_gap",
+    "conduit-server/tests/production_sync.rs::state_after_covers_timeline_and_filtered_state_changes",
+    "conduit-server/tests/production_sync.rs::state_after_is_required_when_empty_and_departure_state_is_frozen",
+    "conduit-server/tests/production_sync.rs::state_after_reports_redaction_of_unchanged_state_event_ids",
+    "conduit-server/tests/production_sync.rs::state_after_lazy_members_survive_timeline_dedup_and_owned_filters"
    ],
-   "tests_total": 3,
+   "tests_total": 7,
    "gap_beads": [
     "conduit-y99.13",
     "conduit-y99.16",
     "conduit-y99.14",
-    "conduit-y99.27",
-    "conduit-y99.13.6"
+    "conduit-y99.27"
    ],
-   "notes": "Initial/new-join state across history visibility gaps is regression-tested; use_state_after and independently filtered state/timeline consistency remain open under conduit-y99.13.6."
+   "notes": "Initial/new-join visibility-gap state, use_state_after initial/incremental/full_state/departure sections, filtered state, redactions and lazy/owned filter combinations are regression-tested. Complete resolved-DAG snapshots and remaining sync combinations remain under conduit-y99.13."
   },
   {
    "id": "cs.events.get",
