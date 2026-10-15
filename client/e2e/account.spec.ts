@@ -125,7 +125,10 @@ test("soft logout keeps the device and its data and re-authenticates in place", 
   const soft = JSON.stringify({ errcode: "M_UNKNOWN_TOKEN", error: "expired", soft_logout: true });
   await page.route("**/_matrix/client/v3/refresh", (route) => route.fulfill({ status: 401, contentType: "application/json", body: soft }));
   await page.route("**/_matrix/client/v3/rooms/*/send/**", (route) => route.fulfill({ status: 401, contentType: "application/json", body: soft }));
-  await sendViaUi(page, "during expiry");
+  // The expected outcome replaces the composer, so wait on re-authentication
+  // below instead of racing the removed input's empty value.
+  await page.getByTestId("composer-input").fill("during expiry");
+  await page.getByTestId("composer-input").press("Enter");
 
   await expect(page.getByTestId("reauth")).toBeVisible();
   await expect(page.getByRole("heading", { name: "Your session expired" })).toBeFocused();
