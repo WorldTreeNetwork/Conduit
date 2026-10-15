@@ -307,8 +307,14 @@ export class MatrixClient {
       } else if (room.timeline.length === 0 && room.prevBatch === undefined && !room.historyExhausted) {
         room.prevBatch = timeline.prev_batch;
       }
-      for (const event of joined.state?.events ?? []) room.applyState(event);
-      const added = room.addLiveEvents(await this.decryptAll(timeline.events ?? []));
+      const usesStateAfter = joined.state_after !== undefined;
+      if (!usesStateAfter) {
+        for (const event of joined.state?.events ?? []) room.applyState(event);
+      }
+      const added = room.addLiveEvents(await this.decryptAll(timeline.events ?? []), !usesStateAfter);
+      if (usesStateAfter) {
+        for (const event of joined.state_after?.events ?? []) room.applyState(event);
+      }
       for (const event of added) {
         if (event.sender === this.userId) {
           this.sendQueue.reconcile(event.event_id, event.unsigned?.transaction_id);

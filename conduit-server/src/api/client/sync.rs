@@ -1,10 +1,8 @@
 //! `GET /_matrix/client/v3/sync` handler.
 //!
-//! Implements:
-//!   - il0.14: full sync (no `since`)
-//!   - il0.15: incremental sync + long-poll (`since` + `timeout`)
-//!   - il0.16: best-effort filter support (`room.timeline.limit`, `.types`, `.rooms`)
-//!   - il0.17: stream-position token format `"s<position>"`
+//! Initial/incremental sync, long polling, owned and inline filters, and
+//! before-timeline or `state_after` state at an acknowledged stream boundary.
+//! Resolved-DAG snapshot conformance remains under conduit-y99.13.
 
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -18,8 +16,6 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::time::Duration;
-
-use conduit::state_events::{parse_member, Membership};
 
 use super::{AuthState, AuthedUser, MatrixError};
 
@@ -209,7 +205,7 @@ fn has_updates(body: &Value) -> bool {
     }
     if let Some(rooms) = body["rooms"]["join"].as_object() {
         for room in rooms.values() {
-            for field in ["timeline", "state", "ephemeral", "account_data"] {
+            for field in ["timeline", "state", "state_after", "ephemeral", "account_data"] {
                 if room[field]["events"]
                     .as_array()
                     .is_some_and(|events| !events.is_empty())
@@ -266,6 +262,8 @@ pub struct SyncQuery {
     #[serde(default)]
     pub full_state: bool,
     #[serde(default)]
+    pub use_state_after: bool,
+    #[serde(default)]
     pub include_leave: bool,
 }
 
@@ -283,6 +281,19 @@ struct TimelineBlock {
 #[derive(Serialize)]
 struct StateBlock {
     events: Vec<Value>,
+    /// Exclusive boundary used when supplying additional lazy memberships.
+    #[serde(skip)]
+    at: i64,
+    #[serde(skip)]
+    after: bool,
+}
+
+#[derive(Clone, Copy)]
+struct RoomSyncBoundary {
+    since: Option<i64>,
+    until: i64,
+    full_state: bool,
+    state_after: bool,
 }
 
 #[derive(Serialize)]
@@ -392,8 +403,7 @@ pub async fn sync<S: AuthState>(
             &authed.device_id,
             since_token.as_ref(),
             &filter,
-            query.full_state,
-            query.include_leave || filter.definition.room.include_leave,
+            &query,
         )
         .await
         {
@@ -439,9 +449,11 @@ async fn build_sync_response<S: AuthState>(
     authed_device_id: &str,
     since_token: Option<&SyncToken>,
     filter: &SyncFilter,
-    full_state: bool,
-    include_leave: bool,
+    query: &SyncQuery,
 ) -> Result<SyncResponse, Response> {
+    let full_state = query.full_state;
+    let use_state_after = query.use_state_after;
+    let include_leave = query.include_leave || filter.definition.room.include_leave;
     let storage = state.storage();
 
     let since = since_token.as_ref().map(|t| t.events_pos).unwrap_or(0);
@@ -519,6 +531,24 @@ async fn build_sync_response<S: AuthState>(
         Ok(evs) => evs,
         Err(e) => return Err(MatrixError::unknown(e.to_string()).into_response()),
     };
+    // Advance to observed event rows, never a later MAX read that could skip
+    // an event committed after we collected this batch.
+    let ids: Vec<_> = new_events
+        .iter()
+        .map(|event| event.event_id.clone())
+        .collect();
+    let positions = storage
+        .event_stream_positions(&ids)
+        .await
+        .map_err(|error| MatrixError::unknown(error.to_string()).into_response())?;
+    let next_events_pos = positions.values().copied().max().unwrap_or(since);
+
+    let boundary = RoomSyncBoundary {
+        since: since_token.map(|token| token.events_pos),
+        until: next_events_pos,
+        full_state,
+        state_after: use_state_after,
+    };
     // Evaluate push rules for everything just collected so each event's
     // notification count lands in this same response (conduit-y99.30).
     super::push::notifications::process_pending(storage.as_ref(), state.server_name())
@@ -576,23 +606,10 @@ async fn build_sync_response<S: AuthState>(
             next_receipts_pos = receipt.stream_pos;
         }
     }
-    let memberships = storage
-        .current_memberships(user_id)
-        .await
-        .map_err(|error| MatrixError::unknown(error.to_string()).into_response())?;
-    let joined: Vec<_> = memberships
-        .iter()
+    let (memberships, member_positions) = memberships_at(storage.as_ref(), user_id, next_events_pos).await?;
+    let joined: Vec<_> = memberships.iter()
         .filter(|event| event.content["membership"] == "join")
-        .map(|event| event.room_id.clone())
-        .collect();
-    let member_ids: Vec<_> = memberships
-        .iter()
-        .map(|event| event.event_id.clone())
-        .collect();
-    let member_positions = storage
-        .event_stream_positions(&member_ids)
-        .await
-        .map_err(|error| MatrixError::unknown(error.to_string()).into_response())?;
+        .map(|event| event.room_id.clone()).collect();
     // Invite blocking (v1.18): pending invites MUST NOT be served.
     let invites_blocked =
         super::room_membership::blocks_invites(storage.as_ref(), user_id).await;
@@ -638,7 +655,7 @@ async fn build_sync_response<S: AuthState>(
                     user_id,
                     membership,
                     position,
-                    since,
+                    RoomSyncBoundary { until: position, ..boundary },
                     filter,
                 )
                 .await?;
@@ -674,18 +691,6 @@ async fn build_sync_response<S: AuthState>(
     // For each room, check if user is currently joined.
     let mut joined_rooms: HashMap<String, JoinedRoomBlock> = HashMap::new();
 
-    // Advance to observed event rows, never a later MAX read that could skip
-    // an event committed after we collected this batch.
-    let ids: Vec<_> = new_events
-        .iter()
-        .map(|event| event.event_id.clone())
-        .collect();
-    let positions = storage
-        .event_stream_positions(&ids)
-        .await
-        .map_err(|error| MatrixError::unknown(error.to_string()).into_response())?;
-    let next_events_pos = positions.values().copied().max().unwrap_or(since);
-
     let thread_counts = filter.definition.room.timeline.unread_thread_notifications;
     let lazy = filter.definition.room.state.lazy_load_members;
     let drop_redundant = lazy
@@ -695,25 +700,6 @@ async fn build_sync_response<S: AuthState>(
     let mut lazy_sent = Vec::new();
 
     for room_id in &rooms_to_check {
-        // Check current membership.
-        let member_ev = match storage
-            .get_state_entry(room_id, "m.room.member", user_id)
-            .await
-        {
-            Ok(ev) => ev,
-            Err(e) => return Err(MatrixError::unknown(e.to_string()).into_response()),
-        };
-
-        let is_joined = member_ev
-            .as_ref()
-            .and_then(|ev| parse_member(&ev.content).ok())
-            .map(|mc| mc.membership == Membership::Join)
-            .unwrap_or(false);
-
-        if !is_joined {
-            continue;
-        }
-
         let prior_members = storage
             .member_events_for_user(room_id, user_id)
             .await
@@ -724,21 +710,20 @@ async fn build_sync_response<S: AuthState>(
             .max_by_key(|(position, _)| *position)
             .is_some_and(|(_, event)| event.content["membership"] == "join");
         let block = if since_token.is_none() || !was_joined {
-            // Initial sync: state = current state, timeline = recent events.
-            match build_initial_room_block(state, user_id, room_id, filter).await {
+            // A new join needs a complete snapshot at the chosen state boundary.
+            match build_initial_room_block(state, user_id, room_id, filter, RoomSyncBoundary { since: None, ..boundary }).await {
                 Ok(b) => b,
                 Err(resp) => return Err(resp),
             }
         } else {
-            // Incremental: state = empty, timeline = new events since `since`.
+            // Incremental state is a delta at the chosen timeline boundary.
             match build_incremental_room_block(
                 state,
                 user_id,
                 room_id,
                 &new_events,
-                since,
                 filter,
-                full_state,
+                boundary,
             )
             .await
             {
@@ -826,6 +811,7 @@ async fn build_sync_response<S: AuthState>(
             if drop_redundant {
                 block.state.events.retain(|event| {
                     !(event["type"] == "m.room.member"
+                        && event["unsigned"]["redacted_because"].is_null()
                         && super::room_summary::already_sent(
                             user_id,
                             authed_device_id,
@@ -836,7 +822,7 @@ async fn build_sync_response<S: AuthState>(
                         ))
                 });
             }
-            for event in block.state.events.iter().chain(block.timeline.events.iter()) {
+            for event in block.state.events.iter().chain(block.timeline.events.iter().filter(|_| !block.state.after)) {
                 if event["type"] == "m.room.member" {
                     if let (Some(member), Some(id)) = (event["state_key"].as_str(), event["event_id"].as_str()) {
                         lazy_sent.push((room_id.clone(), member.to_owned(), id.to_owned()));
@@ -1005,12 +991,24 @@ async fn build_sync_response<S: AuthState>(
             *event = filter.definition.project(std::mem::take(event));
         }
     }
-    let rooms_obj = json!({
+    let mut rooms_obj = json!({
         "join": joined_rooms,
         "invite": invited_rooms,
         "leave": left_rooms,
         "knock": knocked_rooms
     });
+
+    if use_state_after {
+        for section in ["join", "leave"] {
+            if let Some(rooms) = rooms_obj[section].as_object_mut() {
+                for room in rooms.values_mut().filter_map(Value::as_object_mut) {
+                    if let Some(state) = room.remove("state") {
+                        room.insert("state_after".into(), state);
+                    }
+                }
+            }
+        }
+    }
 
     let mut body = json!({
         "next_batch": next_batch,
@@ -1093,9 +1091,10 @@ async fn departed_room_block(
     user: &str,
     membership: &conduit::event::Event,
     departure: i64,
-    since: i64,
+    boundary: RoomSyncBoundary,
     filter: &SyncFilter,
 ) -> Result<JoinedRoomBlock, Response> {
+    let since = boundary.since.unwrap_or(0);
     let raw = storage
         .room_events(&membership.room_id)
         .await
@@ -1136,17 +1135,7 @@ async fn departed_room_block(
         .and_then(|event| positions.get(&event.event_id))
         .copied()
         .unwrap_or(departure);
-    let before = state_before(storage, &membership.room_id, first).await?;
-    let previous = state_before(storage, &membership.room_id, since.saturating_add(1)).await?;
-    let state = before
-        .into_iter()
-        .filter(|(key, event)| {
-            previous
-                .get(key)
-                .is_none_or(|old| old.event_id != event.event_id)
-        })
-        .map(|(_, event)| serde_json::to_value(event).expect("state JSON"))
-        .collect();
+    let state = state_for_sync(storage, &membership.room_id, first, &events, boundary).await?;
     Ok(JoinedRoomBlock {
         timeline: TimelineBlock {
             events: events
@@ -1156,7 +1145,7 @@ async fn departed_room_block(
             limited,
             prev_batch: encode_token(first.saturating_sub(1)),
         },
-        state: StateBlock { events: state },
+        state,
         account_data: AccountDataBlock { events: vec![] },
         ephemeral: EphemeralBlock { events: vec![] },
         unread_notifications: UnreadNotifications {
@@ -1175,6 +1164,7 @@ async fn build_initial_room_block<S: AuthState>(
     user_id: &str,
     room_id: &str,
     filter: &SyncFilter,
+    boundary: RoomSyncBoundary,
 ) -> Result<JoinedRoomBlock, Response> {
     let storage = state.storage();
 
@@ -1182,7 +1172,8 @@ async fn build_initial_room_block<S: AuthState>(
         .room_latest_stream_position(room_id)
         .await
         .map_err(|error| MatrixError::unknown(error.to_string()).into_response())?
-        .unwrap_or(0);
+        .unwrap_or(0)
+        .min(boundary.until);
     let (mut events, _) = storage
         .room_events_paginated(room_id, 'b', latest_pos, i64::MAX)
         .await
@@ -1199,7 +1190,9 @@ async fn build_initial_room_block<S: AuthState>(
     // exposing them as timeline events. Older visible history remains pageable.
     let last_hidden = events.iter().rposition(|event| !visible_ids.contains(&event.event_id));
     let mut events = apply_type_filter(
-        events.into_iter().skip(last_hidden.map_or(0, |index| index + 1)).collect(),
+        if boundary.state_after { visible } else {
+            events.into_iter().skip(last_hidden.map_or(0, |index| index + 1)).collect()
+        },
         filter,
     );
     let over_limit = events.len() > filter.timeline_limit as usize;
@@ -1217,7 +1210,7 @@ async fn build_initial_room_block<S: AuthState>(
         .and_then(|event| positions.get(&event.event_id))
         .copied()
         .unwrap_or(latest_pos.saturating_add(1));
-    let state_events = state_before(storage.as_ref(), room_id, first).await?;
+    let room_state = state_for_sync(storage.as_ref(), room_id, first, &events, boundary).await?;
     Ok(JoinedRoomBlock {
         timeline: TimelineBlock {
             events: events
@@ -1227,12 +1220,7 @@ async fn build_initial_room_block<S: AuthState>(
             limited,
             prev_batch: encode_token(first.saturating_sub(1)),
         },
-        state: StateBlock {
-            events: state_events
-                .into_values()
-                .map(|event| serde_json::to_value(event).expect("state JSON"))
-                .collect(),
-        },
+        state: room_state,
         account_data: AccountDataBlock { events: vec![] },
         ephemeral: EphemeralBlock { events: vec![] },
         unread_notifications: UnreadNotifications {
@@ -1245,38 +1233,121 @@ async fn build_initial_room_block<S: AuthState>(
     })
 }
 
+/// Current membership can change after the room stream was collected.
+/// Roll such changes back to the acknowledged boundary, so a later join/leave
+/// cannot reclassify this response or drop an already-collected room delta.
+async fn memberships_at(
+    storage: &dyn conduit::storage::Storage,
+    user: &str,
+    until: i64,
+) -> Result<(Vec<conduit::event::Event>, HashMap<String, i64>), Response> {
+    let current = storage.current_memberships(user).await
+        .map_err(|error| MatrixError::unknown(error.to_string()).into_response())?;
+    let ids: Vec<_> = current.iter().map(|event| event.event_id.clone()).collect();
+    let mut positions = storage.event_stream_positions(&ids).await
+        .map_err(|error| MatrixError::unknown(error.to_string()).into_response())?;
+    let mut memberships = Vec::new();
+    for event in current {
+        if positions.get(&event.event_id).copied().unwrap_or(0) <= until {
+            memberships.push(event);
+            continue;
+        }
+        let history = storage.member_events_for_user(&event.room_id, user).await
+            .map_err(|error| MatrixError::unknown(error.to_string()).into_response())?;
+        if let Some((position, previous)) = history.into_iter()
+            .filter(|(position, _)| *position <= until).max_by_key(|(position, _)| *position)
+        {
+            positions.insert(previous.event_id.clone(), position);
+            memberships.push(previous);
+        }
+    }
+    Ok((memberships, positions))
+}
+
+async fn positioned_room_events(
+    storage: &dyn conduit::storage::Storage,
+    room_id: &str,
+) -> Result<Vec<(i64, conduit::event::Event)>, Response> {
+    let events = storage.room_events(room_id).await
+        .map_err(|error| MatrixError::unknown(error.to_string()).into_response())?;
+    let ids: Vec<_> = events.iter().map(|event| event.event_id.clone()).collect();
+    let positions = storage.event_stream_positions(&ids).await
+        .map_err(|error| MatrixError::unknown(error.to_string()).into_response())?;
+    let mut events: Vec<_> = events.into_iter().filter_map(|event| {
+        positions.get(&event.event_id).copied().map(|position| (position, event))
+    }).collect();
+    events.sort_by_key(|(position, _)| *position);
+    Ok(events)
+}
+
 async fn state_before(
     storage: &dyn conduit::storage::Storage,
     room_id: &str,
     before: i64,
 ) -> Result<HashMap<(String, String), conduit::event::Event>, Response> {
-    let events = storage
-        .room_events(room_id)
-        .await
-        .map_err(|error| MatrixError::unknown(error.to_string()).into_response())?;
-    let ids: Vec<_> = events.iter().map(|event| event.event_id.clone()).collect();
-    let positions = storage
-        .event_stream_positions(&ids)
-        .await
-        .map_err(|error| MatrixError::unknown(error.to_string()).into_response())?;
-    let mut events: Vec<_> = events
-        .into_iter()
-        .filter_map(|event| {
-            positions
-                .get(&event.event_id)
-                .copied()
-                .map(|position| (position, event))
-        })
-        .filter(|(position, _)| *position < before)
-        .collect();
-    events.sort_by_key(|(position, _)| *position);
     let mut state = HashMap::new();
-    for (_, event) in events {
+    for (_, event) in positioned_room_events(storage, room_id).await?.into_iter().take_while(|(position, _)| *position < before) {
         if let Some(key) = &event.state_key {
             state.insert((event.event_type.clone(), key.clone()), event);
         }
     }
     Ok(state)
+}
+
+/// Produce the full state or state delta at the requested sync boundary.
+/// Legacy sync also carries state excluded by timeline filters; a returned
+/// timeline state event supplies its own change after the before-state.
+async fn state_for_sync(
+    storage: &dyn conduit::storage::Storage,
+    room: &str,
+    first: i64,
+    timeline: &[conduit::event::Event],
+    boundary: RoomSyncBoundary,
+) -> Result<StateBlock, Response> {
+    let mut before = HashMap::new();
+    let mut end = HashMap::new();
+    let mut previous = HashMap::new();
+    let mut redacted = std::collections::HashSet::new();
+    for (position, event) in positioned_room_events(storage, room).await?.into_iter().take_while(|(position, _)| *position <= boundary.until) {
+        if let Some(key) = &event.state_key {
+            let key = (event.event_type.clone(), key.clone());
+            if !boundary.state_after && position < first { before.insert(key.clone(), event.clone()); }
+            if !boundary.full_state && boundary.since.is_some_and(|since| position <= since) {
+                previous.insert(key.clone(), event.clone());
+            }
+            end.insert(key, event.clone());
+        }
+        if boundary.since.is_none_or(|since| position > since) && event.event_type == "m.room.redaction" {
+            if let Some(target) = conduit::room_content::redaction_target(&event) {
+                redacted.insert(target.to_owned());
+            }
+        }
+    }
+    let timeline_state: std::collections::HashSet<_> = timeline.iter().filter_map(|event| {
+        event.state_key.as_ref().map(|key| (event.event_type.clone(), key.clone()))
+    }).collect();
+    let mut selected = before;
+    // A filter can remove state in the middle of a visible timeline.
+    // Legacy sync carries its final value when the timeline cannot supply
+    // this key. state_after carries the final value of every changed key.
+    for (key, event) in end {
+        if boundary.state_after
+            || (!timeline_state.contains(&key)
+                && (key.0 != "m.room.member" || !selected.contains_key(&key)))
+        {
+            selected.insert(key, event);
+        }
+    }
+    let events = selected.into_iter().filter(|(key, event)| {
+        boundary.full_state || boundary.since.is_none()
+            || redacted.contains(&event.event_id)
+            || previous.get(key).is_none_or(|old| old.event_id != event.event_id)
+    }).map(|(_, event)| serde_json::to_value(event).expect("state JSON")).collect();
+    Ok(StateBlock {
+        events,
+        at: if boundary.state_after { boundary.until.saturating_add(1) } else { first },
+        after: boundary.state_after,
+    })
 }
 
 /// Build a room block for incremental sync from pre-fetched new events.
@@ -1285,10 +1356,10 @@ async fn build_incremental_room_block<S: AuthState>(
     user_id: &str,
     room_id: &str,
     new_events: &[conduit::event::Event],
-    since: i64,
     filter: &SyncFilter,
-    full_state: bool,
+    boundary: RoomSyncBoundary,
 ) -> Result<JoinedRoomBlock, Response> {
+    let since = boundary.since.unwrap_or(0);
     let mut room_events: Vec<conduit::event::Event> = new_events
         .iter()
         .filter(|e| e.room_id == room_id)
@@ -1331,25 +1402,14 @@ async fn build_incremental_room_block<S: AuthState>(
         .await
         .map_err(|error| MatrixError::unknown(error.to_string()).into_response())?
         .unwrap_or(since)
+        .min(boundary.until)
         .saturating_add(1);
     let first = room_events
         .first()
         .and_then(|event| positions.get(&event.event_id))
         .copied()
         .unwrap_or(fallback);
-    let previous_state =
-        state_before(state.storage().as_ref(), room_id, since.saturating_add(1)).await?;
-    let before_timeline = state_before(state.storage().as_ref(), room_id, first).await?;
-    let state_values = before_timeline
-        .into_iter()
-        .filter(|(key, event)| {
-            full_state
-                || previous_state
-                    .get(key)
-                    .is_none_or(|old| old.event_id != event.event_id)
-        })
-        .map(|(_, event)| serde_json::to_value(event).expect("state JSON"))
-        .collect();
+    let room_state = state_for_sync(state.storage().as_ref(), room_id, first, &room_events, boundary).await?;
     let prev_batch = encode_token(first.saturating_sub(1));
 
     let timeline_values: Vec<Value> = room_events
@@ -1363,9 +1423,7 @@ async fn build_incremental_room_block<S: AuthState>(
             limited,
             prev_batch,
         },
-        state: StateBlock {
-            events: state_values,
-        },
+        state: room_state,
         account_data: AccountDataBlock { events: vec![] },
         ephemeral: EphemeralBlock { events: vec![] },
         unread_notifications: UnreadNotifications {
@@ -1396,31 +1454,15 @@ async fn add_lazy_members(
         .collect();
     senders.insert(user.to_owned());
     senders.extend(block.heroes.iter().cloned());
-    let member_snapshot = if let Some(first) = block
-        .timeline
-        .events
-        .first()
-        .and_then(|event| event["event_id"].as_str())
-    {
-        let positions = storage
-            .event_stream_positions(&[first.to_owned()])
-            .await
-            .map_err(|error| MatrixError::unknown(error.to_string()).into_response())?;
-        state_before(storage, room, *positions.get(first).unwrap_or(&i64::MAX)).await?
-    } else {
-        state_before(storage, room, i64::MAX).await?
-    };
+    let member_snapshot = state_before(storage, room, block.state.at).await?;
     for member in senders {
         if block
             .state
             .events
             .iter()
             .any(|event| event["type"] == "m.room.member" && event["state_key"] == member)
-            || block
-                .timeline
-                .events
-                .iter()
-                .any(|event| event["type"] == "m.room.member" && event["state_key"] == member)
+            || (!block.state.after && block.timeline.events.iter()
+                .any(|event| event["type"] == "m.room.member" && event["state_key"] == member))
         {
             continue;
         }
@@ -1509,7 +1551,7 @@ fn filter_room_block(
                 || event["state_key"]
                     .as_str()
                     .is_some_and(|member| senders.contains(member)))
-            && (state_rule.include_redundant_members
+            && (block.state.after || state_rule.include_redundant_members
                 || event["type"] != "m.room.member"
                 || event["event_id"]
                     .as_str()
@@ -1653,5 +1695,44 @@ mod token_tests {
         ] {
             assert!(parse_since(raw).is_err(), "{raw}");
         }
+    }
+}
+
+
+#[cfg(test)]
+mod state_tests {
+    use super::{memberships_at, state_for_sync, RoomSyncBoundary};
+    use conduit::event::{Event, Pdu};
+    use conduit::storage::{MemoryStorage, Storage};
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn snapshots_do_not_include_state_or_membership_after_the_cursor() {
+        let storage = MemoryStorage::default();
+        let member = |id: &str, membership: &str| Event::new(id, Pdu::new(
+            "!room:test", "@me:test", "m.room.member", Some("@me:test".into()),
+            json!({"membership":membership}), 1, vec![], vec![], 1));
+        let joined = member("$joined", "join");
+        storage.put_event(&joined).await.unwrap();
+        storage.set_state_entry("!room:test", "m.room.member", "@me:test", "$joined").await.unwrap();
+        let until = storage.event_stream_positions(std::slice::from_ref(&joined.event_id)).await.unwrap()["$joined"];
+        // These writes happen after the room stream was captured for a sync.
+        let left = member("$left", "leave");
+        storage.put_event(&left).await.unwrap();
+        storage.set_state_entry("!room:test", "m.room.member", "@me:test", "$left").await.unwrap();
+        let later = Event::new("$later-name", Pdu::new("!room:test", "@me:test", "m.room.name", Some("".into()),
+            json!({"name":"After cursor"}), 2, vec![], vec![], 2));
+        storage.put_event(&later).await.unwrap();
+        let (memberships, _) = memberships_at(&storage, "@me:test", until).await.unwrap_or_else(|_| panic!("membership snapshot"));
+        assert_eq!(memberships.len(), 1);
+        assert_eq!(memberships[0].event_id, "$joined");
+        let state = state_for_sync(&storage, "!room:test", 0, &[], RoomSyncBoundary {
+            since: None, until, full_state: false, state_after: true,
+        }).await.unwrap_or_else(|_| panic!("state snapshot"));
+        assert_eq!(state.events.len(), 1);
+        assert_eq!(state.events[0]["event_id"], "$joined");
+        // Before this user's first join, the room must not be classified as joined.
+        let (memberships, _) = memberships_at(&storage, "@me:test", 0).await.unwrap_or_else(|_| panic!("membership snapshot"));
+        assert!(memberships.is_empty());
     }
 }

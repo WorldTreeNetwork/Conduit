@@ -74,6 +74,15 @@ export class Room {
       this.state.set(event.type, byKey);
     }
     byKey.set(event.state_key, event);
+    // A state section can carry a redacted copy of an already-cached event
+    // even when the redaction itself was excluded from the timeline filter.
+    if (event.unsigned?.redacted_because) {
+      const index = this.timeline.findIndex((cached) => cached.event_id === event.event_id);
+      if (index >= 0) {
+        this.timeline[index] = event;
+        this.revision++;
+      }
+    }
   }
 
   getState(type: string, stateKey = ""): MatrixEvent | undefined {
@@ -221,15 +230,15 @@ export class Room {
     return this.eventIds.has(eventId);
   }
 
-  /** Append live events (from /sync), folding state as we go. */
-  addLiveEvents(events: MatrixEvent[]): MatrixEvent[] {
+  /** Append live events, optionally folding legacy /sync timeline state. */
+  addLiveEvents(events: MatrixEvent[], foldState = true): MatrixEvent[] {
     const added: MatrixEvent[] = [];
     for (const event of events) {
       if (!event?.event_id || this.eventIds.has(event.event_id)) continue;
       this.eventIds.add(event.event_id);
       this.timeline.push(event);
-      if (event.state_key !== undefined) this.applyState(event);
-      if (event.type === "m.room.redaction") this.applyRedaction(event);
+      if (foldState && event.state_key !== undefined) this.applyState(event);
+      if (event.type === "m.room.redaction") this.applyRedaction(event, foldState);
       added.push(event);
     }
     if (added.length) this.revision++;
@@ -260,7 +269,7 @@ export class Room {
   }
 
   /** Replace a redacted event's content in place (timeline and state). */
-  applyRedaction(redaction: MatrixEvent): void {
+  applyRedaction(redaction: MatrixEvent, includeState = true): void {
     const target = redactsOf(redaction);
     if (!target) return;
     const index = this.timeline.findIndex((e) => e.event_id === target);
@@ -271,7 +280,7 @@ export class Room {
         list.map((e) => (e.event_id === target ? redactEvent(e, redaction) : e)),
       );
     }
-    for (const byKey of this.state.values()) {
+    for (const byKey of includeState ? this.state.values() : []) {
       for (const [key, event] of byKey) {
         if (event.event_id === target) byKey.set(key, redactEvent(event, redaction));
       }

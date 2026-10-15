@@ -51,6 +51,7 @@ export interface RoomSummary {
 export interface JoinedRoomSync {
   summary?: RoomSummary;
   state?: { events?: MatrixEvent[] };
+  state_after?: { events?: MatrixEvent[] };
   timeline?: Timeline;
   ephemeral?: { events?: BasicEvent[] };
   account_data?: { events?: BasicEvent[] };
@@ -63,6 +64,7 @@ export interface InvitedRoomSync {
 
 export interface LeftRoomSync {
   state?: { events?: MatrixEvent[] };
+  state_after?: { events?: MatrixEvent[] };
   timeline?: Timeline;
   account_data?: { events?: BasicEvent[] };
 }

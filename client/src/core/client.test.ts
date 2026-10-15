@@ -75,6 +75,7 @@ describe("sync processing", () => {
     const [first, second] = server.requestsTo(/\/sync$/);
     expect(first!.query.get("since")).toBeNull();
     expect(first!.query.get("timeout")).toBe("0");
+    expect(first!.query.get("use_state_after")).toBe("true");
     expect(second!.query.get("since")).toBe("s1");
     expect(second!.query.get("timeout")).toBe("30000");
     expect(JSON.parse(first!.query.get("filter")!).room.timeline.limit).toBe(30);
@@ -82,6 +83,75 @@ describe("sync processing", () => {
     expect(room.unread.notifications).toBe(2);
     expect(client.roomList()[0]!.preview?.body).toBe("hello");
     await client.stop();
+  });
+
+  it("uses state_after exclusively and keeps timeline state as history", async () => {
+    const { client } = makeClient();
+    const old = makeEvent({ type: "m.room.name", state_key: "", content: { name: "Timeline name" } });
+    const current = makeEvent({ type: "m.room.name", state_key: "", content: { name: "Current name" } });
+    const response = joinedSync("s1", [old]);
+    response.rooms!.join![ROOM]!.state_after = { events: [current] };
+    await client.processSync(response, true);
+    expect(client.getRoom(ROOM)!.explicitName).toBe("Current name");
+    expect(client.getRoom(ROOM)!.timeline[0]!.content.name).toBe("Timeline name");
+
+    const delta = joinedSync("s2", [makeEvent({ type: "m.room.name", state_key: "", content: { name: "Ignored timeline change" } })]);
+    delta.rooms!.join![ROOM]!.state_after = { events: [] };
+    delta.rooms!.join![ROOM]!.timeline!.limited = true;
+    await client.processSync(delta, false);
+    expect(client.getRoom(ROOM)!.explicitName).toBe("Current name");
+    expect(client.getRoom(ROOM)!.timeline[0]!.content.name).toBe("Ignored timeline change");
+  });
+
+  it("updates redacted room state only from state_after while still redacting timeline content", async () => {
+    const { client } = makeClient();
+    const name = makeEvent({ type: "m.room.name", state_key: "", content: { name: "Authoritative" } });
+    const response = joinedSync("s1", [name]);
+    response.rooms!.join![ROOM]!.state_after = { events: [name] };
+    await client.processSync(response, true);
+    const redaction = makeEvent({ type: "m.room.redaction", content: { redacts: name.event_id } });
+    const delta = joinedSync("s2", [redaction]);
+    delta.rooms!.join![ROOM]!.state_after = { events: [] };
+    await client.processSync(delta, false);
+    expect(client.getRoom(ROOM)!.explicitName).toBe("Authoritative");
+    expect(client.getRoom(ROOM)!.timeline[0]!.content).toEqual({});
+    const update = joinedSync("s3", []);
+    update.rooms!.join![ROOM]!.state_after = { events: [{ ...name, content: {} }] };
+    await client.processSync(update, false);
+    expect(client.getRoom(ROOM)!.explicitName).toBeUndefined();
+  });
+
+  it("refreshes a cached timeline state event when state_after carries its redaction", async () => {
+    const { client } = makeClient();
+    const name = makeEvent({ type: "m.room.name", state_key: "", content: { name: "Removed name" } });
+    const response = joinedSync("s1", [name]);
+    response.rooms!.join![ROOM]!.state_after = { events: [name] };
+    await client.processSync(response, true);
+    const delta = joinedSync("s2", []);
+    delta.rooms!.join![ROOM]!.state_after = {
+      events: [{ ...name, content: {}, unsigned: { redacted_because: makeEvent({ type: "m.room.redaction", content: { redacts: name.event_id } }) } }],
+    };
+    await client.processSync(delta, false);
+    expect(client.getRoom(ROOM)!.explicitName).toBeUndefined();
+    expect(client.getRoom(ROOM)!.timeline[0]!.content).toEqual({});
+  });
+
+  it("preserves authoritative state_after across persistence and reconnects", async () => {
+    const { client, sync, store } = makeClient();
+    client.start();
+    const response = joinedSync("s8", [makeEvent({ type: "m.room.name", state_key: "", content: { name: "Old name" } })]);
+    response.rooms!.join![ROOM]!.state_after = {
+      events: [makeEvent({ type: "m.room.name", state_key: "", content: { name: "Saved current name" } })],
+    };
+    sync.push(response);
+    await settle(client, () => client.getRoom(ROOM)?.explicitName === "Saved current name");
+    await client.stop();
+    const restored = makeClient(store);
+    restored.client.start();
+    expect(restored.client.getRoom(ROOM)!.explicitName).toBe("Saved current name");
+    await settle(restored.client, () => restored.server.requestsTo(/\/sync$/).length === 1);
+    expect(restored.server.requestsTo(/\/sync$/)[0]!.query.get("since")).toBe("s8");
+    await restored.client.stop();
   });
 
   it("persists the since token with room state and resumes from it", async () => {

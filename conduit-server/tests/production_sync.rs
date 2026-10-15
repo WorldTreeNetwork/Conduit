@@ -1498,3 +1498,137 @@ async fn joining_preserves_state_across_a_history_visibility_gap() {
         }
     }
 }
+
+
+async fn sync_mode(server: &Server, login: &Value, filter: Value, since: Option<&str>, after: bool, full: bool) -> Value {
+    let path = format!("{}&use_state_after={after}&full_state={full}", filtered(filter, since));
+    server.request(Method::GET, &path, Some(token(login)), None, 200).await
+}
+
+#[tokio::test]
+async fn state_after_covers_timeline_and_filtered_state_changes() {
+    let server = Server::new().await;
+    let (alice, bob, room, _) = server.chat_pair().await;
+    let before = sync(&server, &bob, None).await;
+    let since = next_batch(&before);
+    send_text(&server, &alice, &room, "before-name", json!({"msgtype":"m.text", "body":"Earlier message"})).await;
+    server.request(Method::PUT, &format!("/_matrix/client/v3/rooms/{room}/state/m.room.name"), Some(token(&alice)),
+        Some(json!({"name":"Current name"})), 200).await;
+    send_text(&server, &alice, &room, "after-name", json!({"msgtype":"m.text", "body":"Later message"})).await;
+    for after in [false, true] {
+        for since in [None, Some(since.as_str())] {
+            let response = sync_mode(&server, &bob,
+                json!({"room":{"timeline":{"types":["m.room.message"],"limit":100}}}), since, after, false).await;
+            let block = &response["rooms"]["join"][&room];
+            let field = if after { "state_after" } else { "state" };
+            let omitted = if after { "state" } else { "state_after" };
+            assert!(block.get(omitted).is_none(), "{block}");
+            let state = block[field]["events"].as_array().expect("required state section");
+            assert!(state.iter().any(|e| e["type"] == "m.room.name" && e["content"]["name"] == "Current name"), "{block}");
+            let timeline = block["timeline"]["events"].as_array().unwrap();
+            assert!(timeline.iter().all(|e| e["type"] == "m.room.message"), "{block}");
+            assert!(timeline.iter().any(|e| e["content"]["body"] == "Earlier message"));
+            assert!(timeline.iter().any(|e| e["content"]["body"] == "Later message"));
+        }
+    }
+    // Unfiltered timelines still carry every changed state in state_after:
+    // clients MUST ignore the timeline for state in this mode.
+    let after = sync_mode(&server, &bob, json!({}), Some(&since), true, false).await;
+    let block = &after["rooms"]["join"][&room];
+    let state = block["state_after"]["events"].as_array().unwrap();
+    assert!(state.iter().any(|e| e["type"] == "m.room.name"));
+    assert!(block["timeline"]["events"].as_array().unwrap().iter().any(|e| e["type"] == "m.room.name"));
+    let full = sync_mode(&server, &bob, json!({}), Some(&next_batch(&after)), true, true).await;
+    let full_state = full["rooms"]["join"][&room]["state_after"]["events"].as_array().unwrap();
+    assert!(full_state.iter().any(|e| e["type"] == "m.room.create"));
+    assert!(full_state.iter().any(|e| e["type"] == "m.room.member" && e["state_key"] == user(&bob)));
+    assert!(full["rooms"]["join"][&room]["timeline"]["events"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn state_after_is_required_when_empty_and_departure_state_is_frozen() {
+    let server = Server::new().await;
+    let (alice, bob, room, _) = server.chat_pair().await;
+    let initial = sync_mode(&server, &bob, json!({}), None, true, false).await;
+    let since = next_batch(&initial);
+    send_text(&server, &alice, &room, "only-message", json!({"msgtype":"m.text", "body":"No state change"})).await;
+    let delta = sync_mode(&server, &bob, json!({}), Some(&since), true, false).await;
+    let block = &delta["rooms"]["join"][&room];
+    assert_eq!(block["state_after"]["events"], json!([]), "{block}");
+    assert!(block.get("state").is_none());
+    server.request(Method::PUT, &format!("/_matrix/client/v3/rooms/{room}/state/m.room.topic"), Some(token(&alice)),
+        Some(json!({"topic":"At departure"})), 200).await;
+    server.request(Method::POST, &format!("/_matrix/client/v3/rooms/{room}/leave"), Some(token(&bob)), Some(json!({})), 200).await;
+    server.request(Method::PUT, &format!("/_matrix/client/v3/rooms/{room}/state/m.room.topic"), Some(token(&alice)),
+        Some(json!({"topic":"After departure"})), 200).await;
+    let response = sync_mode(&server, &bob, json!({"room":{"timeline":{"types":["m.room.message"]}}}), Some(&next_batch(&delta)), true, false).await;
+    let left = &response["rooms"]["leave"][&room];
+    assert!(left.get("state").is_none(), "{left}");
+    let state = left["state_after"]["events"].as_array().unwrap();
+    assert!(state.iter().any(|e| e["type"] == "m.room.topic" && e["content"]["topic"] == "At departure"), "{left}");
+    assert!(state.iter().any(|e| e["type"] == "m.room.member" && e["state_key"] == user(&bob) && e["content"]["membership"] == "leave"), "{left}");
+    assert!(!state.iter().any(|e| e["content"]["topic"] == "After departure"), "{left}");
+}
+
+
+#[tokio::test]
+async fn state_after_reports_redaction_of_unchanged_state_event_ids() {
+    let server = Server::new().await;
+    let (alice, bob, room, _) = server.chat_pair().await;
+    let name = server.request(Method::PUT, &format!("/_matrix/client/v3/rooms/{room}/state/m.room.name"), Some(token(&alice)),
+        Some(json!({"name":"To be redacted"})), 200).await["event_id"].as_str().unwrap().to_owned();
+    let initial = sync_mode(&server, &bob, json!({}), None, true, false).await;
+    server.request(Method::PUT, &format!("/_matrix/client/v3/rooms/{room}/redact/{name}/redact-name"), Some(token(&alice)),
+        Some(json!({"reason":"Remove the name"})), 200).await;
+    let start = std::time::Instant::now();
+    let path = format!("{}&use_state_after=true&timeout=25000", filtered(json!({"room":{"timeline":{"types":["m.room.message"]}}}), Some(&next_batch(&initial))));
+    let response = server.request(Method::GET, &path, Some(token(&bob)), None, 200).await;
+    assert!(start.elapsed() < std::time::Duration::from_secs(10), "state_after must wake a filtered state-only long poll");
+    let block = &response["rooms"]["join"][&room];
+    assert!(block["timeline"]["events"].as_array().unwrap().is_empty());
+    let state = block["state_after"]["events"].as_array().unwrap();
+    let name = state.iter().find(|e| e["event_id"] == name).expect("redacted state must be re-sent even with the same event ID");
+    assert_eq!(name["content"], json!({}), "{name}");
+    assert!(name["unsigned"]["redacted_because"].is_object(), "{name}");
+}
+
+
+#[tokio::test]
+async fn state_after_lazy_members_survive_timeline_dedup_and_owned_filters() {
+    let server = Server::new().await;
+    let (alice, bob, room, _) = server.chat_pair().await;
+    let filter = json!({"room":{"timeline":{"limit":100},"state":{"lazy_load_members":true}}});
+    let stored = server.request(Method::POST, &format!("/_matrix/client/v3/user/{}/filter", user(&bob)), Some(token(&bob)),
+        Some(filter.clone()), 200).await["filter_id"].as_str().unwrap().to_owned();
+    let initial = sync_mode(&server, &bob, filter.clone(), None, true, false).await;
+    let since = next_batch(&initial);
+    let member = server.request(Method::PUT, &format!("/_matrix/client/v3/rooms/{room}/state/m.room.member/{}", user(&alice)),
+        Some(token(&alice)), Some(json!({"membership":"join","displayname":"Current Alice"})), 200).await["event_id"].as_str().unwrap().to_owned();
+    send_text(&server, &alice, &room, "new-profile", json!({"msgtype":"m.text","body":"Current profile"})).await;
+    let path = format!("/_matrix/client/v3/sync?filter={stored}&since={since}&use_state_after=true");
+    let state_ids = |response: &Value| response["rooms"]["join"][&room]["state_after"]["events"].as_array().unwrap()
+        .iter().map(|event| event["event_id"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
+    let delta = server.request(Method::GET, &path, Some(token(&bob)), None, 200).await;
+    assert!(state_ids(&delta).contains(&member), "timeline members cannot stand in for authoritative state_after: {delta}");
+    assert!(delta["rooms"]["join"][&room]["timeline"]["events"].as_array().unwrap().iter().any(|e| e["event_id"] == member));
+    let limited = sync_mode(&server, &bob, json!({"room":{"timeline":{"limit":1}}}), Some(&since), true, false).await;
+    assert_eq!(limited["rooms"]["join"][&room]["timeline"]["limited"], true);
+    assert_eq!(limited["rooms"]["join"][&room]["timeline"]["events"].as_array().unwrap().len(), 1);
+    assert!(state_ids(&limited).contains(&member), "limited gaps must retain final member state: {limited}");
+    let retry = server.request(Method::GET, &path, Some(token(&bob)), None, 200).await;
+    assert!(state_ids(&retry).contains(&member), "an unacknowledged response must not suppress members on retry: {retry}");
+    let inline = sync_mode(&server, &bob, filter.clone(), Some(&since), true, false).await;
+    assert_eq!(state_ids(&delta), state_ids(&inline), "stored and inline filters must select identical state");
+    send_text(&server, &alice, &room, "no-profile-change", json!({"msgtype":"m.text","body":"Same profile"})).await;
+    let later = sync_mode(&server, &bob, filter, Some(&next_batch(&delta)), true, false).await;
+    assert!(!state_ids(&later).contains(&member), "acknowledged redundant members stay omitted: {later}");
+
+    server.request(Method::PUT, &format!("/_matrix/client/v3/rooms/{room}/state/m.room.name"), Some(token(&alice)),
+        Some(json!({"name":"Projected"})), 200).await;
+    let projected = sync_mode(&server, &bob, json!({"event_fields":["type","content.name"],
+        "room":{"state":{"types":["m.room.name"],"limit":1},"timeline":{"types":["m.room.message"]}}}),
+        Some(&next_batch(&later)), true, false).await;
+    assert_eq!(projected["rooms"]["join"][&room]["state_after"]["events"], json!([{"type":"m.room.name","content":{"name":"Projected"}}]));
+    let empty = sync_mode(&server, &bob, json!({"room":{"state":{"types":[]}}}), None, true, false).await;
+    assert_eq!(empty["rooms"]["join"][&room]["state_after"]["events"], json!([]), "required state_after survives state filtering");
+}

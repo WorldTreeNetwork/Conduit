@@ -105,6 +105,7 @@ export class SyncEngine {
             since: this.since,
             timeout,
             filter: this.options.filter,
+            use_state_after: true,
           },
           signal,
           maxRetries: 0,
