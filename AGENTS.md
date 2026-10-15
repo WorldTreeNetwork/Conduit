@@ -156,3 +156,10 @@ explicitly; it never skips.
 Production journeys share one harness: `conduit-server/tests/common/production.rs`
 (`Server::new()`, `register`, `request`, `chat_pair`). New feature areas get
 their own `production_<area>.rs` file with `mod common;`.
+
+## Intention
+
+Work loop: intend → steer → change → advise → act → fold.
+Tracker is beads (`bd`; DAG nodes are `--type node`). Living specs are
+`openspec/specs/`; in-flight work is `openspec/changes/`. Read
+[`openspec/AGENTS.md`](openspec/AGENTS.md) before changing behavior.
