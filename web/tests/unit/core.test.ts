@@ -1,6 +1,6 @@
-import '../../../client/src/core/auth.test';
-import '../../../client/src/core/client.test';
-import '../../../client/src/core/http.test';
-import '../../../client/src/core/relations.test';
-import '../../../client/src/core/room.test';
-import '../../../client/src/core/session.test';
+import '../../src/core/auth.test';
+import '../../src/core/client.test';
+import '../../src/core/http.test';
+import '../../src/core/relations.test';
+import '../../src/core/room.test';
+import '../../src/core/session.test';

@@ -8,8 +8,8 @@
  const mxc = $derived(typeof content.url === 'string' ? content.url : undefined);
  const info = $derived((content.info ?? {}) as JsonObject);
  const size = $derived.by(() => {
-  const w = typeof info.w === 'number' && info.w > 0 ? info.w : 320;
-  const h = typeof info.h === 'number' && info.h > 0 ? info.h : 240;
+  const w = typeof info.w === 'number' && Number.isFinite(info.w) && info.w > 0 ? info.w : 320;
+  const h = typeof info.h === 'number' && Number.isFinite(info.h) && info.h > 0 ? info.h : 240;
   const scale = Math.min(1, 320 / w, 240 / h);
   // A 1px source is still an open-image target. Match the current client's 44px floor.
   return { width: Math.max(44, Math.round(w * scale)), height: Math.max(44, Math.round(h * scale)) };

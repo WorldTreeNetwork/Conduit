@@ -1,7 +1,7 @@
 import { describe, expect, it, mock } from 'bun:test';
 
-// Run the framework-free core's existing assertions under Bun without changing
-// the React tree or loading Vitest's runner.
+// Run the framework-free core's existing assertions under Bun.
+// The test files still import vitest; this module supplies that export.
 mock.module('vitest', () => ({ describe, expect, it }));
 
 // Bun 1.3.14 appends charset=utf-8 to a File's explicitly supplied text MIME

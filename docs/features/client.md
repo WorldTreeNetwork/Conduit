@@ -1,26 +1,25 @@
 # Client: the Conduit web client
 
-**Default:** separate deliverable in `client/` (not part of the Rust
+**Default:** the static SvelteKit app in `web/` (not part of the Rust
 workspace). **Depends on:** a homeserver speaking the Matrix
 Client-Server API v1.x — Conduit or any other. **Tracking:**
 `conduit-y99.9`.
 
-The client is Conduit's own Matrix client and its unattended
-client-side verification harness. It is TypeScript + React 18 + Vite,
-managed with pnpm (pinned `pnpm@9.15.4` through `packageManager`).
+The client is Conduit's own Matrix client. It is TypeScript + SvelteKit,
+run with Bun (`packageManager`: `bun@1.3.14`). There is no application
+server: `adapter-static` builds a SPA and the homeserver is the backend.
 
 ## Layout
 
 ```
-client/
-  src/core/        framework-free Matrix CS-API core (no React imports)
-  src/ui/          React components and pure view logic
-  src/styles/      tokens.css (design tokens, light + dark) and app.css
-  src/testHook.ts  window.__conduitClient automation hook
-  e2e/             Playwright journeys against the real conduit-server
+web/
+  src/core/          framework-free Matrix CS-API core (no UI-framework imports)
+  src/lib/           Svelte screens, shadcn-svelte primitives, tokens
+  src/routes/        the static SPA
+  tests/             Playwright journeys and bun:test unit tests
 ```
 
-## Protocol core (`client/src/core`)
+## Protocol core (`web/src/core`)
 
 | Module | Responsibility | Spec |
 |---|---|---|
@@ -90,18 +89,14 @@ an edited display-name draft. The browser profile journey deliberately releases
 an old response after typing, then checks the saved name on the board and in
 the room.
 
-## UI (`client/src/ui`)
+## UI (`web/`)
 
-Design direction ("station enamel", recorded in
-`client/.impeccable/surfaces/src-app-tsx.md`): a deep tube-green
-destination board for navigation, pale enamel for the conversation,
-brass reserved for unread lamps and the single primary action, signal
-red for failures. Each own message carries a carrier mark showing where
-it is: hollow queued, filling while sending, solid sent, red notched
-when it failed. All colours, type and spacing come from
-`src/styles/tokens.css`, with light and dark themes (system,
-or forced in Settings) and a Vitest guard (`contrast.test.ts`) that
-every text pair meets WCAG AA.
+The screens live in `web/src/lib`. Station enamel (ground, ink, brass) is
+`web/src/lib/styles/tokens.css`, with light and dark themes (system, or
+forced in Settings). shadcn-svelte supplies button, input, dialog, scroll
+area, dropdown menu, and avatar. The timeline, room list, and messages
+are custom. Playwright runs axe on the signed-in shell and rejects serious
+and critical violations.
 
 Screens: sign in / create account (field validation, server errors on
 the right field), room list (invites with accept/decline, unread lamps,
@@ -136,67 +131,40 @@ the carrier and lamp animations.
 
 ## Automation hooks
 
-- **`data-testid`** on every interactive and status element (e.g.
-  `room-row` with `data-room-id`/`data-room-name`, `unread-badge` with
-  `data-count`, `pending-item` with `data-status`, `sync-status` with
-  `data-state`, `carrier-mark` with `data-state`).
-- **`window.__conduitClient`** — installed only when `import.meta.env.DEV`
-  or the build sets `VITE_CONDUIT_TEST_HOOKS=1`:
-  `signedIn`, `syncState`, `userId`, `deviceId`, `rooms()`,
-  `pendingSends()`, `timeline(roomId)`, `awaitIdle(ms)` (resolves when
-  sync is live and no send or user operation is in flight),
-  `retrySyncNow()`. It never exposes the access token.
 - **Homeserver:** `?hs=<url>` pins the server (and hides the field),
   else `VITE_CONDUIT_HOMESERVER`, else `http://localhost:8008`.
 - **Injectable clock and transport** in the core for unit tests
-  (`ManualClock`, `FakeServer` in `src/core/testing.ts`).
+  (`ManualClock`, `FakeServer` in `web/src/core/testing.ts`).
+- Browser journeys talk to a real `conduit-server` and assert on the
+  rendered page. They do not read an access token out of the page.
 
 ## Running
 
 ```bash
-cd client
-pnpm install
-pnpm dev                 # http://localhost:5173 (point it at a homeserver with ?hs=)
-pnpm lint                # tsc -b (typecheck) + eslint
-pnpm test                # Vitest unit tests
-pnpm build               # typecheck + production bundle in dist/
-pnpm e2e:install         # once: Playwright's Chromium
-pnpm e2e                 # Playwright against a real conduit-server
+cd web
+bun install
+bun run dev              # http://localhost:5173 (point it at a homeserver with ?hs=)
+bun run check            # svelte-check
+bun run test             # protocol core and UI helper unit tests
+bun run build            # static files in build/
+bun run e2e              # Playwright against a real conduit-server
 ```
 
-`pnpm e2e` global setup (`e2e/global-setup.ts`) runs
-`cargo build -p conduit-server` (or uses `CONDUIT_SERVER_BIN`), creates
-a fresh database through `psql` on `DATABASE_URL` (default
-`postgresql://postgres@localhost/postgres`), launches the binary with
-the same environment as `conduit-server/tests/common/production.rs`
-(`CONDUIT_LISTEN_ADDR=127.0.0.1:0`, `CONDUIT_READY_FILE`,
-`CONDUIT_OIDC_ISSUER=off`, `CONDUIT_FEDERATION=0`, `CONDUIT_MEDIA_ROOT`,
-`CONDUIT_AS_REGISTRATIONS_DIR`, server name `conduit.test`), waits on
-the ready file, and on teardown kills the server and drops the
-database (`CONDUIT_E2E_KEEP_LOGS=1` keeps the server log). Set
-`CONDUIT_E2E_HS=<url>` to run against an already-running homeserver
-instead. `CONDUIT_CAPTURE=1` additionally writes review screenshots to
-`client/.impeccable/review/`.
-
-On macOS, setup starts `caffeinate -i -w <Playwright PID>` for the duration
-of the run, including external-homeserver mode. Teardown releases it; PID
-monitoring also releases it when the runner exits. This prevents idle system
-sleep from interrupting unattended browser assertions without changing system
-power settings.
-
-Tests wait only on observable state (DOM, `__conduitClient.awaitIdle()`,
-server responses); there are no fixed sleeps. Failures are simulated
-with Playwright route interception (aborted `/send` and `/sync`).
+`bun run e2e` (`tests/support/server.ts`) runs `cargo build -p conduit-server`
+(or uses `CONDUIT_SERVER_BIN`), creates a fresh database through `psql` on
+`DATABASE_URL` (default `postgresql://postgres@localhost/postgres`), and
+launches the binary with registration open, `CONDUIT_OIDC_ISSUER=off`, and
+federation off. The static preview is served with `bun run preview`. CI
+runs the same job from `.github/workflows/svelte-client.yml` on Chromium,
+Firefox, and WebKit.
 
 ## Journeys covered (e2e)
 
 | Spec file | Journey |
 |---|---|
-| `chat.spec.ts` | Two browser contexts register, create a room, invite (with validation), accept, chat both ways (multi-line), unread lamp and preview while away, member panel with roles, sender grouping, day plates; session survives reload and sign-out revokes the token (`M_UNKNOWN_TOKEN`); display-name change; decline invite; join by room ID with address validation and not-found error, then leave. |
-| `resilience.spec.ts` | 75-message history paged back to the beginning, every message once and in order, jump to latest; failed send with inline retry and delete, retry delivers exactly once; failed sends survive reload; sync loss shows the reconnecting banner and recovers; sign-in validation and server errors (wrong password, taken username, weak input); unreachable homeserver. |
-| `features.spec.ts` | Two people: reactions (add, join, remove), reply quote, ArrowUp edit with "(edited)", delete with reason, threads both ways with summaries; typing indicator and read receipts; PNG preview and text-file download through authenticated v1 media; room settings (rename, topic, history visibility, promote to moderator); public directory search and join; invite through user-directory suggestions. |
-| `account.spec.ts` | Device list, rename, wrong-password then correct sign-out of another session (which lands on sign-in with local state wiped); password change then sign-in with the new password; deactivation (token revoked, sign-in refused); transparent refresh on a soft-logout 401 (new token, same device); soft logout with a rejected refresh token, re-authentication keeping rooms, device and the failed message for retry. |
-| `a11y.spec.ts` | axe (WCAG 2.0/2.1/2.2 A+AA) with zero serious/critical violations on sign-in, sign-in errors, empty home, room view with invite and member panel, failed send, create dialog and settings, in light and dark; keyboard navigation through rooms, composer and timeline; live announcement of incoming messages; reduced motion. |
+| `web/tests/session.spec.ts` | Password registration and login, profile, reload, sign-out, and a bound `loginToken` return. A visit with no pending-SSO record sends no login request. |
+| `web/tests/chat.spec.ts` | Two people create a room, invite, accept, exchange messages, retry a failed send, page history, and open the app on a phone. |
+| `web/tests/rest.spec.ts` | Settings, theme, device rename, image preview, members, presence, directory join, threads, room settings, and reconnect. The signed-in shell has no serious or critical axe violations. |
 
 ## Roadmap
 

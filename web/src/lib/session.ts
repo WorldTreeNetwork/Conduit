@@ -3,11 +3,11 @@ import {
 	HttpClient, realClock, getLoginFlows, loginWithPassword, register,
 	MatrixClient, LocalStorageStore, loadStoredSession, saveSession, clearStoredSession,
 	type Session
-} from '../../../client/src/core/index';
+} from '../core/index';
 import { homeserverProblem } from './homeserver.js';
 
-export { describeError, validateUsername, relatesTo, formatBytes, MatrixError } from '../../../client/src/core/index';
-export type { MatrixClient, Session, Room, MatrixEvent, JsonObject, PublicRoom, DeviceInfo } from '../../../client/src/core/index';
+export { describeError, validateUsername, relatesTo, formatBytes, MatrixError } from '../core/index';
+export type { MatrixClient, Session, Room, MatrixEvent, JsonObject, PublicRoom, DeviceInfo } from '../core/index';
 export const PENDING_SSO_KEY = 'conduit:pending-sso';
 export const sessionStore = new LocalStorageStore('conduit:web:');
 

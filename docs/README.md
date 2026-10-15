@@ -45,7 +45,7 @@ checkpoints are marked 🚦.
 ### Local server (no federation)
 
 - 🚦 [`client-server-api`](features/client-server-api.md) — the API clients call (first usable server)
-- [`client`](features/client.md) — the Conduit web client (own CS-API core, React UI, real-server e2e)
+- [`client`](features/client.md) — the Conduit web client (`web/`, Bun, SvelteKit, real-server e2e)
 - [`presence-layer`](features/presence-layer.md) — profiles, typing, receipts, presence
 - [`media`](features/media.md) — uploads, downloads, thumbnails
 

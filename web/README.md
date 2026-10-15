@@ -14,12 +14,12 @@ bun run build      # static files in build/
 Homeserver: `?hs=<url>` wins and hides the field, then `VITE_CONDUIT_HOMESERVER`,
 then `http://localhost:8008`.
 
-Colours come only from `src/lib/styles/tokens.css` (station enamel, copied from
-`client/`); `src/routes/layout.css` maps the shadcn-svelte theme onto them.
+Colours come only from `src/lib/styles/tokens.css` (station enamel);
+`src/routes/layout.css` maps the shadcn-svelte theme onto them.
 Fonts are self-hosted via Fontsource: Bricolage Grotesque (titles, wdth 100,
 600) and Atkinson Hyperlegible Next (body, tabular figures). Tactic Sans is not shipped.
 
-Session sign-in uses the framework-free core in `../client/src/core`. The stored
+Session sign-in uses the framework-free core in `src/core`. The stored
 session uses the `conduit:web:` localStorage prefix. The tab-scoped SSO intent is
 `sessionStorage['conduit:pending-sso'] = JSON.stringify({ homeserver })`; it is
 consumed before token exchange, and the callback must contain that exact `hs`.
@@ -62,12 +62,11 @@ axe scans the signed-in home shell and a populated room, rejects serious and
 critical violations, and attaches its complete results to the Playwright report.
 The report lives in `playwright-report/`; failure artifacts and server logs live
 in `test-results/`. CI runs the same proof in `.github/workflows/svelte-client.yml`.
-The React pnpm workflow remains in place.
 
-`bun run test` loads the shared core's existing assertions through a Bun-only
+`bun run test` loads the core's existing assertions through a Bun-only
 Vitest export adapter, plus the Svelte session and homeserver tests. A test-only
 File shim preserves the explicit browser MIME type that Bun 1.3.14 otherwise
-extends with a charset. No React source or tests are changed.
+extends with a charset.
 
 Settings is `#/settings`. People, room settings, and threads open keyboard-accessible
 dialogs; Directory is in the room rail. All Matrix operations go through the same

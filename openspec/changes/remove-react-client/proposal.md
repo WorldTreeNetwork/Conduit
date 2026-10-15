@@ -1,6 +1,6 @@
 # remove-react-client
 
-> **PENDING**
+> **ACTIVE BUILD**
 
 ## Why
 
@@ -28,4 +28,4 @@ No new UI because the person already uses the SvelteKit screens. The outcome is 
 
 ## Preparation
 
-Blocked on `add-svelte-client-proof`. Do not delete `client/` while it still has uncommitted work that has not landed or been dropped.
+`add-svelte-client-proof` is folded. The React browser fixes landed at `a5c6321`. The unrelated `add-atomic-room-state` work stays unstaged.

@@ -218,21 +218,21 @@
       "status": "partial",
       "issue": "conduit-y99.9",
       "evidence": [
-        "client/ is a TypeScript/React web client with its own framework-free CS-API core (client/src/core) and an accessible UI (client/src/ui)",
-        "Unit: cd client && pnpm test (Vitest: core HTTP/auth/discovery/sync/room/send-queue, UI logic, WCAG token contrast)",
-        "E2E: cd client && pnpm e2e (Playwright against the real conduit-server binary and a fresh PostgreSQL database)"
+        "web/ is the SvelteKit client. Its framework-free CS-API core lives in web/src/core and its UI lives in web/src/lib",
+        "Unit: cd web && bun run test (core HTTP/auth/discovery/sync/room/send-queue and Svelte session helpers)",
+        "E2E: cd web && bun run e2e (Playwright against the real conduit-server binary and a fresh PostgreSQL database)"
       ],
       "implementation": [
-        "client/src/core",
-        "client/src/ui",
-        "client/src/testHook.ts"
+        "web/src/core",
+        "web/src/lib/components",
+        "web/src/lib/session.ts"
       ],
       "tests": [
-        "client/e2e/a11y.spec.ts",
-        "client/e2e/account.spec.ts",
-        "client/e2e/chat.spec.ts",
-        "client/e2e/features.spec.ts",
-        "client/e2e/resilience.spec.ts"
+        "web/tests/a11y.spec.ts",
+        "web/tests/account.spec.ts",
+        "web/tests/chat.spec.ts",
+        "web/tests/features.spec.ts",
+        "web/tests/resilience.spec.ts"
       ],
       "scope": [
         "Complete applicable client protocol behavior",
@@ -257,11 +257,11 @@
         "4xx errors are not retried; M_UNKNOWN_TOKEN (incl. soft_logout) is reported to the session owner"
       ],
       "implementation": [
-        "client/src/core/http.ts",
-        "client/src/core/errors.ts"
+        "web/src/core/http.ts",
+        "web/src/core/errors.ts"
       ],
       "tests": [
-        "client/src/core/http.test.ts"
+        "web/src/core/http.test.ts"
       ],
       "status": "covered_assertions_only",
       "issue": "conduit-y99.9"
@@ -276,11 +276,11 @@
         "404 well-known is IGNOREd (falls back to https://server_name); malformed well-known is FAIL_PROMPT; a non-homeserver is FAIL_ERROR"
       ],
       "implementation": [
-        "client/src/core/discovery.ts"
+        "web/src/core/discovery.ts"
       ],
       "tests": [
-        "client/src/core/auth.test.ts",
-        "client/e2e/resilience.spec.ts::an unreachable homeserver is reported on the homeserver field"
+        "web/src/core/auth.test.ts",
+        "web/tests/resilience.spec.ts::an unreachable homeserver is reported on the homeserver field"
       ],
       "status": "covered_assertions_only",
       "issue": "conduit-y99.9"
@@ -295,13 +295,13 @@
         "Logout revokes the token on the server (whoami afterwards returns M_UNKNOWN_TOKEN) and wipes local state"
       ],
       "implementation": [
-        "client/src/core/auth.ts",
-        "client/src/ui/SignIn.tsx"
+        "web/src/core/auth.ts",
+        "web/src/routes/+page.svelte"
       ],
       "tests": [
-        "client/src/core/auth.test.ts",
-        "client/e2e/chat.spec.ts::a session survives reload and sign-out revokes it",
-        "client/e2e/resilience.spec.ts::sign-in validates input and explains server errors"
+        "web/src/core/auth.test.ts",
+        "web/tests/chat.spec.ts::a session survives reload and sign-out revokes it",
+        "web/tests/resilience.spec.ts::sign-in validates input and explains server errors"
       ],
       "status": "covered_assertions_only",
       "issue": "conduit-y99.9"
@@ -318,15 +318,15 @@
         "since token and room snapshots persist across reloads"
       ],
       "implementation": [
-        "client/src/core/sync.ts",
-        "client/src/core/client.ts",
-        "client/src/core/room.ts"
+        "web/src/core/sync.ts",
+        "web/src/core/client.ts",
+        "web/src/core/room.ts"
       ],
       "tests": [
-        "client/src/core/client.test.ts",
-        "client/src/core/room.test.ts",
-        "client/e2e/resilience.spec.ts::losing the sync connection shows a reconnecting banner and recovers",
-        "client/e2e/chat.spec.ts::a session survives reload and sign-out revokes it"
+        "web/src/core/client.test.ts",
+        "web/src/core/room.test.ts",
+        "web/tests/resilience.spec.ts::losing the sync connection shows a reconnecting banner and recovers",
+        "web/tests/chat.spec.ts::a session survives reload and sign-out revokes it"
       ],
       "status": "covered_assertions_only",
       "issue": "conduit-y99.9"
@@ -341,10 +341,10 @@
         "Clashing member display names are disambiguated with the user ID"
       ],
       "implementation": [
-        "client/src/core/room.ts"
+        "web/src/core/room.ts"
       ],
       "tests": [
-        "client/src/core/room.test.ts"
+        "web/src/core/room.test.ts"
       ],
       "status": "covered_assertions_only",
       "issue": "conduit-y99.9"
@@ -359,13 +359,13 @@
         "Failed sends show inline retry and delete; retry delivers exactly once"
       ],
       "implementation": [
-        "client/src/core/sendQueue.ts",
-        "client/src/ui/Timeline.tsx"
+        "web/src/core/sendQueue.ts",
+        "web/src/lib/components/Chat.svelte"
       ],
       "tests": [
-        "client/src/core/client.test.ts",
-        "client/e2e/resilience.spec.ts::a failed send shows inline retry and delete, and retry delivers once",
-        "client/e2e/resilience.spec.ts::failed sends survive a reload and can be retried afterwards"
+        "web/src/core/client.test.ts",
+        "web/tests/resilience.spec.ts::a failed send shows inline retry and delete, and retry delivers once",
+        "web/tests/resilience.spec.ts::failed sends survive a reload and can be retried afterwards"
       ],
       "status": "covered_assertions_only",
       "issue": "conduit-y99.9",
@@ -383,12 +383,12 @@
         "75 seeded messages page back to the beginning exactly once and in order"
       ],
       "implementation": [
-        "client/src/core/client.ts",
-        "client/src/ui/Timeline.tsx"
+        "web/src/core/client.ts",
+        "web/src/lib/components/Chat.svelte"
       ],
       "tests": [
-        "client/src/core/client.test.ts",
-        "client/e2e/resilience.spec.ts::scrolling back pages history until the start of the room"
+        "web/src/core/client.test.ts",
+        "web/tests/resilience.spec.ts::scrolling back pages history until the start of the room"
       ],
       "status": "covered_assertions_only",
       "issue": "conduit-y99.9"
@@ -401,14 +401,14 @@
         "Create (public/private, name, topic), invite, accept, decline, join by room ID and leave work end to end between two browser sessions"
       ],
       "implementation": [
-        "client/src/core/client.ts",
-        "client/src/ui/Dialogs.tsx",
-        "client/src/ui/RoomList.tsx"
+        "web/src/core/client.ts",
+        "web/src/lib/components/Chat.svelte",
+        "web/src/lib/components/Chat.svelte"
       ],
       "tests": [
-        "client/e2e/chat.spec.ts::two people create a room, invite, accept and chat both ways",
-        "client/e2e/chat.spec.ts::declining an invite removes it",
-        "client/e2e/chat.spec.ts::join by room ID, validate addresses, and leave"
+        "web/tests/chat.spec.ts::two people create a room, invite, accept and chat both ways",
+        "web/tests/chat.spec.ts::declining an invite removes it",
+        "web/tests/chat.spec.ts::join by room ID, validate addresses, and leave"
       ],
       "status": "covered_assertions_only",
       "issue": "conduit-y99.9"
@@ -423,12 +423,12 @@
         "Room list and timeline are arrow-key navigable; focus moves on route changes; incoming messages are announced"
       ],
       "implementation": [
-        "client/src/styles/tokens.css",
-        "client/src/ui"
+        "web/src/lib/styles/tokens.css",
+        "web/src/lib/components"
       ],
       "tests": [
-        "client/e2e/a11y.spec.ts",
-        "client/src/styles/contrast.test.ts"
+        "web/tests/a11y.spec.ts",
+        "web/tests/support/accessibility.ts"
       ],
       "status": "covered_assertions_only",
       "issue": "conduit-y99.9",
@@ -448,13 +448,13 @@
         "Redactions prune the target per the redaction algorithm"
       ],
       "implementation": [
-        "client/src/core/relations.ts",
-        "client/src/ui/Message.tsx",
-        "client/src/ui/ThreadPanel.tsx"
+        "web/src/core/relations.ts",
+        "web/src/lib/components/Message.svelte",
+        "web/src/lib/components/ThreadPanel.svelte"
       ],
       "tests": [
-        "client/src/core/relations.test.ts",
-        "client/e2e/features.spec.ts::reactions, replies, edits, deletions and threads between two people"
+        "web/src/core/relations.test.ts",
+        "web/tests/features.spec.ts::reactions, replies, edits, deletions and threads between two people"
       ],
       "status": "covered_assertions_only",
       "issue": "conduit-y99.9"
@@ -469,13 +469,13 @@
         "An upload interrupted by a reload fails visibly instead of sending without a file"
       ],
       "implementation": [
-        "client/src/core/media.ts",
-        "client/src/core/sendQueue.ts",
-        "client/src/ui/Media.tsx"
+        "web/src/core/media.ts",
+        "web/src/core/sendQueue.ts",
+        "web/src/lib/components/Media.svelte"
       ],
       "tests": [
-        "client/src/core/session.test.ts",
-        "client/e2e/features.spec.ts::images and files upload, preview and download through authenticated media"
+        "web/src/core/session.test.ts",
+        "web/tests/features.spec.ts::images and files upload, preview and download through authenticated media"
       ],
       "status": "covered_assertions_only",
       "issue": "conduit-y99.9"
@@ -490,12 +490,12 @@
         "Presence from sync is shown in the member panel"
       ],
       "implementation": [
-        "client/src/core/client.ts",
-        "client/src/ui/Presence.tsx",
-        "client/src/ui/Message.tsx"
+        "web/src/core/client.ts",
+        "web/src/lib/components/Presence.svelte",
+        "web/src/lib/components/Message.svelte"
       ],
       "tests": [
-        "client/e2e/features.spec.ts::typing indicators and read receipts"
+        "web/tests/features.spec.ts::typing indicators and read receipts"
       ],
       "status": "covered_assertions_only",
       "issue": "conduit-y99.9",
@@ -512,12 +512,12 @@
         "Public rooms can be searched and joined from the directory; users can be found through the user directory when inviting"
       ],
       "implementation": [
-        "client/src/ui/RoomSettings.tsx",
-        "client/src/ui/Directory.tsx"
+        "web/src/lib/components/RoomSettings.svelte",
+        "web/src/lib/components/Directory.svelte"
       ],
       "tests": [
-        "client/e2e/features.spec.ts::room settings: rename, topic, history and roles",
-        "client/e2e/features.spec.ts::public room directory and user search"
+        "web/tests/features.spec.ts::room settings: rename, topic, history and roles",
+        "web/tests/features.spec.ts::public room directory and user search"
       ],
       "status": "covered_assertions_only",
       "issue": "conduit-y99.9"
@@ -533,13 +533,13 @@
         "Devices can be listed, renamed and signed out with UIA; the password can be changed and the account deactivated"
       ],
       "implementation": [
-        "client/src/core/http.ts",
-        "client/src/core/client.ts",
-        "client/src/ui/Account.tsx"
+        "web/src/core/http.ts",
+        "web/src/core/client.ts",
+        "web/src/lib/components/AccountSettings.svelte"
       ],
       "tests": [
-        "client/src/core/session.test.ts",
-        "client/e2e/account.spec.ts"
+        "web/src/core/session.test.ts",
+        "web/tests/account.spec.ts"
       ],
       "status": "covered_assertions_only",
       "issue": "conduit-y99.9"
@@ -2694,8 +2694,8 @@
       ],
       "tests": [
         "conduit-server/tests/production_sync.rs::joining_preserves_state_across_a_history_visibility_gap",
-        "client/e2e/chat.spec.ts::two people create a room, invite, accept and chat both ways",
-        "client/e2e/features.spec.ts::room settings: rename, topic, history and roles"
+        "web/tests/chat.spec.ts::two people create a room, invite, accept and chat both ways",
+        "web/tests/features.spec.ts::room settings: rename, topic, history and roles"
       ],
       "limitations": [
         "This regression covers local stream history, not complete resolved-DAG snapshots or every filter/state combination."
@@ -2714,10 +2714,10 @@
         "Saving the edited display name updates the account board, sent-message attribution and membership state description"
       ],
       "implementation": [
-        "client/src/ui/Settings.tsx"
+        "web/src/lib/components/Settings.svelte"
       ],
       "tests": [
-        "client/e2e/chat.spec.ts::display name changes show on the board and in rooms"
+        "web/tests/chat.spec.ts::display name changes show on the board and in rooms"
       ],
       "limitations": [
         "Current browser evidence uses Chromium; Firefox/WebKit and broader accessibility validation remain tracked separately."
@@ -2741,9 +2741,9 @@
       ],
       "implementation": [
         "conduit-server/src/api/client/sync.rs",
-        "client/src/core/client.ts",
-        "client/src/core/room.ts",
-        "client/src/core/sync.ts"
+        "web/src/core/client.ts",
+        "web/src/core/room.ts",
+        "web/src/core/sync.ts"
       ],
       "tests": [
         "conduit-server/tests/production_sync.rs::state_after_covers_timeline_and_filtered_state_changes",
@@ -2752,10 +2752,10 @@
         "conduit-server/tests/production_sync.rs::state_after_lazy_members_survive_timeline_dedup_and_owned_filters",
         "conduit-server/src/api/client/sync.rs::state_tests::snapshots_do_not_include_state_or_membership_after_the_cursor",
         "conduit-server/tests/production_e2e.rs::production_lazy_members_include_self_and_timeline_senders",
-        "client/src/core/client.test.ts",
-        "client/e2e/chat.spec.ts",
-        "client/e2e/features.spec.ts",
-        "client/e2e/resilience.spec.ts"
+        "web/src/core/client.test.ts",
+        "web/tests/chat.spec.ts",
+        "web/tests/features.spec.ts",
+        "web/tests/resilience.spec.ts"
       ],
       "limitations": [
         "State reconstruction uses local stream history; atomic event/current-state publication and persisted resolved-DAG snapshots remain under conduit-y99.13 and conduit-embed-persist.",
@@ -2776,13 +2776,13 @@
         "Teardown releases the guard; other platforms and Matrix authentication behavior are unchanged"
       ],
       "implementation": [
-        "client/e2e/global-setup.ts"
+        "web/tests/global-setup.ts"
       ],
       "tests": [
-        "client/e2e/a11y.spec.ts",
-        "client/e2e/chat.spec.ts",
-        "client/e2e/features.spec.ts",
-        "client/e2e/resilience.spec.ts"
+        "web/tests/a11y.spec.ts",
+        "web/tests/chat.spec.ts",
+        "web/tests/features.spec.ts",
+        "web/tests/resilience.spec.ts"
       ],
       "limitations": [
         "The guard prevents idle system sleep; explicit user sleep or a closed lid can still suspend the machine."

@@ -1,4 +1,4 @@
-// Homeserver resolution, same order as client/src/config.ts:
+// Homeserver resolution: ?hs= pins the address, then VITE_CONDUIT_HOMESERVER, then localhost.
 // `?hs=<url>` wins (and pins it, hiding the field), then the build's
 // VITE_CONDUIT_HOMESERVER, then a localhost default.
 
