@@ -1,6 +1,6 @@
 # add-svelte-chat
 
-> **PENDING**
+> **ACTIVE BUILD**
 
 ## Why
 

@@ -1,0 +1,24 @@
+{
+  "node_id": "conduit-nl4.4",
+  "change_id": "add-svelte-chat",
+  "capability": "matrix-client",
+  "goal": "Add rooms and messages to the SvelteKit app in web/. Read openspec/specs/matrix-client/spec.md and openspec/changes/add-svelte-chat/tasks.md. Use the existing framework-free core via the session already in web/. Do not edit client/src/core. A signed-in person can create a room, invite, and exchange messages, with local echo and retry. The room list shows joined rooms. A hash for a room the person has left returns home. Create, join, and invite use the shadcn-svelte dialog. Timeline, room list, and message layout stay custom. Check the task boxes when each is true. Stay inside web/ and openspec/changes/add-svelte-chat/.",
+  "surface": "packet-only",
+  "assignee": {
+    "id": "sol-implement",
+    "harness": "codex",
+    "interface": "gpt-6.1-sol",
+    "family": "sol",
+    "effort": "medium"
+  },
+  "constraints": {
+    "permission": "write",
+    "paths": [
+      "web/",
+      "openspec/changes/add-svelte-chat/"
+    ]
+  },
+  "acceptance": {
+    "journey": "Two accounts create a room, invite, send both ways, and a failed send can be retried"
+  }
+}

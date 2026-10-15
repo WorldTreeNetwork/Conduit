@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import Chat from '#lib/components/Chat.svelte';
 	import { Button } from '#lib/components/ui/button/index.js';
 	import { Input } from '#lib/components/ui/input/index.js';
 	import {
@@ -147,19 +148,7 @@
 </svelte:head>
 
 {#if client}
-<main class="mx-auto flex min-h-dvh max-w-5xl flex-col gap-8 p-6">
-	<header class="flex flex-wrap items-center justify-between gap-4 border-b border-[var(--color-rule)] pb-5">
-		<h1 class="text-2xl">Conduit</h1>
-		<div class="flex flex-wrap items-center gap-4">
-			<p data-testid="profile-display-name">{displayName}</p>
-			<Button variant="outline" onclick={() => void signOut()}>Sign out</Button>
-		</div>
-	</header>
-	<section aria-label="Your session" class="flex flex-col gap-2">
-		<h2 class="text-xl">You’re signed in</h2>
-		<p class="help">{client.userId}</p>
-	</section>
-</main>
+<Chat {client} {displayName} signOut={() => void signOut()} />
 {:else}
 <main class="grid min-h-dvh place-items-center px-4 py-12">
 	<div class="plate w-full max-w-[26rem] overflow-hidden">
