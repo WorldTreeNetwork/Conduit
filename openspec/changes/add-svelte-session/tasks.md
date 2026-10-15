@@ -7,7 +7,7 @@
 - [x] Sign out clears the stored session
 - [x] The shell shows the profile display name
 
-- [ ] Live journey: password register and sign-in against a local conduit-server, and a `loginToken` with no pending record is not spent (`web/tests/session-journey.ts`)
+- [x] Live journey: password register and sign-in against a local conduit-server, and a `loginToken` with no pending record is not spent (`web/tests/session-journey.ts`)
 
 ## Verification
 
