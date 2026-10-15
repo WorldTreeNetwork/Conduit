@@ -65,6 +65,32 @@ async function waitForReady(child: ChildProcess, readyFile: string, logFile: str
 }
 
 export default async function globalSetup(): Promise<() => Promise<void>> {
+  // Keep unattended macOS runs awake while Playwright lives. Watching this
+  // PID also releases the assertion if setup fails or the runner is killed.
+  const awake = process.platform === "darwin"
+    ? spawn("/usr/bin/caffeinate", ["-i", "-w", String(process.pid)], { stdio: "ignore" })
+    : undefined;
+  if (awake) {
+    await new Promise<void>((resolve, reject) => {
+      awake.once("spawn", resolve);
+      awake.once("error", reject);
+    });
+    awake.unref();
+    console.log(`[e2e] idle-sleep guard pid=${awake.pid}`);
+  }
+  try {
+    const teardown = await bootServer();
+    return async () => {
+      try { await teardown(); }
+      finally { awake?.kill(); }
+    };
+  } catch (error) {
+    awake?.kill();
+    throw error;
+  }
+}
+
+async function bootServer(): Promise<() => Promise<void>> {
   if (process.env.CONDUIT_E2E_HS) {
     // Pointed at an already-running homeserver: nothing to manage.
     return async () => {};

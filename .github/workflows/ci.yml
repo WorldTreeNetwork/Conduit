@@ -84,6 +84,8 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y postgresql-client openssl
       - name: Synapse to-device federation journey
         run: bash conduit-server/tests/peers/run_synapse_to_device.sh
+      - name: Synapse v11 PDU wire and extension journey
+        run: .spawns/synapse-venv/bin/python conduit-server/tests/peers/synapse_pdu_wire.py
 
   client:
     name: web client (typecheck, lint, unit, build)
