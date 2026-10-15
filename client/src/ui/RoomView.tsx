@@ -82,7 +82,7 @@ export function RoomView({ roomId, onLeft }: { roomId: string; onLeft: () => voi
               )}
             </div>
             <div className="room-head-actions" role="toolbar" aria-label="Room actions">
-              <button type="button" className="button button-quiet button-small" onClick={() => setDialog("invite")} data-testid="open-invite">
+              <button type="button" className="button button-quiet button-small" onClick={(event) => { event.currentTarget.focus(); setDialog("invite"); }} data-testid="open-invite">
                 <UserPlus size={16} aria-hidden="true" /> <span className="label">Invite</span>
               </button>
               <button
@@ -98,13 +98,13 @@ export function RoomView({ roomId, onLeft }: { roomId: string; onLeft: () => voi
               <button
                 type="button"
                 className="button button-quiet button-small"
-                onClick={() => setDialog("settings")}
+                onClick={(event) => { event.currentTarget.focus(); setDialog("settings"); }}
                 aria-label="Room settings"
                 data-testid="open-room-settings"
               >
                 <Settings2 size={16} aria-hidden="true" />
               </button>
-              <button type="button" className="button button-quiet button-small" onClick={() => setDialog("leave")} data-testid="open-leave">
+              <button type="button" className="button button-quiet button-small" onClick={(event) => { event.currentTarget.focus(); setDialog("leave"); }} data-testid="open-leave">
                 <DoorOpen size={16} aria-hidden="true" /> <span className="label">Leave</span>
               </button>
             </div>

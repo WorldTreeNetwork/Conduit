@@ -79,7 +79,7 @@ export function RoomList({ selectedRoomId, onOpen, onCreate }: Props) {
         {rooms.length === 0 ? (
           <div className="board-empty" data-testid="room-list-empty">
             <p>No rooms yet.</p>
-            <button type="button" className="link-button link-on-board" onClick={onCreate}>
+            <button type="button" className="link-button link-on-board" onClick={(event) => { event.currentTarget.focus(); onCreate(); }}>
               Create your first room
             </button>
           </div>

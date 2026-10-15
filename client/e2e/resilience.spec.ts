@@ -32,9 +32,14 @@ test("scrolling back pages history until the start of the room", async ({ page }
   await expect(page.getByTestId("timeline-start")).toBeHidden();
   for (let guard = 0; guard < 10; guard++) {
     if (await page.getByTestId("timeline-start").isVisible()) break;
+    const before = await page.getByTestId("timeline-item").count();
     await timeline.evaluate((el) => (el.scrollTop = 0));
-    const older = page.getByTestId("load-older");
-    if (await older.isVisible()) await older.click();
+    // Scrolling starts the automatic loader; its button may disappear while
+    // a click is waiting. Wait for visible history progress instead.
+    await expect.poll(async () =>
+      await page.getByTestId("timeline-start").isVisible()
+      || (await page.getByTestId("timeline-item").count()) > before,
+    ).toBe(true);
     await awaitIdle(page);
   }
   await expect(page.getByTestId("timeline-start")).toHaveText("This is the beginning of Archive.");

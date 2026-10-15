@@ -3,6 +3,7 @@ import { Room } from "../core/room";
 import { makeEvent } from "../core/testing";
 import type { PendingEvent } from "../core/sendQueue";
 import { parseComposer } from "./Composer";
+import { fitImagePreview } from "./Media";
 import { continuesGroup, describeStateEvent, formatDay, messageView } from "./format";
 import { buildItems } from "./timelineItems";
 import { parseHash, routeHref } from "./hooks";
@@ -121,5 +122,19 @@ describe("routes", () => {
     expect(parseHash("#/settings")).toEqual({ name: "settings" });
     expect(parseHash("#/nonsense")).toEqual({ name: "home" });
     expect(parseHash("#/room/%E0%A4%A")).toEqual({ name: "home" });
+  });
+});
+
+
+describe("image preview sizing", () => {
+  it("keeps tiny images visible and clickable", () => {
+    expect(fitImagePreview(2, 2)).toEqual({ width: 44, height: 44 });
+  });
+  it("bounds extreme aspect ratios without zero-size previews", () => {
+    expect(fitImagePreview(100000, 1)).toEqual({ width: 320, height: 44 });
+    expect(fitImagePreview(1, 100000)).toEqual({ width: 44, height: 240 });
+  });
+  it("ignores malformed non-finite dimensions", () => {
+    expect(fitImagePreview(Infinity, NaN)).toEqual({ width: 320, height: 240 });
   });
 });

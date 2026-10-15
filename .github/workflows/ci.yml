@@ -138,9 +138,9 @@ jobs:
           node-version: 22
           cache: pnpm
           cache-dependency-path: client/pnpm-lock.yaml
-      - name: Install client dependencies and Chromium
+      - name: Install client dependencies and browsers
         working-directory: client
-        run: pnpm install --frozen-lockfile && pnpm exec playwright install --with-deps chromium
+        run: pnpm install --frozen-lockfile && pnpm exec playwright install --with-deps chromium firefox webkit
       - name: Playwright journeys (builds conduit-server, fresh database per run)
         working-directory: client
         run: pnpm e2e

@@ -6,11 +6,12 @@ import { useClient } from "./hooks";
 const MAX_W = 320;
 const MAX_H = 240;
 
-function fit(w?: unknown, h?: unknown): { width: number; height: number } {
-  const width = typeof w === "number" && w > 0 ? w : MAX_W;
-  const height = typeof h === "number" && h > 0 ? h : MAX_H;
+export function fitImagePreview(w?: unknown, h?: unknown): { width: number; height: number } {
+  const width = typeof w === "number" && Number.isFinite(w) && w > 0 ? w : MAX_W;
+  const height = typeof h === "number" && Number.isFinite(h) && h > 0 ? h : MAX_H;
   const scale = Math.min(1, MAX_W / width, MAX_H / height);
-  return { width: Math.round(width * scale), height: Math.round(height * scale) };
+  // Tiny or very wide images still need a visible, usable open-image target.
+  return { width: Math.max(44, Math.round(width * scale)), height: Math.max(44, Math.round(height * scale)) };
 }
 
 /** Resolve an mxc:// URI to an object URL through the authenticated media API. */
@@ -38,7 +39,7 @@ function useMediaUrl(mxc: string | undefined, thumbnail?: { width: number; heigh
 export function ImageMessage({ content, localUrl }: { content: JsonObject; localUrl?: string }) {
   const client = useClient();
   const info = (content.info ?? {}) as JsonObject;
-  const size = fit(info.w, info.h);
+  const size = fitImagePreview(info.w, info.h);
   const mxc = typeof content.url === "string" ? content.url : undefined;
   const thumbSize = { width: Math.min(640, size.width * 2), height: Math.min(480, size.height * 2) };
   const { url, error } = useMediaUrl(localUrl ? undefined : mxc, thumbSize);

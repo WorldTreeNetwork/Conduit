@@ -124,14 +124,14 @@ test("typing indicators and read receipts", async ({ browser }) => {
   await bob.page.context().close();
 });
 
-const PNG_1x1 = Buffer.from(
-  "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFklEQVR4nGNgYGD4z8DAwMDEwMDAAAAJGgEB9RvF6QAAAABJRU5ErkJggg==",
+const PNG_2x2 = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAEUlEQVR4nGPQKfT4D8IMMAYAP4IHkZWsd2kAAAAASUVORK5CYII=",
   "base64",
 );
 
 test("images and files upload, preview and download through authenticated media", async ({ browser }) => {
   const { alice, bob } = await pairInRoom(browser, "Media");
-  await alice.page.getByTestId("attach-input").setInputFiles({ name: "dot.png", mimeType: "image/png", buffer: PNG_1x1 });
+  await alice.page.getByTestId("attach-input").setInputFiles({ name: "dot.png", mimeType: "image/png", buffer: PNG_2x2 });
   const bobImage = bob.page.getByTestId("media-image-img");
   await expect(bobImage).toBeVisible();
   await expect(bobImage).toHaveAttribute("alt", "dot.png");

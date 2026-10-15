@@ -59,10 +59,10 @@ export function Shell({ onSignOut, onDeactivated }: { onSignOut: () => Promise<v
           <span className="board-wordmark">Conduit</span>
         </header>
         <div className="board-actions">
-          <button type="button" className="button button-board" onClick={() => setDialog("create")} data-testid="open-create-room">
+          <button type="button" className="button button-board" onClick={(event) => { event.currentTarget.focus(); setDialog("create"); }} data-testid="open-create-room">
             <Plus size={16} aria-hidden="true" /> New room
           </button>
-          <button type="button" className="button button-board" onClick={() => setDialog("join")} data-testid="open-join-room">
+          <button type="button" className="button button-board" onClick={(event) => { event.currentTarget.focus(); setDialog("join"); }} data-testid="open-join-room">
             <LogIn size={16} aria-hidden="true" /> Join
           </button>
         </div>
@@ -147,10 +147,10 @@ function Welcome({ onCreate, onJoin }: { onCreate: () => void; onJoin: () => voi
       )}
       {ready && (
         <div className="welcome-actions">
-          <button type="button" className="button button-primary" onClick={onCreate} data-testid="welcome-create">
+          <button type="button" className="button button-primary" onClick={(event) => { event.currentTarget.focus(); onCreate(); }} data-testid="welcome-create">
             Create a room
           </button>
-          <button type="button" className="button button-quiet" onClick={onJoin} data-testid="welcome-join">
+          <button type="button" className="button button-quiet" onClick={(event) => { event.currentTarget.focus(); onJoin(); }} data-testid="welcome-join">
             Join by address
           </button>
         </div>
