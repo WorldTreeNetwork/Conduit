@@ -88,16 +88,6 @@ The client SHALL offer Identikey only when `GET /_matrix/client/v3/login` lists 
 - WHEN it registers a user
 - THEN it completes `m.login.password` or registration UIA without calling the hosted Identikey provider
 
-### Requirement: React client remains until the proof is green
-
-The React client in `client/` SHALL remain the CI client until the SvelteKit browser proof passes. Removing it SHALL be a separate change.
-
-#### Scenario: Both trees exist
-
-- GIVEN this contract has landed and the proof change has not
-- WHEN CI runs
-- THEN it still builds the React client
-
 ### Requirement: Protocol core stays framework-free
 
 The Matrix protocol core SHALL stay free of UI-framework imports. The SvelteKit app SHALL use that core rather than matrix-js-sdk.
@@ -212,10 +202,20 @@ The SvelteKit app SHALL cover the remaining surfaces of the current client: sett
 
 ### Requirement: Bun proves the client
 
-CI SHALL install `web/` with Bun and run the Playwright journeys against a real Conduit homeserver on Chromium, Firefox, and WebKit. Unit tests for the protocol core and the UI helpers SHALL run under Bun. The React CI job SHALL stay until the remove change lands.
+CI SHALL install `web/` with Bun and run the Playwright journeys against a real Conduit homeserver on Chromium, Firefox, and WebKit. Unit tests for the protocol core and the UI helpers SHALL run under Bun.
 
 #### Scenario: The browser suite
 
 - GIVEN the SvelteKit CI job
 - WHEN it runs
 - THEN Playwright signs in with a password, exchanges a message, and the job is green on all three engines
+
+### Requirement: One client
+
+The repository SHALL contain one first-party UI, the SvelteKit app in `web/`. Docs SHALL tell a person to run it with Bun. The React package SHALL NOT be what CI builds.
+
+#### Scenario: A person follows the docs
+
+- GIVEN the client docs after this change
+- WHEN a person follows them
+- THEN they start `web/` with Bun and do not install the React package
