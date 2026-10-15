@@ -1,0 +1,70 @@
+{
+  "node_id": "conduit-nl4.4",
+  "change_id": "add-svelte-chat",
+  "assignee": "sol-implement",
+  "status": "infra-red",
+  "summary": "Chat implementation is edited; real-homeserver browser acceptance is blocked by the worker sandbox.",
+  "artifacts": [
+    {
+      "path": "web/src/lib/components/Chat.svelte",
+      "sha256": "c556f6e0f70a50e8699cb4f202dd12b7e4fcf5647e2a6bac4e10fe3bfa6ce46e"
+    },
+    {
+      "path": "web/src/routes/+page.svelte",
+      "sha256": "6f40a5e45e90686e881e6793b46a7b4aceef12507f78246d8604a4de5f7f477e"
+    },
+    {
+      "path": "web/tests/chat-journey.ts",
+      "sha256": "4dc1050e43158a4d42b7353579185adcdb5822817d346dc51d1d3ae1cc3bf6c5"
+    },
+    {
+      "path": "openspec/changes/add-svelte-chat/tasks.md",
+      "sha256": "d45280de87efd149f2673cc706fdb746b4f918270dbee6cd3d7f94048d609536"
+    }
+  ],
+  "verification": [
+    {
+      "command": "cd web && bun run check",
+      "status": "pass",
+      "detail": "0 errors, 0 warnings after final component edit"
+    },
+    {
+      "command": "cd web && bun run build",
+      "status": "pass",
+      "detail": "Static adapter build passed before focus-restoration callback was added; final callback passed Svelte checking"
+    },
+    {
+      "command": "cd web && bun test src/lib",
+      "status": "pass",
+      "detail": "17 tests, 70 assertions"
+    },
+    {
+      "command": "TypeScript transpileModule(web/tests/chat-journey.ts)",
+      "status": "pass",
+      "detail": "Syntax validation only; legacy Playwright declarations are not resolved by the web check"
+    },
+    {
+      "command": "CONDUIT_TEST_HS=http://127.0.0.1:8008 bun tests/chat-journey.ts",
+      "status": "infra-red",
+      "detail": "Chromium exits before opening a page: macOS MachPortRendezvous bootstrap_check_in permission denied (1100). Standalone launch failed the same way."
+    }
+  ],
+  "acceptance": {
+    "journey": "Two accounts create a room, invite, send both ways, and a failed send can be retried",
+    "verified": false
+  },
+  "limitations": [
+    "Real-homeserver and visual validation remain owed; all five task checkboxes remain open.",
+    "Sandbox also denies PostgreSQL TCP/Unix sockets and the Vite loopback listener.",
+    "Pre-existing add-svelte-chat/proposal.md edit belongs to the conductor and was not changed by this worker."
+  ],
+  "persistence": {
+    "owner": "conductor",
+    "state": "uncommitted worker edits; no tracker changes or push performed"
+  },
+  "signature": {
+    "signer": "sol-implement",
+    "kind": "stand-in-content-hash",
+    "content_hash": "sha256:25a1b9d15f8fdfb2c54648efbef208a60b0434650cd9a0affa4c8fd13e9646ba"
+  }
+}
