@@ -1,0 +1,25 @@
+[package]
+name = "identikey-oidc-client"
+description = "Relying-party JWT/JWKS validator. Not the OP. Vendored from identikey-core rev 5d5c72eccb22c0630320c1a1c534a1c45d419313."
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+# Protocol-shaped RP client: Apache, not the AGPL product. Conduit vendors
+# this crate so a public checkout can build without cloning private
+# identikey-core. Do not replace this tree with the OP.
+license = "Apache-2.0 OR BSD-2-Clause-Patent"
+repository = "https://github.com/identikey/identikey-core"
+authors = ["IdentiKey"]
+publish = false
+
+[dependencies]
+josekit = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+sha2 = "0.10"
+url = "2"
+base64 = "0.22"
+getrandom = "0.2"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tokio = { version = "1", features = ["sync"] }

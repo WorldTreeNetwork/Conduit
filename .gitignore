@@ -11,6 +11,10 @@ target/
 
 .env
 
+# Local media blobs (CONDUIT_MEDIA_ROOT). Not source. Do not ship them
+# in an mj deploy tarball.
+media-data/
+
 # Intention scratch (conductor isolate, spawn stage, harness session)
 .worktrees/
 .spawns/

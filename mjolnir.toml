@@ -1,0 +1,61 @@
+# Conduit homeserver. The detector cannot infer a Rust workspace.
+#
+#   # once, on the hypervisor, against the running release (not mix app.start)
+#   ssh root@45.76.77.97 'set -a; . /etc/mjolnir/env; set +a; \
+#     /opt/mjolnir/_build/prod/rel/mjolnir/bin/mjolnir rpc \
+#     "Mjolnir.Postgres.Tenants.ensure(\"conduit\", slug: \"conduit\")"'
+#   printf '%s' "$TOKEN" | mj secrets set conduit CONDUIT_REGISTRATION_TOKENS --stdin
+#   mj deploy . --name conduit --memory 2048 --domain conduit.vm.worldtree.network
+#   mj cert issue conduit.vm.worldtree.network
+#
+# --name must be `conduit`. That is the secrets file slug
+# (/var/lib/mjolnir/deploy/secrets/conduit.json) and the tenant role.
+# DATABASE_URL is written by tenant ensure. Do not put it in this file.
+#
+# The Matrix server name is conduit.vm.worldtree.network. User ids on this
+# database keep that name forever. Federation is advertised on :443 because
+# the gateway, not the guest, terminates TLS.
+#
+# Registration stays on and requires CONDUIT_REGISTRATION_TOKENS. Guests stay
+# off. Browser SSO needs CONDUIT_OIDC_CLIENT_SECRET for a confidential client
+# whose redirect is the public callback below. Without that secret, JWT
+# login still works and the SSO button stays off.
+#
+# base_image is required (mjolnir-6ee1). Omitting it deploys onto
+# deploy-node-bun. `runtime` is omitted on purpose: setting it prepends a
+# bare `mise install`, and this image keeps mise at /root/.local/bin.
+# ubuntu-24.04 has no /usr/local/bin shim. Mask serial-getty@ttyS0
+# (mjolnir-606w) or systemd waits 90s on snapshot boot.
+#
+# identikey-auth is a public git crate (https). identikey-oidc-client is
+# vendored under third_party/ because identikey-core is private and build
+# VMs do not receive deploy secrets. SQLX_OFFLINE=true uses the committed
+# .sqlx cache, so the build does not need Postgres.
+#
+# Media is /var/lib/conduit/media on the guest disk. A later mj deploy cuts
+# over to a new VM and leaves those files behind. Signing keys live in
+# Postgres and survive cutover.
+#
+# The Svelte client in web/ is not this service. It is a second app.
+
+base_image = "ubuntu-24.04"
+port = 8008
+start_command = """
+set -e
+[ -f /run/mjolnir/secrets.env ] && . /run/mjolnir/secrets.env
+mkdir -p /var/lib/conduit/media
+exec env CONDUIT_LISTEN_ADDR=0.0.0.0:8008 CONDUIT_SERVER_NAME=conduit.vm.worldtree.network CONDUIT_ALLOW_GUEST_ACCESS=false CONDUIT_MEDIA_ROOT=/var/lib/conduit/media CONDUIT_WELL_KNOWN_CLIENT_BASE_URL=https://conduit.vm.worldtree.network CONDUIT_WELL_KNOWN_SERVER=conduit.vm.worldtree.network:443 CONDUIT_OIDC_REDIRECT_URI=https://conduit.vm.worldtree.network/_matrix/client/v3/login/identikey/callback ./target/release/conduit-server
+"""
+# Empty inputs keep apt and the getty mask off the source hash, so a
+# code change does not reinstall the toolchain. The `mise` step must
+# start with `mise` or Orchestrator treats it as a source build. The
+# cargo step is a string on purpose: that copies the whole tree.
+steps = [
+  { run = "export PATH=/root/.local/bin:/usr/local/bin:$PATH; apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq build-essential pkg-config libssl-dev git ca-certificates && ln -sfn /root/.local/bin/mise /usr/local/bin/mise && ln -sfn /dev/null /etc/systemd/system/serial-getty@ttyS0.service", inputs = [] },
+  "mise install rust@1.96.0",
+  "export PATH=/root/.cargo/bin:/root/.local/bin:/usr/local/bin:$PATH; . /root/.cargo/env; SQLX_OFFLINE=true cargo build --release --locked -p conduit-server",
+]
+
+[build]
+vcpus = 6
+memory_mb = 8192

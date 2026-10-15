@@ -890,7 +890,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ccc2776f0c61eca1ca32528f85548abd1a4be8fb53d1b21c013e4f18da1e7090"
 dependencies = [
  "data-encoding",
- "syn 2.0.117",
+ "syn 1.0.109",
 ]
 
 [[package]]
@@ -2063,7 +2063,7 @@ checksum = "b9e0384b61958566e926dc50660321d12159025e767c18e043daf26b70104c39"
 [[package]]
 name = "identikey-auth"
 version = "0.1.0"
-source = "git+ssh://git@github.com/identikey/identikey-protocol.git?rev=303dff1819aaba4f7a53f38b0fbc5a785a2743db#303dff1819aaba4f7a53f38b0fbc5a785a2743db"
+source = "git+https://github.com/identikey/identikey-protocol.git?rev=303dff1819aaba4f7a53f38b0fbc5a785a2743db#303dff1819aaba4f7a53f38b0fbc5a785a2743db"
 dependencies = [
  "blake3",
  "bs58",
@@ -2084,7 +2084,6 @@ dependencies = [
 [[package]]
 name = "identikey-oidc-client"
 version = "0.1.0"
-source = "git+ssh://git@github.com/identikey/identikey-core.git?rev=5d5c72eccb22c0630320c1a1c534a1c45d419313#5d5c72eccb22c0630320c1a1c534a1c45d419313"
 dependencies = [
  "base64 0.22.1",
  "getrandom 0.2.17",
@@ -5659,7 +5658,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]
