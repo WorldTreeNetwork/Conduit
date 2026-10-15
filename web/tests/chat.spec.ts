@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
+import { enterSession, registerAccount } from './support/account';
 import { assertAccessibleShell } from './support/accessibility';
 
 test('two people exchange messages and recover failed sends', async ({ browser }, testInfo) => {
@@ -19,12 +20,9 @@ test('two people exchange messages and recover failed sends', async ({ browser }
 	type Session = { accessToken: string; userId: string };
 	async function signup(page: Page, name: string): Promise<Session> {
 	 await page.goto(url);
-	 await page.getByRole('button', { name: 'Create an account', exact: true }).click();
-	 await page.getByLabel('Username', { exact: true }).fill(name);
-	 await page.getByLabel('Password', { exact: true }).fill(password);
-	 await page.getByRole('button', { name: 'Create account', exact: true }).click();
-	 await expect(page.getByRole('button', { name: 'Sign out', exact: true })).toBeVisible();
-	 return page.evaluate(() => JSON.parse(localStorage.getItem('conduit:web:session')!));
+	 const account = await registerAccount(hs, name, password);
+	 await enterSession(page, account);
+	 return { accessToken: account.accessToken, userId: account.userId };
 	}
 	async function api(session: Session, path: string, body: unknown) {
 	 const response = await fetch(`${hs}/_matrix/client/v3${path}`, {

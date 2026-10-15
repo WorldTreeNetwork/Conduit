@@ -44,7 +44,7 @@ The client SHALL use shadcn-svelte primitives for button, input, dialog, scroll 
 
 ### Requirement: Identikey sign-in
 
-The client SHALL offer Identikey only when `GET /_matrix/client/v3/login` lists `m.login.sso`. Choosing it SHALL follow the homeserver SSO redirect. The OIDC client secret SHALL remain on the homeserver. Before leaving, the client SHALL write a pending-SSO record in `sessionStorage` naming the homeserver it is about to leave for, and SHALL include that same homeserver on `redirectUrl`. On return, the client SHALL remove `loginToken` from the address bar with `history.replaceState` before it renders. It SHALL spend that token once through `m.login.token` only when the pending record exists and its homeserver equals the `hs` on the return URL. If the record is missing, the homeservers differ, or the return has no `hs`, the client SHALL strip the token, SHALL NOT call any homeserver, and SHALL show the signed-out screen. An expired or reused token SHALL return to the signed-out screen with a retry. The password form SHALL always be available. It SHALL be the primary action when `m.login.sso` is absent, and a secondary action when Identikey is offered.
+The client SHALL offer Identikey only when `GET /_matrix/client/v3/login` lists `m.login.sso`. Choosing it SHALL follow the homeserver SSO redirect. The OIDC client secret SHALL remain on the homeserver. Before leaving, the client SHALL write a pending-SSO record in `sessionStorage` naming the homeserver it is about to leave for, and SHALL include that same homeserver on `redirectUrl`. On return, the client SHALL remove `loginToken` from the address bar with `history.replaceState` before it renders. It SHALL spend that token once through `m.login.token` only when the pending record exists and its homeserver equals the `hs` on the return URL. If the record is missing, the homeservers differ, or the return has no `hs`, the client SHALL strip the token, SHALL NOT call any homeserver, and SHALL show the signed-out screen. An expired or reused token SHALL return to the signed-out screen with a retry. The signed-out screen SHALL NOT collect a username or a password. A homeserver that does not list `m.login.sso` SHALL show that Identikey is not offered. A key the person holds signs in through the Identikey wallet and `io.identikey.auth`, not through this page.
 
 #### Scenario: Continue with Identikey
 
@@ -62,7 +62,7 @@ The client SHALL offer Identikey only when `GET /_matrix/client/v3/login` lists 
 
 - GIVEN `GET /login` does not list `m.login.sso`
 - WHEN the signed-out screen renders
-- THEN there is no Identikey button and the password form is the way to sign in
+- THEN there is no Identikey button, no username field, and no password field
 
 #### Scenario: Secret stays off the client
 
@@ -86,7 +86,7 @@ The client SHALL offer Identikey only when `GET /_matrix/client/v3/login` lists 
 
 - GIVEN the automated browser suite
 - WHEN it registers a user
-- THEN it completes `m.login.password` or registration UIA without calling the hosted Identikey provider
+- THEN it completes registration UIA against the homeserver API, without a password field on the page and without calling the hosted Identikey provider
 
 ### Requirement: Protocol core stays framework-free
 

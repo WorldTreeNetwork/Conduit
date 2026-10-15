@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
+import { enterSession, registerAccount } from './support/account';
 
 test('settings, media, people, directory, threads and reconnect', async ({ browser }, testInfo) => {
 	const hs = process.env.CONDUIT_TEST_HS;
@@ -18,13 +19,10 @@ test('settings, media, people, directory, threads and reconnect', async ({ brows
 	type Session = { accessToken: string; userId: string; deviceId: string };
 	async function signup(page: Page, name: string): Promise<Session> {
 	 await page.goto(url);
-	 await page.getByRole('button', { name: 'Create an account', exact: true }).click();
-	 await page.getByLabel('Username', { exact: true }).fill(name);
-	 await page.getByLabel('Password', { exact: true }).fill(password);
-	 await page.getByRole('button', { name: 'Create account', exact: true }).click();
-	 await expect(page.getByRole('button', { name: 'Sign out', exact: true })).toBeVisible();
+	 const account = await registerAccount(hs, name, password);
+	 await enterSession(page, account);
 	 await expect(page.getByTestId('sync-status')).toHaveAttribute('data-state', 'live');
-	 return page.evaluate(() => JSON.parse(localStorage.getItem('conduit:web:session')!));
+	 return { accessToken: account.accessToken, userId: account.userId, deviceId: account.deviceId };
 	}
 	async function api(session: Session, method: string, path: string, body?: unknown) {
 	 const response = await fetch(`${hs}/_matrix/client/v3${path}`, {

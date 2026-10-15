@@ -98,8 +98,9 @@ area, dropdown menu, and avatar. The timeline, room list, and messages
 are custom. Playwright runs axe on the signed-in shell and rejects serious
 and critical violations.
 
-Screens: sign in / create account (field validation, server errors on
-the right field), room list (invites with accept/decline, unread lamps,
+Screens: sign in with Identikey when the homeserver offers `m.login.sso`
+(no username or password fields; a key the person holds uses the
+Identikey wallet), room list (invites with accept/decline, unread lamps,
 previews, skeleton loading, empty state), room view (topic, invite,
 people panel, leave), timeline (day plates, sender grouping, folded
 room setup, compact state lines, back-pagination with error/retry,
@@ -162,7 +163,7 @@ Firefox, and WebKit.
 
 | Spec file | Journey |
 |---|---|
-| `web/tests/session.spec.ts` | Password registration and login, profile, reload, sign-out, and a bound `loginToken` return. A visit with no pending-SSO record sends no login request. |
+| `web/tests/session.spec.ts` | A session stored by the suite, profile, reload, sign-out, and a bound `loginToken` return. The signed-out page has no password fields. A visit with no pending-SSO record sends no login request. |
 | `web/tests/chat.spec.ts` | Two people create a room, invite, accept, exchange messages, retry a failed send, page history, and open the app on a phone. |
 | `web/tests/rest.spec.ts` | Settings, theme, device rename, image preview, members, presence, directory join, threads, room settings, and reconnect. The signed-in shell has no serious or critical axe violations. |
 

@@ -1,5 +1,6 @@
-import { test, expect, type Page } from '@playwright/test';
+import { test, expect } from '@playwright/test';
 import { PENDING_SSO_KEY } from '../src/lib/session';
+import { enterSession, loginAccount, registerAccount } from './support/account';
 import { assertAccessibleShell } from './support/accessibility';
 
 test('session persistence and bound SSO returns', async ({ browser }, testInfo) => {
@@ -26,18 +27,19 @@ async function pending(homeserver: string) {
 	await page.evaluate(({ key, homeserver }) => sessionStorage.setItem(key, JSON.stringify({ homeserver })), { key: PENDING_SSO_KEY, homeserver });
 }
 async function signedOut() {
-	await expect(page.getByRole('button', { name: 'Sign in with password', exact: true })).toBeVisible();
-	await expect(page.getByLabel('Username', { exact: true })).toBeEnabled();
+	await expect(page.getByRole('heading', { name: 'Conduit', exact: true })).toBeVisible();
+	await expect(page.getByLabel('Username')).toHaveCount(0);
+	await expect(page.getByLabel('Password')).toHaveCount(0);
+	await expect(page.getByRole('button', { name: 'Sign in with password' })).toHaveCount(0);
+	await expect(page.getByRole('button', { name: 'Create an account' })).toHaveCount(0);
 }
 async function signedIn() { await expect(page.getByRole('button', { name: 'Sign out', exact: true })).toBeVisible(); }
 try {
 	await page.goto(url);
 	await signedOut();
 	await expect(page.getByRole('button', { name: 'Continue with Identikey' })).toHaveCount(0);
-	await page.getByRole('button', { name: 'Create an account', exact: true }).click();
-	await page.getByLabel('Username', { exact: true }).fill(username);
-	await page.getByLabel('Password', { exact: true }).fill(password);
-	await page.getByRole('button', { name: 'Create account', exact: true }).click();
+	await expect(page.getByText('This homeserver is not offering Identikey.')).toBeVisible();
+	await enterSession(page, await registerAccount(hs, username, password));
 	await signedIn();
 	await assertAccessibleShell(page, testInfo);
 	const session = await page.evaluate(() => JSON.parse(localStorage.getItem('conduit:web:session')!));
@@ -50,9 +52,7 @@ try {
 	expect(await page.evaluate(() => localStorage.getItem('conduit:web:session'))).toBeNull();
 	await page.reload();
 	await signedOut();
-	await page.getByLabel('Username', { exact: true }).fill(username);
-	await page.getByLabel('Password', { exact: true }).fill(password);
-	await page.getByRole('button', { name: 'Sign in with password', exact: true }).click();
+	await enterSession(page, await loginAccount(hs, username, password));
 	await signedIn();
 	const loggedIn = await page.evaluate(() => JSON.parse(localStorage.getItem('conduit:web:session')!));
 
@@ -100,7 +100,8 @@ try {
 	});
 	await page.goto(url);
 	await expect(page.getByRole('button', { name: 'Continue with Identikey' })).toBeVisible();
-	await expect(page.getByLabel('Password', { exact: true })).toBeVisible();
+	await expect(page.getByLabel('Password')).toHaveCount(0);
+	await expect(page.getByText('This homeserver is not offering Identikey.')).toHaveCount(0);
 	await page.route(`${hs}/_matrix/client/v3/login/sso/redirect?**`, (route) => route.fulfill({ contentType: 'text/html', body: 'SSO redirect captured' }));
 	await page.getByRole('button', { name: 'Continue with Identikey' }).click();
 	await page.waitForURL(`${hs}/_matrix/client/v3/login/sso/redirect?**`);
@@ -108,7 +109,7 @@ try {
 	expect(callback.searchParams.get('hs')).toBe(hs.replace(/\/+$/, ''));
 	await page.goto(url);
 	expect(await page.evaluate((key) => JSON.parse(sessionStorage.getItem(key)!).homeserver, PENDING_SSO_KEY)).toBe(hs.replace(/\/+$/, ''));
-	console.log('PASS: password registration/login, profile, logout persistence, bound SSO, replay, unsolicited/mismatched/missing-hs return guards');
+	console.log('PASS: stored session, profile, logout persistence, bound SSO, replay, unsolicited/mismatched/missing-hs return guards');
 } finally {
 	await context.close();
 }
@@ -147,7 +148,8 @@ test('a fresh tab strips the same loginToken URL without sending a login request
 		// No prior navigation and no addInitScript: this tab has no SSO intent.
 		await page.goto(returnUrl);
 		await expect(page.getByRole('alert')).toContainText('This tab did not request');
-		await expect(page.getByRole('button', { name: 'Sign in with password', exact: true })).toBeVisible();
+		await expect(page.getByLabel('Password')).toHaveCount(0);
+		await expect(page.getByRole('heading', { name: 'Conduit', exact: true })).toBeVisible();
 		expect(new URL(page.url()).searchParams.has('loginToken')).toBe(false);
 		expect(await page.evaluate(key => sessionStorage.getItem(key), PENDING_SSO_KEY)).toBeNull();
 		expect(requests).toEqual([]);
