@@ -48,11 +48,12 @@ its keys); unsent messages can then be retried. `soft_logout: false`
 (device deleted, password reset with logout) is a hard logout that wipes
 local state.
 
-Account management uses UIA with the account password
-(`m.login.password`): device list/rename (`/devices`), signing out other
-devices (`/delete_devices`), changing the password (`/account/password`,
-optionally signing out other devices) and deactivation
-(`/account/deactivate`, optional erase).
+The protocol core can still complete UIA with the account password
+(`m.login.password`): signing out other devices (`/delete_devices`),
+changing the password (`/account/password`), and deactivation
+(`/account/deactivate`). The pages show those controls only when the
+build sets `VITE_CONDUIT_PASSWORD` to `1`, `true`, `on`, or `yes`.
+The default build leaves them out. Device list and rename stay.
 
 ### Persistence and reload
 
@@ -98,9 +99,11 @@ area, dropdown menu, and avatar. The timeline, room list, and messages
 are custom. Playwright runs axe on the signed-in shell and rejects serious
 and critical violations.
 
-Screens: sign in with Identikey when the homeserver offers `m.login.sso`
-(no username or password fields; a key the person holds uses the
-Identikey wallet), room list (invites with accept/decline, unread lamps,
+Screens: sign in with Identikey when the homeserver offers `m.login.sso`.
+The default build has no username or password fields. Set
+`VITE_CONDUIT_PASSWORD=1` at build time to offer password registration,
+login, password change, other-device sign-out, and deactivation. A key
+the person holds uses the Identikey wallet. Room list (invites with accept/decline, unread lamps,
 previews, skeleton loading, empty state), room view (topic, invite,
 people panel, leave), timeline (day plates, sender grouping, folded
 room setup, compact state lines, back-pagination with error/retry,
@@ -120,7 +123,8 @@ with image previews and file cards, typing line, "seen by" receipt
 plates, presence lamps, room settings (name, topic, picture, who can
 join, history visibility, roles), the public room directory inside the
 join dialog, user-directory suggestions when inviting, and account
-settings (devices, password, deactivation) plus the soft-logout screen.
+settings (devices; password and deactivation only when
+`VITE_CONDUIT_PASSWORD` is on) plus the soft-logout screen.
 
 Accessibility: semantic landmarks and headings; skip link; roving
 tabindex with arrow/Home/End through the room list and the timeline;

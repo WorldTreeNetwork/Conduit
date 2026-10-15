@@ -44,7 +44,7 @@ The client SHALL use shadcn-svelte primitives for button, input, dialog, scroll 
 
 ### Requirement: Identikey sign-in
 
-The client SHALL offer Identikey only when `GET /_matrix/client/v3/login` lists `m.login.sso`. Choosing it SHALL follow the homeserver SSO redirect. The OIDC client secret SHALL remain on the homeserver. Before leaving, the client SHALL write a pending-SSO record in `sessionStorage` naming the homeserver it is about to leave for, and SHALL include that same homeserver on `redirectUrl`. On return, the client SHALL remove `loginToken` from the address bar with `history.replaceState` before it renders. It SHALL spend that token once through `m.login.token` only when the pending record exists and its homeserver equals the `hs` on the return URL. If the record is missing, the homeservers differ, or the return has no `hs`, the client SHALL strip the token, SHALL NOT call any homeserver, and SHALL show the signed-out screen. An expired or reused token SHALL return to the signed-out screen with a retry. The signed-out screen SHALL NOT collect a username or a password. A homeserver that does not list `m.login.sso` SHALL show that Identikey is not offered. A key the person holds signs in through the Identikey wallet and `io.identikey.auth`, not through this page.
+The client SHALL offer Identikey only when `GET /_matrix/client/v3/login` lists `m.login.sso`. Choosing it SHALL follow the homeserver SSO redirect. The OIDC client secret SHALL remain on the homeserver. Before leaving, the client SHALL write a pending-SSO record in `sessionStorage` naming the homeserver it is about to leave for, and SHALL include that same homeserver on `redirectUrl`. On return, the client SHALL remove `loginToken` from the address bar with `history.replaceState` before it renders. It SHALL spend that token once through `m.login.token` only when the pending record exists and its homeserver equals the `hs` on the return URL. If the record is missing, the homeservers differ, or the return has no `hs`, the client SHALL strip the token, SHALL NOT call any homeserver, and SHALL show the signed-out screen. An expired or reused token SHALL return to the signed-out screen with a retry. The default build SHALL NOT collect a username or a password, SHALL NOT offer password change, other-device sign-out, or account deactivation, and SHALL NOT ask for a password when a session expires. A homeserver that does not list `m.login.sso` SHALL show that Identikey is not offered. A key the person holds signs in through the Identikey wallet and `io.identikey.auth`, not through this page. A build with `VITE_CONDUIT_PASSWORD` set to `1`, `true`, `on`, or `yes` SHALL offer password registration and login, password re-authentication, password change, and password confirmation for signing out other devices and deactivating the account. Any other value, including an unset variable, SHALL leave those controls out.
 
 #### Scenario: Continue with Identikey
 
@@ -60,9 +60,15 @@ The client SHALL offer Identikey only when `GET /_matrix/client/v3/login` lists 
 
 #### Scenario: A homeserver without SSO
 
-- GIVEN `GET /login` does not list `m.login.sso`
+- GIVEN `GET /login` does not list `m.login.sso` and the build left password login off
 - WHEN the signed-out screen renders
 - THEN there is no Identikey button, no username field, and no password field
+
+#### Scenario: Password login is enabled
+
+- GIVEN a build with `VITE_CONDUIT_PASSWORD=1`
+- WHEN a person opens the signed-out screen and settings
+- THEN the page offers username and password sign-in, and settings offers password change, other-device sign-out, and deactivation
 
 #### Scenario: Secret stays off the client
 

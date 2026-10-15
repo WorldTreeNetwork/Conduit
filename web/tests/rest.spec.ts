@@ -40,6 +40,9 @@ test('settings, media, people, directory, threads and reconnect', async ({ brows
 	try {
 	 const a = await signup(alice, `rest_a_${run}`), b = await signup(bob, `rest_b_${run}`);
 	 await alice.getByRole('link', { name: 'Settings', exact: true }).click();
+	 await expect(alice.getByRole('heading', { name: 'Password', exact: true })).toHaveCount(0);
+	 await expect(alice.getByRole('button', { name: 'Deactivate account', exact: true })).toHaveCount(0);
+	 await expect(alice.getByLabel('Password')).toHaveCount(0);
 	 await alice.getByLabel('Display name', { exact: true }).fill('Alice of Conduit');
 	 await alice.getByRole('button', { name: 'Save', exact: true }).click();
 	 await expect(alice.getByTestId('displayname-status')).toHaveText('Display name saved.');

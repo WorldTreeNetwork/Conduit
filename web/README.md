@@ -14,6 +14,12 @@ bun run build      # static files in build/
 Homeserver: `?hs=<url>` wins and hides the field, then `VITE_CONDUIT_HOMESERVER`,
 then `http://localhost:8008`.
 
+Password fields are off. Set `VITE_CONDUIT_PASSWORD=1` in the environment
+that runs `bun run dev` or `bun run build` to offer password registration,
+login, re-authentication, password change, other-device sign-out, and
+deactivation. `true`, `on`, and `yes` also enable it. Anything else leaves
+it off. The protocol core still speaks `m.login.password` either way.
+
 Colours come only from `src/lib/styles/tokens.css` (station enamel);
 `src/routes/layout.css` maps the shadcn-svelte theme onto them.
 Fonts are self-hosted via Fontsource: Bricolage Grotesque (titles, wdth 100,
@@ -46,7 +52,7 @@ readiness file. macOS runs keep the machine awake only while Playwright runs.
 
 The twelve browser cases cover:
 
-- Password registration and login, display name, reload and sign-out persistence.
+- A stored session, display name, reload and sign-out persistence. The default build shows no password fields.
 - Real login-token issuance through password UIA, pending SSO intent seeded before
   navigation, one token exchange, token removal, replay rejection, and callback guards.
 - A fresh tab opening the same token URL without an intent record, sending no

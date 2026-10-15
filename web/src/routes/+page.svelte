@@ -10,11 +10,14 @@
 		type Probe
 	} from '#lib/homeserver.js';
 
+	import { passwordLoginEnabled } from '#lib/password.js';
 	import {
-		consumeSsoReturn, beginSso, offersSso, exchangeSso,
-		restoreSession, openSession, clearSession,
+		consumeSsoReturn, beginSso, offersSso, passwordSession, exchangeSso,
+		restoreSession, openSession, clearSession, describeError, validateUsername,
 		type MatrixClient, type Session
 	} from '#lib/session.js';
+
+	const passwords = passwordLoginEnabled();
 
 	// Remove single-use credentials before the component renders, even on rejected returns.
 	const ssoReturn = consumeSsoReturn(window);
@@ -26,6 +29,9 @@
 	let probe = $state<Probe | null>(null);
 	let controller: AbortController | null = null;
 	let ssoHomeserver = $state<string | null>(null);
+	let username = $state('');
+	let password = $state('');
+	let signup = $state(false);
 	let busy = $state(ssoReturn.state === 'ready');
 	let error = $state(ssoReturn.state === 'rejected'
 		? 'This tab did not request that sign-in. Try signing in again.' : '');
@@ -81,6 +87,24 @@
 		}
 	}
 
+	async function submitPassword() {
+		touched = true;
+		error = '';
+		if (!passwords || busy || problem || !username.trim() || !password) return;
+		if (signup) {
+			const invalid = validateUsername(username);
+			if (invalid) { error = invalid; return; }
+		}
+		busy = true;
+		try {
+			await signedIn(await passwordSession(homeserver, username, password, signup));
+		} catch (err) {
+			error = describeError(err);
+		} finally {
+			busy = false;
+		}
+	}
+
 	function identikey() {
 		if (busy || !hasSso) return;
 		try { beginSso(homeserver, window); }
@@ -93,6 +117,8 @@
 		clearSession();
 		client = null;
 		displayName = '';
+		signup = false;
+		password = '';
 		error = '';
 		try { if (previous) await previous.logout(); }
 		finally { busy = false; }
@@ -140,7 +166,8 @@
 			novalidate
 			onsubmit={(e) => {
 				e.preventDefault();
-				if (hasSso) identikey();
+				if (passwords) void submitPassword();
+				else if (hasSso) identikey();
 				else void check();
 			}}
 		>
@@ -181,13 +208,33 @@
 			{/if}
 
 			{#if hasSso}
-				<Button type="submit" size="lg" class="h-11 text-base" disabled={busy}>
-					{busy ? 'Please wait…' : 'Continue with Identikey'}
+				<Button type={passwords ? 'button' : 'submit'} size="lg" class="h-11 text-base" disabled={busy} onclick={passwords ? identikey : undefined}>
+					{busy && !passwords ? 'Please wait…' : 'Continue with Identikey'}
 				</Button>
-			{:else if !checking && probe?.state === 'ok'}
+			{:else if !passwords && !checking && probe?.state === 'ok'}
 				<p class="status">This homeserver is not offering Identikey.</p>
 			{/if}
+			{#if passwords}
+				<div class="flex flex-col gap-1.5">
+					<label class="label" for="username">Username</label>
+					<Input id="username" name="username" autocomplete="username" bind:value={username} required disabled={busy} class="h-11 text-base" />
+				</div>
+				<div class="flex flex-col gap-1.5">
+					<label class="label" for="password">Password</label>
+					<Input id="password" name="password" type="password" autocomplete={signup ? 'new-password' : 'current-password'} bind:value={password} required disabled={busy} class="h-11 text-base" />
+				</div>
+			{/if}
 			{#if error}<p class="error" role="alert">{error}</p>{/if}
+			{#if passwords}
+				<div class="flex flex-col gap-3">
+					<Button type="submit" variant={hasSso ? 'outline' : 'default'} size="lg" class="h-11 text-base" disabled={busy || !username.trim() || !password}>
+						{busy ? 'Please wait…' : signup ? 'Create account' : 'Sign in with password'}
+					</Button>
+					<Button type="button" variant="ghost" disabled={busy} onclick={() => { signup = !signup; error = ''; }}>
+						{signup ? 'Already have an account? Sign in' : 'Create an account'}
+					</Button>
+				</div>
+			{/if}
 			<p class="help">A key you hold signs in through the Identikey wallet.</p>
 			<p class="status" aria-live="polite">
 				{#if checking}Checking homeserver…
