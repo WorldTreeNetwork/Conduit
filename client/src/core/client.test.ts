@@ -129,7 +129,7 @@ describe("sync processing", () => {
     await client.processSync(response, true);
     const delta = joinedSync("s2", []);
     delta.rooms!.join![ROOM]!.state_after = {
-      events: [{ ...name, content: {}, unsigned: { redacted_because: makeEvent({ type: "m.room.redaction", content: { redacts: name.event_id } }) } }],
+      events: [{ ...name, content: {}, unsigned: { redacted_because: { ...makeEvent({ type: "m.room.redaction", content: { redacts: name.event_id } }) } } }],
     };
     await client.processSync(delta, false);
     expect(client.getRoom(ROOM)!.explicitName).toBeUndefined();
