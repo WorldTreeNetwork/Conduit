@@ -24,9 +24,17 @@ for the database conventions.
 
 ```sh
 createdb conduit                                                   # one-time
-DATABASE_URL="postgresql://postgres@localhost/conduit" \
-    CONDUIT_SERVER_NAME="localhost" \
-    cargo run -p conduit-server                                    # :8008
+cargo run -p conduit-server                                        # :8008
+```
+
+On startup the server reads a `.env` file from the working directory or
+a parent. Variables already set in the environment win. A missing file
+is fine, and a malformed one stops startup. `DATABASE_URL` is still
+required, from that file or the environment:
+
+```
+DATABASE_URL=postgresql://postgres@localhost/conduit
+CONDUIT_SERVER_NAME=localhost
 ```
 
 OIDC defaults to IdentiKey's hosted OP (`https://auth.identikey.me`).

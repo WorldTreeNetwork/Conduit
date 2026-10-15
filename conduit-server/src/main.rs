@@ -190,13 +190,27 @@ impl MediaState for AppState {
     }
 }
 
+/// Read `.env` from the working directory or a parent. Existing process
+/// variables stay as they are. A missing file is normal.
+fn load_dotenv() -> Result<Option<std::path::PathBuf>, Box<dyn std::error::Error>> {
+    match dotenvy::dotenv() {
+        Ok(path) => Ok(Some(path)),
+        Err(err) if err.not_found() => Ok(None),
+        Err(err) => Err(format!("failed to read .env: {err}").into()),
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let dotenv_path = load_dotenv()?;
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .init();
+    if let Some(path) = &dotenv_path {
+        tracing::info!(path = %path.display(), "loaded .env");
+    }
 
     let server_name: Arc<str> = env::var("CONDUIT_SERVER_NAME")
         .unwrap_or_else(|_| "localhost".to_owned())

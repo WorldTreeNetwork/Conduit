@@ -60,9 +60,9 @@ cargo build --workspace
 cargo build --workspace --features conduit-server/iroh
 
 # Run the server (Postgres required; see AGENTS.md → Database Conventions)
+# Reads .env from the working directory or a parent. Shell vars win.
 createdb conduit                                                   # once
-DATABASE_URL="postgresql://postgres@localhost/conduit" \
-    cargo run -p conduit-server                                    # :8008
+cargo run -p conduit-server                                        # :8008
 
 # Verify endpoints
 curl localhost:8008/health

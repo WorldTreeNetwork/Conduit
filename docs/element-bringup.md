@@ -14,11 +14,18 @@ This is bd story `conduit-il0.19`. Close it when you've completed the flow.
 
 ## 1. Start the server
 
+Put the settings in a `.env` file in the repo root (gitignored). The
+server reads that file from the working directory or a parent. A
+variable already set in the shell wins.
+
+```
+DATABASE_URL=postgresql://postgres@localhost/conduit
+CONDUIT_SERVER_NAME=localhost
+RUST_LOG=info,conduit_server=debug
+```
+
 ```sh
-DATABASE_URL="postgresql://postgres@localhost/conduit" \
-    CONDUIT_SERVER_NAME="localhost" \
-    RUST_LOG="info,conduit_server=debug" \
-    cargo run -p conduit-server
+cargo run -p conduit-server
 ```
 
 You should see:
@@ -47,14 +54,9 @@ there (`IDENTIKEY_CLIENTS`, no DCR) whose `id` equals
 }
 ```
 
-Then start the homeserver with the secret:
-
-```sh
-DATABASE_URL="postgresql://postgres@localhost/conduit" \
-    CONDUIT_SERVER_NAME="localhost" \
-    CONDUIT_OIDC_CLIENT_SECRET="<secret>" \
-    cargo run -p conduit-server
-```
+Put the same secret in `.env` as `CONDUIT_OIDC_CLIENT_SECRET` and start
+the homeserver with `cargo run -p conduit-server`. The SSO redirect
+stays off when that variable is empty.
 
 `GET /_matrix/client/v3/login` should list `m.login.sso` (IdentiKey) and
 `m.login.token`. Element's "Continue with SSO" hits
