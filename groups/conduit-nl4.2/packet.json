@@ -1,0 +1,26 @@
+{
+  "node_id": "conduit-nl4.2",
+  "change_id": "add-sveltekit-shell",
+  "capability": "matrix-client",
+  "goal": "Build the signed-out SvelteKit shell in web/ and nothing else. Read openspec/specs/matrix-client/spec.md and openspec/changes/add-sveltekit-shell/. Scaffold a static SvelteKit app managed by Bun (adapter-static, SPA fallback, ssr off). No +server, +page.server, or hooks.server files. Add shadcn-svelte button, input, dialog, scroll area, dropdown menu, and avatar. Self-host Bricolage Grotesque at width 100 (wdth 100, semibold) and Atkinson Hyperlegible Next. Numerals use the body face tabular figures. Do not ship Tactic Sans. Colors come from the ground, ink, and brass tokens in client/src/styles/tokens.css, as CSS variables that any Tailwind theme also uses. The signed-out screen resolves the homeserver from ?hs=, then the homeserver env, then http://localhost:8008. A pinned hs hides the field. bun run dev must serve that screen. Do not implement Identikey or password login. Do not edit client/, conduit-server/, or unrelated dirty files. Check the boxes in openspec/changes/add-sveltekit-shell/tasks.md when each is true. Stop when the screen is up.",
+  "surface": "skill-host",
+  "assignee": {
+    "id": "opus-design",
+    "harness": "claude",
+    "interface": "claude-opus-5-5",
+    "family": "opus",
+    "effort": "medium",
+    "skills": ["designer"]
+  },
+  "constraints": {
+    "permission": "write",
+    "paths": [
+      "web/",
+      "openspec/changes/add-sveltekit-shell/"
+    ]
+  },
+  "acceptance": {
+    "command": "cd web && bun run dev",
+    "journey": "The signed-out screen loads and a homeserver URL can be set or pinned with ?hs="
+  }
+}

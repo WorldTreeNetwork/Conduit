@@ -1,0 +1,108 @@
+@import 'tailwindcss';
+@import 'tw-animate-css';
+@import 'shadcn-svelte/tailwind.css';
+/* Self-hosted faces (bundled from node_modules, no font CDN). The wdth file
+   carries both the width and weight axes. Tactic Sans is not shipped. */
+@import '@fontsource-variable/bricolage-grotesque/wdth.css';
+@import '@fontsource-variable/atkinson-hyperlegible-next';
+@import '../lib/styles/tokens.css';
+
+/* Dark follows the tokens: system preference unless data-theme pins it. */
+@custom-variant dark {
+	@media (prefers-color-scheme: dark) {
+		&:where(:root:not([data-theme='light']) *) {
+			@slot;
+		}
+	}
+	&:where(:root[data-theme='dark'] *) {
+		@slot;
+	}
+}
+
+/* shadcn-svelte's semantic names, mapped onto the station-enamel tokens. */
+:root {
+	--background: var(--color-ground);
+	--foreground: var(--color-ink);
+	--card: var(--color-surface);
+	--card-foreground: var(--color-ink);
+	--popover: var(--color-surface);
+	--popover-foreground: var(--color-ink);
+	--primary: var(--color-brass);
+	--primary-foreground: var(--color-brass-ink);
+	--secondary: var(--color-surface-sunk);
+	--secondary-foreground: var(--color-ink);
+	--muted: var(--color-surface-sunk);
+	--muted-foreground: var(--color-ink-muted);
+	--accent: var(--color-surface-hover);
+	--accent-foreground: var(--color-ink);
+	--destructive: var(--color-signal);
+	--border: var(--color-rule);
+	--input: var(--color-rule-strong);
+	--ring: var(--color-focus);
+	--radius: 8px;
+}
+
+@theme {
+	/* Drop Tailwind's default palette: the tokens are the only colour source. */
+	--color-*: initial;
+}
+
+@theme inline {
+	--font-sans: var(--font-text);
+	--font-title: var(--font-title);
+	--color-ring: var(--ring);
+	--color-input: var(--input);
+	--color-border: var(--border);
+	--color-destructive: var(--destructive);
+	--color-accent-foreground: var(--accent-foreground);
+	--color-accent: var(--accent);
+	--color-muted-foreground: var(--muted-foreground);
+	--color-muted: var(--muted);
+	--color-secondary-foreground: var(--secondary-foreground);
+	--color-secondary: var(--secondary);
+	--color-primary-foreground: var(--primary-foreground);
+	--color-primary: var(--primary);
+	--color-popover-foreground: var(--popover-foreground);
+	--color-popover: var(--popover);
+	--color-card-foreground: var(--card-foreground);
+	--color-card: var(--card);
+	--color-foreground: var(--foreground);
+	--color-background: var(--background);
+	--color-white: #fff;
+	--color-black: #000;
+	--radius-sm: calc(var(--radius) * 0.6);
+	--radius-md: calc(var(--radius) * 0.8);
+	--radius-lg: var(--radius);
+	--radius-xl: calc(var(--radius) * 1.4);
+	--radius-2xl: calc(var(--radius) * 1.8);
+	--radius-3xl: calc(var(--radius) * 2.2);
+	--radius-4xl: calc(var(--radius) * 2.6);
+}
+
+@layer base {
+	* {
+		@apply border-border outline-ring/50;
+	}
+	html {
+		font-family: var(--font-text);
+		/* Numerals: the body face's tabular figures. */
+		font-variant-numeric: tabular-nums;
+	}
+	body {
+		@apply bg-background text-foreground;
+		line-height: var(--leading-body);
+	}
+	::selection {
+		background: var(--color-selection);
+	}
+	h1,
+	h2,
+	h3,
+	.font-title {
+		font-family: var(--font-title);
+		font-weight: var(--font-title-weight);
+		font-stretch: 100%;
+		font-variation-settings: 'wdth' var(--font-title-width);
+		line-height: var(--leading-tight);
+	}
+}
