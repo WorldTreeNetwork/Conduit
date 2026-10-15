@@ -9,6 +9,8 @@ binary to run it.
   Bring your own host.
 - `conduit-server/` — a basic webserver around `conduit`, built on
   Tokio + axum (axum sits on hyper).
+- `web/` — the first-party client. Static SvelteKit, run with Bun.
+  Not part of the Cargo workspace.
 
 ## Build
 
@@ -42,21 +44,50 @@ Override with `CONDUIT_OIDC_ISSUER`; set it to `0` or `off` to disable.
 `CONDUIT_OIDC_AUDIENCE` defaults to `CONDUIT_OIDC_CLIENT_ID` or
 `CONDUIT_SERVER_NAME` and **must** equal the OP client id.
 
-Browser SSO (Element `m.login.sso`) also needs `CONDUIT_OIDC_CLIENT_SECRET`
-matching a confidential client registered on the OP. Redirect defaults to
+Browser SSO (`m.login.sso`, used by Element and by `web/`) also needs
+`CONDUIT_OIDC_CLIENT_SECRET` matching a confidential client registered on
+the OP. Redirect defaults to
 `http://127.0.0.1:8008/_matrix/client/v3/login/identikey/callback`. Without
-the secret, JWT-in-hand `io.identikey.oidc` still works; the SSO button
-does not.
+the secret, JWT-in-hand `io.identikey.oidc` still works, and neither client
+shows an SSO button. `io.identikey.auth` (the Identikey wallet) stays
+available either way.
 
 Migrations under `conduit-server/migrations/` apply automatically on
 startup. See [docs/element-bringup.md](docs/element-bringup.md) for
-the full Element-web verification flow.
+the Element-web verification flow.
+
+## Web client
+
+The UI is the static SvelteKit app in `web/`. Bun installs and runs it.
+There is no client server: the browser calls the homeserver with a bearer
+token.
+
+```sh
+cd web
+bun install
+bun run dev    # http://localhost:5173/?hs=http://127.0.0.1:8008
+```
+
+The signed-out screen offers Identikey when `GET /_matrix/client/v3/login`
+lists `m.login.sso`. That button starts the homeserver SSO redirect. The
+browser never calls `https://auth.identikey.me` and never sees
+`CONDUIT_OIDC_CLIENT_SECRET`. A homeserver that does not offer SSO says so.
+
+Password fields, password change, other-device sign-out, and deactivation
+stay off unless the command that runs `bun run dev` or `bun run build` has
+`VITE_CONDUIT_PASSWORD` set to `1`, `true`, `on`, or `yes`. Restart that
+command after changing it. The homeserver still accepts `m.login.password`.
+A key you hold signs in through the Identikey wallet (`io.identikey.auth`),
+not through a form on this page.
+
+Details: [docs/features/client.md](docs/features/client.md) and
+[web/README.md](web/README.md).
 
 ## Status
 
 The shape of a real Matrix homeserver is in. Working subsystems:
 
-- **Storage** — PostgreSQL via sqlx; migrations 0001–0005 in place; full `Storage` trait covers events, rooms, accounts, devices, tokens, signing keys, account data, receipts, media, push, app services, audit log.
+- **Storage** — PostgreSQL via sqlx; migrations `0001` through `0091` apply on startup; full `Storage` trait covers events, rooms, accounts, devices, tokens, signing keys, account data, receipts, media, push, app services, audit log.
 - **Events & signing** — v11 PDUs, canonical JSON, content hash, event ID (reference hash), Ed25519 keypair generation with restart-stable persistence, sign/verify events, `GET /_matrix/key/v2/server`, remote key cache, key rotation with grace window.
 - **Auth & state machine** — room v11 authorization rules, typed state-event content (create / member / power_levels / join_rules / history_visibility), auth-event lookup, `apply_state_event`, state resolution v2.
 - **Client-Server API** — register / login / logout / whoami, createRoom + the initial-state cascade, membership ops (join / leave / kick / ban / unban / invite), send + state PUT/GET, /messages with pagination, **`/sync` with long-poll**, filters, profile, account data, typing, receipts, presence.
@@ -111,8 +142,9 @@ assertions and uncovered scope; the complete server/client effort is tracked in
 
 - `conduit/` — pure library. No HTTP server, no I/O loop. All Matrix logic: events, rooms, state, auth, state resolution, signing, hashing, canonical JSON, storage trait + in-memory backend.
 - `conduit-server/` — webserver binary. Tokio + axum + sqlx + PostgresStorage. Wires HTTP routes onto the library; carries `RemoteKeyCache`, `federation::Client`, `federation::Queue`, `PushWorker`, `BlobStore`, app-service workers in `AppState`.
+- `web/` — static SvelteKit client (Bun). Protocol core in `web/src/core`. Screens in `web/src/lib`.
 - `docs/` — per-feature implementation guides for any Matrix homeserver implementer.
-- `epics/` (in `bd`): 12 epics tracked via Steve Yegge's [beads](https://github.com/steveyegge/beads).
+- `epics/` (in `bd`): tracked via Steve Yegge's [beads](https://github.com/steveyegge/beads).
 
 ## Lineage
 

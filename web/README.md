@@ -14,6 +14,12 @@ bun run build      # static files in build/
 Homeserver: `?hs=<url>` wins and hides the field, then `VITE_CONDUIT_HOMESERVER`,
 then `http://localhost:8008`.
 
+Sign-in is Identikey when the homeserver lists `m.login.sso`. The button
+follows the homeserver SSO redirect, and the built files never contain the
+OIDC client secret. If that flow is absent, the page says Identikey is not
+offered. A key you hold uses the Identikey wallet (`io.identikey.auth`)
+against the homeserver. This page does not collect that response.
+
 Password fields are off. Set `VITE_CONDUIT_PASSWORD=1` in the environment
 that runs `bun run dev` or `bun run build` to offer password registration,
 login, re-authentication, password change, other-device sign-out, and

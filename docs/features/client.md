@@ -44,8 +44,10 @@ retried once with the new token; rotated tokens are persisted at once.
 If refreshing is impossible the client enters **soft logout**: sync and
 sends stop, everything local is kept, and a re-authentication screen
 signs in again with the same `device_id` (keeping the device and, later,
-its keys); unsent messages can then be retried. `soft_logout: false`
-(device deleted, password reset with logout) is a hard logout that wipes
+its keys); unsent messages can then be retried. That screen uses
+Identikey. A password form appears there only when
+`VITE_CONDUIT_PASSWORD` is on. `soft_logout: false` (device deleted, or a
+password reset that logged devices out) is a hard logout that wipes
 local state.
 
 The protocol core can still complete UIA with the account password
@@ -64,7 +66,7 @@ update timeline content. When the server omits `state_after`, the client falls
 back to folding `state` and timeline state events. The persisted snapshot keeps
 the authoritative current state independently of the timeline window.
 
-`localStorage` keys (prefix `conduit:`): `session` (homeserver, user,
+`localStorage` keys (prefix `conduit:web:`): `session` (homeserver, user,
 token, device), `sync` (`since` + room snapshots), `pending` (unsent
 messages). On start the client renders cached rooms immediately, then
 syncs from the stored `since`. When a snapshot was trimmed, the stored
@@ -100,10 +102,17 @@ are custom. Playwright runs axe on the signed-in shell and rejects serious
 and critical violations.
 
 Screens: sign in with Identikey when the homeserver offers `m.login.sso`.
+The button follows the homeserver SSO redirect. The page never calls
+`https://auth.identikey.me` and never contains `CONDUIT_OIDC_CLIENT_SECRET`.
 The default build has no username or password fields. Set
-`VITE_CONDUIT_PASSWORD=1` at build time to offer password registration,
-login, password change, other-device sign-out, and deactivation. A key
-the person holds uses the Identikey wallet. Room list (invites with accept/decline, unread lamps,
+`VITE_CONDUIT_PASSWORD` to `1`, `true`, `on`, or `yes` for the command
+that runs `bun run dev` or `bun run build` to offer password registration,
+login, password change, other-device sign-out, and deactivation. Anything
+else, including an unset variable, leaves those controls out. A key the
+person holds signs in through the Identikey wallet and `io.identikey.auth`.
+This page does not collect that response.
+
+Room list (invites with accept/decline, unread lamps,
 previews, skeleton loading, empty state), room view (topic, invite,
 people panel, leave), timeline (day plates, sender grouping, folded
 room setup, compact state lines, back-pagination with error/retry,
@@ -177,5 +186,6 @@ Children of `conduit-y99.9`: E2EE through
 `@matrix-org/matrix-sdk-crypto-wasm` behind `CryptoBackend` (`.1`),
 device verification with SAS emoji and cross-signing (`.2`), key backup
 (`.3`), notification settings and mentions (`.4`), rich text, DMs,
-search, knocking, spaces, URL previews, inline audio/video (`.5`), and
-Firefox/WebKit plus a manual screen-reader audit (`.6`).
+search, knocking, spaces, URL previews, inline audio/video (`.5`).
+Chromium, Firefox, and WebKit already run the browser proof. A manual
+screen-reader audit (`.6`) is still open.

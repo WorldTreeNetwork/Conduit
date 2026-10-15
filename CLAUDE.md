@@ -80,9 +80,19 @@ bun run e2e         # Playwright vs real conduit-server + fresh Postgres (DATABA
 bun run dev         # http://localhost:5173/?hs=http://127.0.0.1:8008
 ```
 
+The default web build signs in with Identikey only. Password fields,
+password change, other-device sign-out, and deactivation appear when
+`VITE_CONDUIT_PASSWORD` is `1`, `true`, `on`, or `yes`. The protocol core
+still speaks `m.login.password`. A key the person holds uses the Identikey
+wallet (`io.identikey.auth`); the page does not collect that response.
+
 ## Architecture Overview
 
-_Add a brief overview of your project architecture_
+Two Rust crates: `conduit` (Matrix kernel) and `conduit-server` (axum
+host, Postgres, Identikey as the OIDC relying party). The first-party UI
+is `web/`, a static SvelteKit SPA run with Bun. See
+[docs/architecture.md](docs/architecture.md) and
+[docs/features/client.md](docs/features/client.md).
 
 ## Conventions & Patterns
 

@@ -2,8 +2,14 @@
 
 The integration tests (`cargo test --workspace`) cover the protocol end-to-end:
 register, login, createRoom, join, send, /sync (with long-poll), whoami,
-logout, kick. This doc is for the **visual** check — point a real Matrix
-client at the server and watch the UI render a real conversation.
+logout, kick. This doc is the Element compatibility check: point Element at
+the server and watch it render a real conversation.
+
+Conduit's own client is the static app in `web/`. From the repo root,
+`cd web && bun run dev`, then open
+`http://localhost:5173/?hs=http://127.0.0.1:8008`. That page signs in with
+Identikey when this server advertises `m.login.sso`. See
+[features/client.md](features/client.md).
 
 This is bd story `conduit-il0.19`. Close it when you've completed the flow.
 
@@ -145,15 +151,19 @@ bd close conduit-il0.19 --reason="Element web verified: register, createRoom, jo
 
 ## Known limitations to expect
 
-These are filed follow-ups; not bugs in the milestone:
+Presence, typing, receipts, and lazy-loaded members are implemented.
+See [presence-layer](features/presence-layer.md). Federation is on unless
+`CONDUIT_FEDERATION` is `0`, `false`, `off`, or `no`. This recipe uses
+`CONDUIT_SERVER_NAME=localhost` over plain HTTP, which is right for Element
+on the same machine and is not a peer for matrix.org.
 
-- **Presence** doesn't update (`conduit-245`).
-- **Typing indicators** aren't implemented (E06 — Presence Layer epic).
-- **Read receipts** aren't implemented (E06).
-- **E2EE** isn't wired (E10) — turn it OFF in Element for now.
-- **Federation** is local-only (E08/E09 still ahead) — don't try to talk
-  to matrix.org from this server yet.
-- **Lazy-load members** is filed but not implemented (`conduit-bh6`); large
-  rooms may be slow in Element.
+- Full Matrix compliance is not established. The register is
+  [matrix-compliance.json](matrix-compliance.json). Run `bd ready` for the
+  current backlog.
+- The first-party client does not encrypt or decrypt rooms. Element can
+  use the server's device-key, to-device, and backup APIs.
+- `CONDUIT_SSO_REDIRECT_ALLOWLIST` is a raw prefix match (`conduit-sw8`).
+  A non-loopback client origin has to be listed, and a prefix can admit a
+  longer host.
 
 If you hit something weird that isn't in this list, file a bd issue.

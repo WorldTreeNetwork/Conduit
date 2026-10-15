@@ -9,9 +9,12 @@
 
 ## What this is
 
-The HTTP API that Matrix clients (Element, FluffyChat, etc.) use to
-talk to a homeserver. Mounted at `/_matrix/client/v3/...`. It's the
-biggest single surface in the spec.
+The HTTP API that Matrix clients use to talk to a homeserver, including
+Conduit's own client in [`web/`](client.md) and Element. Mounted at
+`/_matrix/client/v3/...`. It's the biggest single surface in the spec.
+`GET /login` always lists `m.login.password`, `m.login.token`, and
+`io.identikey.auth`. `io.identikey.oidc` appears when an OIDC client is
+configured. `m.login.sso` also needs the client secret.
 
 ## Minimal "first usable server" subset
 

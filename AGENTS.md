@@ -148,6 +148,11 @@ live Postgres.
 - `synapse-peer`: `conduit-server/tests/peers/run_synapse_to_device.sh`
   against a pinned, independent Synapse.
 
+`.github/workflows/svelte-client.yml` installs `web/` with Bun and runs
+the check, unit tests, and Playwright journeys against a real
+`conduit-server` on Chromium, Firefox, and WebKit. That job builds the
+server, so it needs the same private Cargo key.
+
 Prerequisite: repository secret `CARGO_SSH_PRIVATE_KEY`, a read-only deploy
 key with access to the private `identikey/identikey-protocol` and
 `identikey/identikey-core` git dependencies. Without it the job fails

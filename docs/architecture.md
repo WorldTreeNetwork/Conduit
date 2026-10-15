@@ -14,6 +14,13 @@ Conduit ships as two crates:
   the OP). Durable Postgres
   without axum is `conduit-6jr`, not a feature on `conduit`.
 
+The first-party UI is not a crate. `web/` is a static SvelteKit app
+(Bun, `adapter-static`, no application server). It calls the
+Client-Server API with a bearer token. Identikey sign-in is a
+homeserver SSO redirect; the page does not hold the OIDC client
+secret. Password controls in that UI are off unless the build sets
+`VITE_CONDUIT_PASSWORD`.
+
 Room version **11 only**, checked in the kernel (create and inbound).
 
 ## Target data flow (client → server)
