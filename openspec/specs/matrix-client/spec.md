@@ -133,3 +133,19 @@ shadcn-svelte MAY bring Tailwind. Tailwind's theme SHALL be generated from the s
 - GIVEN the signed-in shell
 - WHEN a primary button and a message are both on screen
 - THEN both take their brass and ink from the same CSS variables
+
+### Requirement: Signed-out screen
+
+The SvelteKit app SHALL serve a signed-out screen from `bun run dev`. The homeserver address SHALL come from the `hs` query parameter, then from the build's homeserver env var, then from `http://localhost:8008`. A pinned `hs` query parameter SHALL hide the field.
+
+#### Scenario: Default local homeserver
+
+- GIVEN the dev server and no query parameter
+- WHEN a person opens the signed-out screen
+- THEN the homeserver field shows `http://localhost:8008`
+
+#### Scenario: Pinned homeserver
+
+- GIVEN the URL includes `?hs=` set to a homeserver
+- WHEN the signed-out screen renders
+- THEN the field is hidden and that homeserver is the one the client will call
