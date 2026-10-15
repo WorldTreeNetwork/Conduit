@@ -1,0 +1,76 @@
+{
+  "node_id": "conduit-nl4.6",
+  "change_id": "add-svelte-client-proof",
+  "disposition": "infra-red",
+  "summary": "Implemented Bun unit tests, twelve Playwright cases across three engines, axe assertions, isolated real-server harness, and Svelte CI. Browser execution remains unverified because the sandbox denies loopback sockets.",
+  "evidence": {
+    "command": "cd web && bun run e2e",
+    "exit_code": 1,
+    "passed": [
+      "bun install --frozen-lockfile (Bun 1.3.14; writable local cache)",
+      "bun run test: 84 pass, 0 fail",
+      "bun run check: 0 errors, 0 warnings",
+      "static production build (completed in both e2e attempts)",
+      "Playwright discovery: 12 cases across Chromium, Firefox, WebKit",
+      "TypeScript check of config, specs, support, preload",
+      "git diff --check"
+    ],
+    "note": "Both e2e attempts fail to bind the static preview (ports 4173 and 43791). Direct loopback bind returns errno 1 Operation not permitted; PostgreSQL TCP also returns Operation not permitted. No browser or axe pass is claimed."
+  },
+  "artifacts": [
+    {
+      "path": "web/package.json"
+    },
+    {
+      "path": "web/bun.lock"
+    },
+    {
+      "path": "web/.gitignore"
+    },
+    {
+      "path": "web/README.md"
+    },
+    {
+      "path": "web/playwright.config.ts"
+    },
+    {
+      "path": "web/tests/session.spec.ts"
+    },
+    {
+      "path": "web/tests/chat.spec.ts"
+    },
+    {
+      "path": "web/tests/rest.spec.ts"
+    },
+    {
+      "path": "web/tests/support/server.ts"
+    },
+    {
+      "path": "web/tests/support/accessibility.ts"
+    },
+    {
+      "path": "web/tests/unit/core.test.ts"
+    },
+    {
+      "path": "web/tests/unit/preload.ts"
+    },
+    {
+      "path": ".github/workflows/svelte-client.yml"
+    },
+    {
+      "path": "openspec/changes/add-svelte-client-proof/tasks.md"
+    }
+  ],
+  "removed": [
+    "web/tests/session-journey.ts",
+    "web/tests/chat-journey.ts",
+    "web/tests/rest-journey.ts"
+  ],
+  "commit": null,
+  "handoff": "Conductor persists the owned files and runs cd web && bun run e2e with PostgreSQL, browsers, Cargo dependency access, and loopback sockets available. Browser and axe task boxes remain unchecked. Pre-existing changes to proposal.md, client/, ci.yml, and other files were not edited.",
+  "signature": {
+    "signer": "sol-implement",
+    "kind": "stand-in-content-hash",
+    "content_hash": "sha256:bad2d387d7f35fff5a378b400de63bf744b6c1154656d9339b4795d5c0a2f0df"
+  }
+}

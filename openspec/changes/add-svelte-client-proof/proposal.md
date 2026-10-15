@@ -1,6 +1,6 @@
 # add-svelte-client-proof
 
-> **PENDING**
+> **ACTIVE BUILD**
 
 ## Why
 
@@ -28,4 +28,4 @@ No new UI because the proof exercises the screens `add-svelte-chat` and `add-sve
 
 ## Preparation
 
-Blocked on `add-svelte-client-rest`.
+Chat landed at `b4a4d26` and folded at `26b6a09`. Remaining surfaces landed at `22ae5d4` and folded at `c86581f`. Journeys already exist at `web/tests/session-journey.ts`, `web/tests/chat-journey.ts`, and `web/tests/rest-journey.ts`. Outcome: still valid. Authority: `conduit-nl4` grant, "fold these in, activate all and run." Bounds: prove `web/` with Bun. Leave the React pnpm job. Do not edit `.github/workflows/ci.yml` or `client/`. No new Matrix features.

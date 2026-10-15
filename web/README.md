@@ -4,10 +4,10 @@ Conduit's static SvelteKit client (`adapter-static`, SPA fallback, `ssr = false`
 No application server: the homeserver is the only backend.
 
 ```bash
-bun install
+bun install --frozen-lockfile
 bun run dev        # signed-out screen on http://localhost:5173
 bun run check      # svelte-check
-bun test           # unit tests (bun:test)
+bun run test       # core + UI helper unit tests (bun:test)
 bun run build      # static files in build/
 ```
 
@@ -26,25 +26,48 @@ consumed before token exchange, and the callback must contain that exact `hs`.
 Token exchange never retries automatically. Rejected callbacks make no homeserver
 request until the person chooses to sign in again.
 
-The focused browser journey reuses the existing `client/` Playwright dependency
-and installed Chromium. With the local homeserver and web dev server running:
+The browser proof belongs to `web/` and runs with Bun on Chromium, Firefox,
+and WebKit. It builds and serves the static production files, builds the real
+`conduit-server` from locked sources, creates a fresh PostgreSQL database, and
+removes that database and stops the server after the run. PostgreSQL with CREATE
+DATABASE permission, `psql`, Rust, and access to the private Cargo git dependencies
+are required. Missing prerequisites fail the run.
 
 ```bash
-CONDUIT_TEST_HS=http://localhost:8008 WEB_BASE_URL=http://localhost:5173 bun tests/session-journey.ts
+bun --bun x playwright install --with-deps chromium firefox webkit
+DATABASE_URL=postgresql://postgres:postgres@localhost/postgres bun run e2e
 ```
 
-It registers a unique account, signs in with a password, checks profile and sign-out
-persistence, mints a real Matrix login token, and checks matching, unsolicited,
-replayed, mismatched, and missing-homeserver SSO returns without the hosted provider.
+For a local binary already built from the current sources, set
+`CONDUIT_SERVER_BIN=/absolute/path/to/conduit-server`. The default static preview
+port is 4173; set `WEB_PORT` to choose another. Cargo output lives in `.cache/cargo`.
+The server always uses its own database, ephemeral port, media directory, and
+readiness file. macOS runs keep the machine awake only while Playwright runs.
 
-The remaining-surface journey covers profile/theme persistence, device rename,
-authenticated image preview, joined members, real sync presence, public directory
-join, thread delivery and retry, room settings, sync transport failure/recovery,
-and mobile navigation:
+The twelve browser cases cover:
 
-```bash
-CONDUIT_TEST_HS=http://localhost:8008 WEB_BASE_URL=http://localhost:5173 bun tests/rest-journey.ts
-```
+- Password registration and login, display name, reload and sign-out persistence.
+- Real login-token issuance through password UIA, pending SSO intent seeded before
+  navigation, one token exchange, token removal, replay rejection, and callback guards.
+- A fresh tab opening the same token URL without an intent record, sending no
+  homeserver request. Revisiting it with intent succeeds, proving the first visit
+  did not spend the token. No hosted Identikey provider is used.
+- Room creation, invite/accept, two-way messages, local echo, retry with the same
+  transaction, room previews and unread counts, pagination, join, and left-room routing.
+- Profile/theme persistence, device rename, authenticated image preview, members,
+  real sync presence, directory join, threads and retry, room settings, reconnect,
+  sync recovery, and mobile navigation.
+
+axe scans the signed-in home shell and a populated room, rejects serious and
+critical violations, and attaches its complete results to the Playwright report.
+The report lives in `playwright-report/`; failure artifacts and server logs live
+in `test-results/`. CI runs the same proof in `.github/workflows/svelte-client.yml`.
+The React pnpm workflow remains in place.
+
+`bun run test` loads the shared core's existing assertions through a Bun-only
+Vitest export adapter, plus the Svelte session and homeserver tests. A test-only
+File shim preserves the explicit browser MIME type that Bun 1.3.14 otherwise
+extends with a charset. No React source or tests are changed.
 
 Settings is `#/settings`. People, room settings, and threads open keyboard-accessible
 dialogs; Directory is in the room rail. All Matrix operations go through the same

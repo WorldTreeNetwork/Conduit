@@ -1,0 +1,25 @@
+{
+  "node_id": "conduit-nl4.6",
+  "change_id": "add-svelte-client-proof",
+  "capability": "matrix-client",
+  "goal": "Prove the SvelteKit client in web/ with Bun. Read openspec/specs/matrix-client/spec.md and openspec/changes/add-svelte-client-proof/. web/package.json already pins packageManager bun@1.3.14 and web/bun.lock exists. Make bun run test the unit-test command. Add Playwright coverage for the session, chat, and remaining surfaces on Chromium, Firefox, and WebKit, run through Bun against a real conduit-server. Include the loginToken return leg with the pending-SSO record seeded before navigation, and a second case that opens the same URL with no record and sends no login request. axe must report zero serious violations on the signed-in shell. Add .github/workflows/svelte-client.yml that triggers like .github/workflows/ci.yml, installs web/ with bun install --frozen-lockfile, and runs those journeys. Read ci.yml only as the pattern for Postgres 16 and the existing React job. Leave .github/workflows/ci.yml and client/ untouched; the React pnpm job stays. Stay inside web/, .github/workflows/svelte-client.yml, and openspec/changes/add-svelte-client-proof/. Check the task boxes when each is true.",
+  "surface": "packet-only",
+  "assignee": {
+    "id": "sol-implement",
+    "harness": "codex",
+    "interface": "gpt-6.1-sol",
+    "family": "sol",
+    "effort": "high"
+  },
+  "constraints": {
+    "permission": "write",
+    "paths": [
+      "web/",
+      ".github/workflows/svelte-client.yml",
+      "openspec/changes/add-svelte-client-proof/"
+    ]
+  },
+  "acceptance": {
+    "journey": "Bun installs web/ from the lockfile, unit tests pass, and Playwright signs in, exchanges a message, and checks the signed-in shell on Chromium, Firefox, and WebKit, including both loginToken return cases"
+  }
+}

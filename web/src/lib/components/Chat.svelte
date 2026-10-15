@@ -68,7 +68,9 @@
    room, name: room.displayName(client.userId), topic: room.topic, exhausted: room.historyExhausted,
    messages: room.timeline.filter(e => e.type === 'm.room.message' && !relations.hidden.has(e.event_id)),
    typing: room.typing.filter(id => id !== client.userId).map(id => room.memberName(id)),
-   pending: client.sendQueue.forRoom(room.roomId).filter(e => e.type === 'm.room.message' && relatesTo(e).relType !== 'm.thread' && (!e.eventId || !room.hasEvent(e.eventId)))
+   // Copy each row. The queue mutates status on the same object, and {#each}
+   // will not redraw a row whose item reference did not change.
+   pending: client.sendQueue.forRoom(room.roomId).filter(e => e.type === 'm.room.message' && relatesTo(e).relType !== 'm.thread' && (!e.eventId || !room.hasEvent(e.eventId))).map(e => ({ ...e }))
   };
  });
  function readHash() {
