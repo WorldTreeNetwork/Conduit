@@ -1,0 +1,24 @@
+{
+  "node_id": "conduit-nl4.5",
+  "change_id": "add-svelte-client-rest",
+  "capability": "matrix-client",
+  "goal": "Port the remaining committed React client surfaces into web/. Read openspec/specs/matrix-client/spec.md and openspec/changes/add-svelte-client-rest/. Reference the committed files client/src/ui/Settings.tsx, Account.tsx, RoomSettings.tsx, Media.tsx, MemberPanel.tsx, Directory.tsx, ThreadPanel.tsx, Presence.tsx, and ConnectionBanner.tsx via git show HEAD:path, because the working tree has unrelated uncommitted edits. Use the existing framework-free core through the session and chat already in web/. Leave client/src/core and the React app untouched. Cover settings and display name, image preview, members, directory, threads, presence, and the reconnect banner. Add no Matrix feature the current client lacks. Check the task boxes when each is true. Stay inside web/ and openspec/changes/add-svelte-client-rest/.",
+  "surface": "packet-only",
+  "assignee": {
+    "id": "sol-implement",
+    "harness": "codex",
+    "interface": "gpt-6.1-sol",
+    "family": "sol",
+    "effort": "high"
+  },
+  "constraints": {
+    "permission": "write",
+    "paths": [
+      "web/",
+      "openspec/changes/add-svelte-client-rest/"
+    ]
+  },
+  "acceptance": {
+    "journey": "A signed-in person sets a display name, sees an image preview, opens members, the directory, and a thread, and a dropped homeserver shows the reconnect banner until sync resumes"
+  }
+}

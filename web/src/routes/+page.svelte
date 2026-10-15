@@ -148,7 +148,7 @@
 </svelte:head>
 
 {#if client}
-<Chat {client} {displayName} signOut={() => void signOut()} />
+<Chat {client} {displayName} signOut={() => void signOut()} onProfileChanged={name => { displayName = name || client!.userId; }} onDeactivated={() => { clearSession(); client = null; displayName = ''; location.hash = '#/'; }} />
 {:else}
 <main class="grid min-h-dvh place-items-center px-4 py-12">
 	<div class="plate w-full max-w-[26rem] overflow-hidden">

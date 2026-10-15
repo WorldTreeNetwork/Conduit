@@ -1,0 +1,131 @@
+{
+  "node_id": "conduit-nl4.5",
+  "change_id": "add-svelte-client-rest",
+  "capability": "matrix-client",
+  "assignee": {
+    "id": "sol-implement",
+    "harness": "codex",
+    "interface": "gpt-6.1-sol",
+    "family": "sol"
+  },
+  "disposition": "infra-red",
+  "summary": "Implemented the remaining Svelte client surfaces using the committed React references and existing protocol core. Svelte checks, 17 unit tests, and static build pass. Live acceptance is pending because sandbox restrictions prevent PostgreSQL, a local dev server, and Chromium startup.",
+  "commit": null,
+  "persistence": {
+    "owner": "conductor",
+    "state": "uncommitted",
+    "reason": "Worker instructed to edit within the declared paths and stop; conductor persists."
+  },
+  "evidence": {
+    "command": "cd web && CONDUIT_TEST_HS=http://127.0.0.1:8008 WEB_BASE_URL=http://127.0.0.1:5174 bun tests/rest-journey.ts",
+    "exit_code": 1,
+    "note": "Chromium bootstrap_check_in: Permission denied (1100), before any journey assertion. Smoke attempt and focused retry failed. Vite listen EPERM and PostgreSQL Operation not permitted independently prevent local service setup.",
+    "passed": [
+      "bun run --cwd web check (0 errors, 0 warnings)",
+      "bun test --cwd web (17 pass, 70 assertions)",
+      "bun run --cwd web build (adapter-static output)",
+      "git diff --check -- web openspec/changes/add-svelte-client-rest"
+    ],
+    "acceptance_checkboxes": "All five remain open pending real browser/homeserver proof.",
+    "reference_commit": "f24f1118e21cb2d8ff5048bf73843c02c00bb156",
+    "references": "git show HEAD:client/src/ui/{Settings,Account,RoomSettings,Media,MemberPanel,Directory,ThreadPanel,Presence,ConnectionBanner}.tsx"
+  },
+  "artifacts": [
+    {
+      "path": "openspec/changes/add-svelte-client-rest/tasks.md",
+      "sha256": "65b9f0c642b83b5a242884c5c9a4adfa3a64b16c66b2554c428f0ad2befd6a2b"
+    },
+    {
+      "path": "openspec/changes/add-svelte-client-rest/verification.md",
+      "sha256": "bafa90b6312912ec24fba638d6a97c28a8179db36ff1230e6b5c84de17252a61"
+    },
+    {
+      "path": "web/README.md",
+      "sha256": "c20954486709e83dedaa746035c85fe1c6e78c86baaf365590c2c7cd5af0e898"
+    },
+    {
+      "path": "web/src/lib/components/AccountSettings.svelte",
+      "sha256": "c2e0263ac8b951a176b7ef0d3c77b51806c18731f449e43897f4f48d6cf043d8"
+    },
+    {
+      "path": "web/src/lib/components/Chat.svelte",
+      "sha256": "ff2d8ead26824e34aaea9e4d3ea0abbfe97dc77652ca9bc25bc601db5a60d907"
+    },
+    {
+      "path": "web/src/lib/components/ConnectionBanner.svelte",
+      "sha256": "a7cd3c88f65119aac3087e0dd618c3ad4b3bb266a4897a2f8b2120d7d9e725b2"
+    },
+    {
+      "path": "web/src/lib/components/Directory.svelte",
+      "sha256": "3ec60ec6e672b3312f3727c79fd29fb844373711cdb753cc3bade22e2e353327"
+    },
+    {
+      "path": "web/src/lib/components/Media.svelte",
+      "sha256": "cc248264b79cb89c7911e88959f337af3e28c35a9d5835170d4872d0f116412e"
+    },
+    {
+      "path": "web/src/lib/components/MemberPanel.svelte",
+      "sha256": "bdc9897fb97d38d183928e024b4e842c29de495dc4840331d0b49fc7ada917a4"
+    },
+    {
+      "path": "web/src/lib/components/Message.svelte",
+      "sha256": "6a75437bf313aa73a1d77b3b801cea9d5b96a11d267134c6fd6a9ae8606eadec"
+    },
+    {
+      "path": "web/src/lib/components/Presence.svelte",
+      "sha256": "d63f69fdff3effd85f923bc6f4bd823ca1f30f4e7ecfed347f833e6e1f17397f"
+    },
+    {
+      "path": "web/src/lib/components/Reauth.svelte",
+      "sha256": "f9ba69a7aa757ac87de97b72df5e452ef5ce3cead7b9032676a55cf662688a35"
+    },
+    {
+      "path": "web/src/lib/components/RoomSettings.svelte",
+      "sha256": "4355adc416f9611d77f8447b0dce5ea356df3d2130581c5d88127b46fe305a4e"
+    },
+    {
+      "path": "web/src/lib/components/Settings.svelte",
+      "sha256": "50b797edeafd0c86827f645b05113997ba2f8c9ea211e20ee95bbc420e1a9aca"
+    },
+    {
+      "path": "web/src/lib/components/ThreadPanel.svelte",
+      "sha256": "913dd6918194210fa9c4d4fc4d8b1ff4deb17f45189f651eb9a695e2abc4a66b"
+    },
+    {
+      "path": "web/src/lib/components/UserSuggestions.svelte",
+      "sha256": "3a1b9c91721443c4e9278be75b5fdb08a386db80f19f6b698fa9be695ff3da40"
+    },
+    {
+      "path": "web/src/lib/session.ts",
+      "sha256": "6bb880bbede997f14299397741fb46f3dbaec6cc3e7ae95b27d6b21a95840d52"
+    },
+    {
+      "path": "web/src/lib/styles/rest.css",
+      "sha256": "70b9c9020d1ba180aee56a3a094f3253ee587a509b31f7a7c39b1fe6f0907556"
+    },
+    {
+      "path": "web/src/lib/theme.ts",
+      "sha256": "4c227412fb515afdd568099f07d255451c1065f0e5a71a49e6c6cc6223c26f2d"
+    },
+    {
+      "path": "web/src/routes/+layout.svelte",
+      "sha256": "666ff3f959d95a3412ec9941637b7f596238bf37bb6f8cf9ac01bb8cd3a5c282"
+    },
+    {
+      "path": "web/src/routes/+page.svelte",
+      "sha256": "847bc510a50df7745fbe0fd9d5f4fca245fc3b663a9393214ee24d0e9da7ede4"
+    },
+    {
+      "path": "web/tests/rest-journey.ts",
+      "sha256": "0df787dfdafa4412e6101314deea0bba827b293b211b9d9d935f7a1eaf39d509"
+    }
+  ],
+  "raw_ref": "openspec/changes/add-svelte-client-rest/verification.md",
+  "handoff": "Persist only the listed artifacts plus this result file. Do not include the pre-existing proposal edit or other dirty files. Run the focused journey with a real homeserver and web server outside this sandbox, then check the task boxes when true.",
+  "signature": {
+    "signer": "sol-implement",
+    "scheme": "sha256-content-hash",
+    "note": "Integrity hash, not a cryptographic identity signature.",
+    "content_hash": "sha256:b2b22c736edbbf93e1794045a57f3a4fd900cc226e5f39d45d718a52fd3f92bb"
+  }
+}

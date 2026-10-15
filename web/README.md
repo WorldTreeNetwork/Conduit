@@ -36,3 +36,16 @@ CONDUIT_TEST_HS=http://localhost:8008 WEB_BASE_URL=http://localhost:5173 bun tes
 It registers a unique account, signs in with a password, checks profile and sign-out
 persistence, mints a real Matrix login token, and checks matching, unsolicited,
 replayed, mismatched, and missing-homeserver SSO returns without the hosted provider.
+
+The remaining-surface journey covers profile/theme persistence, device rename,
+authenticated image preview, joined members, real sync presence, public directory
+join, thread delivery and retry, room settings, sync transport failure/recovery,
+and mobile navigation:
+
+```bash
+CONDUIT_TEST_HS=http://localhost:8008 WEB_BASE_URL=http://localhost:5173 bun tests/rest-journey.ts
+```
+
+Settings is `#/settings`. People, room settings, and threads open keyboard-accessible
+dialogs; Directory is in the room rail. All Matrix operations go through the same
+session's protocol core. Theme choice is local (`conduit:theme`); system is the default.

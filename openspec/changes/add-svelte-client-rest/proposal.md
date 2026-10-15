@@ -1,6 +1,6 @@
 # add-svelte-client-rest
 
-> **PENDING**
+> **ACTIVE BUILD**
 
 ## Why
 
@@ -27,4 +27,4 @@ A signed-in person opens settings and sets a display name, previews an image, se
 
 ## Preparation
 
-Blocked on `add-svelte-chat`.
+Chat landed at `b4a4d26` and folded at `26b6a09` (living requirement "Two people can talk"). Outcome: still valid. Authority: `conduit-nl4` grant, "fold these in, activate all and run." Bounds: port the committed React surfaces only. Do not copy the uncommitted React tree. No new Matrix features. No CI swap.
