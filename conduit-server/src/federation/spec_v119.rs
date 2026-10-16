@@ -436,25 +436,44 @@ pub async fn user_keys_query(
         return bad_json("device_keys is required");
     };
     let mut device_keys = serde_json::Map::new();
+    let mut master_keys = serde_json::Map::new();
+    let mut self_signing_keys = serde_json::Map::new();
     for (user_id, device_ids) in requested {
         if server_of_user_id(user_id) != Some(state.server_name.as_ref()) {
             continue;
         }
-        let stored = match state.storage.get_device_keys_for_user(user_id).await {
-            Ok(stored) => stored,
+        let filter: Vec<String> = device_ids
+            .as_array()
+            .map(|ids| ids.iter().filter_map(Value::as_str).map(str::to_owned).collect())
+            .unwrap_or_default();
+        let published = match crate::api::client::keys::query_local_user_keys(
+            state.storage.as_ref(),
+            user_id,
+            &filter,
+            None,
+        )
+        .await
+        {
+            Ok(published) => published,
             Err(error) => return internal(&error.to_string()),
         };
-        let mut for_user = serde_json::Map::new();
-        let filter: Option<Vec<&str>> = device_ids.as_array().map(|ids| ids.iter().filter_map(Value::as_str).collect());
-        for (device_id, keys) in stored {
-            let wanted = filter.as_ref().is_none_or(|ids| ids.is_empty() || ids.contains(&device_id.as_str()));
-            if wanted {
-                for_user.insert(device_id, keys);
-            }
+        device_keys.insert(user_id.clone(), Value::Object(published.devices));
+        if let Some(master) = published.master {
+            master_keys.insert(user_id.clone(), master);
         }
-        device_keys.insert(user_id.clone(), Value::Object(for_user));
+        if let Some(self_signing) = published.self_signing {
+            self_signing_keys.insert(user_id.clone(), self_signing);
+        }
     }
-    (StatusCode::OK, Json(json!({ "device_keys": device_keys }))).into_response()
+    (
+        StatusCode::OK,
+        Json(json!({
+            "device_keys": device_keys,
+            "master_keys": master_keys,
+            "self_signing_keys": self_signing_keys,
+        })),
+    )
+        .into_response()
 }
 
 /// `POST /_matrix/federation/v1/user/keys/claim`.

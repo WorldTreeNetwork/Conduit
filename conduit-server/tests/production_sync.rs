@@ -685,6 +685,386 @@ async fn enabling_encryption_marks_existing_members_changed() {
     );
 }
 
+/// Cross-signing changes leave as `m.signing_key_update` (master and
+/// self-signing only) for servers that share a room. Federation
+/// `/user/keys/query` returns those keys with merged signatures and
+/// withholds unsigned device keys. An inbound EDU is what a later client
+/// `/keys/query` serves when the remote query fails.
+#[tokio::test]
+async fn signing_key_updates_federate_and_keys_query_merges_cross_signing() {
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    use axum::extract::Json;
+    use axum::http::{HeaderMap, StatusCode};
+    use axum::routing::{get, post, put};
+    use axum::Router;
+    use base64::Engine as _;
+    use conduit::event::{Event, Pdu};
+    use conduit::keys::{generate_server_key, public_bytes};
+    use conduit::storage::Storage;
+    use ed25519_dalek::Signer as _;
+
+    let captured = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let captured_route = Arc::clone(&captured);
+    let peer_key = Arc::new(generate_server_key());
+    let peer_key_route = Arc::clone(&peer_key);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let peer_url = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        let app = Router::new()
+            .route(
+                "/_matrix/key/v2/server",
+                get(move || {
+                    let key = Arc::clone(&peer_key_route);
+                    async move {
+                        let public = STANDARD_NO_PAD.encode(public_bytes(&key));
+                        let mut document = json!({
+                            "server_name": "peer.test",
+                            "verify_keys": { &key.key_id: { "key": public } },
+                            "old_verify_keys": {},
+                            "valid_until_ts": chrono::Utc::now().timestamp_millis() + 86_400_000,
+                        });
+                        let canonical = conduit::canonical_json::to_canonical_bytes(&document).unwrap();
+                        let signature = STANDARD_NO_PAD.encode(key.signing_key.sign(&canonical).to_bytes());
+                        document["signatures"] = json!({ "peer.test": { &key.key_id: signature } });
+                        Json(document)
+                    }
+                }),
+            )
+            .route(
+                "/_matrix/federation/v1/send/:txn",
+                put(move |headers: HeaderMap, Json(body): Json<Value>| {
+                    let captured = Arc::clone(&captured_route);
+                    async move {
+                        let mut hit = body;
+                        hit["authorization"] = json!(headers.get("authorization").and_then(|v| v.to_str().ok()).unwrap_or(""));
+                        captured.lock().unwrap().push(hit);
+                        Json(json!({ "pdus": {} }))
+                    }
+                }),
+            )
+            .route(
+                "/_matrix/federation/v1/user/keys/query",
+                post(|| async { StatusCode::NOT_FOUND }),
+            );
+        axum::serve(listener, app).await.ok();
+    });
+
+    let server = Server::with_env(&[
+        ("CONDUIT_FEDERATION_BASE_URL", peer_url.as_str()),
+        ("CONDUIT_REMOTE_KEYS_OVERRIDE", peer_url.as_str()),
+    ])
+    .await;
+    let alice = server.register("alice").await;
+    let alice_id = user(&alice).to_owned();
+    let device_id = alice["device_id"].as_str().unwrap().to_owned();
+    let room = encrypted_room(&server, &alice).await;
+    let pool = sqlx::PgPool::connect(&server.database_url).await.unwrap();
+    let storage = conduit_server::PostgresStorage::new(pool);
+    for (member, membership) in [("@erin:peer.test", "join"), ("@cara:gone.test", "leave")] {
+        let event = Event::new(
+            format!("$member-{membership}-{}", member.trim_start_matches('@').replace(':', "-")),
+            Pdu::new(
+                &room,
+                member,
+                "m.room.member",
+                Some(member.to_owned()),
+                json!({ "membership": membership }),
+                1_700_000_000_000,
+                vec![],
+                vec![],
+                40,
+            ),
+        );
+        storage.put_event(&event).await.unwrap();
+        storage.set_state_entry(&room, "m.room.member", member, &event.event_id).await.unwrap();
+    }
+
+    let alice_device = upload_device(&server, &alice).await;
+    server
+        .request(
+            Method::PUT,
+            &format!("/_matrix/client/v3/devices/{device_id}"),
+            Some(token(&alice)),
+            Some(json!({ "display_name": "Alice phone" })),
+            200,
+        )
+        .await;
+    let cross = CrossSigning::new(&alice_id);
+    server
+        .request(
+            Method::POST,
+            "/_matrix/client/v3/keys/device_signing/upload",
+            Some(token(&alice)),
+            Some(cross.upload_body()),
+            200,
+        )
+        .await;
+    let ssk_id = format!("ed25519:{}", keys::public(&cross.self_signing));
+    let device_key_id = format!("ed25519:{device_id}");
+    let mut signed_device = alice_device.keys.clone();
+    keys::sign(&mut signed_device, &alice_id, &ssk_id, &cross.self_signing);
+    let mut signed_master = cross.master_key.clone();
+    keys::sign(&mut signed_master, &alice_id, &device_key_id, &alice_device.key);
+    let uploaded = server
+        .request(
+            Method::POST,
+            "/_matrix/client/v3/keys/signatures/upload",
+            Some(token(&alice)),
+            Some(json!({
+                &alice_id: {
+                    &device_id: signed_device,
+                    keys::public(&cross.master): signed_master,
+                }
+            })),
+            200,
+        )
+        .await;
+    assert_eq!(uploaded["failures"], json!({}), "{uploaded}");
+    server
+        .request(
+            Method::POST,
+            "/_matrix/client/v3/keys/upload",
+            Some(token(&alice)),
+            Some(json!({ "one_time_keys": { "curve25519:AAAA": "one-time-key-material" } })),
+            200,
+        )
+        .await;
+
+    let edu = tokio::time::timeout(Duration::from_secs(8), async {
+        loop {
+            let found = captured.lock().unwrap().iter().find_map(|body| {
+                let authorization = body["authorization"].as_str().unwrap_or("");
+                body["edus"].as_array().and_then(|edus| {
+                    edus.iter().find(|edu| {
+                        edu["edu_type"] == "m.signing_key_update"
+                            && edu["content"]["master_key"]["signatures"][&alice_id][&device_key_id].is_string()
+                    }).map(|edu| (authorization.to_owned(), edu.clone()))
+                })
+            });
+            if let Some(found) = found {
+                return found;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("sharing server never received m.signing_key_update");
+    let (authorization, edu) = edu;
+    assert!(authorization.contains("destination=\"peer.test\""), "{authorization}");
+    assert_eq!(edu["content"]["user_id"], alice_id);
+    assert!(independently_verified(
+        &edu["content"]["self_signing_key"],
+        &alice_id,
+        &format!("ed25519:{}", keys::public(&cross.master)),
+        &keys::public(&cross.master),
+    ), "{edu}");
+    assert!(independently_verified(
+        &edu["content"]["master_key"],
+        &alice_id,
+        &device_key_id,
+        &keys::public(&alice_device.key),
+    ), "{edu}");
+    assert!(!edu.to_string().contains(&keys::public(&cross.user_signing)), "{edu}");
+    assert!(edu["content"].get("user_signing_key").is_none(), "{edu}");
+    let leaked = captured.lock().unwrap().iter().any(|body| {
+        body["authorization"].as_str().unwrap_or("").contains("destination=\"gone.test\"")
+    });
+    assert!(!leaked, "a left member's server is not a signing-key destination");
+
+    let pool = sqlx::PgPool::connect(&server.database_url).await.unwrap();
+    let forged = Device::new(&alice_id, "FORGED");
+    let mut unsigned = forged.keys.clone();
+    unsigned["signatures"] = json!({});
+    sqlx::query("INSERT INTO device_keys (user_id, device_id, keys) VALUES ($1, 'FORGED', $2)")
+        .bind(&alice_id)
+        .bind(&unsigned)
+        .execute(&pool)
+        .await
+        .unwrap();
+    pool.close().await;
+
+    let query_body = json!({ "device_keys": { &alice_id: [] } });
+    let query_path = "/_matrix/federation/v1/user/keys/query";
+    let query_auth = conduit_server::federation::auth::sign_request(
+        "POST",
+        query_path,
+        "peer.test",
+        "production.test",
+        Some(&query_body),
+        &peer_key,
+    );
+    let queried: Value = server
+        .http
+        .post(format!("{}{query_path}", server.base_url))
+        .header("Authorization", query_auth)
+        .json(&query_body)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let device = &queried["device_keys"][&alice_id][&device_id];
+    assert!(independently_verified(device, &alice_id, &ssk_id, &keys::public(&cross.self_signing)), "{queried}");
+    assert_eq!(device["unsigned"]["device_display_name"], "Alice phone");
+    assert!(queried["device_keys"][&alice_id].get("FORGED").is_none(), "{queried}");
+    assert_eq!(
+        queried["master_keys"][&alice_id]["keys"][&format!("ed25519:{}", keys::public(&cross.master))],
+        keys::public(&cross.master)
+    );
+    assert!(independently_verified(
+        &queried["self_signing_keys"][&alice_id],
+        &alice_id,
+        &format!("ed25519:{}", keys::public(&cross.master)),
+        &keys::public(&cross.master),
+    ), "{queried}");
+    assert!(queried.get("user_signing_keys").is_none(), "{queried}");
+    assert!(!queried.to_string().contains(&keys::public(&cross.user_signing)), "{queried}");
+
+    let claim_body = json!({ "one_time_keys": { &alice_id: { &device_id: "curve25519" } } });
+    let claim_path = "/_matrix/federation/v1/user/keys/claim";
+    let claim = |body: &Value| {
+        let server = &server;
+        let peer_key = &peer_key;
+        let body = body.clone();
+        async move {
+            let auth = conduit_server::federation::auth::sign_request(
+                "POST",
+                claim_path,
+                "peer.test",
+                "production.test",
+                Some(&body),
+                peer_key,
+            );
+            server
+                .http
+                .post(format!("{}{claim_path}", server.base_url))
+                .header("Authorization", auth)
+                .json(&body)
+                .send()
+                .await
+                .unwrap()
+                .json::<Value>()
+                .await
+                .unwrap()
+        }
+    };
+    let claimed = claim(&claim_body).await;
+    assert_eq!(
+        claimed["one_time_keys"][&alice_id][&device_id]["curve25519:AAAA"],
+        "one-time-key-material",
+        "{claimed}"
+    );
+    let again = claim(&claim_body).await;
+    assert_eq!(again["one_time_keys"][&alice_id], json!({}), "{again}");
+
+    let since = next_batch(&sync(&server, &alice, None).await);
+    let erin = CrossSigning::new("@erin:peer.test");
+    let mut bad_master = CrossSigning::new("@bad:peer.test");
+    let wrong = keys::generate();
+    bad_master.self_signing_key["signatures"] = json!({});
+    keys::sign(
+        &mut bad_master.self_signing_key,
+        "@bad:peer.test",
+        &format!("ed25519:{}", keys::public(&bad_master.master)),
+        &wrong,
+    );
+    let spoof = CrossSigning::new(&alice_id);
+    let txn = json!({
+        "origin": "peer.test",
+        "origin_server_ts": 1_700_000_000_000u64,
+        "pdus": [],
+        "edus": [
+            {
+                "edu_type": "m.signing_key_update",
+                "content": {
+                    "user_id": "@erin:peer.test",
+                    "master_key": erin.master_key,
+                    "self_signing_key": erin.self_signing_key,
+                    "user_signing_key": erin.user_signing_key,
+                }
+            },
+            {
+                "edu_type": "m.signing_key_update",
+                "content": {
+                    "user_id": "@bad:peer.test",
+                    "master_key": bad_master.master_key,
+                    "self_signing_key": bad_master.self_signing_key,
+                }
+            },
+            {
+                "edu_type": "m.signing_key_update",
+                "content": {
+                    "user_id": &alice_id,
+                    "master_key": spoof.master_key,
+                    "self_signing_key": spoof.self_signing_key,
+                }
+            }
+        ]
+    });
+    let send_path = "/_matrix/federation/v1/send/signing-keys-1";
+    let send_auth = conduit_server::federation::auth::sign_request(
+        "PUT",
+        send_path,
+        "peer.test",
+        "production.test",
+        Some(&txn),
+        &peer_key,
+    );
+    let sent = server
+        .http
+        .put(format!("{}{send_path}", server.base_url))
+        .header("Authorization", send_auth)
+        .json(&txn)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(sent.status(), StatusCode::OK, "{}", sent.text().await.unwrap_or_default());
+
+    let cached = server
+        .request(
+            Method::POST,
+            "/_matrix/client/v3/keys/query",
+            Some(token(&alice)),
+            Some(json!({
+                "device_keys": {
+                    "@erin:peer.test": [],
+                    "@bad:peer.test": [],
+                    &alice_id: [],
+                }
+            })),
+            200,
+        )
+        .await;
+    assert!(independently_verified(
+        &cached["self_signing_keys"]["@erin:peer.test"],
+        "@erin:peer.test",
+        &format!("ed25519:{}", keys::public(&erin.master)),
+        &keys::public(&erin.master),
+    ), "{cached}");
+    assert_eq!(
+        cached["master_keys"]["@erin:peer.test"]["keys"][&format!("ed25519:{}", keys::public(&erin.master))],
+        keys::public(&erin.master)
+    );
+    assert!(cached["self_signing_keys"].get("@bad:peer.test").is_none(), "{cached}");
+    assert_eq!(
+        cached["master_keys"]["@bad:peer.test"]["keys"][&format!("ed25519:{}", keys::public(&bad_master.master))],
+        keys::public(&bad_master.master)
+    );
+    assert_eq!(
+        cached["master_keys"][&alice_id]["keys"][&format!("ed25519:{}", keys::public(&cross.master))],
+        keys::public(&cross.master),
+        "a signing-key EDU for another server's user is ignored: {cached}"
+    );
+    assert!(!cached.to_string().contains(&keys::public(&erin.user_signing)), "{cached}");
+    assert!(cached["failures"]["peer.test"].is_object(), "{cached}");
+
+    let update = sync(&server, &alice, Some(&since)).await;
+    assert_eq!(list(&update["device_lists"]["changed"]), vec!["@erin:peer.test".to_owned()], "{update}");
+}
+
 // ---------------------------------------------------------------------------
 // conduit-y99.15: threaded receipts and typing authorization
 // ---------------------------------------------------------------------------

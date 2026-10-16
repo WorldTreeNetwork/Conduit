@@ -24,9 +24,9 @@
         "total": 164
       },
       "requirement": {
-        "implemented+tested": 76,
+        "implemented+tested": 77,
         "implemented-untested": 0,
-        "partial": 1,
+        "partial": 0,
         "missing": 0,
         "not-applicable": 9,
         "total": 86
@@ -42,10 +42,10 @@
         "total": 36
       },
       "requirement": {
-        "implemented+tested": 15,
+        "implemented+tested": 16,
         "implemented-untested": 0,
         "partial": 14,
-        "missing": 9,
+        "missing": 8,
         "not-applicable": 3,
         "total": 41
       }
@@ -5765,11 +5765,12 @@
         }
       ],
       "tests": [
-        "conduit-server/tests/federation_inbound.rs::federation_directory_openid_and_local_key_query"
+        "conduit-server/tests/federation_inbound.rs::federation_directory_openid_and_local_key_query",
+        "conduit-server/tests/production_sync.rs::signing_key_updates_federate_and_keys_query_merges_cross_signing"
       ],
-      "tests_total": 1,
+      "tests_total": 2,
       "gap_beads": [],
-      "notes": "Claims a local one-time key, else the fallback. An empty claim is an empty object for that device."
+      "notes": "Claims a local one-time key, else the fallback. When nothing remains, the user object is empty."
     },
     {
       "id": "ss.ep.post_matrixfederationv1userkeysquery",
@@ -5792,11 +5793,12 @@
         }
       ],
       "tests": [
-        "conduit-server/tests/federation_inbound.rs::federation_directory_openid_and_local_key_query"
+        "conduit-server/tests/federation_inbound.rs::federation_directory_openid_and_local_key_query",
+        "conduit-server/tests/production_sync.rs::signing_key_updates_federate_and_keys_query_merges_cross_signing"
       ],
-      "tests_total": 1,
+      "tests_total": 2,
       "gap_beads": [],
-      "notes": "Returns stored device keys for local users named in device_keys."
+      "notes": "Returns authentic device keys for local users, with merged signatures, the master key, and the self-signing key. User-signing keys are omitted. A device that fails signature checks is withheld."
     },
     {
       "id": "ss.ep.get_matrixfederationv1mediadownloadmediaid",
@@ -7894,25 +7896,30 @@
       "title": "End-to-End Encryption (key upload/query/claim/changes, cross-signing, device lists, backups)",
       "source": "https://spec.matrix.org/v1.19/client-server-api/#end-to-end-encryption",
       "role": "homeserver",
-      "status": "partial",
+      "status": "implemented+tested",
       "code": [
         {
           "loc": "conduit-server/src/api/client/keys.rs"
+        },
+        {
+          "loc": "conduit-server/src/federation/spec_v119.rs"
+        },
+        {
+          "loc": "conduit-server/src/federation/server.rs"
         }
       ],
       "tests": [
         "conduit-server/tests/e2ee.rs::keys_claim_concurrent_no_double_spend",
         "conduit-server/tests/production_e2e.rs::production_key_inventory_wakes_sync_and_quiets_after_acknowledgement",
-        "conduit-server/tests/production_modules.rs::key_backup_versions_keys_etags_and_errors"
+        "conduit-server/tests/production_modules.rs::key_backup_versions_keys_etags_and_errors",
+        "conduit-server/tests/production_sync.rs::device_lists_report_only_shared_users_and_departures",
+        "conduit-server/tests/production_sync.rs::key_query_withholds_forged_device_keys_and_reports_display_names",
+        "conduit-server/tests/production_sync.rs::signature_uploads_verify_signers_and_respect_visibility",
+        "conduit-server/tests/production_sync.rs::signing_key_updates_federate_and_keys_query_merges_cross_signing"
       ],
-      "tests_total": 3,
-      "gap_beads": [
-        "conduit-y99.14",
-        "conduit-y99.22",
-        "conduit-y99.32",
-        "conduit-nq5"
-      ],
-      "notes": ""
+      "tests_total": 7,
+      "gap_beads": [],
+      "notes": "Device lists name only users who share a joined room, and a departure moves them to device_lists.left. /keys/query withholds unsigned or misplaced device keys and reports display names. Cross-signing signatures merge onto device and master keys for a caller who may see them."
     },
     {
       "id": "cs.mod.secrets",
@@ -9315,15 +9322,24 @@
       "title": "End-to-end encryption (user/keys/query, user/keys/claim, m.signing_key_update)",
       "source": "https://spec.matrix.org/v1.19/server-server-api/#end-to-end-encryption",
       "role": "homeserver",
-      "status": "missing",
-      "code": [],
-      "tests": [],
-      "tests_total": 0,
-      "gap_beads": [
-        "conduit-y99.22",
-        "conduit-y99.32"
+      "status": "implemented+tested",
+      "code": [
+        {
+          "loc": "conduit-server/src/federation/spec_v119.rs"
+        },
+        {
+          "loc": "conduit-server/src/api/client/keys.rs"
+        },
+        {
+          "loc": "conduit-server/src/federation/server.rs"
+        }
       ],
-      "notes": ""
+      "tests": [
+        "conduit-server/tests/production_sync.rs::signing_key_updates_federate_and_keys_query_merges_cross_signing"
+      ],
+      "tests_total": 1,
+      "gap_beads": [],
+      "notes": "Federation query returns authentic device keys with merged signatures, the master key, and the self-signing key, and omits user-signing keys. A second one-time-key claim returns an empty user object. Inbound and outbound m.signing_key_update are stored and sent to servers that share a joined room."
     },
     {
       "id": "ss.to-device",

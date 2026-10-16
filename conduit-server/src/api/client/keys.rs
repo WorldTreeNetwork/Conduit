@@ -303,12 +303,192 @@ fn merge_signatures<'a>(
     }
 }
 
+/// Device, master, and self-signing keys this server will publish for `uid`.
+///
+/// `requester` is the client asking. `None` is a federation query: user-signing
+/// keys and signatures made with them stay private. Device keys that are not
+/// self-signed by that device are omitted. Self-signing keys that are not
+/// signed by the current master key are omitted.
+pub(crate) struct PublishedKeys {
+    pub devices: serde_json::Map<String, Value>,
+    pub master: Option<Value>,
+    pub self_signing: Option<Value>,
+    pub user_signing: Option<Value>,
+}
+
+pub(crate) async fn query_local_user_keys(
+    storage: &dyn Storage,
+    uid: &str,
+    device_filter: &[String],
+    requester: Option<&str>,
+) -> conduit::Result<PublishedKeys> {
+    use super::key_identity::{cross_signing_public, device_keys_are_authentic, verify_signature};
+    let all_device_keys = storage.get_device_keys_for_user(uid).await?;
+    let devices = storage.list_devices_for_user(uid).await?;
+    let signatures = storage.cross_signing_signatures_for(uid).await?;
+    let mut published = PublishedKeys {
+        devices: serde_json::Map::new(),
+        master: None,
+        self_signing: None,
+        user_signing: None,
+    };
+    for (did, keys) in all_device_keys {
+        if !device_filter.is_empty() && !device_filter.contains(&did) {
+            continue;
+        }
+        if !device_keys_are_authentic(&keys, uid, &did) {
+            tracing::warn!(user = %uid, device = %did, "withholding unauthenticated device keys");
+            continue;
+        }
+        let mut keys = keys;
+        merge_signatures(
+            &mut keys,
+            signatures.iter().filter(|(signer, _, target, _)| signer == uid && target == &did),
+        );
+        if let Some(name) = devices
+            .iter()
+            .find(|device| device.device_id == did)
+            .and_then(|device| device.display_name.clone())
+        {
+            keys["unsigned"] = json!({"device_display_name": name});
+        }
+        published.devices.insert(did, keys);
+    }
+    let xsk = storage.get_cross_signing_keys(uid).await?;
+    if let Some(mk) = xsk.get("master") {
+        let mut master = mk.clone();
+        if let Some(public) = cross_signing_public(mk) {
+            merge_signatures(
+                &mut master,
+                signatures.iter().filter(|(signer, _, target, _)| {
+                    target == &public && (*signer == uid || requester == Some(signer))
+                }),
+            );
+        }
+        published.master = Some(master);
+    }
+    if let Some(ss) = xsk.get("self_signing") {
+        let signed_by_master = xsk.get("master").and_then(cross_signing_public).is_some_and(|master| {
+            verify_signature(ss, uid, &format!("ed25519:{master}"), &master)
+        });
+        if signed_by_master {
+            published.self_signing = Some(ss.clone());
+        }
+    }
+    if requester == Some(uid) {
+        if let Some(us) = xsk.get("user_signing") {
+            published.user_signing = Some(us.clone());
+        }
+    }
+    Ok(published)
+}
+
+/// Broadcast `m.signing_key_update` to servers that share a room with `user_id`.
+///
+/// The EDU carries the master and self-signing keys only. The user-signing
+/// key is private and is never included. Master-key signatures made by the
+/// owner's own devices are merged in; another user's user-signing signature
+/// is not.
+pub(crate) async fn broadcast_signing_key_update<S: AuthState>(state: &S, user_id: &str) {
+    let Some(queue) = state.federation_queue().cloned() else {
+        return;
+    };
+    let storage = state.storage().clone();
+    let server_name = state.server_name().to_owned();
+    let user_id = user_id.to_owned();
+    tokio::spawn(async move {
+        let servers = remote_servers_sharing_room_with(&storage, &server_name, &user_id).await;
+        if servers.is_empty() {
+            return;
+        }
+        let Ok(keys) = storage.get_cross_signing_keys(&user_id).await else {
+            return;
+        };
+        let Ok(signatures) = storage.cross_signing_signatures_for(&user_id).await else {
+            return;
+        };
+        let mut content = json!({ "user_id": user_id });
+        if let Some(master) = keys.get("master") {
+            let mut master = master.clone();
+            if let Some(public) = super::key_identity::cross_signing_public(&master) {
+                merge_signatures(
+                    &mut master,
+                    signatures.iter().filter(|(signer, _, target, _)| signer == &user_id && target == &public),
+                );
+            }
+            content["master_key"] = master;
+        }
+        if let Some(self_signing) = keys.get("self_signing") {
+            content["self_signing_key"] = self_signing.clone();
+        }
+        if content.get("master_key").is_none() && content.get("self_signing_key").is_none() {
+            return;
+        }
+        let edu = json!({
+            "edu_type": "m.signing_key_update",
+            "content": content,
+        });
+        for dest in servers {
+            queue.enqueue(&dest, vec![], vec![edu.clone()]).await;
+        }
+    });
+}
+
+/// Store an inbound `m.signing_key_update`. Returns whether a key was stored.
+///
+/// The user must belong to `origin`. A master or self-signing key that fails
+/// validation is ignored. A self-signing key must be signed by the master key
+/// in the EDU, or by the master key already stored. A user-signing key in the
+/// EDU is ignored.
+pub(crate) async fn apply_signing_key_update(
+    storage: &dyn Storage,
+    origin: &str,
+    edu: &Value,
+) -> conduit::Result<bool> {
+    use super::key_identity::{cross_signing_public, validate_cross_signing_key, verify_signature};
+    let content = edu.get("content").unwrap_or(edu);
+    let Some(user_id) = content.get("user_id").and_then(Value::as_str) else {
+        return Ok(false);
+    };
+    if conduit::signing::server_of_user_id(user_id) != Some(origin) {
+        return Ok(false);
+    }
+    let existing = storage.get_cross_signing_keys(user_id).await?;
+    let master = content.get("master_key").filter(|key| key.is_object());
+    let master_ok = match master {
+        Some(master) => validate_cross_signing_key(master, user_id, "master").is_ok(),
+        None => false,
+    };
+    let master_public = master
+        .filter(|_| master_ok)
+        .and_then(cross_signing_public)
+        .or_else(|| existing.get("master").and_then(cross_signing_public));
+    let self_signing = content.get("self_signing_key").filter(|key| key.is_object());
+    let self_ok = match (self_signing, master_public.as_deref()) {
+        (Some(key), Some(master)) => {
+            validate_cross_signing_key(key, user_id, "self_signing").is_ok()
+                && verify_signature(key, user_id, &format!("ed25519:{master}"), master)
+        }
+        _ => false,
+    };
+    if master_ok {
+        if let Some(master) = master {
+            storage.upsert_cross_signing_key(user_id, "master", master).await?;
+        }
+    }
+    if self_ok {
+        if let Some(self_signing) = self_signing {
+            storage.upsert_cross_signing_key(user_id, "self_signing", self_signing).await?;
+        }
+    }
+    Ok(master_ok || self_ok)
+}
+
 pub async fn keys_query<S: AuthState>(
     State(state): State<S>,
     authed: AuthedUser,
     Json(body): Json<KeysQueryRequest>,
 ) -> Response {
-    use super::key_identity::{cross_signing_public, device_keys_are_authentic};
     let storage = state.storage();
     let requester = &authed.user_id;
     let mut result_device_keys: HashMap<String, Value> = HashMap::new();
@@ -320,74 +500,21 @@ pub async fn keys_query<S: AuthState>(
         if conduit::signing::server_of_user_id(uid).is_some_and(|server| server != state.server_name()) {
             continue;
         }
-        let all_device_keys = match storage.get_device_keys_for_user(uid).await {
-            Ok(m) => m,
+        let published = match query_local_user_keys(storage.as_ref(), uid, device_filter, Some(requester)).await {
+            Ok(published) => published,
             Err(e) => return MatrixError::unknown(e.to_string()).into_response(),
         };
-        let devices = match storage.list_devices_for_user(uid).await {
-            Ok(devices) => devices,
-            Err(e) => return MatrixError::unknown(e.to_string()).into_response(),
-        };
-        let signatures = match storage.cross_signing_signatures_for(uid).await {
-            Ok(signatures) => signatures,
-            Err(e) => return MatrixError::unknown(e.to_string()).into_response(),
-        };
-
-        // Only serve device keys that name this user/device and are
-        // self-signed by the device's own Ed25519 key (conduit-y99.14).
-        let mut user_keys = serde_json::Map::new();
-        for (did, keys) in all_device_keys {
-            if !device_filter.is_empty() && !device_filter.contains(&did) {
-                continue;
-            }
-            if !device_keys_are_authentic(&keys, uid, &did) {
-                tracing::warn!(user = %uid, device = %did, "withholding unauthenticated device keys");
-                continue;
-            }
-            let mut keys = keys;
-            // Device signatures come from the owner's self-signing key.
-            merge_signatures(
-                &mut keys,
-                signatures.iter().filter(|(signer, _, target, _)| signer == uid && *target == did),
-            );
-            if let Some(name) = devices
-                .iter()
-                .find(|device| device.device_id == did)
-                .and_then(|device| device.display_name.clone())
-            {
-                keys["unsigned"] = json!({"device_display_name": name});
-            }
-            user_keys.insert(did, keys);
+        if !published.devices.is_empty() {
+            result_device_keys.insert(uid.clone(), Value::Object(published.devices));
         }
-        if !user_keys.is_empty() {
-            result_device_keys.insert(uid.clone(), Value::Object(user_keys));
-        }
-
-        let xsk = match storage.get_cross_signing_keys(uid).await {
-            Ok(m) => m,
-            Err(e) => return MatrixError::unknown(e.to_string()).into_response(),
-        };
-        if let Some(mk) = xsk.get("master") {
-            let mut master = mk.clone();
-            if let Some(public) = cross_signing_public(mk) {
-                // The owner's device signatures are public; a user-signing
-                // signature is visible only to the user who made it.
-                merge_signatures(
-                    &mut master,
-                    signatures.iter().filter(|(signer, _, target, _)| {
-                        *target == public && (signer == uid || signer == requester)
-                    }),
-                );
-            }
+        if let Some(master) = published.master {
             result_master_keys.insert(uid.clone(), master);
         }
-        if let Some(ss) = xsk.get("self_signing") {
-            result_self_signing.insert(uid.clone(), ss.clone());
+        if let Some(self_signing) = published.self_signing {
+            result_self_signing.insert(uid.clone(), self_signing);
         }
-        if uid == requester {
-            if let Some(us) = xsk.get("user_signing") {
-                result_user_signing.insert(uid.clone(), us.clone());
-            }
+        if let Some(user_signing) = published.user_signing {
+            result_user_signing.insert(uid.clone(), user_signing);
         }
     }
 
@@ -402,6 +529,22 @@ pub async fn keys_query<S: AuthState>(
         &mut failures,
     )
     .await;
+    // Keys learned from m.device_list_update and m.signing_key_update fill
+    // anything the remote query did not return (including a failed query).
+    if let Err(error) = fill_cached_remote_keys(
+        storage.as_ref(),
+        state.server_name(),
+        requester,
+        &body.device_keys,
+        &mut result_device_keys,
+        &mut result_master_keys,
+        &mut result_self_signing,
+        &mut result_user_signing,
+    )
+    .await
+    {
+        return MatrixError::unknown(error.to_string()).into_response();
+    }
 
     (
         StatusCode::OK,
@@ -449,6 +592,49 @@ async fn merge_remote_device_keys<S: AuthState>(
             }
         }
     }
+}
+
+/// Serve cross-signing and device keys already cached for remote users.
+async fn fill_cached_remote_keys(
+    storage: &dyn Storage,
+    server_name: &str,
+    requester: &str,
+    requested: &HashMap<String, Vec<String>>,
+    device_keys: &mut HashMap<String, Value>,
+    master_keys: &mut HashMap<String, Value>,
+    self_signing_keys: &mut HashMap<String, Value>,
+    user_signing_keys: &mut HashMap<String, Value>,
+) -> conduit::Result<()> {
+    for (uid, filter) in requested {
+        let Some(server) = conduit::signing::server_of_user_id(uid) else {
+            continue;
+        };
+        if server == server_name {
+            continue;
+        }
+        let cached = query_local_user_keys(storage, uid, filter, Some(requester)).await?;
+        if cached.devices.is_empty() && cached.master.is_none() && cached.self_signing.is_none() {
+            continue;
+        }
+        if !cached.devices.is_empty() {
+            let entry = device_keys.entry(uid.clone()).or_insert_with(|| json!({}));
+            if let Some(entry) = entry.as_object_mut() {
+                for (device_id, keys) in cached.devices {
+                    entry.entry(device_id).or_insert(keys);
+                }
+            }
+        }
+        if let Some(master) = cached.master {
+            master_keys.entry(uid.clone()).or_insert(master);
+        }
+        if let Some(key) = cached.self_signing {
+            self_signing_keys.entry(uid.clone()).or_insert(key);
+        }
+        if let Some(key) = cached.user_signing {
+            user_signing_keys.entry(uid.clone()).or_insert(key);
+        }
+    }
+    Ok(())
 }
 
 /// Copy device, master, and self-signing keys for the users we asked this
@@ -1012,13 +1198,10 @@ pub async fn device_signing_upload<S: AuthState>(
     }
 
     // Record device list change so peers see updated cross-signing keys.
-    let stream_id = match storage.record_device_list_change(user_id).await {
-        Ok(id) => id,
-        Err(e) => return MatrixError::unknown(e.to_string()).into_response(),
-    };
-    // Federate an m.device_list_update EDU. Cross-signing key changes
-    // surface as a device-less device_list_update (remotes re-query).
-    broadcast_device_list_update(&state, user_id, "", stream_id, None).await;
+    if let Err(e) = storage.record_device_list_change(user_id).await {
+        return MatrixError::unknown(e.to_string()).into_response();
+    }
+    broadcast_signing_key_update(&state, user_id).await;
 
     state.sync_notify().notify_waiters();
     (StatusCode::OK, Json(json!({}))).into_response()
@@ -1051,6 +1234,8 @@ pub async fn signatures_upload<S: AuthState>(
 
     let mut failures: HashMap<String, HashMap<String, Value>> = HashMap::new();
     let mut changed_users = std::collections::BTreeSet::new();
+    let mut own_devices = std::collections::BTreeSet::new();
+    let mut own_master = false;
     for (target_user, keys) in &body {
         for (target_key_id, signed) in keys {
             let mut fail = |error: KeyError| {
@@ -1155,13 +1340,37 @@ pub async fn signatures_upload<S: AuthState>(
                 // Signatures on my own keys are public; a user-signing
                 // signature is only visible to me.
                 changed_users.insert(me.clone());
+                if target_user == me {
+                    match storage.get_device_keys(me, target_key_id).await {
+                        Ok(Some(_)) => {
+                            own_devices.insert(target_key_id.clone());
+                        }
+                        Ok(None) => own_master = true,
+                        Err(e) => return MatrixError::unknown(e.to_string()).into_response(),
+                    }
+                }
             }
         }
     }
+    let mut announced = 0i64;
     for user in changed_users {
         match storage.record_device_list_change(&user).await {
-            Ok(stream_id) => broadcast_device_list_update(&state, &user, "", stream_id, None).await,
+            Ok(stream_id) => announced = stream_id,
             Err(e) => return MatrixError::unknown(e.to_string()).into_response(),
+        }
+    }
+    if own_master {
+        broadcast_signing_key_update(&state, me).await;
+    }
+    if !own_devices.is_empty() {
+        let published = match query_local_user_keys(storage.as_ref(), me, &[], Some(me)).await {
+            Ok(published) => published,
+            Err(e) => return MatrixError::unknown(e.to_string()).into_response(),
+        };
+        for device in own_devices {
+            if let Some(keys) = published.devices.get(&device).cloned() {
+                broadcast_device_list_update(&state, me, &device, announced, Some(keys)).await;
+            }
         }
     }
     state.sync_notify().notify_waiters();

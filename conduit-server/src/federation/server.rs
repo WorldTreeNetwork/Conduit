@@ -1451,6 +1451,19 @@ pub(crate) async fn handle_edu(
         // Record device list change so local /sync picks it up.
         state.storage.record_device_list_change(&user_id).await?;
     }
+    if edu_type == "m.signing_key_update" {
+        let stored = crate::api::client::keys::apply_signing_key_update(state.storage.as_ref(), origin, edu).await?;
+        if stored {
+            let user_id = edu
+                .get("content")
+                .and_then(|content| content.get("user_id"))
+                .and_then(|user| user.as_str())
+                .unwrap_or("");
+            if !user_id.is_empty() {
+                state.storage.record_device_list_change(user_id).await?;
+            }
+        }
+    }
     Ok(())
 }
 // ---------------------------------------------------------------------------

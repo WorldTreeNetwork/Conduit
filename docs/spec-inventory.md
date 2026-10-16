@@ -16,9 +16,9 @@ Statuses: **tested** = present and asserted by a named test; **untested** = pres
 | API | kind | tested | untested | partial | missing | n/a | total |
 |---|---|---:|---:|---:|---:|---:|---:|
 | Client-Server API | endpoints | 163 | 0 | 0 | 0 | 1 | 164 |
-| Client-Server API | requirements | 76 | 0 | 1 | 0 | 9 | 86 |
+| Client-Server API | requirements | 77 | 0 | 0 | 0 | 9 | 86 |
 | Server-Server API | endpoints | 23 | 2 | 6 | 4 | 1 | 36 |
-| Server-Server API | requirements | 15 | 0 | 14 | 9 | 3 | 41 |
+| Server-Server API | requirements | 16 | 0 | 14 | 8 | 3 | 41 |
 | Application Service API | endpoints | 11 | 0 | 0 | 0 | 0 | 11 |
 | Application Service API | requirements | 16 | 0 | 0 | 0 | 2 | 18 |
 | Push Gateway API (homeserver as client) | endpoints | 1 | 0 | 0 | 0 | 0 | 1 |
@@ -27,7 +27,7 @@ Statuses: **tested** = present and asserted by a named test; **untested** = pres
 | Identity Service API (homeserver as consumer) | requirements | 1 | 0 | 0 | 0 | 0 | 1 |
 | Room versions 1–12 | requirements | 61 | 0 | 0 | 0 | 0 | 61 |
 | Appendices | requirements | 10 | 0 | 3 | 4 | 4 | 21 |
-| All |  | 383 | 2 | 26 | 17 | 37 | 465 |
+| All |  | 385 | 2 | 25 | 16 | 37 | 465 |
 ## Gap beads
 
 New beads filed by this inventory (children of `conduit-y99`):
@@ -36,7 +36,7 @@ New beads filed by this inventory (children of `conduit-y99`):
 - `conduit-y99.29` - Room membership, summary and invite-permission gaps (POST /rooms/{id}/join, room_summary, mutual_rooms, M_INVITE_BLOCKED) (0 row(s))
 - `conduit-y99.30` - Push rule evaluation, predefined rules, GET /pushrules/global/, /notifications and thread counts (10 row(s))
 - `conduit-y99.31` - Push gateway delivery conformance (/notify payload, rejected pushkeys, retries) (4 row(s))
-- `conduit-y99.32` - Federation EDUs: m.typing, m.receipt, m.presence, m.signing_key_update in+out (5 row(s))
+- `conduit-y99.32` - Federation EDUs: m.typing, m.receipt, m.presence, m.signing_key_update in+out (3 row(s))
 - `conduit-y99.33` - PDU receipt checks: rejection, soft failure, hash-mismatch redaction, size limits (7 row(s))
 - `conduit-y99.34` - Application service transaction push conformance (Bearer hs_token, durable retry, interest rules, ephemeral) (0 row(s))
 - `conduit-y99.35` - Application service CS-API extensions (identity assertion, ts massaging, m.login.application_service login, rate-limit exemption) (0 row(s))
@@ -63,12 +63,12 @@ In-flight / pre-existing beads referenced (not duplicated):
 - `conduit-g12` - recursive auth-event verification (1 row(s))
 - `conduit-jt5` - restricted join rule evaluation (2 row(s))
 - `conduit-kqy` - federation knock (rv7+) (2 row(s))
-- `conduit-nq5` - keys/query merges cross-signing signatures (2 row(s))
+- `conduit-nq5` - keys/query merges cross-signing signatures (1 row(s))
 - `conduit-s6m` - state res v2 strictness + per-event visibility (1 row(s))
 - `conduit-vfm` - distributed UIA session store (0 row(s))
 - `conduit-y99.13` - sync membership/state/pagination semantics (4 row(s))
 - `conduit-y99.13.4` - structured filters across sync streams (3 row(s))
-- `conduit-y99.14` - device-list visibility and key identities (7 row(s))
+- `conduit-y99.14` - device-list visibility and key identities (6 row(s))
 - `conduit-y99.15` - threaded receipts, fully-read markers, typing (1 row(s))
 - `conduit-y99.16` - commit-ordered sync cursors (2 row(s))
 - `conduit-y99.18.1` - AS device create/delete (0 row(s))
@@ -83,7 +83,7 @@ In-flight / pre-existing beads referenced (not duplicated):
 - `conduit-y99.21.1` - federation media multipart/mixed (0 row(s))
 - `conduit-y99.21.2` - animated thumbnails / non-UTF-8 previews (0 row(s))
 - `conduit-y99.21.3` - media blob hygiene (0 row(s))
-- `conduit-y99.22` - federation API completeness (18 row(s))
+- `conduit-y99.22` - federation API completeness (16 row(s))
 - `conduit-y99.22.1` - send_join state before join (2 row(s))
 - `conduit-y99.22.2` - make_join ver / M_INCOMPATIBLE_ROOM_VERSION (2 row(s))
 - `conduit-y99.22.3` - event_auth endpoint (1 row(s))
@@ -322,7 +322,7 @@ In-flight / pre-existing beads referenced (not duplicated):
 | `cs.mod.content-repo` | [Content repository](https://spec.matrix.org/v1.19/client-server-api/#content-repository) | tested | `conduit-server/src/api/client/media.rs` | `production_media.rs::production_media_animated_thumbnail_and_windows_1252_preview`<br>`media.rs::preview_retention_and_admin_delete_drop_unreferenced_blobs` (+1) |  | Animated thumbnails cover the request. windows-1252 previews follow the declared charset. Remote cache and preview images expire separately. Unreferenced thumbnail blobs are deleted. |
 | `cs.mod.send-to-device` | [Send-to-Device messaging (store until ack, 100/sync, federation)](https://spec.matrix.org/v1.19/client-server-api/#send-to-device-messaging) | tested | `conduit-server/src/api/client/keys.rs`<br>`conduit-server/src/api/client/sync.rs (drain_to_device limit 100)` | `production_e2e.rs::production_to_device_sync_retries_until_acknowledged`<br>`production_e2e.rs::production_to_device_transactions_are_durable_and_do_not_reexpand_wildcards` |  |  |
 | `cs.mod.device-management` | [Device management](https://spec.matrix.org/v1.19/client-server-api/#device-management) | tested | `conduit-server/src/api/client/devices.rs` | `production_account.rs::production_device_lifecycle_with_uia_keys_and_device_lists`<br>`production_appservice.rs::identity_assertion_devices_registration_and_login` |  | Includes AS device creation (PUT 201) and UIA-free deletion. |
-| `cs.mod.e2ee` | [End-to-End Encryption (key upload/query/claim/changes, cross-signing, device lists, backups)](https://spec.matrix.org/v1.19/client-server-api/#end-to-end-encryption) | partial | `conduit-server/src/api/client/keys.rs` | `e2ee.rs::keys_claim_concurrent_no_double_spend`<br>`production_e2e.rs::production_key_inventory_wakes_sync_and_quiets_after_acknowledgement` (+1) | `conduit-y99.14` `conduit-y99.22` `conduit-y99.32` `conduit-nq5` |  |
+| `cs.mod.e2ee` | [End-to-End Encryption (key upload/query/claim/changes, cross-signing, device lists, backups)](https://spec.matrix.org/v1.19/client-server-api/#end-to-end-encryption) | tested | `conduit-server/src/api/client/keys.rs`<br>`conduit-server/src/federation/spec_v119.rs` (+1) | `production_sync.rs::signing_key_updates_federate_and_keys_query_merges_cross_signing`<br>`production_sync.rs::signature_uploads_verify_signers_and_respect_visibility` (+5) |  | Device lists name only users who share a joined room, and a departure moves them to device_lists.left. /keys/query withholds unsigned or misplaced device keys and reports display names. Cross-signing signatures merge onto device and master keys for a caller who may see them. |
 | `cs.mod.secrets` | [Secrets (storage in account data, sharing over to-device)](https://spec.matrix.org/v1.19/client-server-api/#secrets) | tested | `conduit-server/src/api/client/account_data.rs`<br>`conduit-server/src/api/client/keys.rs` | `presence.rs::account_data_global_round_trip`<br>`e2ee.rs::send_to_device_delivered_via_sync` |  | No secret-specific server behaviour; generic account data and to-device carry m.secret_storage.* and m.secret.*. |
 | `cs.mod.history-visibility` | [Room history visibility](https://spec.matrix.org/v1.19/client-server-api/#room-history-visibility) | tested | `conduit/src/auth.rs (filter_visible_for_user)` | `production_sync.rs::history_visibility_is_the_value_at_each_event`<br>`production_sync.rs::joining_preserves_state_across_a_history_visibility_gap` (+2) |  | Visibility is the value when the event was sent. Non-members are rejected unless the room is world_readable, and that change does not reveal earlier joined-era events. |
 | `cs.mod.push` | [Push notifications (rules, evaluation, pushers, notifications, counts)](https://spec.matrix.org/v1.19/client-server-api/#push-notifications) | tested | `conduit-server/src/api/client/push.rs`<br>`conduit-server/src/api/client/push/rules.rs` (+3) | `push.rs::push_rules_crud`<br>`push.rs::pusher_set_and_list` (+4) |  | Rules, evaluation once per event, counts in the same /sync response, receipts and own events clear, thread partitioning, /notifications, pushers and gateway delivery. |
@@ -395,8 +395,8 @@ In-flight / pre-existing beads referenced (not duplicated):
 | GET | [`/_matrix/federation/v1/query/{queryType}`](https://spec.matrix.org/v1.19/server-server-api/#get_matrixfederationv1queryquerytype) | partial | `conduit-server/src/federation/server.rs:1079`<br>`conduit-server/src/federation/server.rs:1080` | `federation.rs::query_profile_returns_displayname`<br>`federation_inbound.rs::inbound_signature_verified_or_rejected` (+2) | `conduit-y99.22` | Only the profile and directory query types are routed; generic queryType handling missing. |
 | GET | [`/_matrix/federation/v1/openid/userinfo`](https://spec.matrix.org/v1.19/server-server-api/#get_matrixfederationv1openiduserinfo) | tested |  | `conduit-server/tests/federation_inbound.rs::federation_directory_openid_and_local_key_query` | | A live OpenID bearer returns sub. An unknown token is M_UNAUTHORIZED. |
 | GET | [`/_matrix/federation/v1/user/devices/{userId}`](https://spec.matrix.org/v1.19/server-server-api/#get_matrixfederationv1userdevicesuserid) | tested |  | `conduit-server/tests/federation_inbound.rs::federation_directory_openid_and_local_key_query` | | Local users return device_id and stream_id. Remote users are not found. |
-| POST | [`/_matrix/federation/v1/user/keys/claim`](https://spec.matrix.org/v1.19/server-server-api/#post_matrixfederationv1userkeysclaim) | tested |  | `conduit-server/tests/federation_inbound.rs::federation_directory_openid_and_local_key_query` | | Claims a local one-time key, else the fallback. An empty claim is an empty object for that device. |
-| POST | [`/_matrix/federation/v1/user/keys/query`](https://spec.matrix.org/v1.19/server-server-api/#post_matrixfederationv1userkeysquery) | tested |  | `conduit-server/tests/federation_inbound.rs::federation_directory_openid_and_local_key_query` | | Returns stored device keys for local users named in device_keys. |
+| POST | [`/_matrix/federation/v1/user/keys/claim`](https://spec.matrix.org/v1.19/server-server-api/#post_matrixfederationv1userkeysclaim) | tested |  | `federation_inbound.rs::federation_directory_openid_and_local_key_query`<br>`production_sync.rs::signing_key_updates_federate_and_keys_query_merges_cross_signing` | | Claims a local one-time key, else the fallback. When nothing remains, the user object is empty. |
+| POST | [`/_matrix/federation/v1/user/keys/query`](https://spec.matrix.org/v1.19/server-server-api/#post_matrixfederationv1userkeysquery) | tested |  | `federation_inbound.rs::federation_directory_openid_and_local_key_query`<br>`production_sync.rs::signing_key_updates_federate_and_keys_query_merges_cross_signing` | | Returns authentic device keys for local users, with merged signatures, the master key, and the self-signing key. User-signing keys are omitted. A device that fails signature checks is withheld. |
 | GET | [`/_matrix/federation/v1/media/download/{mediaId}`](https://spec.matrix.org/v1.19/server-server-api/#get_matrixfederationv1mediadownloadmediaid) | tested | `conduit-server/src/api/client/media.rs` | `media.rs::federation_media_download_and_thumbnail_are_multipart_mixed`<br>`media.rs::federation_pending_media_waits_for_timeout_ms` |  | 200 is multipart/mixed. Pending local media waits timeout_ms, then 504 M_NOT_YET_UPLOADED. |
 | GET | [`/_matrix/federation/v1/media/thumbnail/{mediaId}`](https://spec.matrix.org/v1.19/server-server-api/#get_matrixfederationv1mediathumbnailmediaid) | tested | `conduit-server/src/api/client/media.rs` | `media.rs::federation_media_download_and_thumbnail_are_multipart_mixed`<br>`media.rs::federation_pending_media_waits_for_timeout_ms` |  | 200 is multipart/mixed. Pending local media waits timeout_ms, then 504 M_NOT_YET_UPLOADED. |
 | POST | [`/_matrix/policy/v1/sign`](https://spec.matrix.org/v1.19/server-server-api/#post_matrixpolicyv1sign) | n/a |  |  |  | *policy-server-only* Served only by Policy Servers. Homeserver-side obligation (calling it and validating signatures) is conduit-y99.45. |
@@ -436,7 +436,7 @@ In-flight / pre-existing beads referenced (not duplicated):
 | `ss.query` | [Querying for information (directory, profile, generic)](https://spec.matrix.org/v1.19/server-server-api/#querying-for-information) | partial | `conduit-server/src/federation/server.rs` | `federation_inbound.rs::query_profile_for_local_user` | `conduit-y99.22` |  |
 | `ss.openid` | [OpenID userinfo](https://spec.matrix.org/v1.19/server-server-api/#openid) | tested | `conduit-server/src/federation/spec_v119.rs (openid_userinfo)` | `production_pdu.rs::minted_openid_token_is_redeemed_by_federation_userinfo`<br>`federation_inbound.rs::federation_directory_openid_and_local_key_query` |  | A minted client token is accepted; an unknown token is 401. |
 | `ss.device-management` | [Device management (user/devices, m.device_list_update)](https://spec.matrix.org/v1.19/server-server-api/#device-management) | partial | `conduit-server/src/federation/server.rs:1015`<br>`conduit-server/src/api/client/keys.rs:174` |  | `conduit-y99.22` `conduit-y99.32` | Inbound/outbound m.device_list_update exist; /user/devices missing; no federation test of device list updates. |
-| `ss.e2ee` | [End-to-end encryption (user/keys/query, user/keys/claim, m.signing_key_update)](https://spec.matrix.org/v1.19/server-server-api/#end-to-end-encryption) | missing |  |  | `conduit-y99.22` `conduit-y99.32` |  |
+| `ss.e2ee` | [End-to-end encryption (user/keys/query, user/keys/claim, m.signing_key_update)](https://spec.matrix.org/v1.19/server-server-api/#end-to-end-encryption) | tested | `conduit-server/src/federation/spec_v119.rs`<br>`conduit-server/src/api/client/keys.rs` (+1) | `production_sync.rs::signing_key_updates_federate_and_keys_query_merges_cross_signing` |  | Federation query returns authentic device keys with merged signatures, the master key, and the self-signing key, and omits user-signing keys. A second one-time-key claim returns an empty user object. Inbound and outbound m.signing_key_update are stored and sent to servers that share a joined room. |
 | `ss.to-device` | [Send-to-device messaging (m.direct_to_device)](https://spec.matrix.org/v1.19/server-server-api/#send-to-device-messaging) | tested | `conduit-server/src/federation/server.rs:958`<br>`conduit-server/src/federation/client.rs:706` | `peers/synapse_to_device.py (live Synapse)`<br>`production_e2e.rs::production_to_device_transactions_are_durable_and_do_not_reexpand_wildcards` |  |  |
 | `ss.content-repo` | [Content repository over federation (multipart/mixed)](https://spec.matrix.org/v1.19/server-server-api/#content-repository) | tested | `conduit-server/src/api/client/media.rs` | `media.rs::remote_media_is_fetched_over_federation_cached_and_served`<br>`media.rs::federation_media_download_and_thumbnail_are_multipart_mixed`<br>`media.rs::federation_pending_media_waits_for_timeout_ms` |  | Download and thumbnail answer multipart/mixed. Pending local media waits timeout_ms, then 504 M_NOT_YET_UPLOADED. |
 | `ss.acls` | [Server ACLs enforcement](https://spec.matrix.org/v1.19/server-server-api/#server-access-control-lists-acls) | tested | `conduit/src/server_acl.rs`<br>`conduit-server/src/federation/server.rs` | `production_pdu.rs::server_acl_denies_remote_participation_until_lifted`<br>`server_acl.rs::acl_order_globs_ports_and_ip_literals` |  | Denied origins are rejected on the MUST endpoints and per PDU on /send; lifting the deny list restores access. |
