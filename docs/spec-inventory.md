@@ -637,4 +637,4 @@ In-flight / pre-existing beads referenced (not duplicated):
 
 ## Maintaining this inventory
 
-When a lane lands work, update the affected rows (status, code, tests, gap_beads) in both `spec-inventory.json` and this file, and the summary counts. A row may only move to `implemented+tested` with a named test that asserts the spec behaviour. The register entry `complete-server-requirement-inventory` in `matrix-compliance.json` points here; `full_compliance_proven` stays false until every non-n/a row is tested.
+When a lane lands work, update the affected rows (status, code, tests, gap_beads) in both `spec-inventory.json` and this file, and the summary counts. A row may only move to `implemented+tested` with a named test that asserts the spec behaviour. The register entry `complete-server-requirement-inventory` in `matrix-compliance.json` points here. `full_compliance_proven` is true when every non-n/a row is `implemented+tested`, and false while any such row is missing, partial, or untested.

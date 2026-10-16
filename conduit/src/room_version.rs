@@ -3,8 +3,8 @@
 //! <https://spec.matrix.org/v1.19/rooms/>
 //!
 //! Redaction, event IDs, and state resolution v1 live here so a test can call
-//! them without HTTP. Authorization uses [`spec_default_when_absent`].
-//! [`version_of_content`] keeps the historical kernel default for other readers.
+//! them without HTTP. Authorization and [`version_of_content`] use
+//! [`spec_default_when_absent`].
 
 use std::collections::HashMap;
 
@@ -55,15 +55,11 @@ pub fn spec_default_when_absent(content: &Value) -> u32 {
         .unwrap_or(1)
 }
 
-/// Version written on an event. Omitted fields stay on the historical kernel
-/// default (11) so fixtures that predate an explicit field keep their meaning.
-/// [`spec_default_when_absent`] is the spec rule.
+/// Room version selected by a create event's content.
+///
+/// An absent or unknown `room_version` is version 1.
 pub fn version_of_content(content: &Value) -> u32 {
-    content
-        .get("room_version")
-        .and_then(Value::as_str)
-        .and_then(parse)
-        .unwrap_or(11)
+    spec_default_when_absent(content)
 }
 
 pub fn version_of_event(event: &Event) -> u32 {
@@ -400,7 +396,8 @@ mod tests {
     fn absent_room_version_is_spec_default_one() {
         assert_eq!(spec_default_when_absent(&json!({})), 1);
         assert_eq!(spec_default_when_absent(&json!({"room_version": "12"})), 12);
-        assert_eq!(version_of_content(&json!({})), 11);
+        assert_eq!(version_of_content(&json!({})), 1);
+        assert_eq!(version_of_content(&json!({"room_version": "12"})), 12);
     }
 
     #[test]
