@@ -180,6 +180,21 @@ pub fn event_id_for(pdu: &Pdu, version: u32) -> Result<Option<String>, EventIdEr
     Ok(Some(format!("${encoded}")))
 }
 
+/// Power-level content as the auth rules see it.
+///
+/// Versions 1–5 coerce integer strings and truncated floats. Versions 6–9
+/// still accept an integer encoded as a string, and reject floats. Version
+/// 10 rejects anything that is not a JSON integer.
+pub fn power_levels_for_auth(content: &Value, version: u32) -> Value {
+    if version < 6 {
+        coerce_power_level_values(content)
+    } else if version < 10 {
+        coerce_integer_power_level_strings(content)
+    } else {
+        content.clone()
+    }
+}
+
 /// Room versions 1–5 accept power-level numbers as strings or truncated floats.
 pub fn coerce_power_level_values(content: &Value) -> Value {
     let Some(map) = content.as_object() else {
@@ -202,6 +217,38 @@ pub fn coerce_power_level_values(content: &Value) -> Value {
                 } else {
                     next.insert(name, value);
                 }
+            }
+            out.insert(key.to_owned(), Value::Object(next));
+        }
+    }
+    Value::Object(out)
+}
+
+/// Room versions 6–9 keep the deprecated integer-as-string power levels.
+/// Floats stay floats so a later integer parse rejects them.
+pub fn coerce_integer_power_level_strings(content: &Value) -> Value {
+    let Some(map) = content.as_object() else {
+        return content.clone();
+    };
+    let mut out = map.clone();
+    for key in ["ban", "events_default", "state_default", "users_default", "redact", "kick", "invite"] {
+        if let Some(Value::String(text)) = out.get(key) {
+            if let Some(n) = coerce_integer(&Value::String(text.clone())) {
+                out.insert(key.to_owned(), Value::from(n));
+            }
+        }
+    }
+    for key in ["events", "notifications", "users"] {
+        if let Some(Value::Object(inner)) = out.get(key).cloned() {
+            let mut next = Map::new();
+            for (name, value) in inner {
+                if let Value::String(text) = &value {
+                    if let Some(n) = coerce_integer(&Value::String(text.clone())) {
+                        next.insert(name, Value::from(n));
+                        continue;
+                    }
+                }
+                next.insert(name, value);
             }
             out.insert(key.to_owned(), Value::Object(next));
         }

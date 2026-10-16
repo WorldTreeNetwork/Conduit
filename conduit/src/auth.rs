@@ -263,13 +263,12 @@ fn get_pl_content(auth_state: &StateMap<Event>) -> PowerLevelsContent {
     let Some(ev) = auth_state.get(&("m.room.power_levels".to_owned(), String::new())) else {
         return PowerLevelsContent::default();
     };
-    // Room versions 1–5 keep string and truncated-float power levels in the
-    // event. Later checks must see the coerced integers, not a parse failure.
-    let content = if room_version_from_state(auth_state) < 6 {
-        crate::room_version::coerce_power_level_values(&ev.content)
-    } else {
-        ev.content.clone()
-    };
+    // Versions 1–5 coerce strings and truncated floats. Versions 6–9 coerce
+    // integer strings only. Version 10 keeps JSON integers and nothing else.
+    let content = crate::room_version::power_levels_for_auth(
+        &ev.content,
+        room_version_from_state(auth_state),
+    );
     parse_power_levels(&content).unwrap_or_default()
 }
 
@@ -965,13 +964,9 @@ fn check_power_levels(event: &Event, auth_state: &StateMap<Event>) -> Result<(),
         });
     }
 
-    // Parse the proposed new power_levels content. Versions 1–5 coerce
-    // strings and truncated floats; version 6+ rejects anything but integers.
-    let content = if version < 6 {
-        crate::room_version::coerce_power_level_values(&event.content)
-    } else {
-        event.content.clone()
-    };
+    // Versions 1–5 coerce strings and truncated floats. Versions 6–9 still
+    // accept an integer encoded as a string. Version 10 requires JSON integers.
+    let content = crate::room_version::power_levels_for_auth(&event.content, version);
     let new_pl = parse_power_levels(&content)
         .map_err(|e| AuthError::ContentParseError(e.to_string()))?;
     if version >= 12 {
@@ -1578,8 +1573,8 @@ mod tests {
             "v5 coerces string power levels"
         );
         assert!(
-            check_auth(&string_levels, &joined).is_err(),
-            "v6 rejects a non-integer power level"
+            check_auth(&string_levels, &joined).is_ok(),
+            "v6 accepts an integer power level encoded as a string"
         );
 
         let knock = make_member_event("$knock", "@kate:example.com", "@kate:example.com", room, "knock");
@@ -2608,6 +2603,111 @@ mod tests {
         assert!(
             check_auth(&knock, &room_at("knock_restricted")).is_err(),
             "v9 does not allow knocking on knock_restricted"
+        );
+    }
+
+    /// Room version 10 accepts `knock_restricted` and rejects a power level
+    /// that is an integer encoded as a string. Version 9 still accepts that
+    /// string, and still rejects a float.
+    #[test]
+    fn room_version_10_accepts_knock_restricted_and_rejects_string_power_levels() {
+        let alice = "@alice:example.com";
+        let bob = "@bob:example.com";
+        let dave = "@dave:example.com";
+        let room = "!room:example.com";
+        let room_at = |version: &str, rule: &str| {
+            let mut state = HashMap::new();
+            apply_state_event(&mut state, &create_with(version, alice, room, json!({ "creator": alice })));
+            apply_state_event(&mut state, &make_member_event("$aj", alice, alice, room, "join"));
+            apply_state_event(&mut state, &make_member_event("$dj", alice, dave, room, "join"));
+            apply_state_event(
+                &mut state,
+                &make_join_rules_event_with_allow(
+                    alice,
+                    room,
+                    rule,
+                    json!([{ "type": "m.room_membership", "room_id": "!space:example.com" }]),
+                ),
+            );
+            apply_state_event(
+                &mut state,
+                &make_power_levels_event(
+                    "$pl",
+                    alice,
+                    room,
+                    json!({ "invite": 50, "users": { alice: 100, dave: 50 } }),
+                ),
+            );
+            state
+        };
+        let mut join = make_member_event("$bj", bob, bob, room, "join");
+        join.content["join_authorised_via_users_server"] = json!(dave);
+        assert!(
+            check_auth(&join, &room_at("10", "knock_restricted")).is_ok(),
+            "v10 accepts a knock_restricted join from an authoriser"
+        );
+        assert!(
+            check_auth(&join, &room_at("9", "knock_restricted")).is_err(),
+            "v9 still rejects knock_restricted"
+        );
+        let knock = make_member_event("$bk", bob, bob, room, "knock");
+        assert!(
+            check_auth(&knock, &room_at("10", "knock_restricted")).is_ok(),
+            "v10 allows a knock when the join rule is knock_restricted"
+        );
+
+        let mut v9 = HashMap::new();
+        apply_state_event(&mut v9, &create_with("9", alice, room, json!({ "creator": alice })));
+        apply_state_event(&mut v9, &make_member_event("$aj", alice, alice, room, "join"));
+        apply_state_event(&mut v9, &make_member_event("$bj", alice, bob, room, "join"));
+        let strings = make_power_levels_event(
+            "$strings",
+            alice,
+            room,
+            json!({
+                "events": { "m.room.name": "50" },
+                "events_default": "0",
+                "users": { alice: "100", bob: "0" }
+            }),
+        );
+        assert!(check_auth(&strings, &v9).is_ok(), "v9 accepts integer strings");
+        let mut v10 = HashMap::new();
+        apply_state_event(&mut v10, &create_with("10", alice, room, json!({ "creator": alice })));
+        apply_state_event(&mut v10, &make_member_event("$aj", alice, alice, room, "join"));
+        apply_state_event(&mut v10, &make_member_event("$bj", alice, bob, room, "join"));
+        assert!(check_auth(&strings, &v10).is_err(), "v10 rejects integer strings");
+        let integers = make_power_levels_event(
+            "$ints",
+            alice,
+            room,
+            json!({
+                "events": { "m.room.name": 50 },
+                "events_default": 0,
+                "users": { alice: 100, bob: 0 }
+            }),
+        );
+        assert!(check_auth(&integers, &v10).is_ok(), "v10 accepts JSON integers");
+        let float_level = make_power_levels_event(
+            "$float",
+            alice,
+            room,
+            json!({ "users": { alice: 100 }, "events_default": 0.9 }),
+        );
+        assert!(check_auth(&float_level, &v9).is_err(), "v9 still rejects a float power level");
+
+        apply_state_event(&mut v9, &strings);
+        let name = make_event(
+            "$name",
+            "m.room.name",
+            bob,
+            room,
+            Some(""),
+            json!({ "name": "n" }),
+            vec![],
+        );
+        assert!(
+            matches!(check_auth(&name, &v9), Err(AuthError::InsufficientPowerLevel { .. })),
+            "v9 uses the string level 50, so bob at 0 cannot rename the room"
         );
     }
 

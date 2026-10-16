@@ -106,10 +106,10 @@
     },
     "rv": {
       "requirement": {
-        "implemented+tested": 53,
+        "implemented+tested": 54,
         "implemented-untested": 0,
         "partial": 6,
-        "missing": 2,
+        "missing": 1,
         "not-applicable": 0,
         "total": 61
       }
@@ -10934,14 +10934,18 @@
       "title": "Room version 10: Authorisation rules",
       "source": "https://spec.matrix.org/v1.19/rooms/v10/#authorisation-rules",
       "role": "homeserver",
-      "status": "missing",
-      "code": [],
-      "tests": [],
-      "tests_total": 0,
-      "gap_beads": [
-        "conduit-y99.23"
+      "status": "implemented+tested",
+      "code": [
+        {
+          "loc": "conduit/src/auth.rs"
+        }
       ],
-      "notes": "Kernel implements room version 11 only."
+      "tests": [
+        "conduit/src/auth.rs::room_version_10_accepts_knock_restricted_and_rejects_string_power_levels"
+      ],
+      "tests_total": 1,
+      "gap_beads": [],
+      "notes": "Room version 10 accepts knock_restricted joins and knocks. It rejects power levels encoded as strings. Version 9 still accepts those strings and still rejects floats."
     },
     {
       "id": "rv.v10.redaction",

@@ -25,9 +25,9 @@ Statuses: **tested** = present and asserted by a named test; **untested** = pres
 | Push Gateway API (homeserver as client) | requirements | 1 | 0 | 0 | 0 | 1 | 2 |
 | Identity Service API (homeserver as consumer) | endpoints | 5 | 0 | 2 | 0 | 16 | 23 |
 | Identity Service API (homeserver as consumer) | requirements | 1 | 0 | 0 | 0 | 0 | 1 |
-| Room versions 1–12 | requirements | 53 | 0 | 6 | 2 | 0 | 61 |
+| Room versions 1–12 | requirements | 54 | 0 | 6 | 1 | 0 | 61 |
 | Appendices | requirements | 10 | 0 | 3 | 4 | 4 | 21 |
-| All |  | 350 | 3 | 56 | 19 | 37 | 465 |
+| All |  | 351 | 3 | 56 | 18 | 37 | 465 |
 ## Gap beads
 
 New beads filed by this inventory (children of `conduit-y99`):
@@ -89,7 +89,7 @@ In-flight / pre-existing beads referenced (not duplicated):
 - `conduit-y99.22.3` - event_auth endpoint (1 row(s))
 - `conduit-y99.22.4` - EDU U+0000 / per-EDU error isolation (2 row(s))
 - `conduit-y99.22.5` - transactions/outbox retention (1 row(s))
-- `conduit-y99.23` - room versions 1-12 (14 row(s))
+- `conduit-y99.23` - room versions 1-12 (13 row(s))
 - `conduit-y99.24` - sync unread_notifications hard-coded to zero (3 row(s))
 - `conduit-y99.25` - profile changes not propagated to member events (0 row(s))
 - `conduit-y99.26` - /messages hides create/initial join (2 row(s))
@@ -591,7 +591,7 @@ In-flight / pre-existing beads referenced (not duplicated):
 | `rv.v9.state-res` | [Room version 9: State resolution algorithm](https://spec.matrix.org/v1.19/rooms/v9/#state-resolution) | tested | `conduit/src/room/state_res.rs` | `state_res.rs::room_version_9_prefers_later_timestamp_over_greater_depth` |  | Room version 9 keeps state resolution v2. A later origin_server_ts beats a greater depth. Version 1 keeps the deeper event. |
 | `rv.v9.canonical-json` | [Room version 9: Canonical JSON / integer rules](https://spec.matrix.org/v1.19/rooms/v9/#canonical-json) | partial | `conduit/src/canonical_json.rs` |  | `conduit-y99.23` | Version-independent canonical JSON implemented; v6+ integer-range enforcement shared with v11. |
 | `rv.v10.event-format` | [Room version 10: Event format and event IDs](https://spec.matrix.org/v1.19/rooms/v10/#event-format) | tested |  | `conduit/src/room_version.rs::event_ids_follow_the_version_encoding` | | Reference-hash event ids. v3 is standard base64; v4-v10 share the URL-safe hash; v11 and v12 share the v11 redaction. A v12 create omits room_id. |
-| `rv.v10.auth-rules` | [Room version 10: Authorisation rules](https://spec.matrix.org/v1.19/rooms/v10/#authorisation-rules) | missing |  |  | `conduit-y99.23` | Kernel implements room version 11 only. |
+| `rv.v10.auth-rules` | [Room version 10: Authorisation rules](https://spec.matrix.org/v1.19/rooms/v10/#authorisation-rules) | tested | `conduit/src/auth.rs` | `auth.rs::room_version_10_accepts_knock_restricted_and_rejects_string_power_levels` |  | Room version 10 accepts knock_restricted joins and knocks. It rejects power levels encoded as strings. Version 9 still accepts those strings and still rejects floats. |
 | `rv.v10.redaction` | [Room version 10: Redaction algorithm](https://spec.matrix.org/v1.19/rooms/v10/#redactions) | tested |  | `conduit/src/room_version.rs::v6_redaction_drops_aliases_and_v11_drops_legacy_top_level_keys` | | v10 redaction still drops invite; v11 keeps it. |
 | `rv.v10.state-res` | [Room version 10: State resolution algorithm](https://spec.matrix.org/v1.19/rooms/v10/#state-resolution) | missing |  |  | `conduit-y99.23` | Kernel implements room version 11 only. |
 | `rv.v10.canonical-json` | [Room version 10: Canonical JSON / integer rules](https://spec.matrix.org/v1.19/rooms/v10/#canonical-json) | partial | `conduit/src/canonical_json.rs` |  | `conduit-y99.23` | Version-independent canonical JSON implemented; v6+ integer-range enforcement shared with v11. |
