@@ -16,7 +16,7 @@ Statuses: **tested** = present and asserted by a named test; **untested** = pres
 | API | kind | tested | untested | partial | missing | n/a | total |
 |---|---|---:|---:|---:|---:|---:|---:|
 | Client-Server API | endpoints | 163 | 0 | 0 | 0 | 1 | 164 |
-| Client-Server API | requirements | 73 | 0 | 4 | 0 | 9 | 86 |
+| Client-Server API | requirements | 74 | 0 | 3 | 0 | 9 | 86 |
 | Server-Server API | endpoints | 23 | 2 | 6 | 4 | 1 | 36 |
 | Server-Server API | requirements | 15 | 0 | 14 | 9 | 3 | 41 |
 | Application Service API | endpoints | 11 | 0 | 0 | 0 | 0 | 11 |
@@ -27,7 +27,7 @@ Statuses: **tested** = present and asserted by a named test; **untested** = pres
 | Identity Service API (homeserver as consumer) | requirements | 1 | 0 | 0 | 0 | 0 | 1 |
 | Room versions 1–12 | requirements | 61 | 0 | 0 | 0 | 0 | 61 |
 | Appendices | requirements | 10 | 0 | 3 | 4 | 4 | 21 |
-| All |  | 380 | 2 | 29 | 17 | 37 | 465 |
+| All |  | 381 | 2 | 28 | 17 | 37 | 465 |
 ## Gap beads
 
 New beads filed by this inventory (children of `conduit-y99`):
@@ -81,8 +81,8 @@ In-flight / pre-existing beads referenced (not duplicated):
 - `conduit-y99.20.1` - remote publicRooms + POST filters over federation (6 row(s))
 - `conduit-y99.20.2` - federated knocking (4 row(s))
 - `conduit-y99.21.1` - federation media multipart/mixed (0 row(s))
-- `conduit-y99.21.2` - animated thumbnails / non-UTF-8 previews (2 row(s))
-- `conduit-y99.21.3` - media blob hygiene (1 row(s))
+- `conduit-y99.21.2` - animated thumbnails / non-UTF-8 previews (0 row(s))
+- `conduit-y99.21.3` - media blob hygiene (0 row(s))
 - `conduit-y99.22` - federation API completeness (18 row(s))
 - `conduit-y99.22.1` - send_join state before join (2 row(s))
 - `conduit-y99.22.2` - make_join ver / M_INCOMPATIBLE_ROOM_VERSION (2 row(s))
@@ -186,8 +186,8 @@ In-flight / pre-existing beads referenced (not duplicated):
 | GET | [`/_matrix/client/v1/media/config`](https://spec.matrix.org/v1.19/client-server-api/#get_matrixclientv1mediaconfig) | tested | `conduit-server/src/api/client/media.rs:147` | `production_media.rs::production_media_config_parity_and_upload_limit` |  |  |
 | GET | [`/_matrix/client/v1/media/download/{serverName}/{mediaId}`](https://spec.matrix.org/v1.19/client-server-api/#get_matrixclientv1mediadownloadservernamemediaid) | tested | `conduit-server/src/api/client/media.rs:156` | `media.rs::download_html_forced_attachment`<br>`media.rs::download_round_trip` (+10) |  |  |
 | GET | [`/_matrix/client/v1/media/download/{serverName}/{mediaId}/{fileName}`](https://spec.matrix.org/v1.19/client-server-api/#get_matrixclientv1mediadownloadservernamemediaidfilename) | tested | `conduit-server/src/api/client/media.rs:157` | `media.rs::download_with_filename_includes_disposition`<br>`production_media.rs::production_media_download_headers_follow_spec` |  |  |
-| GET | [`/_matrix/client/v1/media/preview_url`](https://spec.matrix.org/v1.19/client-server-api/#get_matrixclientv1mediapreview_url) | tested | `conduit-server/src/api/client/media.rs:149` | `production_media.rs::production_media_preview_url_opengraph_rehost_cache_and_ts`<br>`production_media.rs::production_media_preview_url_refuses_internal_destinations` (+2) |  |  |
-| GET | [`/_matrix/client/v1/media/thumbnail/{serverName}/{mediaId}`](https://spec.matrix.org/v1.19/client-server-api/#get_matrixclientv1mediathumbnailservernamemediaid) | tested | `conduit-server/src/api/client/media.rs:161` | `media.rs::remote_media_is_fetched_over_federation_cached_and_served`<br>`media.rs::thumbnail_cached_on_second_call` (+5) | `conduit-y99.21.2` | Animated thumbnails open (P3). |
+| GET | [`/_matrix/client/v1/media/preview_url`](https://spec.matrix.org/v1.19/client-server-api/#get_matrixclientv1mediapreview_url) | tested | `conduit-server/src/api/client/media.rs:149` | `production_media.rs::production_media_preview_url_opengraph_rehost_cache_and_ts`<br>`production_media.rs::production_media_animated_thumbnail_and_windows_1252_preview` (+3) |  | HTML uses the Content-Type charset, else a meta charset, else UTF-8, else windows-1252. |
+| GET | [`/_matrix/client/v1/media/thumbnail/{serverName}/{mediaId}`](https://spec.matrix.org/v1.19/client-server-api/#get_matrixclientv1mediathumbnailservernamemediaid) | tested | `conduit-server/src/api/client/media.rs:161` | `production_media.rs::production_media_animated_thumbnail_and_windows_1252_preview`<br>`media.rs::thumbnail_cached_on_second_call` (+6) |  | animated=true returns an animated GIF no smaller than requested. |
 | POST | [`/_matrix/media/v1/create`](https://spec.matrix.org/v1.19/client-server-api/#post_matrixmediav1create) | tested | `conduit-server/src/api/client/media.rs:145` | `production_media.rs::production_media_async_upload_lifecycle`<br>`production_media.rs::production_media_pending_limit_and_expiry` |  |  |
 | GET | [`/_matrix/media/v3/config`](https://spec.matrix.org/v1.19/client-server-api/#get_matrixmediav3config) *(deprecated)* | tested | `conduit-server/src/api/client/media.rs:146` | `media.rs::media_config_returns_upload_limit`<br>`production_media.rs::production_media_config_parity_and_upload_limit` |  |  |
 | GET | [`/_matrix/media/v3/download/{serverName}/{mediaId}`](https://spec.matrix.org/v1.19/client-server-api/#get_matrixmediav3downloadservernamemediaid) *(deprecated)* | tested | `conduit-server/src/api/client/media.rs:150` | `media.rs::remote_media_is_fetched_over_federation_cached_and_served`<br>`production_media.rs::production_media_freeze_can_be_disabled` (+1) |  |  |
@@ -319,7 +319,7 @@ In-flight / pre-existing beads referenced (not duplicated):
 | `cs.mod.receipts` | [Receipts (m.read, m.read.private, threaded)](https://spec.matrix.org/v1.19/client-server-api/#receipts) | tested | `conduit-server/src/api/client/receipts.rs`<br>`conduit-server/src/federation/server.rs` | `production_sync.rs::threaded_and_unthreaded_receipts_coexist`<br>`presence.rs::local_public_receipt_is_federated_and_private_is_not` (+2) |  | Unthreaded, main, and thread-root receipts coexist, and m.read.private stays local. A public m.read is federated as an m.receipt EDU. A version-12 create event with an empty room_id still belongs to its room. |
 | `cs.mod.read-markers` | [Read and unread markers (m.fully_read, m.marked_unread)](https://spec.matrix.org/v1.19/client-server-api/#read-and-unread-markers) | tested | `conduit-server/src/api/client/room_content/events.rs` | `production_rooms.rs::read_markers_and_room_tags`<br>`production_sync.rs::threaded_and_unthreaded_receipts_coexist` |  | POST /read_markers stores m.fully_read plus public and private receipts. The receipt endpoint rejects m.fully_read and honours thread_id. |
 | `cs.mod.presence` | [Presence](https://spec.matrix.org/v1.19/client-server-api/#presence) | tested | `conduit-server/src/api/client/presence.rs`<br>`conduit-server/src/federation/server.rs` | `production_e2e.rs::production_receipt_overwrites_and_presence_respect_privacy`<br>`federation_inbound.rs::inbound_presence_edu_applies_only_the_sending_servers_users` (+1) |  | Local presence plus inbound and outbound m.presence EDUs. A push entry must name a user of the sending server, a known presence, and last_active_ago. Outbound updates go to servers that share a joined room. The five-minute idle transition stays local. |
-| `cs.mod.content-repo` | [Content repository](https://spec.matrix.org/v1.19/client-server-api/#content-repository) | partial | `conduit-server/src/api/client/media.rs` | `production_media.rs::production_media_async_upload_lifecycle` | `conduit-y99.21.2` `conduit-y99.21.3` | Animated thumbnails and blob hygiene remain. |
+| `cs.mod.content-repo` | [Content repository](https://spec.matrix.org/v1.19/client-server-api/#content-repository) | tested | `conduit-server/src/api/client/media.rs` | `production_media.rs::production_media_animated_thumbnail_and_windows_1252_preview`<br>`media.rs::preview_retention_and_admin_delete_drop_unreferenced_blobs` (+1) |  | Animated thumbnails cover the request. windows-1252 previews follow the declared charset. Remote cache and preview images expire separately. Unreferenced thumbnail blobs are deleted. |
 | `cs.mod.send-to-device` | [Send-to-Device messaging (store until ack, 100/sync, federation)](https://spec.matrix.org/v1.19/client-server-api/#send-to-device-messaging) | tested | `conduit-server/src/api/client/keys.rs`<br>`conduit-server/src/api/client/sync.rs (drain_to_device limit 100)` | `production_e2e.rs::production_to_device_sync_retries_until_acknowledged`<br>`production_e2e.rs::production_to_device_transactions_are_durable_and_do_not_reexpand_wildcards` |  |  |
 | `cs.mod.device-management` | [Device management](https://spec.matrix.org/v1.19/client-server-api/#device-management) | tested | `conduit-server/src/api/client/devices.rs` | `production_account.rs::production_device_lifecycle_with_uia_keys_and_device_lists`<br>`production_appservice.rs::identity_assertion_devices_registration_and_login` |  | Includes AS device creation (PUT 201) and UIA-free deletion. |
 | `cs.mod.e2ee` | [End-to-End Encryption (key upload/query/claim/changes, cross-signing, device lists, backups)](https://spec.matrix.org/v1.19/client-server-api/#end-to-end-encryption) | partial | `conduit-server/src/api/client/keys.rs` | `e2ee.rs::keys_claim_concurrent_no_double_spend`<br>`production_e2e.rs::production_key_inventory_wakes_sync_and_quiets_after_acknowledgement` (+1) | `conduit-y99.14` `conduit-y99.22` `conduit-y99.32` `conduit-nq5` |  |

@@ -17,8 +17,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use conduit::storage::Storage;
-
+use crate::api::client::media::{MediaState, purge_media_blobs};
 use crate::api::client::{AuthState, AuthedUser, MatrixError, hash_password, hash_token, generate_token};
 
 // ---------------------------------------------------------------------------
@@ -273,16 +272,15 @@ pub async fn list_media<S: AuthState>(
     }
 }
 
-pub async fn delete_media<S: AuthState>(
+pub async fn delete_media<S: AuthState + MediaState>(
     State(state): State<S>,
     admin: AdminAuthed,
     Path(media_id): Path<String>,
 ) -> Response {
-    let storage = state.storage();
-
-    // We need server_name to locate the media. Assume local media by default.
-    let server_name = state.server_name().to_owned();
-    match storage.delete_media(&media_id, &server_name).await {
+    let storage = AuthState::storage(&state);
+    // Local media is keyed by this server's name.
+    let server_name = AuthState::server_name(&state).to_owned();
+    match purge_media_blobs(storage.as_ref(), MediaState::blob_store(&state), &media_id, &server_name).await {
         Ok(_) => {}
         Err(e) => return MatrixError::unknown(e.to_string()).into_response(),
     }

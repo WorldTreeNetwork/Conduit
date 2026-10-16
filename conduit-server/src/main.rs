@@ -27,7 +27,7 @@ use hickory_resolver::TokioAsyncResolver;
 use conduit::{keys::ServerKey, storage::Storage};
 use conduit_server::{
     api::client::{AuthState, TxnCacheKey, TypingStore, PresenceStore},
-    api::client::media::{MediaState, cleanup_remote_media},
+    api::client::media::{MediaState, cleanup_preview_media, cleanup_remote_media},
     app_service::{self, AppService},
     federation,
     federation::{
@@ -790,6 +790,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Ok(n) if n > 0 => tracing::info!(deleted = n, "remote media retention cleanup"),
                     Ok(_) => {}
                     Err(e) => tracing::warn!(error = %e, "remote media retention cleanup failed"),
+                }
+                match cleanup_preview_media(&*storage_clone, &blob_clone, max_age).await {
+                    Ok(n) if n > 0 => tracing::info!(deleted = n, "preview media retention cleanup"),
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!(error = %e, "preview media retention cleanup failed"),
                 }
             }
         });

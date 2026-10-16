@@ -901,3 +901,223 @@ async fn oversized_remote_media_is_502_too_large() {
     assert_eq!(json_body(resp).await["errcode"], "M_TOO_LARGE");
     assert!(MediaState::storage(&state).get_media("huge", "remote.example").await.unwrap().is_none());
 }
+
+/// Remote cache and URL-preview images share a null uploader. Preview images
+/// stay while a live preview names them, then follow the same idle window.
+/// Deleting media removes thumbnail blobs that nothing else references, and
+/// leaves a content-addressed blob that another row still uses.
+#[tokio::test]
+async fn preview_retention_and_admin_delete_drop_unreferenced_blobs() {
+    use std::path::Path;
+    use axum::routing::delete;
+    use chrono::{Duration as ChronoDuration, Utc};
+    use conduit::storage::{MediaMetadata, ThumbnailMetadata, UrlPreview};
+    use conduit_server::api::admin as admin_api;
+    use conduit_server::api::client::media::{cleanup_preview_media, cleanup_remote_media};
+
+    let db = TempDb::new().await;
+    let tmp = TempDir::new().unwrap();
+    let state = make_test_state(&db, &tmp).await;
+    let storage = Arc::clone(&state.storage);
+    let blob = state.blob_store.clone();
+    let old = Utc::now() - ChronoDuration::days(40);
+    let fresh = Utc::now();
+
+    async fn store(
+        storage: &Arc<dyn Storage>,
+        blob: &conduit_server::BlobStore,
+        id: &str,
+        bytes: &[u8],
+        purpose: &str,
+        uploader: Option<&str>,
+        accessed: chrono::DateTime<Utc>,
+    ) -> String {
+        let (_sha, path, size) = blob.put(bytes).await.unwrap();
+        storage
+            .insert_media(&MediaMetadata {
+                media_id: id.to_owned(),
+                origin_server: "localhost".into(),
+                uploader: uploader.map(str::to_owned),
+                content_type: Some("image/png".into()),
+                upload_name: None,
+                file_size: size as i64,
+                sha256: _sha,
+                storage_path: path.clone(),
+                uploaded_at: accessed,
+                last_accessed: accessed,
+            })
+            .await
+            .unwrap();
+        storage.set_media_purpose(id, "localhost", purpose).await.unwrap();
+        path
+    }
+
+    let remote_bytes = b"remote-cache-bytes-9f3a".as_slice();
+    let remote_path = store(&storage, &blob, "remote1", remote_bytes, "remote", None, old).await;
+    let (_sha, thumb_path, thumb_size) = blob.put(b"remote-thumb-bytes-9f3a").await.unwrap();
+    storage
+        .insert_thumbnail(&ThumbnailMetadata {
+            media_id: "remote1".into(),
+            origin_server: "localhost".into(),
+            width: 8,
+            height: 8,
+            method: "scale".into(),
+            content_type: "image/png".into(),
+            file_size: thumb_size as i64,
+            storage_path: thumb_path.clone(),
+        })
+        .await
+        .unwrap();
+    let kept_preview = store(&storage, &blob, "previewkeep", b"preview-kept", "preview", None, old).await;
+    let dropped_preview = store(&storage, &blob, "previewdrop", b"preview-dropped", "preview", None, old).await;
+    let _fresh_preview = store(&storage, &blob, "previewfresh", b"preview-fresh", "preview", None, fresh).await;
+    let upload_path = store(&storage, &blob, "userupload", b"user-upload", "upload", Some("@alice:localhost"), old).await;
+    storage
+        .insert_url_preview(&UrlPreview {
+            url: "https://example.org/kept".into(),
+            fetched_at: fresh,
+            expires_at: fresh + ChronoDuration::hours(2),
+            og: json!({ "og:image": "mxc://localhost/previewkeep" }),
+        })
+        .await
+        .unwrap();
+
+    let removed = cleanup_remote_media(storage.as_ref(), &blob, std::time::Duration::from_secs(30 * 24 * 3600))
+        .await
+        .unwrap();
+    assert_eq!(removed, 1, "only the stale remote cache row is swept");
+    assert!(storage.get_media("remote1", "localhost").await.unwrap().is_none());
+    assert!(!tmp.path().join(&remote_path).exists(), "remote blob removed");
+    assert!(!tmp.path().join(&thumb_path).exists(), "thumbnail blob removed with its media");
+    for id in ["previewkeep", "previewdrop", "previewfresh", "userupload"] {
+        assert!(storage.get_media(id, "localhost").await.unwrap().is_some(), "{id} must survive the remote sweep");
+    }
+    assert!(tmp.path().join(&kept_preview).exists());
+    assert!(tmp.path().join(&dropped_preview).exists());
+
+    let removed = cleanup_preview_media(storage.as_ref(), &blob, std::time::Duration::from_secs(30 * 24 * 3600))
+        .await
+        .unwrap();
+    assert_eq!(removed, 1, "only the idle unreferenced preview is removed");
+    assert!(storage.get_media("previewdrop", "localhost").await.unwrap().is_none());
+    assert!(!tmp.path().join(&dropped_preview).exists());
+    assert!(storage.get_media("previewkeep", "localhost").await.unwrap().is_some());
+    assert!(storage.get_media("previewfresh", "localhost").await.unwrap().is_some());
+    assert!(tmp.path().join(&upload_path).exists());
+
+    sqlx::query("UPDATE url_previews SET expires_at = $1")
+        .bind(old)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let removed = cleanup_preview_media(storage.as_ref(), &blob, std::time::Duration::from_secs(30 * 24 * 3600))
+        .await
+        .unwrap();
+    assert_eq!(removed, 1);
+    assert!(storage.get_media("previewkeep", "localhost").await.unwrap().is_none());
+    assert!(!Path::new(&tmp.path().join(&kept_preview)).exists());
+    assert!(storage.get_media("previewfresh", "localhost").await.unwrap().is_some(), "a recent preview image waits out the idle window");
+    assert!(storage.get_media("userupload", "localhost").await.unwrap().is_some());
+
+    // Admin delete of a duplicated upload removes the row and its thumbnail
+    // blob, and removes the content-addressed original only when the other
+    // copy is gone too.
+    let app = build_router(state.clone()).merge(
+        Router::new()
+            .route(
+                "/_matrix/conduit/admin/v1/media/:mediaId",
+                delete(admin_api::delete_media::<TestState>),
+            )
+            .with_state(state.clone()),
+    );
+    let body = json!({ "username": "admin", "password": "testpass123", "auth": { "type": "m.login.dummy" } });
+    let resp = app.clone().oneshot(
+        Request::builder()
+            .method("POST")
+            .uri("/_matrix/client/v3/register")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap(),
+    ).await.unwrap();
+    let registered = json_body(resp).await;
+    let token = registered["access_token"].as_str().unwrap().to_owned();
+    let user_id = registered["user_id"].as_str().unwrap().to_owned();
+    storage.set_admin(&user_id, true).await.unwrap();
+
+    let png = make_png(40, 20);
+    let first: Value = upload_ok(&app, &token, &png, "image/png").await;
+    let second: Value = upload_ok(&app, &token, &png, "image/png").await;
+    let mut unique_png = Vec::new();
+    image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(40, 20, image::Rgb([200, 30, 30])))
+        .write_to(&mut std::io::Cursor::new(&mut unique_png), image::ImageFormat::Png)
+        .unwrap();
+    let unique: Value = upload_ok(&app, &token, &unique_png, "image/png").await;
+    let id_of = |v: &Value| v["content_uri"].as_str().unwrap().rsplit('/').next().unwrap().to_owned();
+    let first_id = id_of(&first);
+    let second_id = id_of(&second);
+    let unique_id = id_of(&unique);
+    for id in [&first_id, &second_id, &unique_id] {
+        let resp = authed_get(&app, &token, &format!("/_matrix/client/v1/media/thumbnail/localhost/{id}?width=8&height=8")).await;
+        assert_eq!(resp.status(), StatusCode::OK, "{id}");
+        let _ = raw_body(resp).await;
+    }
+    let paths = |id: &str| {
+        let pool = db.pool.clone();
+        let id = id.to_owned();
+        async move {
+            let original: String = sqlx::query_scalar("SELECT storage_path FROM media WHERE media_id = $1")
+                .bind(&id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            let thumbs: Vec<String> = sqlx::query_scalar("SELECT storage_path FROM media_thumbnails WHERE media_id = $1")
+                .bind(&id)
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+            (original, thumbs)
+        }
+    };
+    let (shared_blob, first_thumbs) = paths(&first_id).await;
+    let (shared_again, _) = paths(&second_id).await;
+    let (unique_blob, unique_thumbs) = paths(&unique_id).await;
+    assert_eq!(shared_blob, shared_again);
+    assert_ne!(unique_blob, shared_blob);
+    assert!(!unique_thumbs.is_empty() && !first_thumbs.is_empty());
+
+    let del = |id: &str| {
+        let app = app.clone();
+        let token = token.clone();
+        let id = id.to_owned();
+        async move {
+            app.oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/_matrix/conduit/admin/v1/media/{id}"))
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+        }
+    };
+    assert_eq!(del(&unique_id).await.status(), StatusCode::OK);
+    assert!(storage.get_media(&unique_id, "localhost").await.unwrap().is_none());
+    assert!(!tmp.path().join(&unique_blob).exists());
+    for thumb in &unique_thumbs {
+        assert!(!tmp.path().join(thumb).exists(), "unreferenced thumbnail blob {thumb}");
+    }
+    assert!(tmp.path().join(&shared_blob).exists(), "the other copy still references the blob");
+
+    assert_eq!(del(&first_id).await.status(), StatusCode::OK);
+    assert!(tmp.path().join(&shared_blob).exists());
+    for thumb in &first_thumbs {
+        assert!(tmp.path().join(thumb).exists(), "second thumbnail still references {thumb}");
+    }
+    assert_eq!(del(&second_id).await.status(), StatusCode::OK);
+    assert!(!tmp.path().join(&shared_blob).exists());
+    for thumb in &first_thumbs {
+        assert!(!tmp.path().join(thumb).exists(), "thumbnail blob {thumb} outlived both rows");
+    }
+}

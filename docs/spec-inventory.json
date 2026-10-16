@@ -24,9 +24,9 @@
         "total": 164
       },
       "requirement": {
-        "implemented+tested": 73,
+        "implemented+tested": 74,
         "implemented-untested": 0,
-        "partial": 4,
+        "partial": 3,
         "missing": 0,
         "not-applicable": 9,
         "total": 86
@@ -2683,11 +2683,12 @@
         "conduit-server/tests/production_media.rs::production_media_preview_url_opengraph_rehost_cache_and_ts",
         "conduit-server/tests/production_media.rs::production_media_preview_url_refuses_internal_destinations",
         "conduit-server/tests/production_media.rs::production_media_preview_url_revalidates_redirects_and_images",
-        "conduit-server/tests/production_media.rs::production_media_preview_url_size_and_time_limits"
+        "conduit-server/tests/production_media.rs::production_media_preview_url_size_and_time_limits",
+        "conduit-server/tests/production_media.rs::production_media_animated_thumbnail_and_windows_1252_preview"
       ],
-      "tests_total": 4,
+      "tests_total": 5,
       "gap_beads": [],
-      "notes": ""
+      "notes": "HTML is decoded with the Content-Type charset, else meta charset, else UTF-8, else windows-1252."
     },
     {
       "id": "cs.ep.get_matrixclientv1mediathumbnailservernamemediaid",
@@ -2716,13 +2717,12 @@
         "conduit-server/tests/production_media.rs::production_media_async_upload_lifecycle",
         "conduit-server/tests/production_media.rs::production_media_remote_is_not_found_when_federation_disabled",
         "conduit-server/tests/production_media.rs::production_media_thumbnails",
-        "conduit-server/tests/production_media.rs::production_media_unauthenticated_endpoints_are_frozen"
+        "conduit-server/tests/production_media.rs::production_media_unauthenticated_endpoints_are_frozen",
+        "conduit-server/tests/production_media.rs::production_media_animated_thumbnail_and_windows_1252_preview"
       ],
-      "tests_total": 7,
-      "gap_beads": [
-        "conduit-y99.21.2"
-      ],
-      "notes": "Animated thumbnails open (P3)."
+      "tests_total": 8,
+      "gap_beads": [],
+      "notes": "animated=true resizes every frame and returns an animated GIF that is not smaller than requested."
     },
     {
       "id": "cs.ep.post_matrixmediav1create",
@@ -7822,21 +7822,23 @@
       "title": "Content repository",
       "source": "https://spec.matrix.org/v1.19/client-server-api/#content-repository",
       "role": "homeserver",
-      "status": "partial",
+      "status": "implemented+tested",
       "code": [
         {
           "loc": "conduit-server/src/api/client/media.rs"
+        },
+        {
+          "loc": "conduit-server/src/api/client/media_preview.rs"
         }
       ],
       "tests": [
-        "conduit-server/tests/production_media.rs::production_media_async_upload_lifecycle"
+        "conduit-server/tests/production_media.rs::production_media_async_upload_lifecycle",
+        "conduit-server/tests/production_media.rs::production_media_animated_thumbnail_and_windows_1252_preview",
+        "conduit-server/tests/media.rs::preview_retention_and_admin_delete_drop_unreferenced_blobs"
       ],
-      "tests_total": 1,
-      "gap_beads": [
-        "conduit-y99.21.2",
-        "conduit-y99.21.3"
-      ],
-      "notes": "Animated thumbnails and blob hygiene remain (conduit-y99.21.2, conduit-y99.21.3)."
+      "tests_total": 3,
+      "gap_beads": [],
+      "notes": "animated=true keeps an animated GIF at least as large as requested. windows-1252 pages follow Content-Type or meta charset. Remote cache and preview images expire separately. Admin delete and retention remove unreferenced thumbnail blobs."
     },
     {
       "id": "cs.mod.send-to-device",

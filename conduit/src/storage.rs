@@ -888,6 +888,18 @@ pub trait Storage: Send + Sync + 'static {
     async fn get_media(&self, media_id: &str, origin_server: &str) -> Result<Option<MediaMetadata>>;
     async fn touch_media_access(&self, media_id: &str, origin_server: &str) -> Result<()>;
     async fn delete_media(&self, media_id: &str, origin_server: &str) -> Result<()>;
+    /// `upload` (a local user upload), `remote` (federation cache), or
+    /// `preview` (a URL-preview image rehosted on this server).
+    async fn set_media_purpose(&self, media_id: &str, origin_server: &str, purpose: &str) -> Result<()>;
+    /// Blob paths of cached thumbnails for one media item.
+    async fn thumbnail_storage_paths(&self, media_id: &str, origin_server: &str) -> Result<Vec<String>>;
+    /// Preview rehosts whose last access is before `accessed_before` and
+    /// which no unexpired `url_previews` row still names as `og:image`.
+    async fn list_unreferenced_preview_media(
+        &self,
+        accessed_before: DateTime<Utc>,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<MediaMetadata>>;
     async fn list_remote_media_older_than(&self, ts: DateTime<Utc>) -> Result<Vec<MediaMetadata>>;
 
     async fn insert_thumbnail(&self, t: &ThumbnailMetadata) -> Result<()>;
@@ -1796,6 +1808,9 @@ struct MemoryInner {
     receipts_next_pos: i64,
     // Media (E07)
     media: HashMap<(String, String), MediaMetadata>,
+    /// (media_id, origin) → upload | remote | preview. Absent means
+    /// `remote` when the uploader is unset, otherwise `upload`.
+    media_purpose: HashMap<(String, String), String>,
     thumbnails: HashMap<(String, String, i32, i32, String), ThumbnailMetadata>,
     // Media lane (conduit-y99.21)
     pending_media: HashMap<(String, String), PendingMedia>,
@@ -1863,6 +1878,7 @@ impl Default for MemoryInner {
             receipts: HashMap::new(),
             receipts_next_pos: 0,
             media: HashMap::new(),
+            media_purpose: HashMap::new(),
             thumbnails: HashMap::new(),
             pending_media: HashMap::new(),
             media_legacy_access: std::collections::HashSet::new(),
@@ -1934,6 +1950,21 @@ fn prune_locked(inner: &mut MemoryInner, just_inserted: &Event) {
         inner.events.insert(id.clone(), updated);
         inner.redacted.insert(id);
     }
+}
+
+fn media_purpose_of<'a>(inner: &'a MemoryInner, m: &MediaMetadata) -> &'a str {
+    inner
+        .media_purpose
+        .get(&(m.media_id.clone(), m.origin_server.clone()))
+        .map(String::as_str)
+        .unwrap_or(if m.uploader.is_none() { "remote" } else { "upload" })
+}
+
+fn preview_still_names(inner: &MemoryInner, m: &MediaMetadata, now: DateTime<Utc>) -> bool {
+    let mxc = format!("mxc://{}/{}", m.origin_server, m.media_id);
+    inner.url_previews.iter().any(|p| {
+        p.expires_at > now && p.og.get("og:image").and_then(|v| v.as_str()) == Some(mxc.as_str())
+    })
 }
 
 #[async_trait]
@@ -3082,8 +3113,10 @@ impl Storage for MemoryStorage {
 
     async fn delete_media(&self, media_id: &str, origin_server: &str) -> Result<()> {
         let mut inner = self.inner.write().await;
-        inner.media.remove(&(media_id.to_owned(), origin_server.to_owned()));
-        inner.media_legacy_access.remove(&(media_id.to_owned(), origin_server.to_owned()));
+        let key = (media_id.to_owned(), origin_server.to_owned());
+        inner.media.remove(&key);
+        inner.media_purpose.remove(&key);
+        inner.media_legacy_access.remove(&key);
         // Cascade: remove thumbnails too.
         inner.thumbnails.retain(|(mid, orig, _, _, _), _| {
             !(mid == media_id && orig == origin_server)
@@ -3091,12 +3124,49 @@ impl Storage for MemoryStorage {
         Ok(())
     }
 
+    async fn set_media_purpose(&self, media_id: &str, origin_server: &str, purpose: &str) -> Result<()> {
+        self.inner
+            .write()
+            .await
+            .media_purpose
+            .insert((media_id.to_owned(), origin_server.to_owned()), purpose.to_owned());
+        Ok(())
+    }
+
+    async fn thumbnail_storage_paths(&self, media_id: &str, origin_server: &str) -> Result<Vec<String>> {
+        let inner = self.inner.read().await;
+        Ok(inner
+            .thumbnails
+            .values()
+            .filter(|t| t.media_id == media_id && t.origin_server == origin_server)
+            .map(|t| t.storage_path.clone())
+            .collect())
+    }
+
+    async fn list_unreferenced_preview_media(
+        &self,
+        accessed_before: DateTime<Utc>,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<MediaMetadata>> {
+        let inner = self.inner.read().await;
+        Ok(inner
+            .media
+            .values()
+            .filter(|m| {
+                media_purpose_of(&inner, m) == "preview"
+                    && m.last_accessed < accessed_before
+                    && !preview_still_names(&inner, m, now)
+            })
+            .cloned()
+            .collect())
+    }
+
     async fn list_remote_media_older_than(&self, ts: DateTime<Utc>) -> Result<Vec<MediaMetadata>> {
         let inner = self.inner.read().await;
         Ok(inner
             .media
             .values()
-            .filter(|m| m.uploader.is_none() && m.last_accessed < ts)
+            .filter(|m| media_purpose_of(&inner, m) == "remote" && m.last_accessed < ts)
             .cloned()
             .collect())
     }

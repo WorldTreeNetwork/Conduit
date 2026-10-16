@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use sqlx::PgPool;
+use sqlx::{PgPool, Row};
 
 use serde_json::Value;
 
@@ -98,6 +98,21 @@ fn map_sqlx(e: sqlx::Error) -> Error {
         }
     }
     Error::Storage(e.to_string())
+}
+
+fn media_from_row(row: &sqlx::postgres::PgRow) -> Result<MediaMetadata> {
+    Ok(MediaMetadata {
+        media_id: row.try_get("media_id").map_err(map_sqlx)?,
+        origin_server: row.try_get("origin_server").map_err(map_sqlx)?,
+        uploader: row.try_get("uploader").map_err(map_sqlx)?,
+        content_type: row.try_get("content_type").map_err(map_sqlx)?,
+        upload_name: row.try_get("upload_name").map_err(map_sqlx)?,
+        file_size: row.try_get("file_size").map_err(map_sqlx)?,
+        sha256: row.try_get("sha256").map_err(map_sqlx)?,
+        storage_path: row.try_get("storage_path").map_err(map_sqlx)?,
+        uploaded_at: row.try_get("uploaded_at").map_err(map_sqlx)?,
+        last_accessed: row.try_get("last_accessed").map_err(map_sqlx)?,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -2500,35 +2515,75 @@ impl Storage for PostgresStorage {
         Ok(())
     }
 
+    async fn set_media_purpose(&self, media_id: &str, origin_server: &str, purpose: &str) -> Result<()> {
+        sqlx::query("UPDATE media SET purpose = $3 WHERE media_id = $1 AND origin_server = $2")
+            .bind(media_id)
+            .bind(origin_server)
+            .bind(purpose)
+            .execute(&self.pool)
+            .await
+            .map_err(map_sqlx)?;
+        Ok(())
+    }
+
+    async fn thumbnail_storage_paths(&self, media_id: &str, origin_server: &str) -> Result<Vec<String>> {
+        let rows = sqlx::query(
+            "SELECT storage_path FROM media_thumbnails WHERE media_id = $1 AND origin_server = $2",
+        )
+        .bind(media_id)
+        .bind(origin_server)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        rows.into_iter()
+            .map(|row| row.try_get("storage_path").map_err(map_sqlx))
+            .collect()
+    }
+
+    async fn list_unreferenced_preview_media(
+        &self,
+        accessed_before: DateTime<Utc>,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<MediaMetadata>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT m.media_id, m.origin_server, m.uploader, m.content_type, m.upload_name,
+                   m.file_size, m.sha256, m.storage_path, m.uploaded_at, m.last_accessed
+            FROM media m
+            WHERE m.purpose = 'preview'
+              AND m.last_accessed < $1
+              AND NOT EXISTS (
+                SELECT 1 FROM url_previews p
+                WHERE p.expires_at > $2
+                  AND p.og->>'og:image' = 'mxc://' || m.origin_server || '/' || m.media_id
+              )
+            "#,
+        )
+        .bind(accessed_before)
+        .bind(now)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        rows.into_iter().map(|row| media_from_row(&row)).collect()
+    }
+
     async fn list_remote_media_older_than(&self, ts: DateTime<Utc>) -> Result<Vec<MediaMetadata>> {
-        let rows = sqlx::query!(
+        // Remote cache only. Preview rehosts share a null uploader but use
+        // purpose = 'preview' and are retained with the URL preview that
+        // names them.
+        let rows = sqlx::query(
             r#"
             SELECT media_id, origin_server, uploader, content_type, upload_name,
                    file_size, sha256, storage_path, uploaded_at, last_accessed
             FROM media
-            WHERE uploader IS NULL AND last_accessed < $1
+            WHERE purpose = 'remote' AND last_accessed < $1
             "#,
-            ts
         )
+        .bind(ts)
         .fetch_all(&self.pool)
         .await
         .map_err(map_sqlx)?;
-
-        Ok(rows
-            .into_iter()
-            .map(|r| MediaMetadata {
-                media_id: r.media_id,
-                origin_server: r.origin_server,
-                uploader: r.uploader,
-                content_type: r.content_type,
-                upload_name: r.upload_name,
-                file_size: r.file_size,
-                sha256: r.sha256,
-                storage_path: r.storage_path,
-                uploaded_at: r.uploaded_at,
-                last_accessed: r.last_accessed,
-            })
-            .collect())
+        rows.into_iter().map(|row| media_from_row(&row)).collect()
     }
 
     async fn insert_thumbnail(&self, t: &ThumbnailMetadata) -> Result<()> {

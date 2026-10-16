@@ -863,8 +863,15 @@ impl ThumbnailRequest {
         Ok(Self { width, height, crop, animated: parse_bool(params, "animated")? })
     }
 
-    fn method(&self) -> &'static str {
-        if self.crop { "crop" } else { "scale" }
+    /// Cache key. Animated and static thumbnails of the same box are
+    /// different images, so they do not share a row.
+    fn cache_method(&self) -> String {
+        match (self.crop, self.animated == Some(true)) {
+            (false, false) => "scale".to_owned(),
+            (true, false) => "crop".to_owned(),
+            (false, true) => "scale-animated".to_owned(),
+            (true, true) => "crop-animated".to_owned(),
+        }
     }
 }
 
@@ -904,7 +911,7 @@ pub async fn serve_thumbnail<S: MediaState>(
 
     match state
         .storage()
-        .get_thumbnail(media_id, server_name, width, height, req.method())
+        .get_thumbnail(media_id, server_name, width, height, &req.cache_method())
         .await
     {
         Ok(Some(t)) => match state.blob_store().get(&t.storage_path).await {
@@ -942,7 +949,7 @@ pub async fn serve_thumbnail<S: MediaState>(
                     origin_server: server_name.to_owned(),
                     width,
                     height,
-                    method: req.method().to_owned(),
+                    method: req.cache_method(),
                     content_type: content_type.to_owned(),
                     file_size: size as i64,
                     storage_path: path,
@@ -1294,6 +1301,11 @@ async fn fetch_remote_media<S: MediaState>(
         .insert_media(&meta)
         .await
         .map_err(|e| RemoteError::Failed(format!("persist remote media metadata: {e}")))?;
+    state
+        .storage()
+        .set_media_purpose(media_id, origin_server, "remote")
+        .await
+        .map_err(|e| RemoteError::Failed(format!("persist remote media purpose: {e}")))?;
     record_legacy_access(state, media_id, origin_server).await;
     Ok(meta)
 }
@@ -1389,9 +1401,37 @@ async fn raw_content(response: reqwest::Response, max_bytes: u64) -> Result<Remo
 // Retention policy (h9n.11)
 // ---------------------------------------------------------------------------
 
+/// Delete one media row, its thumbnail rows, and every blob none of those
+/// rows still reference. Content-addressed blobs shared with another media
+/// item or thumbnail are left on disk.
+pub async fn purge_media_blobs(
+    storage: &dyn Storage,
+    blob: &BlobStore,
+    media_id: &str,
+    origin_server: &str,
+) -> conduit::Result<bool> {
+    let Some(meta) = storage.get_media(media_id, origin_server).await? else {
+        return Ok(false);
+    };
+    let mut paths = storage.thumbnail_storage_paths(media_id, origin_server).await?;
+    paths.push(meta.storage_path);
+    storage.delete_media(media_id, origin_server).await?;
+    for path in paths {
+        if !storage.media_storage_path_in_use(&path).await? {
+            let _ = blob.delete(&path).await;
+        }
+    }
+    Ok(true)
+}
+
 /// Delete remote-cached media that has not been accessed since `now - max_age`.
-/// Returns the number of items deleted. Blobs are content-addressed and
-/// may be shared, so a blob is removed only once nothing references it.
+/// Returns the number of items deleted.
+///
+/// Only `purpose = remote` rows are eligible. URL-preview rehosts
+/// (`purpose = preview`) stay until [`cleanup_preview_media`] decides they
+/// are unreferenced. Blobs are content-addressed and may be shared, so a
+/// blob is removed only once nothing references it. Thumbnail blobs are
+/// removed with the media they belong to.
 pub async fn cleanup_remote_media(
     storage: &dyn Storage,
     blob: &BlobStore,
@@ -1399,18 +1439,33 @@ pub async fn cleanup_remote_media(
 ) -> conduit::Result<usize> {
     let cutoff = Utc::now()
         - chrono::Duration::from_std(max_age).unwrap_or(chrono::Duration::days(30));
-
     let stale = storage.list_remote_media_older_than(cutoff).await?;
     let count = stale.len();
-
     for m in stale {
-        // Delete DB row (cascades to thumbnails), then the unreferenced blob.
-        storage.delete_media(&m.media_id, &m.origin_server).await?;
-        if !storage.media_storage_path_in_use(&m.storage_path).await? {
-            let _ = blob.delete(&m.storage_path).await;
-        }
+        purge_media_blobs(storage, blob, &m.media_id, &m.origin_server).await?;
     }
+    Ok(count)
+}
 
+/// Delete URL-preview images that no longer back a live preview.
+///
+/// A preview image is kept while any `url_previews` row with `expires_at`
+/// in the future names `mxc://{origin}/{media_id}` as `og:image`. Once that
+/// reference is gone, the image follows the same idle window as remote
+/// cache (`last_accessed` older than `max_age`) and is then removed with
+/// its thumbnail blobs. User uploads are never selected.
+pub async fn cleanup_preview_media(
+    storage: &dyn Storage,
+    blob: &BlobStore,
+    max_age: Duration,
+) -> conduit::Result<usize> {
+    let cutoff = Utc::now()
+        - chrono::Duration::from_std(max_age).unwrap_or(chrono::Duration::days(30));
+    let stale = storage.list_unreferenced_preview_media(cutoff, Utc::now()).await?;
+    let count = stale.len();
+    for m in stale {
+        purge_media_blobs(storage, blob, &m.media_id, &m.origin_server).await?;
+    }
     Ok(count)
 }
 
@@ -1456,15 +1511,14 @@ fn is_animated(source: &[u8], format: image::ImageFormat) -> bool {
 ///   in either dimension unless the source is;
 /// * `crop` returns exactly the requested size (or, for a smaller source,
 ///   the largest region with the requested aspect ratio);
-/// * animated output only when `animated=true` (and then only by passing
-///   through an already-small animated original).
+/// * `animated=true` resizes every frame of an animated GIF, WebP, or APNG
+///   and returns an animated GIF. Otherwise a static image is returned.
 pub fn make_thumbnail(
     source: &[u8],
     source_type: &str,
     req: ThumbnailRequest,
     max_pixels: u64,
 ) -> Result<ThumbnailOutcome, ThumbnailError> {
-    use image::imageops::FilterType;
     use image::{ImageFormat, ImageReader};
     use std::io::Cursor;
 
@@ -1490,37 +1544,21 @@ pub fn make_thumbnail(
         return Ok(ThumbnailOutcome::Original);
     }
 
+    if animated && req.animated == Some(true) {
+        let frames = animated_frames(source, format)?;
+        if frames.len() > 1 {
+            let bytes = encode_animated_gif(frames, sw, sh, req)?;
+            return Ok(ThumbnailOutcome::Generated { bytes, content_type: "image/gif" });
+        }
+    }
+
     let mut decoder = ImageReader::with_format(Cursor::new(source), format);
     let mut limits = image::Limits::default();
     limits.max_image_width = Some(sw);
     limits.max_image_height = Some(sh);
     decoder.limits(limits);
     let img = decoder.decode().map_err(|_| ThumbnailError::NotImage)?;
-
-    let thumb = if req.crop {
-        if sw >= w && sh >= h {
-            img.resize_to_fill(w, h, FilterType::Lanczos3)
-        } else {
-            // Largest centred region with the requested aspect, no scaling.
-            let (cw, ch) = if (sw as u64) * (h as u64) > (sh as u64) * (w as u64) {
-                (((sh as u64 * w as u64) / h as u64).max(1) as u32, sh)
-            } else {
-                (sw, ((sw as u64 * h as u64) / w as u64).max(1) as u32)
-            };
-            img.crop_imm((sw - cw) / 2, (sh - ch) / 2, cw, ch)
-        }
-    } else {
-        // Smallest aspect-preserving size covering the request, capped at
-        // the source size.
-        let factor = (w as f64 / sw as f64).max(h as f64 / sh as f64);
-        if factor >= 1.0 {
-            img
-        } else {
-            let nw = ((sw as f64 * factor).ceil() as u32).clamp(1, sw);
-            let nh = ((sh as f64 * factor).ceil() as u32).clamp(1, sh);
-            img.resize_exact(nw, nh, FilterType::Lanczos3)
-        }
-    };
+    let thumb = fit_thumbnail(img, sw, sh, req);
 
     let mut buf = Vec::new();
     let content_type = if format == ImageFormat::Jpeg {
@@ -1535,6 +1573,98 @@ pub fn make_thumbnail(
         "image/png"
     };
     Ok(ThumbnailOutcome::Generated { bytes: buf, content_type })
+}
+
+fn target_dims(sw: u32, sh: u32, req: ThumbnailRequest) -> (u32, u32) {
+    let (w, h) = (req.width, req.height);
+    if req.crop {
+        if sw >= w && sh >= h {
+            (w, h)
+        } else if (sw as u64) * (h as u64) > (sh as u64) * (w as u64) {
+            ((((sh as u64) * (w as u64)) / (h as u64)).max(1) as u32, sh)
+        } else {
+            (sw, (((sw as u64) * (h as u64)) / (w as u64)).max(1) as u32)
+        }
+    } else {
+        let factor = (w as f64 / sw as f64).max(h as f64 / sh as f64);
+        if factor >= 1.0 {
+            (sw, sh)
+        } else {
+            (
+                ((sw as f64 * factor).ceil() as u32).clamp(1, sw),
+                ((sh as f64 * factor).ceil() as u32).clamp(1, sh),
+            )
+        }
+    }
+}
+
+fn fit_thumbnail(img: image::DynamicImage, sw: u32, sh: u32, req: ThumbnailRequest) -> image::DynamicImage {
+    use image::imageops::FilterType;
+    use image::GenericImageView;
+    let (w, h) = (req.width, req.height);
+    let (nw, nh) = target_dims(sw, sh, req);
+    if req.crop {
+        if sw >= w && sh >= h {
+            img.resize_to_fill(nw, nh, FilterType::Lanczos3)
+        } else {
+            let (iw, ih) = img.dimensions();
+            let cw = nw.min(iw);
+            let ch = nh.min(ih);
+            img.crop_imm(iw.saturating_sub(cw) / 2, ih.saturating_sub(ch) / 2, cw, ch)
+        }
+    } else if nw == sw && nh == sh {
+        img
+    } else {
+        img.resize_exact(nw, nh, FilterType::Lanczos3)
+    }
+}
+
+fn animated_frames(source: &[u8], format: image::ImageFormat) -> Result<Vec<image::Frame>, ThumbnailError> {
+    use image::AnimationDecoder as _;
+    use std::io::Cursor;
+    let failed = |e: image::ImageError| ThumbnailError::Failed(e.to_string());
+    match format {
+        image::ImageFormat::Gif => image::codecs::gif::GifDecoder::new(Cursor::new(source))
+            .map_err(failed)?
+            .into_frames()
+            .collect_frames()
+            .map_err(failed),
+        image::ImageFormat::WebP => image::codecs::webp::WebPDecoder::new(Cursor::new(source))
+            .map_err(failed)?
+            .into_frames()
+            .collect_frames()
+            .map_err(failed),
+        image::ImageFormat::Png => {
+            let decoder = image::codecs::png::PngDecoder::new(Cursor::new(source)).map_err(failed)?;
+            if !decoder.is_apng().unwrap_or(false) {
+                return Ok(Vec::new());
+            }
+            decoder.apng().map_err(failed)?.into_frames().collect_frames().map_err(failed)
+        }
+        _ => Ok(Vec::new()),
+    }
+}
+
+fn encode_animated_gif(
+    frames: Vec<image::Frame>,
+    sw: u32,
+    sh: u32,
+    req: ThumbnailRequest,
+) -> Result<Vec<u8>, ThumbnailError> {
+    use image::codecs::gif::{GifEncoder, Repeat};
+    use std::io::Cursor;
+    let mut buf = Vec::new();
+    {
+        let mut enc = GifEncoder::new(Cursor::new(&mut buf));
+        enc.set_repeat(Repeat::Infinite).map_err(|e| ThumbnailError::Failed(e.to_string()))?;
+        for frame in frames {
+            let delay = frame.delay();
+            let fitted = fit_thumbnail(image::DynamicImage::ImageRgba8(frame.into_buffer()), sw, sh, req);
+            let out = image::Frame::from_parts(fitted.to_rgba8(), 0, 0, delay);
+            enc.encode_frame(out).map_err(|e| ThumbnailError::Failed(e.to_string()))?;
+        }
+    }
+    Ok(buf)
 }
 
 #[cfg(test)]
@@ -1665,6 +1795,28 @@ mod tests {
             assert_eq!(ct, "image/png");
             assert!(bytes.starts_with(b"\x89PNG"));
         }
+    }
+
+    #[test]
+    fn large_animated_gif_stays_animated_and_covers_the_request() {
+        use image::AnimationDecoder as _;
+        let gif = animated_gif(64, 32);
+        let (bytes, ct) = generated(make_thumbnail(&gif, "image/gif", req(20, 20, false, Some(true)), u64::MAX).unwrap());
+        assert_eq!(ct, "image/gif");
+        let frames = image::codecs::gif::GifDecoder::new(std::io::Cursor::new(bytes.as_slice()))
+            .unwrap()
+            .into_frames()
+            .collect_frames()
+            .unwrap();
+        assert!(frames.len() > 1, "thumbnail must keep more than one frame");
+        let first = frames[0].buffer();
+        let second = frames[1].buffer();
+        assert_eq!((first.width(), first.height()), (40, 20));
+        assert!(first.width() >= 20 && first.height() >= 20);
+        assert_ne!(first.get_pixel(0, 0), second.get_pixel(0, 0), "frames must differ");
+        let (still, still_ct) = generated(make_thumbnail(&gif, "image/gif", req(20, 20, false, Some(false)), u64::MAX).unwrap());
+        assert_eq!(still_ct, "image/png");
+        assert!(still.starts_with(b"\x89PNG"));
     }
 
     #[test]

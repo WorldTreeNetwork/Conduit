@@ -161,7 +161,7 @@ async fn build_preview<S: MediaState>(state: &S, fetched: safe_fetch::Fetched, i
     if !looks_html {
         return Map::new();
     }
-    let html = String::from_utf8_lossy(&fetched.body);
+    let html = decode_preview_html(&fetched.body, fetched.content_type.as_deref());
     let mut og = parse_html_preview(&html, &fetched.final_url);
     if let Some(Value::String(image_url)) = og.remove("og:image") {
         let image = match safe_fetch::fetch(preview_policy(image_limit), &image_url).await {
@@ -230,6 +230,10 @@ async fn rehost_image<S: MediaState>(state: &S, bytes: &[u8], declared: Option<&
         last_accessed: now,
     };
     state.storage().insert_media(&meta).await.ok()?;
+    if state.storage().set_media_purpose(&media_id, state.server_name(), "preview").await.is_err() {
+        let _ = state.storage().delete_media(&media_id, state.server_name()).await;
+        return None;
+    }
     Some(RehostedImage {
         mxc: format!("mxc://{}/{media_id}", state.server_name()),
         content_type,
@@ -299,6 +303,93 @@ fn clean(s: &str) -> String {
     let decoded = decode_entities(s);
     let collapsed = decoded.split_whitespace().collect::<Vec<_>>().join(" ");
     collapsed.chars().take(MAX_VALUE_CHARS).collect()
+}
+
+/// Decode an HTML body using the Content-Type charset, then a `<meta charset>`,
+/// then UTF-8 when the bytes are valid UTF-8, otherwise windows-1252
+/// (the HTML default for unlabeled documents). `iso-8859-1` is treated as
+/// windows-1252, matching the HTML encoding specification.
+pub fn decode_preview_html(body: &[u8], content_type: Option<&str>) -> String {
+    let body = body.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(body);
+    if let Some(label) = content_type.and_then(charset_from_content_type) {
+        return decode_labeled(body, label);
+    }
+    if let Some(label) = charset_from_meta(body) {
+        return decode_labeled(body, label);
+    }
+    match String::from_utf8(body.to_vec()) {
+        Ok(text) => text,
+        Err(_) => decode_windows_1252(body),
+    }
+}
+
+fn charset_from_content_type(content_type: &str) -> Option<&'static str> {
+    content_type.split(';').skip(1).find_map(|part| {
+        let (name, value) = part.trim().split_once('=')?;
+        if name.trim().eq_ignore_ascii_case("charset") {
+            charset_label(value.trim().trim_matches(|c| c == '"' || c == '\''))
+        } else {
+            None
+        }
+    })
+}
+
+fn charset_from_meta(body: &[u8]) -> Option<&'static str> {
+    let head = &body[..body.len().min(2048)];
+    let text: String = head.iter().map(|b| char::from(*b)).collect();
+    let lower = text.to_ascii_lowercase();
+    let mut rest = lower.as_str();
+    while let Some(at) = rest.find("charset") {
+        rest = &rest[at + "charset".len()..];
+        let rest_orig = &text[text.len() - rest.len()..];
+        let trimmed = rest.trim_start();
+        let trimmed_orig = rest_orig.trim_start();
+        if let Some(after_eq) = trimmed.strip_prefix('=') {
+            let after_orig = &trimmed_orig[trimmed_orig.len() - after_eq.len()..];
+            let after_orig = after_orig.trim_start().trim_start_matches(|c| c == '"' || c == '\'');
+            let token = after_orig
+                .split(|c: char| c == '"' || c == '\'' || c == ';' || c == '>' || c == ' ' || c == '/')
+                .next()
+                .unwrap_or("");
+            if let Some(label) = charset_label(token) {
+                return Some(label);
+            }
+        }
+    }
+    None
+}
+
+fn charset_label(raw: &str) -> Option<&'static str> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "utf-8" | "utf8" => Some("utf-8"),
+        "windows-1252" | "cp1252" | "x-cp1252" | "iso-8859-1" | "latin1" | "iso8859-1" | "us-ascii" => {
+            Some("windows-1252")
+        }
+        _ => None,
+    }
+}
+
+fn decode_labeled(body: &[u8], label: &str) -> String {
+    match label {
+        "utf-8" => String::from_utf8_lossy(body).into_owned(),
+        _ => decode_windows_1252(body),
+    }
+}
+
+fn decode_windows_1252(body: &[u8]) -> String {
+    // Unicode for bytes 0x80..=0x9F. The rest map to the same code point.
+    const HIGH: [char; 32] = [
+        '\u{20AC}', '\u{0081}', '\u{201A}', '\u{0192}', '\u{201E}', '\u{2026}', '\u{2020}', '\u{2021}',
+        '\u{02C6}', '\u{2030}', '\u{0160}', '\u{2039}', '\u{0152}', '\u{008D}', '\u{017D}', '\u{008F}',
+        '\u{0090}', '\u{2018}', '\u{2019}', '\u{201C}', '\u{201D}', '\u{2022}', '\u{2013}', '\u{2014}',
+        '\u{02DC}', '\u{2122}', '\u{0161}', '\u{203A}', '\u{0153}', '\u{009D}', '\u{017E}', '\u{0178}',
+    ];
+    body.iter()
+        .map(|b| match *b {
+            0x80..=0x9F => HIGH[(*b - 0x80) as usize],
+            byte => char::from(byte),
+        })
+        .collect()
 }
 
 /// Extract OpenGraph properties from an HTML document.
@@ -407,6 +498,28 @@ mod tests {
         let og = parse_html_preview(&html, &Url::parse("http://h.example/").unwrap());
         assert!(og.len() <= MAX_OG_KEYS + 1);
         assert!(og.values().all(|v| v.as_str().is_none_or(|s| s.chars().count() <= MAX_VALUE_CHARS)));
+    }
+
+    #[test]
+    fn windows_1252_preview_keeps_the_declared_characters() {
+        let mut meta = b"<!doctype html><html><head><meta charset=\"windows-1252\"><title>ignored</title><meta property=\"og:title\" content=\"Price ".to_vec();
+        meta.push(0x80);
+        meta.extend_from_slice(b"\"></head></html>");
+        let html = decode_preview_html(&meta, Some("text/html"));
+        let og = parse_html_preview(&html, &Url::parse("http://h.example/").unwrap());
+        assert_eq!(og["og:title"], "Price \u{20AC}");
+
+        let mut typed = b"<html><head><meta property=\"og:title\" content=\"Say ".to_vec();
+        typed.push(0x93);
+        typed.extend_from_slice(b"Hi");
+        typed.push(0x94);
+        typed.extend_from_slice(b"\"></head></html>");
+        let html = decode_preview_html(&typed, Some("text/html; charset=Windows-1252"));
+        let og = parse_html_preview(&html, &Url::parse("http://h.example/").unwrap());
+        assert_eq!(og["og:title"], "Say \u{201C}Hi\u{201D}");
+
+        let utf8 = decode_preview_html("caf\u{e9}".as_bytes(), Some("text/html; charset=utf-8"));
+        assert_eq!(utf8, "caf\u{e9}");
     }
 
     #[test]

@@ -753,3 +753,81 @@ async fn production_media_preview_url_size_and_time_limits() {
     expect_error(preview(&server, &alice, &origin.url("/slow"), None).await, 504, "M_UNKNOWN").await;
     assert!(started.elapsed() < Duration::from_millis(2500), "deadline enforced: {:?}", started.elapsed());
 }
+
+fn animated_gif(w: u32, h: u32) -> Vec<u8> {
+    let mut buf = Vec::new();
+    {
+        let mut enc = image::codecs::gif::GifEncoder::new(&mut buf);
+        let frames = (0..2).map(|i| {
+            image::Frame::new(image::RgbaImage::from_pixel(w, h, image::Rgba([i * 80, 10, 20, 255])))
+        });
+        enc.encode_frames(frames).unwrap();
+    }
+    buf
+}
+
+fn gif_frame_count_and_size(bytes: &[u8]) -> (usize, u32, u32, [u8; 4], [u8; 4]) {
+    use image::AnimationDecoder as _;
+    let frames = image::codecs::gif::GifDecoder::new(std::io::Cursor::new(bytes))
+        .unwrap()
+        .into_frames()
+        .collect_frames()
+        .unwrap();
+    let a = frames[0].buffer().get_pixel(0, 0).0;
+    let b = frames[1].buffer().get_pixel(0, 0).0;
+    let (w, h) = (frames[0].buffer().width(), frames[0].buffer().height());
+    (frames.len(), w, h, a, b)
+}
+
+/// `animated=true` on a GIF larger than the requested box returns an animated
+/// image that is not smaller than the request. A windows-1252 page previews
+/// with the characters that encoding assigns, from either the Content-Type
+/// charset or `<meta charset>`.
+#[tokio::test]
+async fn production_media_animated_thumbnail_and_windows_1252_preview() {
+    let origin = Origin::start().await;
+    let mut meta = b"<!doctype html><meta charset=\"windows-1252\"><meta property=\"og:title\" content=\"Price ".to_vec();
+    meta.push(0x80);
+    meta.extend_from_slice(b"\"><title>ignored</title>");
+    origin.route("/meta", Reply::ok("text/html", meta));
+    let mut typed = b"<meta property=\"og:title\" content=\"Say ".to_vec();
+    typed.push(0x93);
+    typed.extend_from_slice(b"Hi");
+    typed.push(0x94);
+    typed.extend_from_slice(b"\">");
+    origin.route("/typed", Reply::ok("text/html; charset=Windows-1252", typed));
+
+    let server = server_with_env(&[("CONDUIT_URL_PREVIEW_IP_ALLOWLIST", "127.0.0.1/32")]).await;
+    let alice = token(&server, "alice").await;
+
+    let gif = animated_gif(64, 32);
+    let id = upload_ok(&server, &alice, "", Some("image/gif"), gif).await;
+    let resp = get(
+        &server,
+        &format!("/_matrix/client/v1/media/thumbnail/production.test/{id}?width=20&height=20&method=scale&animated=true"),
+        Some(&alice),
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+    assert_eq!(header(&resp, "content-type"), "image/gif");
+    assert_eq!(header(&resp, "content-disposition"), "inline; filename=\"thumbnail.gif\"");
+    let (n, w, h, a, b) = gif_frame_count_and_size(&resp.bytes().await.unwrap());
+    assert!(n > 1, "animated thumbnail collapsed to one frame");
+    assert_eq!((w, h), (40, 20));
+    assert!(w >= 20 && h >= 20);
+    assert_ne!(a, b, "resized frames must stay distinct");
+
+    let resp = get(
+        &server,
+        &format!("/_matrix/client/v1/media/thumbnail/production.test/{id}?width=20&height=20&animated=false"),
+        Some(&alice),
+    )
+    .await;
+    assert_eq!(header(&resp, "content-type"), "image/png");
+    assert!(resp.bytes().await.unwrap().starts_with(&b"\x89PNG"[..]));
+
+    let og: Value = preview(&server, &alice, &origin.url("/meta"), None).await.json().await.unwrap();
+    assert_eq!(og["og:title"], "Price \u{20AC}");
+    let og: Value = preview(&server, &alice, &origin.url("/typed"), None).await.json().await.unwrap();
+    assert_eq!(og["og:title"], "Say \u{201C}Hi\u{201D}");
+}
