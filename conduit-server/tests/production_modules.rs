@@ -253,6 +253,90 @@ async fn profile_changes_propagate_to_member_events_and_presence() {
     assert_eq!(content["displayname"], "Carol");
 }
 
+/// A profile lookup for a user on another server is `GET /query/profile`.
+/// A remote 404 is 404 here, a remote 403 is 403, and a local user is not fetched.
+#[tokio::test]
+async fn remote_profile_is_fetched_over_federation() {
+    use std::sync::{Arc, Mutex};
+    use axum::response::IntoResponse;
+    let asked = Arc::new(Mutex::new(Vec::<String>::new()));
+    let asked_route = Arc::clone(&asked);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        let app = axum::Router::new().route(
+            "/_matrix/federation/v1/query/profile",
+            axum::routing::get(move |axum::extract::Query(query): axum::extract::Query<std::collections::HashMap<String, String>>| {
+                let asked = Arc::clone(&asked_route);
+                async move {
+                    let user = query.get("user_id").cloned().unwrap_or_default();
+                    asked.lock().unwrap().push(user.clone());
+                    match user.as_str() {
+                        "@bob:remote.test" => (
+                            axum::http::StatusCode::OK,
+                            axum::Json(json!({
+                                "displayname": "Bob",
+                                "avatar_url": "mxc://remote.test/bob",
+                                "m.tz": "Europe/London",
+                                "unset": null
+                            })),
+                        ).into_response(),
+                        "@secret:remote.test" => (
+                            axum::http::StatusCode::FORBIDDEN,
+                            axum::Json(json!({"errcode": "M_FORBIDDEN", "error": "no"})),
+                        ).into_response(),
+                        _ => (
+                            axum::http::StatusCode::NOT_FOUND,
+                            axum::Json(json!({"errcode": "M_NOT_FOUND", "error": "unknown"})),
+                        ).into_response(),
+                    }
+                }
+            }),
+        );
+        axum::serve(listener, app).await.ok();
+    });
+
+    let server = Server::with_env(&[
+        ("CONDUIT_FEDERATION", "1"),
+        ("CONDUIT_FEDERATION_BASE_URL", &base_url),
+    ]).await;
+    let alice = server.register("alice").await;
+    let me = uid(&alice);
+
+    let bob = server
+        .request(Method::GET, &format!("/_matrix/client/v3/profile/{}", enc("@bob:remote.test")), Some(token(&alice)), None, 200)
+        .await;
+    assert_eq!(bob["displayname"], "Bob");
+    assert_eq!(bob["avatar_url"], "mxc://remote.test/bob");
+    assert_eq!(bob["m.tz"], "Europe/London");
+    assert!(bob.get("unset").is_none(), "a null remote field is not a set field: {bob}");
+    let field = server
+        .request(
+            Method::GET,
+            &format!("/_matrix/client/v3/profile/{}/displayname", enc("@bob:remote.test")),
+            Some(token(&alice)),
+            None,
+            200,
+        )
+        .await;
+    assert_eq!(field["displayname"], "Bob");
+    assert!(field.get("avatar_url").is_none(), "{field}");
+
+    let missing = server
+        .request(Method::GET, &format!("/_matrix/client/v3/profile/{}", enc("@ghost:remote.test")), Some(token(&alice)), None, 404)
+        .await;
+    assert_eq!(missing["errcode"], "M_NOT_FOUND");
+    let denied = server
+        .request(Method::GET, &format!("/_matrix/client/v3/profile/{}", enc("@secret:remote.test")), Some(token(&alice)), None, 403)
+        .await;
+    assert_eq!(denied["errcode"], "M_FORBIDDEN");
+
+    server.request(Method::GET, &format!("/_matrix/client/v3/profile/{}", enc(me)), Some(token(&alice)), None, 200).await;
+    let asked = asked.lock().unwrap().clone();
+    assert!(asked.iter().any(|user| user == "@bob:remote.test"), "{asked:?}");
+    assert!(!asked.iter().any(|user| user.contains("production.test")), "a local profile must not be fetched: {asked:?}");
+}
+
 #[tokio::test]
 async fn restricted_profile_lookup_allows_only_the_spec_minimum() {
     let server = Server::with_env(&[("CONDUIT_PROFILE_LOOKUP", "restricted")]).await;

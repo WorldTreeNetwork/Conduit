@@ -990,9 +990,9 @@ pub async fn query_profile(
         None => return bad_json("Missing user_id parameter"),
     };
 
-    // Verify user is on our server.
-    let user_server = user_id.split(':').nth(1).unwrap_or("");
-    if user_server != &*state.server_name {
+    // The user id's server name is everything after the first colon, so a
+    // port survives. Homeservers only answer for their own users.
+    if conduit::signing::server_of_user_id(&user_id) != Some(state.server_name.as_ref()) {
         return not_found("User is not on this server");
     }
 
@@ -1014,28 +1014,39 @@ pub async fn query_profile(
         return not_found("User not found");
     }
 
-    // Profile data: look up from account_data / profile state.
-    // bd remember: E06 (Profiles) lands separately; for now return displayname
-    // and avatar_url from the m.room.member state_key if present in any room.
-    // This is a best-effort implementation — full profile storage tracked in E06.
-    let field = params.get("field").cloned();
-    let mut result = json!({});
-
-    // Return empty profile for now — E06 will add proper profile storage.
-    // Filed follow-up: conduit-x2r.10 notes profile storage dependency.
-    match field.as_deref() {
-        Some("displayname") => {
-            result["displayname"] = json!(null);
+    let account = match state.storage.get_account(&user_id).await {
+        Ok(Some(account)) if account.deactivated_at.is_none() => account,
+        Ok(_) => return not_found("User not found"),
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"errcode": "M_UNKNOWN", "error": error.to_string()})),
+            )
+                .into_response()
         }
-        Some("avatar_url") => {
-            result["avatar_url"] = json!(null);
+    };
+    let mut profile = match state.storage.profile_fields(&user_id).await {
+        Ok(fields) => fields.into_iter().collect::<serde_json::Map<String, Value>>(),
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"errcode": "M_UNKNOWN", "error": error.to_string()})),
+            )
+                .into_response()
         }
-        _ => {
-            result["displayname"] = json!(null);
-            result["avatar_url"] = json!(null);
-        }
+    };
+    if let Some(displayname) = account.displayname {
+        profile.insert("displayname".into(), json!(displayname));
     }
-
+    if let Some(avatar_url) = account.avatar_url {
+        profile.insert("avatar_url".into(), json!(avatar_url));
+    }
+    // A requested field is the only key. An unset field is null. The full
+    // profile omits keys the user has not set.
+    let result = match params.get("field").map(String::as_str) {
+        Some(field) => json!({ field: profile.get(field).cloned().unwrap_or(Value::Null) }),
+        None => Value::Object(profile),
+    };
     (StatusCode::OK, Json(result)).into_response()
 }
 

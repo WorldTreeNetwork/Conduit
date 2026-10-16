@@ -16,17 +16,17 @@
   "summary": {
     "cs": {
       "endpoint": {
-        "implemented+tested": 148,
+        "implemented+tested": 149,
         "implemented-untested": 0,
-        "partial": 15,
+        "partial": 14,
         "missing": 0,
         "not-applicable": 1,
         "total": 164
       },
       "requirement": {
-        "implemented+tested": 64,
+        "implemented+tested": 65,
         "implemented-untested": 0,
-        "partial": 13,
+        "partial": 12,
         "missing": 0,
         "not-applicable": 9,
         "total": 86
@@ -2314,7 +2314,7 @@
       "rate_limited": "No",
       "deprecated": false,
       "role": "homeserver",
-      "status": "partial",
+      "status": "implemented+tested",
       "code": [
         {
           "loc": "conduit-server/src/api/client/profile.rs (get_profile)"
@@ -2323,13 +2323,12 @@
       "tests": [
         "conduit-server/tests/production_modules.rs::profile_extended_fields_round_trip_and_limits",
         "conduit-server/tests/production_modules.rs::restricted_profile_lookup_allows_only_the_spec_minimum",
-        "conduit-server/tests/production_modules.rs::profile_changes_propagate_to_member_events_and_presence"
+        "conduit-server/tests/production_modules.rs::profile_changes_propagate_to_member_events_and_presence",
+        "conduit-server/tests/production_modules.rs::remote_profile_is_fetched_over_federation"
       ],
-      "tests_total": 3,
-      "gap_beads": [
-        "conduit-z3r"
-      ],
-      "notes": "All fields incl. m.tz/custom; optional restricted lookup (CONDUIT_PROFILE_LOOKUP=restricted). Remote users not fetched (conduit-z3r)."
+      "tests_total": 4,
+      "gap_beads": [],
+      "notes": "All fields incl. m.tz/custom; optional restricted lookup (CONDUIT_PROFILE_LOOKUP=restricted). A remote user is fetched with GET /query/profile. A remote 404 is 404, a remote 403 is 403, and null fields are omitted. A local user is not fetched."
     },
     {
       "id": "cs.ep.get_matrixclientv3profileuseridkeyname",
@@ -5660,7 +5659,7 @@
       ],
       "tests_total": 2,
       "gap_beads": [],
-      "notes": ""
+      "notes": "Returns the stored public profile. An unset field is omitted from the full profile. field= returns only that key, null when unset. A user on another server, or one that does not exist, is 404."
     },
     {
       "id": "ss.ep.get_matrixfederationv1queryquerytype",
@@ -7641,22 +7640,24 @@
       "title": "Profiles: lookup visibility, propagation to member events and presence",
       "source": "https://spec.matrix.org/v1.19/client-server-api/#profiles",
       "role": "homeserver",
-      "status": "partial",
+      "status": "implemented+tested",
       "code": [
         {
           "loc": "conduit-server/src/api/client/profile.rs"
+        },
+        {
+          "loc": "conduit-server/src/federation/server.rs"
         }
       ],
       "tests": [
         "conduit-server/tests/production_modules.rs::profile_extended_fields_round_trip_and_limits",
         "conduit-server/tests/production_modules.rs::restricted_profile_lookup_allows_only_the_spec_minimum",
-        "conduit-server/tests/production_modules.rs::profile_changes_propagate_to_member_events_and_presence"
+        "conduit-server/tests/production_modules.rs::profile_changes_propagate_to_member_events_and_presence",
+        "conduit-server/tests/production_modules.rs::remote_profile_is_fetched_over_federation"
       ],
-      "tests_total": 3,
-      "gap_beads": [
-        "conduit-z3r"
-      ],
-      "notes": "Lookup MUST cases asserted in restricted mode (shared/public/world_readable, 403 otherwise incl. unknown users); propagation to m.room.member and m.presence; own joins carry profile. Remote profile fetch is conduit-z3r."
+      "tests_total": 4,
+      "gap_beads": [],
+      "notes": "Lookup MUST cases asserted in restricted mode (shared/public/world_readable, 403 otherwise incl. unknown users); propagation to m.room.member and m.presence; own joins carry profile. A remote user is fetched with GET /query/profile when federation is on and the lookup is allowed. A remote 404 is 404 and a remote 403 is 403."
     },
     {
       "id": "cs.mod.instant-messaging",

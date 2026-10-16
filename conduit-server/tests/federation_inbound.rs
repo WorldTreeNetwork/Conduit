@@ -767,9 +767,43 @@ async fn query_profile_for_local_user() {
         .await
         .unwrap();
 
-    // Profile endpoint should return 200 (even though profile data is empty
-    // until E06 lands — the user exists so it's not 404).
+    // A user with no profile fields is 200 and an empty object.
     assert_eq!(resp.status().as_u16(), 200, "profile query for existing user should succeed");
+    let empty: Value = resp.json().await.unwrap();
+    assert_eq!(empty, json!({}));
+
+    storage_a.set_displayname(user_id, Some("Alice")).await.unwrap();
+    storage_a.set_avatar_url(user_id, Some("mxc://server-a.test/alice")).await.unwrap();
+    storage_a
+        .set_profile_field(user_id, "m.tz", Some(&json!("America/Los_Angeles")))
+        .await
+        .unwrap();
+    let auth_full = sign_req("GET", &path, "server-a.test", "server-a.test", None, &key_a);
+    let full: Value = client
+        .get(format!("{base_a}{path}"))
+        .header("Authorization", auth_full)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(full["displayname"], "Alice");
+    assert_eq!(full["avatar_url"], "mxc://server-a.test/alice");
+    assert_eq!(full["m.tz"], "America/Los_Angeles");
+
+    let field_path = format!("{path}&field=displayname");
+    let auth_field = sign_req("GET", &field_path, "server-a.test", "server-a.test", None, &key_a);
+    let only: Value = client
+        .get(format!("{base_a}{field_path}"))
+        .header("Authorization", auth_field)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(only, json!({"displayname": "Alice"}));
 
     // Query for a non-existent user should return 404.
     let path_nouser = "/_matrix/federation/v1/query/profile?user_id=%40ghost%3Aserver-a.test";

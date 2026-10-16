@@ -179,7 +179,46 @@ async fn lookup<S: AuthState>(state: &S, requester: Option<&str>, target: &str) 
     }
     match load_profile(state, target).await? {
         Some(p) => Ok(p),
-        None => Err(MatrixError::new_not_found("Profile not found").into_response()),
+        None => match remote_profile(state, target).await? {
+            Some(p) => Ok(p),
+            None => Err(MatrixError::new_not_found("Profile not found").into_response()),
+        },
+    }
+}
+
+/// Profile of a user on another server, via `GET /query/profile`.
+/// `Ok(None)` means this server should answer as if the user is unknown:
+/// they are local, federation is off, or the remote server returned 404.
+async fn remote_profile<S: AuthState>(
+    state: &S,
+    user_id: &str,
+) -> Result<Option<Map<String, Value>>, Response> {
+    let Some(dest) = conduit::signing::server_of_user_id(user_id) else {
+        return Ok(None);
+    };
+    if dest == state.server_name() || std::env::var("CONDUIT_FEDERATION").ok().as_deref() == Some("0") {
+        return Ok(None);
+    }
+    let Some(client) = state.federation_client() else {
+        return Ok(None);
+    };
+    match client.query_profile(dest, user_id, None).await {
+        Ok(value) => {
+            let Some(object) = value.as_object() else {
+                return Err(MatrixError::unknown("remote profile was not a JSON object").into_response());
+            };
+            let profile = object
+                .iter()
+                .filter(|(_, value)| !value.is_null())
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect();
+            Ok(Some(profile))
+        }
+        Err(crate::federation::FederationError::RemoteError { status: 404, .. }) => Ok(None),
+        Err(crate::federation::FederationError::RemoteError { status: 403, .. }) => {
+            Err(error(StatusCode::FORBIDDEN, "M_FORBIDDEN", "Profile lookup was denied by the remote server"))
+        }
+        Err(error) => Err(MatrixError::unknown(error.to_string()).into_response()),
     }
 }
 
