@@ -18,7 +18,7 @@ Statuses: **tested** = present and asserted by a named test; **untested** = pres
 | Client-Server API | endpoints | 163 | 0 | 0 | 0 | 1 | 164 |
 | Client-Server API | requirements | 77 | 0 | 0 | 0 | 9 | 86 |
 | Server-Server API | endpoints | 34 | 0 | 1 | 0 | 1 | 36 |
-| Server-Server API | requirements | 29 | 0 | 9 | 0 | 3 | 41 |
+| Server-Server API | requirements | 30 | 0 | 8 | 0 | 3 | 41 |
 | Application Service API | endpoints | 11 | 0 | 0 | 0 | 0 | 11 |
 | Application Service API | requirements | 16 | 0 | 0 | 0 | 2 | 18 |
 | Push Gateway API (homeserver as client) | endpoints | 1 | 0 | 0 | 0 | 0 | 1 |
@@ -27,7 +27,7 @@ Statuses: **tested** = present and asserted by a named test; **untested** = pres
 | Identity Service API (homeserver as consumer) | requirements | 1 | 0 | 0 | 0 | 0 | 1 |
 | Room versions 1–12 | requirements | 61 | 0 | 0 | 0 | 0 | 61 |
 | Appendices | requirements | 10 | 0 | 3 | 4 | 4 | 21 |
-| All |  | 411 | 0 | 13 | 4 | 37 | 465 |
+| All |  | 412 | 0 | 12 | 4 | 37 | 465 |
 ## Gap beads
 
 New beads filed by this inventory (children of `conduit-y99`):
@@ -49,7 +49,7 @@ New beads filed by this inventory (children of `conduit-y99`):
 - `conduit-y99.42` - Deprecated legacy client endpoints (/events, /events/{id}, /initialSync, rooms initialSync) (0 row(s))
 - `conduit-y99.43` - Account locking and suspension admin endpoints and enforcement (0 row(s))
 - `conduit-y99.44` - Federation /version endpoint, v1 invite, federation M_UNRECOGNIZED (1 row(s))
-- `conduit-y99.45` - Policy server client support (request/validate policy-server signatures) (2 row(s))
+- `conduit-y99.45` - Policy server client support (request/validate policy-server signatures) (1 row(s))
 - `conduit-y99.46` - Tests for implemented-but-untested surfaces (turnServer, openid, CORS, is_direct, unban, versions/capabilities) (0 row(s))
 
 In-flight / pre-existing beads referenced (not duplicated):
@@ -440,7 +440,7 @@ In-flight / pre-existing beads referenced (not duplicated):
 | `ss.to-device` | [Send-to-device messaging (m.direct_to_device)](https://spec.matrix.org/v1.19/server-server-api/#send-to-device-messaging) | tested | `conduit-server/src/federation/server.rs:958`<br>`conduit-server/src/federation/client.rs:706` | `peers/synapse_to_device.py (live Synapse)`<br>`production_e2e.rs::production_to_device_transactions_are_durable_and_do_not_reexpand_wildcards` |  |  |
 | `ss.content-repo` | [Content repository over federation (multipart/mixed)](https://spec.matrix.org/v1.19/server-server-api/#content-repository) | tested | `conduit-server/src/api/client/media.rs` | `media.rs::remote_media_is_fetched_over_federation_cached_and_served`<br>`media.rs::federation_media_download_and_thumbnail_are_multipart_mixed`<br>`media.rs::federation_pending_media_waits_for_timeout_ms` |  | Download and thumbnail answer multipart/mixed. Pending local media waits timeout_ms, then 504 M_NOT_YET_UPLOADED. |
 | `ss.acls` | [Server ACLs enforcement](https://spec.matrix.org/v1.19/server-server-api/#server-access-control-lists-acls) | tested | `conduit/src/server_acl.rs`<br>`conduit-server/src/federation/server.rs` | `production_pdu.rs::server_acl_denies_remote_participation_until_lifted`<br>`server_acl.rs::acl_order_globs_ports_and_ip_literals` |  | Denied origins are rejected on the MUST endpoints and per PDU on /send; lifting the deny list restores access. |
-| `ss.policy-servers` | [Policy servers (homeserver obligations in rooms using one)](https://spec.matrix.org/v1.19/server-server-api/#policy-servers) | partial | `conduit-server/src/federation/policy.rs` | `production_pdu.rs::policy_server_signature_is_required_before_a_client_event_is_sent` | `conduit-y99.45` | Client-authored events are signed before send. Federation receipts without a valid policy signature are not soft-failed yet. |
+| `ss.policy-servers` | [Policy servers (homeserver obligations in rooms using one)](https://spec.matrix.org/v1.19/server-server-api/#policy-servers) | tested | `conduit-server/src/federation/policy.rs`<br>`conduit-server/src/federation/pipeline.rs` | `production_pdu.rs::policy_server_signature_is_required_before_a_client_event_is_sent`<br>`production_pdu.rs::policy_server_refusal_soft_fails_a_federated_event` |  | Client events are signed before send. A refusal is not stored. A federated PDU with a valid signature is not requested again. A missing signature is requested and stored. A refusal is soft-failed: HTTP 200, GET /event returns it, /sync omits it. An invalid signature is requested again. |
 | `ss.signing.outgoing` | [Adding hashes and signatures to outgoing events](https://spec.matrix.org/v1.19/server-server-api/#adding-hashes-and-signatures-to-outgoing-events) | partial | `conduit/src/hashing.rs`<br>`conduit/src/signing.rs` | `matrix_v11_crypto.rs` | `conduit-embed-pdu` | Byte-exact for typed v11 events; wire PDU model in conduit-embed-pdu. |
 | `ss.signing.validate` | [Validating hashes and signatures on received events](https://spec.matrix.org/v1.19/server-server-api/#validating-hashes-and-signatures-on-received-events) | partial | `conduit-server/src/federation/pipeline.rs` | `federation_inbound.rs::inbound_signature_verified_or_rejected`<br>`production_pdu.rs::send_applies_acl_per_pdu_and_inbound_edus` | `conduit-y99.33` `conduit-embed-pdu` | Signatures are checked. A content-hash mismatch on PUT /send is stored as the redacted PDU with the original hashes. Byte-exact wire persistence remains. |
 | `ss.signing.reference-hash` | [Calculating the reference hash](https://spec.matrix.org/v1.19/server-server-api/#calculating-the-reference-hash-for-an-event) | tested | `conduit/src/hashing.rs` | `matrix_v11_crypto.rs` |  |  |

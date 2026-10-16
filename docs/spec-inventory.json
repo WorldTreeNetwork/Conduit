@@ -42,9 +42,9 @@
         "total": 36
       },
       "requirement": {
-        "implemented+tested": 29,
+        "implemented+tested": 30,
         "implemented-untested": 0,
-        "partial": 9,
+        "partial": 8,
         "missing": 0,
         "not-applicable": 3,
         "total": 41
@@ -9495,20 +9495,22 @@
       "title": "Policy servers (homeserver obligations in rooms using one)",
       "source": "https://spec.matrix.org/v1.19/server-server-api/#policy-servers",
       "role": "homeserver",
-      "status": "partial",
+      "status": "implemented+tested",
       "code": [
         {
           "loc": "conduit-server/src/federation/policy.rs"
+        },
+        {
+          "loc": "conduit-server/src/federation/pipeline.rs"
         }
       ],
       "tests": [
-        "conduit-server/tests/production_pdu.rs::policy_server_signature_is_required_before_a_client_event_is_sent"
+        "conduit-server/tests/production_pdu.rs::policy_server_signature_is_required_before_a_client_event_is_sent",
+        "conduit-server/tests/production_pdu.rs::policy_server_refusal_soft_fails_a_federated_event"
       ],
-      "tests_total": 1,
-      "gap_beads": [
-        "conduit-y99.45"
-      ],
-      "notes": "Client-authored events ask POST /_matrix/policy/v1/sign and keep a verifying ed25519:policy_server signature. Events received over federation without a valid policy signature are not yet soft-failed."
+      "tests_total": 2,
+      "gap_beads": [],
+      "notes": "Client-authored events ask POST /_matrix/policy/v1/sign and keep a verifying ed25519:policy_server signature. A refusal is returned to the client and the event is not stored. A federated PDU that already verifies is not requested again. A missing signature is requested and stored. A refusal is soft-failed: the transaction stays 200, federation GET /event returns the PDU, and /sync omits it. An invalid signature is requested a second time."
     },
     {
       "id": "ss.signing.outgoing",

@@ -181,7 +181,7 @@ pub async fn process_received(
     origin: &str,
 ) -> Result<String, PipelineError> {
     let Received { event_id, pdu, signed_by, .. } = received;
-    let pdu = Event { event_id, pdu, unsigned };
+    let mut pdu = Event { event_id, pdu, unsigned };
 
     // --- Dedup — skip if we already have this event -------------------------
     if let Some(cache) = recent {
@@ -271,6 +271,20 @@ pub async fn process_received(
             }
             return Ok(pdu.event_id);
         }
+    }
+    // A policy server's recommendation is not an auth rule. An event that
+    // still lacks ed25519:policy_server after a fresh request is stored and
+    // hidden from clients, the same as a current-state soft failure.
+    match super::policy::federated_policy_decision(storage.as_ref(), fed_client.map(Arc::as_ref), &mut pdu).await {
+        Ok(super::policy::PolicyDecision::Accept) => {}
+        Ok(super::policy::PolicyDecision::SoftFail) => {
+            persist_held(storage, &pdu, "soft_failed").await?;
+            if let Some(cache) = recent {
+                cache.insert(&pdu.event_id).await;
+            }
+            return Ok(pdu.event_id);
+        }
+        Err(error) => return Err(PipelineError::Storage(error)),
     }
     // Resolution needs every auth event of both snapshots, not only the
     // incoming PDU's. A conflicting leave otherwise fails closed on a

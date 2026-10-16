@@ -26,8 +26,8 @@ use reqwest::Method;
 use serde_json::{json, Value};
 
 use conduit::event::Pdu;
-use conduit::keys::{generate_server_key, public_bytes, ServerKey};
-use conduit::signing::sign_authored;
+use conduit::keys::{generate_server_key, public_bytes, server_key_from_bytes, ServerKey};
+use conduit::signing::{add_signature, sign_authored};
 use conduit_server::federation::auth::sign_request;
 
 const REMOTE: &str = "remote.test";
@@ -1358,6 +1358,231 @@ async fn policy_server_signature_is_required_before_a_client_event_is_sent() {
     assert_eq!(policy.calls.load(Ordering::SeqCst), calls_before_disable, "clearing m.room.policy is not signed");
     send("after-disable", 200).await;
     assert_eq!(policy.calls.load(Ordering::SeqCst), calls_before_disable, "a disabled policy server is not asked");
+}
+
+async fn timeline_bodies(server: &Server, token: &str, room: &str) -> Vec<String> {
+    let sync = server.request(Method::GET, "/_matrix/client/v3/sync", Some(token), None, 200).await;
+    sync["rooms"]["join"][room]["timeline"]["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|event| event["content"]["body"].as_str().map(str::to_owned))
+        .collect()
+}
+
+fn policy_signature_holds(pdu: &Value, public: &[u8]) -> bool {
+    let Ok(parsed) = serde_json::from_value::<Pdu>(pdu.clone()) else { return false };
+    let Ok(mut redacted) = serde_json::to_value(conduit::redaction::redact(&parsed)) else { return false };
+    let Some(map) = redacted.as_object_mut() else { return false };
+    map.remove("signatures");
+    map.remove("unsigned");
+    let Ok(bytes) = conduit::canonical_json::to_canonical_bytes(&redacted) else { return false };
+    let Some(signature) = pdu["signatures"][REMOTE]["ed25519:policy_server"].as_str() else { return false };
+    let Ok(raw) = STANDARD_NO_PAD.decode(signature) else { return false };
+    let Ok(raw) = <[u8; 64]>::try_from(raw.as_slice()) else { return false };
+    let Ok(public) = <[u8; 32]>::try_from(public) else { return false };
+    let Ok(key) = ed25519_dalek::VerifyingKey::from_bytes(&public) else { return false };
+    key.verify_strict(&bytes, &ed25519_dalek::Signature::from_bytes(&raw)).is_ok()
+}
+
+/// A PDU that already carries `ed25519:policy_server` is accepted without
+/// asking again. A missing signature is requested and stored. A refusal is
+/// HTTP 200, absent from `/sync`, and still returned by federation GET
+/// `/event`. An invalid signature is requested a second time.
+#[tokio::test]
+async fn policy_server_refusal_soft_fails_a_federated_event() {
+    let policy = spawn_policy().await;
+    let server = Server::with_env(&[
+        ("CONDUIT_FEDERATION", "1"),
+        ("CONDUIT_REMOTE_KEYS_OVERRIDE", &policy.remote.keys_url),
+        ("CONDUIT_FEDERATION_BASE_URL", &policy.base_url),
+    ])
+    .await;
+    let alice = server.register("alice").await;
+    let token = alice["access_token"].as_str().unwrap();
+    let room = server
+        .request(
+            Method::POST,
+            "/_matrix/client/v3/createRoom",
+            Some(token),
+            Some(json!({"preset": "public_chat", "room_version": "12"})),
+            200,
+        )
+        .await["room_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let public_key = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(public_bytes(&policy.policy_key));
+    server
+        .request(
+            Method::PUT,
+            &format!("/_matrix/client/v3/rooms/{}/state/m.room.policy", enc(&room)),
+            Some(token),
+            Some(json!({"via": REMOTE, "public_keys": {"ed25519": public_key}})),
+            200,
+        )
+        .await;
+    let joiner = "@ps:remote.test";
+    federation_join(&server, &policy.remote, REMOTE, &room, joiner).await;
+    assert_eq!(policy.calls.load(Ordering::SeqCst), 0, "the join predates an enabled check on the resident's own events");
+
+    let state = server
+        .request(Method::GET, &format!("/_matrix/client/v3/rooms/{}/state", enc(&room)), Some(token), None, 200)
+        .await;
+    let mut power_id = String::new();
+    let mut join_id = String::new();
+    for event in state.as_array().unwrap() {
+        match event["type"].as_str() {
+            Some("m.room.power_levels") => power_id = event["event_id"].as_str().unwrap().to_owned(),
+            Some("m.room.member") if event["state_key"] == joiner => {
+                join_id = event["event_id"].as_str().unwrap().to_owned();
+            }
+            _ => {}
+        }
+    }
+    assert!(!power_id.is_empty() && !join_id.is_empty(), "{state}");
+    let policy_signer = server_key_from_bytes("ed25519:policy_server", policy.policy_key.signing_key.to_bytes().as_ref()).unwrap();
+    let policy_public = public_bytes(&policy.policy_key);
+
+    let message = |body: &str, ts: u64, depth: i64, with_policy: bool| {
+        let pdu = Pdu::new(
+            &room,
+            joiner,
+            "m.room.message",
+            None,
+            json!({"msgtype": "m.text", "body": body}),
+            ts,
+            vec![power_id.clone(), join_id.clone()],
+            vec![join_id.clone()],
+            depth,
+        );
+        let (id, value) = sign(&policy.remote, pdu);
+        if !with_policy {
+            return (id, value);
+        }
+        let mut signed: Pdu = serde_json::from_value(value).unwrap();
+        add_signature(&mut signed, &policy_signer, REMOTE).unwrap();
+        (conduit::hashing::event_id(&signed).unwrap(), serde_json::to_value(signed).unwrap())
+    };
+    let calls_before_signed = policy.calls.load(Ordering::SeqCst);
+    let (signed_id, signed_pdu) = message("already-signed", 1_700_000_003_000, 40, true);
+    let signed_result = fed(
+        &server,
+        &policy.remote,
+        Method::PUT,
+        "/_matrix/federation/v1/send/policy-already",
+        Some(txn(vec![signed_pdu], vec![])),
+        200,
+    )
+    .await;
+    assert_eq!(signed_result["pdus"][&signed_id], json!({}), "{signed_result}");
+    assert_eq!(policy.calls.load(Ordering::SeqCst), calls_before_signed, "a valid policy signature is not requested again");
+    assert!(timeline_bodies(&server, token, &room).await.iter().any(|body| body == "already-signed"), "a recommended event reaches /sync");
+
+    let calls_before_hello = policy.calls.load(Ordering::SeqCst);
+    let (hello_id, hello_pdu) = message("hello-fed", 1_700_000_003_100, 41, false);
+    let hello_result = fed(
+        &server,
+        &policy.remote,
+        Method::PUT,
+        "/_matrix/federation/v1/send/policy-hello",
+        Some(txn(vec![hello_pdu], vec![])),
+        200,
+    )
+    .await;
+    assert_eq!(hello_result["pdus"][&hello_id], json!({}), "{hello_result}");
+    assert!(policy.calls.load(Ordering::SeqCst) > calls_before_hello, "a missing policy signature is requested");
+    let hello_wire = fed(
+        &server,
+        &policy.remote,
+        Method::GET,
+        &format!("/_matrix/federation/v1/event/{}", enc(&hello_id)),
+        None,
+        200,
+    )
+    .await;
+    assert!(
+        policy_signature_holds(&hello_wire["pdus"][0], &policy_public),
+        "the stored event carries the policy server signature: {}",
+        hello_wire["pdus"][0]
+    );
+    assert!(timeline_bodies(&server, token, &room).await.iter().any(|body| body == "hello-fed"), "the signed event reaches /sync");
+
+    let calls_before_spam = policy.calls.load(Ordering::SeqCst);
+    let (spam_id, spam_pdu) = message("spam", 1_700_000_003_200, 42, false);
+    let spam_result = fed(
+        &server,
+        &policy.remote,
+        Method::PUT,
+        "/_matrix/federation/v1/send/policy-spam",
+        Some(txn(vec![spam_pdu], vec![])),
+        200,
+    )
+    .await;
+    assert_eq!(spam_result["pdus"][&spam_id], json!({}), "{spam_result}");
+    assert_eq!(policy.calls.load(Ordering::SeqCst), calls_before_spam + 1, "a refusal is not retried");
+    let spam_wire = fed(
+        &server,
+        &policy.remote,
+        Method::GET,
+        &format!("/_matrix/federation/v1/event/{}", enc(&spam_id)),
+        None,
+        200,
+    )
+    .await;
+    assert_eq!(spam_wire["pdus"][0]["content"]["body"], "spam", "{spam_wire}");
+    assert!(spam_wire["pdus"][0]["signatures"][REMOTE].get("ed25519:policy_server").is_none(), "{spam_wire}");
+    let seen = timeline_bodies(&server, token, &room).await;
+    assert!(!seen.iter().any(|body| body == "spam"), "a refused event is soft-failed: {seen:?}");
+
+    let calls_before_retry = policy.calls.load(Ordering::SeqCst);
+    let (retry_id, retry_pdu) = message("retry-me", 1_700_000_003_300, 43, false);
+    let retry_result = fed(
+        &server,
+        &policy.remote,
+        Method::PUT,
+        "/_matrix/federation/v1/send/policy-retry",
+        Some(txn(vec![retry_pdu], vec![])),
+        200,
+    )
+    .await;
+    assert_eq!(retry_result["pdus"][&retry_id], json!({}), "{retry_result}");
+    assert!(policy.calls.load(Ordering::SeqCst) >= calls_before_retry + 2, "an invalid signature is requested again");
+    let retry_wire = fed(
+        &server,
+        &policy.remote,
+        Method::GET,
+        &format!("/_matrix/federation/v1/event/{}", enc(&retry_id)),
+        None,
+        200,
+    )
+    .await;
+    assert!(policy_signature_holds(&retry_wire["pdus"][0], &policy_public), "{retry_wire}");
+    assert!(timeline_bodies(&server, token, &room).await.iter().any(|body| body == "retry-me"), "the retried event reaches /sync");
+
+    let after = server
+        .request(
+            Method::PUT,
+            &format!("/_matrix/client/v3/rooms/{}/send/m.room.message/after-policy-soft", enc(&room)),
+            Some(token),
+            Some(json!({"msgtype": "m.text", "body": "still here"})),
+            200,
+        )
+        .await["event_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let after_pdu = fed(
+        &server,
+        &policy.remote,
+        Method::GET,
+        &format!("/_matrix/federation/v1/event/{}", enc(&after)),
+        None,
+        200,
+    )
+    .await;
+    let prevs = after_pdu["pdus"][0]["prev_events"].as_array().unwrap();
+    assert!(prevs.iter().all(|id| id != &json!(spam_id)), "a soft-failed event is not a prev event: {after_pdu}");
 }
 
 #[tokio::test]
