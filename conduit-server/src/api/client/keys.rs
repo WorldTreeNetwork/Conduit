@@ -110,7 +110,7 @@ pub async fn keys_upload<S: AuthState>(
                 Ok(id) => id,
                 Err(e) => return MatrixError::unknown(e.to_string()).into_response(),
             };
-            broadcast_device_list_update(&state, user_id, device_id, stream_id, Some(dk.clone())).await;
+            broadcast_device_list_update(&state, user_id, device_id, stream_id, Some(dk.clone()), false).await;
         }
     }
 
@@ -171,48 +171,161 @@ pub(crate) async fn remote_servers_sharing_room_with(
 }
 
 /// Broadcast an `m.device_list_update` EDU to every remote server that shares
-/// a room with `user_id` (conduit-6r1).
+/// a room with `user_id`.
 ///
-/// Best-effort and fire-and-forget — failures are logged. Triggered after
-/// `keys_upload` and `device_signing_upload`.
+/// Best-effort and fire-and-forget. `prev_id` cites the previous EDU sent
+/// for this user. A display name already stored on the device is included.
 pub(crate) async fn broadcast_device_list_update<S: AuthState>(
     state: &S,
     user_id: &str,
     device_id: &str,
     stream_id: i64,
     keys: Option<Value>,
+    deleted: bool,
 ) {
     let Some(queue) = state.federation_queue().cloned() else {
-        return; // No federation wiring (tests / stub state) — silently skip.
+        return;
     };
     let storage = state.storage().clone();
     let server_name = state.server_name().to_owned();
-    let user_id = user_id.to_owned();
-    let device_id = device_id.to_owned();
+    // An EDU that nobody receives must not advance prev_id.
+    let servers = remote_servers_sharing_room_with(&storage, &server_name, user_id).await;
+    if servers.is_empty() {
+        return;
+    }
+    let edu = device_list_edu(&storage, user_id, device_id, stream_id, deleted, keys).await;
 
     tokio::spawn(async move {
-        let servers =
-            remote_servers_sharing_room_with(&storage, &server_name, &user_id).await;
-        if servers.is_empty() {
-            return;
-        }
-        let mut content = json!({
-            "user_id": user_id,
-            "device_id": device_id,
-            "stream_id": stream_id,
-            "prev_id": [],
-        });
-        if let Some(k) = keys {
-            content["keys"] = k;
-        }
-        let edu = json!({
-            "edu_type": "m.device_list_update",
-            "content": content,
-        });
         for dest in servers {
             queue.enqueue(&dest, vec![], vec![edu.clone()]).await;
         }
     });
+}
+
+/// One `m.device_list_update` EDU. `prev_id` is the previous outbound tip.
+async fn device_list_edu(
+    storage: &Arc<dyn Storage>,
+    user_id: &str,
+    device_id: &str,
+    stream_id: i64,
+    deleted: bool,
+    keys: Option<Value>,
+) -> Value {
+    let prev_id = storage
+        .note_outbound_device_list_edu(user_id, stream_id)
+        .await
+        .unwrap_or_default();
+    let display_name = if deleted {
+        None
+    } else {
+        storage
+            .get_device(user_id, device_id)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|device| device.display_name)
+    };
+    let mut content = json!({
+        "user_id": user_id,
+        "device_id": device_id,
+        "stream_id": stream_id,
+        "prev_id": prev_id,
+    });
+    if deleted {
+        content["deleted"] = json!(true);
+    }
+    if let Some(name) = display_name {
+        content["device_display_name"] = json!(name);
+    }
+    if let Some(keys) = keys {
+        content["keys"] = keys;
+    }
+    json!({
+        "edu_type": "m.device_list_update",
+        "content": content,
+    })
+}
+
+/// After a join, send the current device list to servers that were not
+/// already receiving this user's updates.
+pub(crate) async fn publish_device_lists_after_join(
+    storage: &Arc<dyn Storage>,
+    queue: &Arc<crate::federation::Queue>,
+    server_name: &str,
+    room_id: &str,
+    joined_user: &str,
+) {
+    let Ok(remotes) = storage.joined_remote_servers(room_id, server_name).await else {
+        return;
+    };
+    let mut deliveries: Vec<(String, String)> = Vec::new();
+    if conduit::signing::server_of_user_id(joined_user) == Some(server_name) {
+        for dest in remotes {
+            if !shares_server_outside_room(storage, server_name, joined_user, room_id, &dest).await {
+                deliveries.push((joined_user.to_owned(), dest));
+            }
+        }
+    } else if let Some(dest) = conduit::signing::server_of_user_id(joined_user) {
+        let Ok(state) = storage.get_current_state(room_id).await else {
+            return;
+        };
+        for event in state {
+            if event.event_type != "m.room.member" {
+                continue;
+            }
+            if event.content.get("membership").and_then(Value::as_str) != Some("join") {
+                continue;
+            }
+            let Some(local_user) = event.state_key.as_deref() else { continue };
+            if conduit::signing::server_of_user_id(&local_user) != Some(server_name) {
+                continue;
+            }
+            if shares_server_outside_room(storage, server_name, &local_user, room_id, dest).await {
+                continue;
+            }
+            deliveries.push((local_user.to_owned(), dest.to_owned()));
+        }
+    }
+    for (user_id, dest) in deliveries {
+        let Ok(devices) = storage.list_devices_for_user(&user_id).await else {
+            continue;
+        };
+        let keys = storage.get_device_keys_for_user(&user_id).await.unwrap_or_default();
+        for device in devices {
+            let Ok(stream_id) = storage.record_device_list_change(&user_id).await else {
+                continue;
+            };
+            let device_keys = keys.get(&device.device_id).cloned();
+            let edu = device_list_edu(storage, &user_id, &device.device_id, stream_id, false, device_keys).await;
+            queue.enqueue(&dest, vec![], vec![edu]).await;
+        }
+    }
+}
+
+/// True when `user_id` already shares some room other than `room_id` with `server`.
+async fn shares_server_outside_room(
+    storage: &Arc<dyn Storage>,
+    server_name: &str,
+    user_id: &str,
+    room_id: &str,
+    server: &str,
+) -> bool {
+    let Ok(rooms) = storage.joined_rooms(user_id).await else {
+        return false;
+    };
+    for other in rooms {
+        if other == room_id {
+            continue;
+        }
+        if storage
+            .joined_remote_servers(&other, server_name)
+            .await
+            .is_ok_and(|servers| servers.iter().any(|candidate| candidate == server))
+        {
+            return true;
+        }
+    }
+    false
 }
 
 // ---------------------------------------------------------------------------
@@ -1352,11 +1465,9 @@ pub async fn signatures_upload<S: AuthState>(
             }
         }
     }
-    let mut announced = 0i64;
     for user in changed_users {
-        match storage.record_device_list_change(&user).await {
-            Ok(stream_id) => announced = stream_id,
-            Err(e) => return MatrixError::unknown(e.to_string()).into_response(),
+        if let Err(e) = storage.record_device_list_change(&user).await {
+            return MatrixError::unknown(e.to_string()).into_response();
         }
     }
     if own_master {
@@ -1369,7 +1480,11 @@ pub async fn signatures_upload<S: AuthState>(
         };
         for device in own_devices {
             if let Some(keys) = published.devices.get(&device).cloned() {
-                broadcast_device_list_update(&state, me, &device, announced, Some(keys)).await;
+                let stream_id = match storage.record_device_list_change(me).await {
+                    Ok(stream_id) => stream_id,
+                    Err(e) => return MatrixError::unknown(e.to_string()).into_response(),
+                };
+                broadcast_device_list_update(&state, me, &device, stream_id, Some(keys), false).await;
             }
         }
     }

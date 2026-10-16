@@ -2426,3 +2426,270 @@ async fn state_after_lazy_members_survive_timeline_dedup_and_owned_filters() {
     let empty = sync_mode(&server, &bob, json!({"room":{"state":{"types":[]}}}), None, true, false).await;
     assert_eq!(empty["rooms"]["join"][&room]["state_after"]["events"], json!([]), "required state_after survives state filtering");
 }
+
+/// Display-name, key, and delete updates are `m.device_list_update` EDUs
+/// chained by `prev_id`. Joining a room tells a server that was not already
+/// receiving that user's devices. An inbound EDU whose `prev_id` is unknown
+/// resyncs via `/user/keys/query` before the incremental update is applied.
+#[tokio::test]
+async fn device_list_updates_chain_and_unknown_prev_resyncs() {
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    use axum::extract::Json;
+    use axum::http::HeaderMap;
+    use axum::routing::{get, post, put};
+    use axum::Router;
+    use conduit::event::{Event, Pdu};
+    use conduit::keys::{generate_server_key, public_bytes};
+    use conduit::storage::Storage;
+    use ed25519_dalek::Signer as _;
+
+    let captured = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let captured_route = Arc::clone(&captured);
+    let queries = Arc::new(Mutex::new(0u32));
+    let queries_route = Arc::clone(&queries);
+    let snap = Device::new("@bob:peer.test", "SNAP");
+    let phone = Device::new("@bob:peer.test", "PHONE");
+    let snap_keys = snap.keys.clone();
+    let peer_key = Arc::new(generate_server_key());
+    let peer_key_route = Arc::clone(&peer_key);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let peer_url = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        let app = Router::new()
+            .route(
+                "/_matrix/key/v2/server",
+                get(move || {
+                    let key = Arc::clone(&peer_key_route);
+                    async move {
+                        let public = STANDARD_NO_PAD.encode(public_bytes(&key));
+                        let mut document = json!({
+                            "server_name": "peer.test",
+                            "verify_keys": { &key.key_id: { "key": public } },
+                            "old_verify_keys": {},
+                            "valid_until_ts": chrono::Utc::now().timestamp_millis() + 86_400_000,
+                        });
+                        let canonical = conduit::canonical_json::to_canonical_bytes(&document).unwrap();
+                        let signature = STANDARD_NO_PAD.encode(key.signing_key.sign(&canonical).to_bytes());
+                        document["signatures"] = json!({ "peer.test": { &key.key_id: signature } });
+                        Json(document)
+                    }
+                }),
+            )
+            .route(
+                "/_matrix/federation/v1/send/:txn",
+                put(move |headers: HeaderMap, Json(body): Json<Value>| {
+                    let captured = Arc::clone(&captured_route);
+                    async move {
+                        let mut hit = body;
+                        hit["authorization"] = json!(headers.get("authorization").and_then(|value| value.to_str().ok()).unwrap_or(""));
+                        captured.lock().unwrap().push(hit);
+                        Json(json!({ "pdus": {} }))
+                    }
+                }),
+            )
+            .route(
+                "/_matrix/federation/v1/user/keys/query",
+                post(move |Json(body): Json<Value>| {
+                    let queries = Arc::clone(&queries_route);
+                    let snap_keys = snap_keys.clone();
+                    async move {
+                        let n = {
+                            let mut seen = queries.lock().unwrap();
+                            *seen += 1;
+                            *seen
+                        };
+                        let _ = body;
+                        if n == 1 {
+                            Json(json!({ "device_keys": { "@bob:peer.test": { "SNAP": snap_keys } } }))
+                        } else {
+                            Json(json!({ "device_keys": {} }))
+                        }
+                    }
+                }),
+            );
+        axum::serve(listener, app).await.ok();
+    });
+
+    let server = Server::with_env(&[
+        ("CONDUIT_FEDERATION_BASE_URL", peer_url.as_str()),
+        ("CONDUIT_REMOTE_KEYS_OVERRIDE", peer_url.as_str()),
+    ])
+    .await;
+    let alice = server.register("alice").await;
+    let alice_id = user(&alice).to_owned();
+    let device_id = alice["device_id"].as_str().unwrap().to_owned();
+    let room = encrypted_room(&server, &alice).await;
+    let pool = sqlx::PgPool::connect(&server.database_url).await.unwrap();
+    let storage = conduit_server::PostgresStorage::new(pool);
+    for (member, membership) in [("@erin:peer.test", "join"), ("@cara:gone.test", "leave")] {
+        let event = Event::new(
+            format!("$member-{membership}-{}", member.trim_start_matches('@').replace(':', "-")),
+            Pdu::new(
+                &room,
+                member,
+                "m.room.member",
+                Some(member.to_owned()),
+                json!({ "membership": membership }),
+                1_700_000_000_000,
+                vec![],
+                vec![],
+                40,
+            ),
+        );
+        storage.put_event(&event).await.unwrap();
+        storage.set_state_entry(&room, "m.room.member", member, &event.event_id).await.unwrap();
+    }
+
+    let wait_edu = |pred: fn(&Value) -> bool| {
+        let captured = Arc::clone(&captured);
+        async move {
+            tokio::time::timeout(Duration::from_secs(8), async move {
+                loop {
+                    if let Some(found) = captured.lock().unwrap().iter().find_map(|body| {
+                        let authorization = body["authorization"].as_str().unwrap_or("").to_owned();
+                        body["edus"].as_array().and_then(|edus| {
+                            edus.iter().find(|edu| pred(edu)).map(|edu| (authorization.clone(), edu.clone()))
+                        })
+                    }) {
+                        return found;
+                    }
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+            })
+            .await
+            .expect("device list EDU was not sent")
+        }
+    };
+
+    server
+        .request(
+            Method::PUT,
+            &format!("/_matrix/client/v3/devices/{device_id}"),
+            Some(token(&alice)),
+            Some(json!({ "display_name": "Alice phone" })),
+            200,
+        )
+        .await;
+    let (authorization, named) = wait_edu(|edu| {
+        edu["edu_type"] == "m.device_list_update" && edu["content"]["device_display_name"] == "Alice phone" && edu["content"].get("keys").is_none()
+    })
+    .await;
+    assert!(authorization.contains("destination=\"peer.test\""), "{authorization}");
+    assert_eq!(named["content"]["user_id"], alice_id);
+    assert_eq!(named["content"]["device_id"], device_id);
+    assert_eq!(named["content"]["prev_id"], json!([]));
+    let first_stream = named["content"]["stream_id"].as_i64().unwrap();
+
+    upload_device(&server, &alice).await;
+    let (_, keyed) = wait_edu(|edu| {
+        edu["edu_type"] == "m.device_list_update" && edu["content"]["keys"]["device_id"].is_string()
+    })
+    .await;
+    assert_eq!(keyed["content"]["user_id"], alice_id);
+    assert_eq!(keyed["content"]["device_display_name"], "Alice phone");
+    assert_eq!(keyed["content"]["prev_id"], json!([first_stream]));
+    let second_stream = keyed["content"]["stream_id"].as_i64().unwrap();
+    assert_ne!(second_stream, first_stream);
+
+    let bob = server.register("bob").await;
+    let bob_device = bob["device_id"].as_str().unwrap().to_owned();
+    join(&server, &bob, &room).await;
+    let (_, joined) = wait_edu(|edu| {
+        edu["edu_type"] == "m.device_list_update" && edu["content"]["user_id"] == "@bob:production.test"
+    })
+    .await;
+    assert_eq!(joined["content"]["device_id"], bob_device);
+    assert_eq!(joined["content"]["prev_id"], json!([]), "a server new to this user starts the chain");
+
+    let txn = json!({
+        "origin": "peer.test",
+        "origin_server_ts": 1_700_000_000_000u64,
+        "pdus": [],
+        "edus": [
+            {
+                "edu_type": "m.device_list_update",
+                "content": {
+                    "user_id": "@bob:peer.test",
+                    "device_id": "PHONE",
+                    "stream_id": 7,
+                    "prev_id": [4],
+                    "keys": phone.keys,
+                }
+            },
+            {
+                "edu_type": "m.device_list_update",
+                "content": {
+                    "user_id": "@ghost:elsewhere.test",
+                    "device_id": "SPOOF",
+                    "stream_id": 1,
+                    "prev_id": [1],
+                    "keys": {"user_id": "@ghost:elsewhere.test", "device_id": "SPOOF"},
+                }
+            }
+        ]
+    });
+    let send_path = "/_matrix/federation/v1/send/device-lists-1";
+    let send_auth = conduit_server::federation::auth::sign_request(
+        "PUT",
+        send_path,
+        "peer.test",
+        "production.test",
+        Some(&txn),
+        &peer_key,
+    );
+    let sent = server.http.put(format!("{}{send_path}", server.base_url)).header("Authorization", send_auth).json(&txn).send().await.unwrap();
+    assert_eq!(sent.status().as_u16(), 200, "{}", sent.text().await.unwrap_or_default());
+    let queried = tokio::time::timeout(Duration::from_secs(8), async {
+        loop {
+            if *queries.lock().unwrap() >= 1 {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await;
+    assert!(queried.is_ok(), "an unknown prev_id must call /user/keys/query");
+    let cached = server
+        .request(
+            Method::POST,
+            "/_matrix/client/v3/keys/query",
+            Some(token(&alice)),
+            Some(json!({ "device_keys": { "@bob:peer.test": [], "@ghost:elsewhere.test": [] }, "timeout": 2000 })),
+            200,
+        )
+        .await;
+    assert!(cached["device_keys"]["@bob:peer.test"]["SNAP"].is_object(), "snapshot device missing: {cached}");
+    assert!(cached["device_keys"]["@bob:peer.test"]["PHONE"].is_object(), "incremental device missing: {cached}");
+    assert!(cached["device_keys"].get("@ghost:elsewhere.test").is_none(), "spoofed user was stored: {cached}");
+
+    let challenge = server
+        .request(Method::DELETE, &format!("/_matrix/client/v3/devices/{device_id}"), Some(token(&alice)), Some(json!({})), 401)
+        .await;
+    server
+        .request(
+            Method::DELETE,
+            &format!("/_matrix/client/v3/devices/{device_id}"),
+            Some(token(&alice)),
+            Some(json!({
+                "auth": {
+                    "type": "m.login.password",
+                    "identifier": {"type": "m.id.user", "user": "alice"},
+                    "password": "test-password",
+                    "session": challenge["session"],
+                }
+            })),
+            200,
+        )
+        .await;
+    let (_, removed) = wait_edu(|edu| edu["edu_type"] == "m.device_list_update" && edu["content"]["deleted"] == true).await;
+    assert_eq!(removed["content"]["user_id"], alice_id);
+    assert_eq!(removed["content"]["device_id"], device_id);
+    assert_eq!(removed["content"]["prev_id"], json!([second_stream]));
+    assert_ne!(removed["content"]["stream_id"].as_i64().unwrap(), second_stream);
+    let leaked = captured.lock().unwrap().iter().any(|body| {
+        body["authorization"].as_str().unwrap_or("").contains("destination=\"gone.test\"")
+    });
+    assert!(!leaked, "a left member's server is not a device-list destination");
+}

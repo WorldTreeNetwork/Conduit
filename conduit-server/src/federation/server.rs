@@ -68,6 +68,8 @@ pub struct FedState {
     pub typing: Arc<crate::api::client::TypingStore>,
     /// Ephemeral presence state shared with client /sync.
     pub presence: Arc<crate::api::client::PresenceStore>,
+    /// Outbound transaction queue. Absent in tests that never federate EDUs.
+    pub federation_queue: Option<Arc<crate::federation::Queue>>,
 }
 
 impl MediaState for FedState {
@@ -425,6 +427,20 @@ pub async fn send_transaction(
         {
             Ok(event_id) => {
                 pdu_results.insert(event_id, json!({}));
+                if event_type == "m.room.member"
+                    && content.get("membership").and_then(Value::as_str) == Some("join")
+                {
+                    if let (Some(queue), Some(user)) = (state.federation_queue.as_ref(), state_key.as_deref()) {
+                        crate::api::client::keys::publish_device_lists_after_join(
+                            &state.storage,
+                            queue,
+                            &state.server_name,
+                            &room_id,
+                            user,
+                        )
+                        .await;
+                    }
+                }
                 // A remote guest_access change must remove this server's guests.
                 if state_key.as_deref() == Some("") {
                     crate::api::client::guest_access::after_state_event(
@@ -717,7 +733,18 @@ pub async fn send_join(
     )
     .await
     {
-        Ok(_) => {}
+        Ok(_) => {
+            if let Some(queue) = state.federation_queue.as_ref() {
+                crate::api::client::keys::publish_device_lists_after_join(
+                    &state.storage,
+                    queue,
+                    &state.server_name,
+                    &room_id,
+                    &pdu.sender,
+                )
+                .await;
+            }
+        }
         Err(PipelineError::AuthFailed(e)) => return forbidden(&e),
         Err(e) => return internal(&e.to_string()),
     }
@@ -1502,6 +1529,39 @@ pub async fn fed_send_to_device(
 // mrm.11 — handle m.device_list_update EDU in send_transaction
 // ---------------------------------------------------------------------------
 
+/// Replace the cached device list when an EDU cites an unknown `prev_id`.
+async fn resync_device_list(state: &FedState, origin: &str, user_id: &str) {
+    let mut requested = serde_json::Map::new();
+    requested.insert(user_id.to_owned(), json!([]));
+    let Ok(snapshot) = state.fed_client.query_user_keys(origin, &requested).await else {
+        return;
+    };
+    let Some(devices) = snapshot
+        .get("device_keys")
+        .and_then(|value| value.get(user_id))
+        .and_then(Value::as_object)
+    else {
+        return;
+    };
+    let existing = state
+        .storage
+        .get_device_keys_for_user(user_id)
+        .await
+        .unwrap_or_default();
+    for (device_id, keys) in devices {
+        if state.storage.upsert_device_keys(user_id, device_id, keys).await.is_err() {
+            return;
+        }
+    }
+    for device_id in existing.keys() {
+        if !devices.contains_key(device_id) && state.storage.delete_device_keys(user_id, device_id).await.is_err() {
+            return;
+        }
+    }
+}
+
+
+
 /// Handle EDUs in an inbound federation transaction.
 pub(crate) async fn handle_edu(
     state: &FedState,
@@ -1605,15 +1665,41 @@ pub(crate) async fn handle_edu(
             .get("deleted")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
+        let prev_ids: Vec<i64> = content
+            .get("prev_id")
+            .and_then(Value::as_array)
+            .map(|ids| ids.iter().filter_map(Value::as_i64).collect())
+            .unwrap_or_default();
+        let mut unknown_prev = false;
+        for prev_id in &prev_ids {
+            if !state.storage.device_list_edu_recognised(&user_id, *prev_id).await? {
+                unknown_prev = true;
+                break;
+            }
+        }
+        if unknown_prev {
+            // A gap in the EDU chain. The snapshot replaces the cache; the
+            // EDU itself is then applied on top of that snapshot.
+            resync_device_list(state, origin, &user_id).await;
+        }
 
         tracing::debug!(user_id = %user_id, device_id = %device_id, deleted, "m.device_list_update EDU");
 
         // If the EDU includes the device keys, persist them.
         if let Some(keys) = content.get("keys") {
             if !deleted && !device_id.is_empty() {
+                let mut keys = keys.clone();
+                if let Some(name) = content.get("device_display_name").and_then(Value::as_str) {
+                    if let Some(object) = keys.as_object_mut() {
+                        let unsigned = object.entry("unsigned").or_insert_with(|| json!({}));
+                        if let Some(unsigned) = unsigned.as_object_mut() {
+                            unsigned.insert("device_display_name".into(), json!(name));
+                        }
+                    }
+                }
                 state
                     .storage
-                    .upsert_device_keys(&user_id, device_id, keys)
+                    .upsert_device_keys(&user_id, device_id, &keys)
                     .await?;
             }
         }
@@ -1624,6 +1710,10 @@ pub(crate) async fn handle_edu(
                 .storage
                 .delete_device_keys(&user_id, device_id)
                 .await?;
+        }
+
+        if let Some(stream_id) = content.get("stream_id").and_then(Value::as_i64) {
+            state.storage.note_device_list_edu(&user_id, stream_id).await?;
         }
 
         // Record device list change so local /sync picks it up.

@@ -18,7 +18,7 @@ Statuses: **tested** = present and asserted by a named test; **untested** = pres
 | Client-Server API | endpoints | 163 | 0 | 0 | 0 | 1 | 164 |
 | Client-Server API | requirements | 77 | 0 | 0 | 0 | 9 | 86 |
 | Server-Server API | endpoints | 34 | 0 | 1 | 0 | 1 | 36 |
-| Server-Server API | requirements | 28 | 0 | 10 | 0 | 3 | 41 |
+| Server-Server API | requirements | 29 | 0 | 9 | 0 | 3 | 41 |
 | Application Service API | endpoints | 11 | 0 | 0 | 0 | 0 | 11 |
 | Application Service API | requirements | 16 | 0 | 0 | 0 | 2 | 18 |
 | Push Gateway API (homeserver as client) | endpoints | 1 | 0 | 0 | 0 | 0 | 1 |
@@ -27,7 +27,7 @@ Statuses: **tested** = present and asserted by a named test; **untested** = pres
 | Identity Service API (homeserver as consumer) | requirements | 1 | 0 | 0 | 0 | 0 | 1 |
 | Room versions 1–12 | requirements | 61 | 0 | 0 | 0 | 0 | 61 |
 | Appendices | requirements | 10 | 0 | 3 | 4 | 4 | 21 |
-| All |  | 410 | 0 | 14 | 4 | 37 | 465 |
+| All |  | 411 | 0 | 13 | 4 | 37 | 465 |
 ## Gap beads
 
 New beads filed by this inventory (children of `conduit-y99`):
@@ -36,7 +36,7 @@ New beads filed by this inventory (children of `conduit-y99`):
 - `conduit-y99.29` - Room membership, summary and invite-permission gaps (POST /rooms/{id}/join, room_summary, mutual_rooms, M_INVITE_BLOCKED) (0 row(s))
 - `conduit-y99.30` - Push rule evaluation, predefined rules, GET /pushrules/global/, /notifications and thread counts (10 row(s))
 - `conduit-y99.31` - Push gateway delivery conformance (/notify payload, rejected pushkeys, retries) (4 row(s))
-- `conduit-y99.32` - Federation EDUs: m.typing, m.receipt, m.presence, m.signing_key_update in+out (2 row(s))
+- `conduit-y99.32` - Federation EDUs: m.typing, m.receipt, m.presence, m.signing_key_update in+out (1 row(s))
 - `conduit-y99.33` - PDU receipt checks: rejection, soft failure, hash-mismatch redaction, size limits (3 row(s))
 - `conduit-y99.34` - Application service transaction push conformance (Bearer hs_token, durable retry, interest rules, ephemeral) (0 row(s))
 - `conduit-y99.35` - Application service CS-API extensions (identity assertion, ts massaging, m.login.application_service login, rate-limit exemption) (0 row(s))
@@ -83,7 +83,7 @@ In-flight / pre-existing beads referenced (not duplicated):
 - `conduit-y99.21.1` - federation media multipart/mixed (0 row(s))
 - `conduit-y99.21.2` - animated thumbnails / non-UTF-8 previews (0 row(s))
 - `conduit-y99.21.3` - media blob hygiene (0 row(s))
-- `conduit-y99.22` - federation API completeness (7 row(s))
+- `conduit-y99.22` - federation API completeness (6 row(s))
 - `conduit-y99.22.1` - send_join state before join (0 row(s))
 - `conduit-y99.22.2` - make_join ver / M_INCOMPATIBLE_ROOM_VERSION (0 row(s))
 - `conduit-y99.22.3` - event_auth endpoint (1 row(s))
@@ -435,7 +435,7 @@ In-flight / pre-existing beads referenced (not duplicated):
 | `ss.receipts` | [Receipts (m.receipt EDU)](https://spec.matrix.org/v1.19/server-server-api/#receipts) | tested | `conduit-server/src/api/client/receipts.rs`<br>`conduit-server/src/federation/server.rs` | `federation_inbound.rs::inbound_receipt_edu_updates_only_listed_public_reads`<br>`presence.rs::local_public_receipt_is_federated_and_private_is_not` |  | An m.receipt EDU updates only listed m.read entries. Private receipts, spoofed users, and unjoined users are ignored. An ACL-denied room is skipped; other rooms in the EDU still apply. Outbound public receipts go to joined remote servers. |
 | `ss.query` | [Querying for information (directory, profile, generic)](https://spec.matrix.org/v1.19/server-server-api/#querying-for-information) | tested | `conduit-server/src/federation/server.rs` | `production_pdu.rs::generic_query_serves_known_types_and_rejects_unknown`<br>`federation_inbound.rs::query_profile_for_local_user` |  | The same test covers profile, directory, and an unknown type. |
 | `ss.openid` | [OpenID userinfo](https://spec.matrix.org/v1.19/server-server-api/#openid) | tested | `conduit-server/src/federation/spec_v119.rs (openid_userinfo)` | `production_pdu.rs::minted_openid_token_is_redeemed_by_federation_userinfo`<br>`federation_inbound.rs::federation_directory_openid_and_local_key_query` |  | A minted client token is accepted; an unknown token is 401. |
-| `ss.device-management` | [Device management (user/devices, m.device_list_update)](https://spec.matrix.org/v1.19/server-server-api/#device-management) | partial | `conduit-server/src/federation/server.rs:1015`<br>`conduit-server/src/api/client/keys.rs:174` |  | `conduit-y99.22` `conduit-y99.32` | Inbound/outbound m.device_list_update exist; /user/devices missing; no federation test of device list updates. |
+| `ss.device-management` | [Device management (user/devices, m.device_list_update)](https://spec.matrix.org/v1.19/server-server-api/#device-management) | tested | `conduit-server/src/federation/server.rs:1651`<br>`conduit-server/src/api/client/keys.rs:178` | `production_sync.rs::device_list_updates_chain_and_unknown_prev_resyncs` |  | Display-name, key, and delete changes are chained m.device_list_update EDUs. prev_id cites the previous EDU. A join sends the current devices to a server that was not already receiving them. An unknown prev_id resyncs with /user/keys/query before the EDU is applied. A user on another server is ignored. |
 | `ss.e2ee` | [End-to-end encryption (user/keys/query, user/keys/claim, m.signing_key_update)](https://spec.matrix.org/v1.19/server-server-api/#end-to-end-encryption) | tested | `conduit-server/src/federation/spec_v119.rs`<br>`conduit-server/src/api/client/keys.rs` (+1) | `production_sync.rs::signing_key_updates_federate_and_keys_query_merges_cross_signing` |  | Federation query returns authentic device keys with merged signatures, the master key, and the self-signing key, and omits user-signing keys. A second one-time-key claim returns an empty user object. Inbound and outbound m.signing_key_update are stored and sent to servers that share a joined room. |
 | `ss.to-device` | [Send-to-device messaging (m.direct_to_device)](https://spec.matrix.org/v1.19/server-server-api/#send-to-device-messaging) | tested | `conduit-server/src/federation/server.rs:958`<br>`conduit-server/src/federation/client.rs:706` | `peers/synapse_to_device.py (live Synapse)`<br>`production_e2e.rs::production_to_device_transactions_are_durable_and_do_not_reexpand_wildcards` |  |  |
 | `ss.content-repo` | [Content repository over federation (multipart/mixed)](https://spec.matrix.org/v1.19/server-server-api/#content-repository) | tested | `conduit-server/src/api/client/media.rs` | `media.rs::remote_media_is_fetched_over_federation_cached_and_served`<br>`media.rs::federation_media_download_and_thumbnail_are_multipart_mixed`<br>`media.rs::federation_pending_media_waits_for_timeout_ms` |  | Download and thumbnail answer multipart/mixed. Pending local media waits timeout_ms, then 504 M_NOT_YET_UPLOADED. |

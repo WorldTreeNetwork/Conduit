@@ -91,6 +91,7 @@ async fn spawn_test_server(
         app_services: Arc::new(Vec::new()),
         typing: Arc::clone(&typing),
         presence: Arc::clone(&presence),
+        federation_queue: None,
     };
 
     let rate_limiter = RateLimiter::new(1000.0, 1000.0); // permissive for tests
@@ -851,6 +852,7 @@ async fn rate_limit_kicks_in_after_burst() {
         app_services: Arc::new(Vec::new()),
         typing: Arc::new(conduit_server::api::client::TypingStore::default()),
         presence: Arc::new(conduit_server::api::client::PresenceStore::default()),
+        federation_queue: None,
     };
 
 

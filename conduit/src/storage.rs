@@ -840,6 +840,17 @@ pub trait Storage: Send + Sync + 'static {
     /// The maximum device list stream position, or 0 if none.
     async fn device_list_max_position(&self) -> Result<i64>;
 
+    /// Record `stream_id` as the latest outbound `m.device_list_update` for
+    /// `user_id`. Returns the previous tip, which the new EDU cites as `prev_id`.
+    async fn note_outbound_device_list_edu(&self, user_id: &str, stream_id: i64) -> Result<Vec<i64>>;
+
+    /// Whether this server has already applied an inbound EDU with `stream_id`
+    /// for `user_id`.
+    async fn device_list_edu_recognised(&self, user_id: &str, stream_id: i64) -> Result<bool>;
+
+    /// Remember an inbound EDU stream id so a later `prev_id` can cite it.
+    async fn note_device_list_edu(&self, user_id: &str, stream_id: i64) -> Result<()>;
+
     // --- Room key backup (mrm.13) ---------------------------------------------
 
     /// Create a new backup version. Returns the etag.
@@ -1844,6 +1855,10 @@ struct MemoryInner {
     /// device list change log (id, user_id)
     device_list_changes: Vec<(i64, String)>,
     device_list_next_id: i64,
+    /// Latest outbound device-list EDU stream id per user.
+    device_list_edu_out: HashMap<String, i64>,
+    /// Inbound device-list EDU stream ids already applied.
+    device_list_edu_seen: std::collections::HashSet<(String, i64)>,
     /// (user_id, version) → RoomKeyVersion + deleted flag
     room_key_versions: HashMap<(String, String), (RoomKeyVersion, bool)>,
     /// (user_id, version, room_id, session_id) → key_data
@@ -1921,6 +1936,8 @@ impl Default for MemoryInner {
             to_device_next_id: 0,
             device_list_changes: Vec::new(),
             device_list_next_id: 0,
+            device_list_edu_out: HashMap::new(),
+            device_list_edu_seen: std::collections::HashSet::new(),
             room_key_versions: HashMap::new(),
             room_keys: HashMap::new(),
             account_data: HashMap::new(),
@@ -2866,6 +2883,20 @@ impl Storage for MemoryStorage {
 
     async fn device_list_max_position(&self) -> Result<i64> {
         Ok(self.inner.read().await.device_list_next_id)
+    }
+
+    async fn note_outbound_device_list_edu(&self, user_id: &str, stream_id: i64) -> Result<Vec<i64>> {
+        let mut inner = self.inner.write().await;
+        Ok(inner.device_list_edu_out.insert(user_id.to_owned(), stream_id).into_iter().collect())
+    }
+
+    async fn device_list_edu_recognised(&self, user_id: &str, stream_id: i64) -> Result<bool> {
+        Ok(self.inner.read().await.device_list_edu_seen.contains(&(user_id.to_owned(), stream_id)))
+    }
+
+    async fn note_device_list_edu(&self, user_id: &str, stream_id: i64) -> Result<()> {
+        self.inner.write().await.device_list_edu_seen.insert((user_id.to_owned(), stream_id));
+        Ok(())
     }
 
     // --- Room key backup ------------------------------------------------------

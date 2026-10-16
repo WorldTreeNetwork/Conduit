@@ -42,9 +42,9 @@
         "total": 36
       },
       "requirement": {
-        "implemented+tested": 28,
+        "implemented+tested": 29,
         "implemented-untested": 0,
-        "partial": 10,
+        "partial": 9,
         "missing": 0,
         "not-applicable": 3,
         "total": 41
@@ -9370,22 +9370,24 @@
       "title": "Device management (user/devices, m.device_list_update)",
       "source": "https://spec.matrix.org/v1.19/server-server-api/#device-management",
       "role": "homeserver",
-      "status": "partial",
+      "status": "implemented+tested",
       "code": [
         {
-          "loc": "conduit-server/src/federation/server.rs:1015"
+          "loc": "conduit-server/src/federation/server.rs:1651"
         },
         {
-          "loc": "conduit-server/src/api/client/keys.rs:174"
+          "loc": "conduit-server/src/api/client/keys.rs:178"
+        },
+        {
+          "loc": "conduit-server/src/api/client/keys.rs:251"
         }
       ],
-      "tests": [],
-      "tests_total": 0,
-      "gap_beads": [
-        "conduit-y99.22",
-        "conduit-y99.32"
+      "tests": [
+        "conduit-server/tests/production_sync.rs::device_list_updates_chain_and_unknown_prev_resyncs"
       ],
-      "notes": "Inbound/outbound m.device_list_update exist; /user/devices missing; no federation test of device list updates."
+      "tests_total": 1,
+      "gap_beads": [],
+      "notes": "Display-name, key, and delete changes are chained m.device_list_update EDUs. prev_id cites the previous EDU. A join sends the current devices to a server that was not already receiving them. An unknown prev_id resyncs with /user/keys/query before the EDU is applied. A user on another server is ignored."
     },
     {
       "id": "ss.e2ee",

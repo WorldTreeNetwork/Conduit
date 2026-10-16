@@ -561,6 +561,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         app_services: Arc::clone(&state.app_services),
         typing: Arc::clone(&state.typing_store),
         presence: Arc::clone(&state.presence_store),
+        federation_queue: Some(Arc::clone(&state.federation_queue)),
     };
 
     let fed_router: Router<AppState> = authenticated_federation_router(fed_state, rate_limiter);

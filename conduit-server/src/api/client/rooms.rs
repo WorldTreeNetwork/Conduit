@@ -266,6 +266,16 @@ pub async fn join_room<S: AuthState>(
                     .await;
                 }
             }
+            if let Some(queue) = state.federation_queue() {
+                super::keys::publish_device_lists_after_join(
+                    state.storage(),
+                    queue,
+                    state.server_name(),
+                    &room_id,
+                    sender,
+                )
+                .await;
+            }
             (StatusCode::OK, Json(json!({ "room_id": room_id }))).into_response()
         }
         Err(e) => MatrixError::from_conduit(e).into_response(),

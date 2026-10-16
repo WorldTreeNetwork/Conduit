@@ -136,7 +136,7 @@ pub async fn issue_session<S: AuthState>(
             .map_err(|e| MatrixError::unknown(e.to_string()).into_response())?;
     }
     if created {
-        notify_device_list_change(state, user_id, &[]).await;
+        notify_device_list_change(state, user_id, Some(&device_id), &[]).await;
     }
 
     let mut body = json!({ "user_id": user_id, "device_id": device_id });
@@ -339,55 +339,48 @@ pub async fn remove_devices<S: AuthState>(
         }
     }
     if !removed.is_empty() {
-        notify_device_list_change(state, user_id, &removed).await;
+        notify_device_list_change(state, user_id, None, &removed).await;
     }
     Ok(())
 }
 
-/// Record a device-list change for `user_id` and federate it.  `deleted`
-/// names devices that no longer exist; an empty slice announces a new
-/// or changed device without keys.
+/// Record a device-list change for `user_id` and federate it.
+///
+/// `changed_device` is a new device or one whose display name changed.
+/// `deleted` names devices that no longer exist. Each device gets its own
+/// stream id so the EDUs form a chain.
 pub async fn notify_device_list_change<S: AuthState>(
     state: &S,
     user_id: &str,
+    changed_device: Option<&str>,
     deleted: &[String],
 ) {
-    let stream_id = state
-        .storage()
-        .record_device_list_change(user_id)
-        .await
-        .unwrap_or(0);
-    state.sync_notify().notify_waiters();
-
-    let Some(queue) = state.federation_queue().cloned() else {
-        return;
-    };
-    if deleted.is_empty() {
+    let mut devices: Vec<(String, bool)> = Vec::new();
+    if let Some(device_id) = changed_device {
+        devices.push((device_id.to_owned(), false));
+    }
+    for device_id in deleted {
+        devices.push((device_id.clone(), true));
+    }
+    if devices.is_empty() {
         return;
     }
-    let storage = state.storage().clone();
-    let server_name = state.server_name().to_owned();
-    let user_id = user_id.to_owned();
-    let deleted = deleted.to_vec();
-    tokio::spawn(async move {
-        let servers =
-            super::keys::remote_servers_sharing_room_with(&storage, &server_name, &user_id).await;
-        for device_id in deleted {
-            let edu = json!({
-                "edu_type": "m.device_list_update",
-                "content": {
-                    "user_id": user_id,
-                    "device_id": device_id,
-                    "stream_id": stream_id,
-                    "prev_id": [],
-                    "deleted": true,
-                },
-            });
-            for dest in &servers {
-                queue.enqueue(dest, vec![], vec![edu.clone()]).await;
-            }
-        }
-    });
+    let mut prepared = Vec::new();
+    for (device_id, is_deleted) in devices {
+        let Ok(stream_id) = state.storage().record_device_list_change(user_id).await else {
+            continue;
+        };
+        let keys = if is_deleted {
+            None
+        } else {
+            state.storage().get_device_keys(user_id, &device_id).await.ok().flatten()
+        };
+        prepared.push((device_id, is_deleted, stream_id, keys));
+    }
+    state.sync_notify().notify_waiters();
+    for (device_id, is_deleted, stream_id, keys) in prepared {
+        super::keys::broadcast_device_list_update(state, user_id, &device_id, stream_id, keys, is_deleted).await;
+    }
 }
 
 /// Every device of `user_id`, except `keep`.

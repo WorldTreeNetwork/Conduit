@@ -2115,6 +2115,59 @@ impl Storage for PostgresStorage {
         Ok(rows.into_iter().map(|r| r.user_id).collect())
     }
 
+    async fn note_outbound_device_list_edu(&self, user_id: &str, stream_id: i64) -> Result<Vec<i64>> {
+        let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
+        let previous = sqlx::query("SELECT stream_id FROM device_list_edu_out WHERE user_id = $1 FOR UPDATE")
+            .bind(user_id)
+            .fetch_optional(&mut *transaction)
+            .await
+            .map_err(map_sqlx)?
+            .map(|row| {
+                use sqlx::Row;
+                row.get::<i64, _>("stream_id")
+            });
+        sqlx::query(
+            r#"
+            INSERT INTO device_list_edu_out (user_id, stream_id)
+            VALUES ($1, $2)
+            ON CONFLICT (user_id) DO UPDATE SET stream_id = EXCLUDED.stream_id
+            "#,
+        )
+        .bind(user_id)
+        .bind(stream_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(map_sqlx)?;
+        transaction.commit().await.map_err(map_sqlx)?;
+        Ok(previous.into_iter().collect())
+    }
+
+    async fn device_list_edu_recognised(&self, user_id: &str, stream_id: i64) -> Result<bool> {
+        let row = sqlx::query("SELECT 1 AS hit FROM device_list_edu_seen WHERE user_id = $1 AND stream_id = $2")
+            .bind(user_id)
+            .bind(stream_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(map_sqlx)?;
+        Ok(row.is_some())
+    }
+
+    async fn note_device_list_edu(&self, user_id: &str, stream_id: i64) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO device_list_edu_seen (user_id, stream_id)
+            VALUES ($1, $2)
+            ON CONFLICT (user_id, stream_id) DO NOTHING
+            "#,
+        )
+        .bind(user_id)
+        .bind(stream_id)
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(())
+    }
+
     async fn device_list_max_position(&self) -> Result<i64> {
         let row = sqlx::query!(
             r#"SELECT COALESCE(MAX(id), 0) AS max_id FROM device_list_changes"#

@@ -84,7 +84,7 @@ pub async fn update_device<S: AuthState>(
             }
             return match storage.create_device_if_absent(&authed.user_id, &device_id, name).await {
                 Ok(true) => {
-                    super::session::notify_device_list_change(&state, &authed.user_id, &[]).await;
+                    super::session::notify_device_list_change(&state, &authed.user_id, Some(&device_id), &[]).await;
                     (StatusCode::CREATED, Json(json!({}))).into_response()
                 }
                 // Lost a race with a concurrent create: it exists now.
@@ -107,7 +107,7 @@ pub async fn update_device<S: AuthState>(
                     return MatrixError::unknown(e.to_string()).into_response();
                 }
                 // Display names are visible in /keys/query unsigned data.
-                super::session::notify_device_list_change(&state, &authed.user_id, &[]).await;
+                super::session::notify_device_list_change(&state, &authed.user_id, Some(&device_id), &[]).await;
             }
         }
         Some(_) => {
