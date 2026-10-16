@@ -42,9 +42,9 @@
         "total": 36
       },
       "requirement": {
-        "implemented+tested": 16,
+        "implemented+tested": 17,
         "implemented-untested": 0,
-        "partial": 14,
+        "partial": 13,
         "missing": 8,
         "not-applicable": 3,
         "total": 41
@@ -5106,11 +5106,12 @@
       ],
       "tests": [
         "conduit-server/tests/federation_inbound.rs::backfill_returns_history_visibility_filtered_events",
-        "conduit-server/tests/production_pdu.rs::server_acl_denies_remote_participation_until_lifted"
+        "conduit-server/tests/production_pdu.rs::server_acl_denies_remote_participation_until_lifted",
+        "conduit-server/tests/production_pdu.rs::backfill_returns_the_named_events_and_their_predecessors"
       ],
-      "tests_total": 2,
+      "tests_total": 3,
       "gap_beads": [],
-      "notes": "History visibility filtering plus server ACL denial."
+      "notes": "Returns the named events and the PDUs that preceded them, up to limit. A later event is absent. A missing v is 400 M_MISSING_PARAM. History visibility and server ACL still apply. Limit is capped at 100."
     },
     {
       "id": "ss.ep.post_matrixfederationv1get_missing_eventsroomid",
@@ -8973,7 +8974,7 @@
       "title": "Backfilling and retrieving missing events",
       "source": "https://spec.matrix.org/v1.19/server-server-api/#backfilling-and-retrieving-missing-events",
       "role": "homeserver",
-      "status": "partial",
+      "status": "implemented+tested",
       "code": [
         {
           "loc": "conduit-server/src/federation/server.rs"
@@ -8984,13 +8985,12 @@
       ],
       "tests": [
         "conduit-server/tests/federation_inbound.rs::backfill_returns_history_visibility_filtered_events",
-        "conduit-server/tests/production_pdu.rs::get_missing_events_returns_prev_events_between_the_bounds"
+        "conduit-server/tests/production_pdu.rs::get_missing_events_returns_prev_events_between_the_bounds",
+        "conduit-server/tests/production_pdu.rs::backfill_returns_the_named_events_and_their_predecessors"
       ],
-      "tests_total": 2,
-      "gap_beads": [
-        "conduit-y99.22"
-      ],
-      "notes": "get_missing_events walks prev_events of latest_events and stops at earliest_events. Backfill still ignores v and returns a depth-ordered page."
+      "tests_total": 3,
+      "gap_beads": [],
+      "notes": "Backfill returns the named events and their predecessors. get_missing_events walks prev_events of latest_events and stops at earliest_events."
     },
     {
       "id": "ss.retrieving-events",

@@ -21,7 +21,7 @@ use std::sync::Arc;
 
 use axum::{
     Json,
-    extract::{Path, Query, State},
+    extract::{Path, Query, RawQuery, State},
     http::StatusCode,
     response::{IntoResponse, Response},
 };
@@ -941,12 +941,47 @@ pub async fn state_ids(
 // x2r.8 — GET /backfill/:roomId
 // ---------------------------------------------------------------------------
 
+/// Repeated `v` parameters, plus `limit`. A single `v` is one event id.
+fn backfill_params(raw: &str) -> (Vec<String>, Option<i64>) {
+    let mut seeds = Vec::new();
+    let mut limit = None;
+    for (key, value) in url::form_urlencoded::parse(raw.as_bytes()) {
+        if key == "v" && !value.is_empty() {
+            seeds.push(value.into_owned());
+        } else if key == "limit" {
+            limit = value.parse().ok();
+        }
+    }
+    (seeds, limit)
+}
+
+/// Events in `seeds` and the events that preceded them, breadth-first, up to `limit`.
+fn backfill_window(events: &[Event], seeds: &[String], limit: usize) -> Vec<Event> {
+    let by_id: HashMap<&str, &Event> = events.iter().map(|event| (event.event_id.as_str(), event)).collect();
+    let mut selected = Vec::new();
+    let mut seen = HashSet::new();
+    let mut queue: VecDeque<String> = seeds.iter().cloned().collect();
+    while let Some(event_id) = queue.pop_front() {
+        if !seen.insert(event_id.clone()) || selected.len() >= limit {
+            continue;
+        }
+        let Some(event) = by_id.get(event_id.as_str()) else { continue };
+        selected.push((*event).clone());
+        for prev in &event.prev_events {
+            if !seen.contains(prev) {
+                queue.push_back(prev.clone());
+            }
+        }
+    }
+    selected
+}
+
 /// `GET /_matrix/federation/v1/backfill/:roomId?v=...&limit=...`
 pub async fn backfill(
     State(state): State<FedState>,
     origin_ext: Option<axum::extract::Extension<FederationOrigin>>,
     Path(room_id): Path<String>,
-    Query(params): Query<HashMap<String, String>>,
+    RawQuery(raw): RawQuery,
 ) -> Response {
     let origin = match origin_ext {
         Some(axum::extract::Extension(o)) => o.server_name,
@@ -955,19 +990,20 @@ pub async fn backfill(
     if let Some(response) = ensure_server_acl(&state, &origin, &room_id).await {
         return response;
     }
+    let (seeds, limit) = backfill_params(raw.as_deref().unwrap_or(""));
+    if seeds.is_empty() {
+        return matrix_error(StatusCode::BAD_REQUEST, "M_MISSING_PARAM", "v is required");
+    }
+    let Some(limit) = limit.filter(|limit| *limit > 0) else {
+        return matrix_error(StatusCode::BAD_REQUEST, "M_MISSING_PARAM", "limit is required");
+    };
+    let limit = (limit as usize).min(100);
 
-    let limit: usize = params
-        .get("limit")
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(20)
-        .min(100);
-
-    // Get all room events, sorted by depth descending.
-    let mut all_events = match state.storage.room_events(&room_id).await {
+    let all_events = match state.storage.room_events(&room_id).await {
         Ok(evs) => evs,
         Err(e) => return internal(&e.to_string()),
     };
-    all_events.sort_by_key(|e| std::cmp::Reverse(e.depth));
+    let window = backfill_window(&all_events, &seeds, limit);
 
     // History visibility, against the requesting origin's membership —
     // the same derivation the client-server read paths use, not a
@@ -976,14 +1012,14 @@ pub async fn backfill(
         state.storage.as_ref(),
         &room_id,
         &origin,
-        all_events,
+        window,
     )
     .await
     {
         Ok(evs) => evs,
         Err(e) => return internal(&e.to_string()),
     };
-    let filtered: Vec<Event> = visible.into_iter().take(limit).collect();
+    let filtered = visible;
     let filtered = match wire_pdus(&state.storage, &origin, &filtered).await {
         Ok(pdus) => pdus,
         Err(e) => return internal(&e.to_string()),

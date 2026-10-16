@@ -613,7 +613,11 @@ async fn server_acl_denies_remote_participation_until_lifted() {
         enc(&marker_id)
     );
     let join_path = format!("/_matrix/federation/v1/make_join/{}/{}", enc(&room), enc("@r:remote.test"));
-    let backfill_path = format!("/_matrix/federation/v1/backfill/{}?limit=1", enc(&room));
+    let backfill_path = format!(
+        "/_matrix/federation/v1/backfill/{}?limit=1&v={}",
+        enc(&room),
+        enc(&marker_id)
+    );
     let auth_path = format!("/_matrix/federation/v1/event_auth/{}/{}", enc(&room), enc(&marker_id));
     let missing_path = format!("/_matrix/federation/v1/get_missing_events/{}", enc(&room));
     let knock_path = format!("/_matrix/federation/v1/make_knock/{}/{}", enc(&room), enc("@r:remote.test"));
@@ -1343,6 +1347,81 @@ async fn get_missing_events_returns_prev_events_between_the_bounds() {
     assert!(too_deep.is_empty(), "min_depth drops the shallower predecessor: {too_deep:?}");
 }
 
+#[tokio::test]
+async fn backfill_returns_the_named_events_and_their_predecessors() {
+    let remote = spawn_remote().await;
+    let server = federated_server(&remote).await;
+    let alice = server.register("alice").await;
+    let token = alice["access_token"].as_str().unwrap();
+    let room = server
+        .request(Method::POST, "/_matrix/client/v3/createRoom", Some(token), Some(json!({"preset": "public_chat"})), 200)
+        .await["room_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    federation_join(&server, &remote, REMOTE, &room, "@r:remote.test").await;
+    let send = |txn: &str, body: &str| {
+        let server = &server;
+        let room = room.clone();
+        let txn = txn.to_owned();
+        let body = body.to_owned();
+        async move {
+            server
+                .request(
+                    Method::PUT,
+                    &format!("/_matrix/client/v3/rooms/{}/send/m.room.message/{txn}", enc(&room)),
+                    Some(token),
+                    Some(json!({"msgtype": "m.text", "body": body})),
+                    200,
+                )
+                .await["event_id"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        }
+    };
+    let _one = send("one", "one").await;
+    let two = send("two", "two").await;
+    let _three = send("three", "three").await;
+    let four = send("four", "four").await;
+    let window = |event_id: &str, limit: u32| {
+        let path = format!(
+            "/_matrix/federation/v1/backfill/{}?limit={limit}&v={}",
+            enc(&room),
+            enc(event_id)
+        );
+        let server = &server;
+        let remote = &remote;
+        async move {
+            let response = fed(server, remote, Method::GET, &path, None, 200).await;
+            assert!(response["origin"].is_string(), "{response}");
+            assert!(response["origin_server_ts"].is_number(), "{response}");
+            response["pdus"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|pdu| pdu["content"]["body"].as_str().map(str::to_owned))
+                .collect::<Vec<_>>()
+        }
+    };
+    let from_two = window(&two, 10).await;
+    assert!(from_two.contains(&"two".to_owned()), "v itself is included: {from_two:?}");
+    assert!(from_two.contains(&"one".to_owned()), "the predecessor of v is included: {from_two:?}");
+    assert!(!from_two.iter().any(|body| body == "three" || body == "four"), "later events stay out: {from_two:?}");
+    let capped = window(&four, 2).await;
+    assert_eq!(capped, vec!["four".to_owned(), "three".to_owned()], "limit counts v and then its predecessors: {capped:?}");
+    let missing = fed(
+        &server,
+        &remote,
+        Method::GET,
+        &format!("/_matrix/federation/v1/backfill/{}?limit=2", enc(&room)),
+        None,
+        400,
+    )
+    .await;
+    assert_eq!(missing["errcode"], "M_MISSING_PARAM", "{missing}");
+}
+
 async fn federation_join(server: &Server, remote: &Remote, origin: &str, room: &str, user: &str) {
     let make = format!("/_matrix/federation/v1/make_join/{}/{}", enc(room), enc(user));
     let template = fed_as(server, remote, origin, Method::GET, &make, None, 200).await["event"].clone();
@@ -1449,7 +1528,11 @@ async fn later_joining_servers_get_redacted_federation_events() {
     assert!(late_pdu.get("unsigned").is_none(), "erasure is not a redaction event: {late_pdu}");
     assert!(!late_event.to_string().contains("my secret"), "{late_event}");
 
-    let backfill = format!("/_matrix/federation/v1/backfill/{}?limit=50", enc(&room));
+    let backfill = format!(
+        "/_matrix/federation/v1/backfill/{}?limit=50&v={}",
+        enc(&room),
+        enc(&successor)
+    );
     let early_back = fed_as(&server, &early, REMOTE, Method::GET, &backfill, None, 200).await;
     let early_copy = pdu_with_hash(early_back["pdus"].as_array().unwrap(), &hash);
     assert_eq!(early_copy["content"]["body"], "my secret");

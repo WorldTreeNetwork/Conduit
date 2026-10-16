@@ -18,7 +18,7 @@ Statuses: **tested** = present and asserted by a named test; **untested** = pres
 | Client-Server API | endpoints | 163 | 0 | 0 | 0 | 1 | 164 |
 | Client-Server API | requirements | 77 | 0 | 0 | 0 | 9 | 86 |
 | Server-Server API | endpoints | 25 | 0 | 6 | 4 | 1 | 36 |
-| Server-Server API | requirements | 16 | 0 | 14 | 8 | 3 | 41 |
+| Server-Server API | requirements | 17 | 0 | 13 | 8 | 3 | 41 |
 | Application Service API | endpoints | 11 | 0 | 0 | 0 | 0 | 11 |
 | Application Service API | requirements | 16 | 0 | 0 | 0 | 2 | 18 |
 | Push Gateway API (homeserver as client) | endpoints | 1 | 0 | 0 | 0 | 0 | 1 |
@@ -27,7 +27,7 @@ Statuses: **tested** = present and asserted by a named test; **untested** = pres
 | Identity Service API (homeserver as consumer) | requirements | 1 | 0 | 0 | 0 | 0 | 1 |
 | Room versions 1–12 | requirements | 61 | 0 | 0 | 0 | 0 | 61 |
 | Appendices | requirements | 10 | 0 | 3 | 4 | 4 | 21 |
-| All |  | 387 | 0 | 25 | 16 | 37 | 465 |
+| All |  | 388 | 0 | 24 | 16 | 37 | 465 |
 ## Gap beads
 
 New beads filed by this inventory (children of `conduit-y99`):
@@ -83,7 +83,7 @@ In-flight / pre-existing beads referenced (not duplicated):
 - `conduit-y99.21.1` - federation media multipart/mixed (0 row(s))
 - `conduit-y99.21.2` - animated thumbnails / non-UTF-8 previews (0 row(s))
 - `conduit-y99.21.3` - media blob hygiene (0 row(s))
-- `conduit-y99.22` - federation API completeness (16 row(s))
+- `conduit-y99.22` - federation API completeness (15 row(s))
 - `conduit-y99.22.1` - send_join state before join (2 row(s))
 - `conduit-y99.22.2` - make_join ver / M_INCOMPATIBLE_ROOM_VERSION (2 row(s))
 - `conduit-y99.22.3` - event_auth endpoint (1 row(s))
@@ -371,7 +371,7 @@ In-flight / pre-existing beads referenced (not duplicated):
 | GET | [`/_matrix/key/v2/query/{serverName}`](https://spec.matrix.org/v1.19/server-server-api/#get_matrixkeyv2queryservername) | tested |  | `conduit-server/tests/federation_inbound.rs::federation_directory_openid_and_local_key_query` | | Returns this server's signed key document when the path names it. |
 | PUT | [`/_matrix/federation/v1/send/{txnId}`](https://spec.matrix.org/v1.19/server-server-api/#put_matrixfederationv1sendtxnid) | partial | `conduit-server/src/federation/server.rs:1072` | `conduit-server/src/federation/auth.rs::xmatrix_with_body`<br>`federation.rs::send_transaction_to_mock_remote` (+4) | `conduit-y99.33` `conduit-y99.32` `conduit-y99.22` `conduit-y99.22.4` | PDUs persisted and authorised; no ACLs, soft failure or rejection tracking; only to-device and device-list EDUs. |
 | GET | [`/_matrix/federation/v1/event_auth/{roomId}/{eventId}`](https://spec.matrix.org/v1.19/server-server-api/#get_matrixfederationv1event_authroomideventid) | tested |  | `conduit-server/tests/federation_inbound.rs::federation_directory_openid_and_local_key_query` | | Returns the auth chain of the event as federation PDUs. |
-| GET | [`/_matrix/federation/v1/backfill/{roomId}`](https://spec.matrix.org/v1.19/server-server-api/#get_matrixfederationv1backfillroomid) | tested | `conduit-server/src/federation/server.rs:1076` | `federation_inbound.rs::backfill_returns_history_visibility_filtered_events`<br>`production_pdu.rs::server_acl_denies_remote_participation_until_lifted` |  | History visibility filtering plus server ACL denial. |
+| GET | [`/_matrix/federation/v1/backfill/{roomId}`](https://spec.matrix.org/v1.19/server-server-api/#get_matrixfederationv1backfillroomid) | tested | `conduit-server/src/federation/server.rs:1076` | `federation_inbound.rs::backfill_returns_history_visibility_filtered_events`<br>`production_pdu.rs::backfill_returns_the_named_events_and_their_predecessors` (+1) |  | Returns the named events and the PDUs that preceded them, up to limit. A later event is absent. A missing v is 400 M_MISSING_PARAM. History visibility and server ACL still apply. Limit is capped at 100. |
 | POST | [`/_matrix/federation/v1/get_missing_events/{roomId}`](https://spec.matrix.org/v1.19/server-server-api/#post_matrixfederationv1get_missing_eventsroomid) | tested | `conduit-server/src/federation/server.rs:1078` | `production_pdu.rs::get_missing_events_returns_prev_events_between_the_bounds`<br>`production_pdu.rs::server_acl_denies_remote_participation_until_lifted` | `conduit-y99.22` | Walks prev_events of latest_events breadth-first, skips earliest_events and the latest events themselves, and honors limit and min_depth. Limit is capped at 20. A denied server is 403. |
 | GET | [`/_matrix/federation/v1/event/{eventId}`](https://spec.matrix.org/v1.19/server-server-api/#get_matrixfederationv1eventeventid) | tested | `conduit-server/src/federation/server.rs:982` | `production_pdu.rs::accepted_redaction_prunes_the_row_and_federation_get_event`<br>`production_pdu.rs::later_joining_servers_get_redacted_federation_events` |  | Accepted redaction is the room version's pruned PDU with the original hashes and signatures. Erasure redacts only servers that joined after the sender was erased. |
 | GET | [`/_matrix/federation/v1/state/{roomId}`](https://spec.matrix.org/v1.19/server-server-api/#get_matrixfederationv1stateroomid) | tested | `conduit-server/src/federation/server.rs:1074` | `federation_inbound.rs::state_endpoint_returns_room_state`<br>`production_pdu.rs::state_ids_are_the_room_state_before_the_event` | `conduit-y99.22` | Returns the resolved state before the requested event. The event itself and later state are absent. An unknown event is 404. |
@@ -420,7 +420,7 @@ In-flight / pre-existing beads referenced (not duplicated):
 | `ss.pdu.soft-failure` | [Soft failure](https://spec.matrix.org/v1.19/server-server-api/#soft-failure) | missing |  |  | `conduit-y99.33` |  |
 | `ss.edus` | [EDUs (general)](https://spec.matrix.org/v1.19/server-server-api/#edus) | partial | `conduit-server/src/federation/server.rs:951` |  | `conduit-y99.32` |  |
 | `ss.state-res` | [Room state resolution](https://spec.matrix.org/v1.19/server-server-api/#room-state-resolution) | partial | `conduit/src/room/state_res.rs` | `conduit/src/room/state_res.rs (unit tests)` | `conduit-y99.23` `conduit-s6m` | State res v2 only. |
-| `ss.backfill` | [Backfilling and retrieving missing events](https://spec.matrix.org/v1.19/server-server-api/#backfilling-and-retrieving-missing-events) | partial | `conduit-server/src/federation/server.rs`<br>`conduit-server/src/federation/client.rs` | `federation_inbound.rs::backfill_returns_history_visibility_filtered_events`<br>`production_pdu.rs::get_missing_events_returns_prev_events_between_the_bounds` | `conduit-y99.22` | get_missing_events walks prev_events of latest_events and stops at earliest_events. Backfill still ignores v and returns a depth-ordered page. |
+| `ss.backfill` | [Backfilling and retrieving missing events](https://spec.matrix.org/v1.19/server-server-api/#backfilling-and-retrieving-missing-events) | tested | `conduit-server/src/federation/server.rs`<br>`conduit-server/src/federation/client.rs` | `production_pdu.rs::backfill_returns_the_named_events_and_their_predecessors`<br>`production_pdu.rs::get_missing_events_returns_prev_events_between_the_bounds` (+1) |  | Backfill returns the named events and their predecessors. get_missing_events walks prev_events of latest_events and stops at earliest_events. |
 | `ss.retrieving-events` | [Retrieving events (event, state, state_ids, timestamp_to_event)](https://spec.matrix.org/v1.19/server-server-api/#retrieving-events) | partial |  | `production_pdu.rs::state_ids_are_the_room_state_before_the_event` | `conduit-y99.22` `conduit-embed-pdu` | state and state_ids return the resolved state before the requested event. timestamp_to_event remains open. |
 | `ss.joining` | [Joining rooms (make_join/send_join, room version negotiation)](https://spec.matrix.org/v1.19/server-server-api/#joining-rooms) | partial | `conduit-server/src/federation/server.rs`<br>`conduit-server/src/federation/client.rs` | `federation_roundtrip.rs::rt3_join_room_on_a`<br>`federation_inbound.rs::make_send_join_roundtrip` | `conduit-y99.22.1` `conduit-y99.22.2` |  |
 | `ss.joining.restricted` | [Restricted rooms (join_authorised_via_users_server)](https://spec.matrix.org/v1.19/server-server-api/#restricted-rooms) | tested | `conduit-server/src/federation/server.rs`<br>`conduit-server/src/api/client/room_membership.rs` | `production_pdu.rs::restricted_make_join_names_an_authoriser_or_refuses`<br>`auth.rs::restricted_join_requires_a_joined_authoriser_with_invite_power` |  | make_join names a local inviter. Unknown rooms are 400 M_UNABLE_TO_AUTHORISE_JOIN. No local inviter is 400 M_UNABLE_TO_GRANT_JOIN. A failed condition is 403. An invite omits the field. send_join co-signs. |

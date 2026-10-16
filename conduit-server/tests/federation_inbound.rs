@@ -765,19 +765,24 @@ async fn backfill_returns_history_visibility_filtered_events() {
     ));
     storage_a.put_event(&join).await.unwrap();
 
-    // Seed a few events.
+    // A chain. Backfill from the newest event returns that event and its predecessors.
+    let mut prev = vec![join.event_id.clone()];
+    let mut newest = String::new();
     for i in 1..=5u64 {
         let ev = signed_event(&key_a, "server-a.test", Pdu::new(
             room_id, "@alice:server-a.test", "m.room.message", None,
-            json!({ "msgtype": "m.text", "body": format!("msg {i}") }), 1000 + i, vec![], vec![], i as i64,
+            json!({ "msgtype": "m.text", "body": format!("msg {i}") }), 1000 + i, vec![], prev.clone(), i as i64,
         ));
+        newest = ev.event_id.clone();
+        prev = vec![ev.event_id.clone()];
         storage_a.put_event(&ev).await.unwrap();
     }
 
     let client = reqwest::Client::new();
     let path = format!(
-        "/_matrix/federation/v1/backfill/{}?limit=3",
-        urlencoding::encode(room_id)
+        "/_matrix/federation/v1/backfill/{}?limit=3&v={}",
+        urlencoding::encode(room_id),
+        urlencoding::encode(&newest),
     );
     let auth = sign_req("GET", &path, "server-a.test", "server-a.test", None, &key_a);
 
@@ -793,6 +798,8 @@ async fn backfill_returns_history_visibility_filtered_events() {
     let pdus = body["pdus"].as_array().unwrap();
     assert_eq!(pdus.len(), 3, "backfill should return at most limit events");
     assert!(pdus.iter().all(|p| p.get("event_id").is_none()));
+    let bodies: Vec<&str> = pdus.iter().filter_map(|pdu| pdu["content"]["body"].as_str()).collect();
+    assert_eq!(bodies, vec!["msg 5", "msg 4", "msg 3"], "the window is the named event and its predecessors: {body}");
 }
 
 // ---------------------------------------------------------------------------
