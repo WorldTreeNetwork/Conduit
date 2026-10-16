@@ -25,9 +25,9 @@ Statuses: **tested** = present and asserted by a named test; **untested** = pres
 | Push Gateway API (homeserver as client) | requirements | 1 | 0 | 0 | 0 | 1 | 2 |
 | Identity Service API (homeserver as consumer) | endpoints | 5 | 0 | 2 | 0 | 16 | 23 |
 | Identity Service API (homeserver as consumer) | requirements | 1 | 0 | 0 | 0 | 0 | 1 |
-| Room versions 1–12 | requirements | 44 | 0 | 6 | 11 | 0 | 61 |
+| Room versions 1–12 | requirements | 45 | 0 | 6 | 10 | 0 | 61 |
 | Appendices | requirements | 10 | 0 | 3 | 4 | 4 | 21 |
-| All |  | 341 | 3 | 56 | 28 | 37 | 465 |
+| All |  | 342 | 3 | 56 | 27 | 37 | 465 |
 ## Gap beads
 
 New beads filed by this inventory (children of `conduit-y99`):
@@ -89,7 +89,7 @@ In-flight / pre-existing beads referenced (not duplicated):
 - `conduit-y99.22.3` - event_auth endpoint (1 row(s))
 - `conduit-y99.22.4` - EDU U+0000 / per-EDU error isolation (2 row(s))
 - `conduit-y99.22.5` - transactions/outbox retention (1 row(s))
-- `conduit-y99.23` - room versions 1-12 (23 row(s))
+- `conduit-y99.23` - room versions 1-12 (22 row(s))
 - `conduit-y99.24` - sync unread_notifications hard-coded to zero (3 row(s))
 - `conduit-y99.25` - profile changes not propagated to member events (0 row(s))
 - `conduit-y99.26` - /messages hides create/initial join (2 row(s))
@@ -568,7 +568,7 @@ In-flight / pre-existing beads referenced (not duplicated):
 | `rv.v5.event-format` | [Room version 5: Event format and event IDs](https://spec.matrix.org/v1.19/rooms/v5/#event-format) | tested |  | `conduit/src/room_version.rs::event_ids_follow_the_version_encoding` | | Reference-hash event ids. v3 is standard base64; v4-v10 share the URL-safe hash; v11 and v12 share the v11 redaction. A v12 create omits room_id. |
 | `rv.v5.auth-rules` | [Room version 5: Authorisation rules](https://spec.matrix.org/v1.19/rooms/v5/#authorisation-rules) | tested |  | `conduit/src/auth.rs::room_version_auth_rules_follow_the_spec` | | v1-v5 allow m.room.aliases when state_key is the sender's server name, and coerce string power levels. |
 | `rv.v5.redaction` | [Room version 5: Redaction algorithm](https://spec.matrix.org/v1.19/rooms/v5/#redactions) | tested |  | `conduit/src/room_version.rs::v6_redaction_drops_aliases_and_v11_drops_legacy_top_level_keys` | | v5 redaction still keeps aliases content. |
-| `rv.v5.state-res` | [Room version 5: State resolution algorithm](https://spec.matrix.org/v1.19/rooms/v5/#state-resolution) | missing |  |  | `conduit-y99.23` | Kernel implements room version 11 only. |
+| `rv.v5.state-res` | [Room version 5: State resolution algorithm](https://spec.matrix.org/v1.19/rooms/v5/#state-resolution) | tested | `conduit/src/room/state_res.rs` | `state_res.rs::room_version_5_prefers_later_timestamp_over_greater_depth` |  | Version 5 keeps state resolution v2: a later origin_server_ts beats a greater depth. Version 1 keeps the deeper event. |
 | `rv.v5.canonical-json` | [Room version 5: Canonical JSON / integer rules](https://spec.matrix.org/v1.19/rooms/v5/#canonical-json) | tested | `conduit/src/canonical_json.rs` | `conduit/src/auth.rs::room_version_auth_rules_follow_the_spec` | | v5 check_auth accepts a string power level by coercing it to an integer. |
 | `rv.v6.event-format` | [Room version 6: Event format and event IDs](https://spec.matrix.org/v1.19/rooms/v6/#event-format) | tested |  | `conduit/src/room_version.rs::event_ids_follow_the_version_encoding` | | Reference-hash event ids. v3 is standard base64; v4-v10 share the URL-safe hash; v11 and v12 share the v11 redaction. A v12 create omits room_id. |
 | `rv.v6.auth-rules` | [Room version 6: Authorisation rules](https://spec.matrix.org/v1.19/rooms/v6/#authorisation-rules) | tested |  | `conduit/src/auth.rs::room_version_auth_rules_follow_the_spec` | | v6 drops the aliases special case and rejects non-integer power levels. |
