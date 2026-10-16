@@ -16,17 +16,17 @@
   "summary": {
     "cs": {
       "endpoint": {
-        "implemented+tested": 151,
+        "implemented+tested": 152,
         "implemented-untested": 0,
-        "partial": 12,
+        "partial": 11,
         "missing": 0,
         "not-applicable": 1,
         "total": 164
       },
       "requirement": {
-        "implemented+tested": 67,
+        "implemented+tested": 68,
         "implemented-untested": 0,
-        "partial": 10,
+        "partial": 9,
         "missing": 0,
         "not-applicable": 9,
         "total": 86
@@ -743,21 +743,23 @@
       "rate_limited": "Yes",
       "deprecated": false,
       "role": "homeserver",
-      "status": "partial",
+      "status": "implemented+tested",
       "code": [
         {
           "loc": "conduit-server/src/api/client/account.rs:44"
+        },
+        {
+          "loc": "conduit-server/src/federation/server.rs (wire_pdus)"
         }
       ],
       "tests": [
         "conduit-server/tests/production_account.rs::production_deactivation_leaves_rooms_and_blocks_login",
-        "conduit-server/tests/production_modules.rs::erased_accounts_are_served_redacted_to_later_joiners_only"
+        "conduit-server/tests/production_modules.rs::erased_accounts_are_served_redacted_to_later_joiners_only",
+        "conduit-server/tests/production_pdu.rs::later_joining_servers_get_redacted_federation_events"
       ],
-      "tests_total": 2,
-      "gap_beads": [
-        "conduit-y99.49"
-      ],
-      "notes": "erase: users who join after the erasure get redacted copies (no redacted_because) on every CS read path; earlier members keep originals. Servers joining later still get originals over federation (conduit-y99.49)."
+      "tests_total": 3,
+      "gap_beads": [],
+      "notes": "erase: users and servers whose first join is after the erasure get redacted copies (no redacted_because, no redaction event) on CS reads and on federation /event, backfill and get_missing_events; earlier members and servers keep originals."
     },
     {
       "id": "cs.ep.get_matrixclientv1auth_metadata",
@@ -7079,25 +7081,27 @@
       "title": "Password change / deactivation",
       "source": "https://spec.matrix.org/v1.19/client-server-api/#legacy-account-management",
       "role": "homeserver",
-      "status": "partial",
+      "status": "implemented+tested",
       "code": [
         {
           "loc": "conduit-server/src/api/client/account.rs"
         },
         {
           "loc": "conduit-server/src/api/client/room_content/serve.rs (erased_for_viewer)"
+        },
+        {
+          "loc": "conduit-server/src/federation/server.rs (wire_pdus)"
         }
       ],
       "tests": [
         "conduit-server/tests/production_account.rs::production_password_change_revokes_other_devices",
         "conduit-server/tests/production_account.rs::production_deactivation_leaves_rooms_and_blocks_login",
-        "conduit-server/tests/production_modules.rs::erased_accounts_are_served_redacted_to_later_joiners_only"
+        "conduit-server/tests/production_modules.rs::erased_accounts_are_served_redacted_to_later_joiners_only",
+        "conduit-server/tests/production_pdu.rs::later_joining_servers_get_redacted_federation_events"
       ],
-      "tests_total": 3,
-      "gap_beads": [
-        "conduit-y99.49"
-      ],
-      "notes": "Password change and deactivation incl. erase serving on CS reads; federation reads by later-joining servers are conduit-y99.49."
+      "tests_total": 4,
+      "gap_beads": [],
+      "notes": "Password change and deactivation. erase: later joiners, on CS and over federation, get redacted copies; earlier members and servers keep originals."
     },
     {
       "id": "cs.auth.oauth2",

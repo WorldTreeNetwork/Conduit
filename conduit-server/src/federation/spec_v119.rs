@@ -135,7 +135,7 @@ pub async fn event_auth(
         Err(error) => return internal(&error.to_string()),
     };
     let chain = build_auth_chain(&state.storage, &[event]).await;
-    match wire_pdus(&state.storage, &chain).await {
+    match wire_pdus(&state.storage, &origin, &chain).await {
         Ok(auth_chain) => (StatusCode::OK, Json(json!({ "auth_chain": auth_chain }))).into_response(),
         Err(error) => internal(&error.to_string()),
     }

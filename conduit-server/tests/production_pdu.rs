@@ -10,9 +10,11 @@
 
 mod common;
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
+use axum::extract::Query;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::{routing::{get, post}, Json, Router};
@@ -68,7 +70,19 @@ async fn federated_server(remote: &Remote) -> Server {
 
 /// A signed federation request from `remote.test`.
 async fn fed(server: &Server, remote: &Remote, method: Method, path: &str, body: Option<Value>, status: u16) -> Value {
-    let auth = sign_request(method.as_str(), path, REMOTE, LOCAL, body.as_ref(), &remote.key);
+    fed_as(server, remote, REMOTE, method, path, body, status).await
+}
+
+async fn fed_as(
+    server: &Server,
+    remote: &Remote,
+    origin: &str,
+    method: Method,
+    path: &str,
+    body: Option<Value>,
+    status: u16,
+) -> Value {
+    let auth = sign_request(method.as_str(), path, origin, LOCAL, body.as_ref(), &remote.key);
     let mut request = server.http.request(method, format!("{}{path}", server.base_url)).header("Authorization", auth);
     if let Some(body) = &body {
         request = request.json(body);
@@ -80,11 +94,15 @@ async fn fed(server: &Server, remote: &Remote, method: Method, path: &str, body:
     serde_json::from_str(&text).unwrap_or(Value::Null)
 }
 
-fn sign(remote: &Remote, mut pdu: Pdu) -> (String, Value) {
+fn sign(remote: &Remote, pdu: Pdu) -> (String, Value) {
+    sign_as(remote, REMOTE, pdu)
+}
+
+fn sign_as(remote: &Remote, origin: &str, mut pdu: Pdu) -> (String, Value) {
     // Like sign_authored, without its 64-byte authoring margin, so tests can
     // build PDUs right at the 65536-byte receive limit.
     pdu.hashes = json!({ "sha256": conduit::hashing::content_hash(&pdu).unwrap() });
-    conduit::signing::add_signature(&mut pdu, &remote.key, REMOTE).unwrap();
+    conduit::signing::add_signature(&mut pdu, &remote.key, origin).unwrap();
     (conduit::hashing::event_id(&pdu).unwrap(), serde_json::to_value(&pdu).unwrap())
 }
 
@@ -1093,4 +1111,153 @@ async fn federation_guest_access_revocation_removes_local_guests() {
         )
         .await;
     assert_eq!(refused["errcode"], "M_GUEST_ACCESS_FORBIDDEN", "{refused}");
+}
+
+fn key_document(server_name: &str, key: &ServerKey) -> Value {
+    let unsigned = json!({
+        "server_name": server_name,
+        "verify_keys": { key.key_id.clone(): { "key": STANDARD_NO_PAD.encode(public_bytes(key)) } },
+        "old_verify_keys": {},
+        "valid_until_ts": chrono::Utc::now().timestamp_millis() + 3_600_000,
+    });
+    use ed25519_dalek::Signer as _;
+    let sig = key.signing_key.sign(&conduit::canonical_json::to_canonical_bytes(&unsigned).unwrap());
+    let mut doc = unsigned;
+    doc["signatures"] = json!({ server_name: { key.key_id.clone(): STANDARD_NO_PAD.encode(sig.to_bytes()) } });
+    doc
+}
+
+/// One key endpoint, a different document per `server_name` query.
+async fn spawn_key_server(docs: Vec<Value>) -> String {
+    let by_name: HashMap<String, Value> = docs
+        .into_iter()
+        .map(|doc| (doc["server_name"].as_str().unwrap().to_owned(), doc))
+        .collect();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let app = Router::new().route(
+        "/_matrix/key/v2/server",
+        get(move |Query(query): Query<HashMap<String, String>>| {
+            let by_name = by_name.clone();
+            async move {
+                let name = query.get("server_name").map(String::as_str).unwrap_or("");
+                Json(by_name.get(name).cloned().unwrap_or_else(|| json!({})))
+            }
+        }),
+    );
+    tokio::spawn(async move { axum::serve(listener, app).await.ok() });
+    format!("http://{addr}")
+}
+
+async fn federation_join(server: &Server, remote: &Remote, origin: &str, room: &str, user: &str) {
+    let make = format!("/_matrix/federation/v1/make_join/{}/{}", enc(room), enc(user));
+    let template = fed_as(server, remote, origin, Method::GET, &make, None, 200).await["event"].clone();
+    let pdu: Pdu = serde_json::from_value(template).unwrap();
+    let (id, body) = sign_as(remote, origin, pdu);
+    let send = format!("/_matrix/federation/v2/send_join/{}/{}", enc(room), enc(&id));
+    fed_as(server, remote, origin, Method::PUT, &send, Some(body), 200).await;
+}
+
+fn pdu_with_hash<'a>(pdus: &'a [Value], hash: &Value) -> &'a Value {
+    pdus.iter()
+        .find(|pdu| &pdu["hashes"]["sha256"] == hash)
+        .unwrap_or_else(|| panic!("no pdu with content hash {hash} in {pdus:?}"))
+}
+
+/// A server that joined before `erase: true` still receives the original
+/// message over `/event`, backfill and `get_missing_events`. A server whose
+/// first join is after the erasure receives the redacted copy (empty message
+/// content, original hashes, no redaction event).
+#[tokio::test]
+async fn later_joining_servers_get_redacted_federation_events() {
+    let early_key = Arc::new(generate_server_key());
+    let late_key = Arc::new(generate_server_key());
+    let keys_url = spawn_key_server(vec![
+        key_document(REMOTE, &early_key),
+        key_document("late.test", &late_key),
+    ])
+    .await;
+    let early = Remote { key: early_key, keys_url: keys_url.clone() };
+    let late = Remote { key: late_key, keys_url: keys_url.clone() };
+    let server = Server::with_env(&[("CONDUIT_FEDERATION", "1"), ("CONDUIT_REMOTE_KEYS_OVERRIDE", &keys_url)]).await;
+    let alice = server.register("alice").await;
+    let token = alice["access_token"].as_str().unwrap();
+    let room = server
+        .request(Method::POST, "/_matrix/client/v3/createRoom", Some(token), Some(json!({"preset": "public_chat"})), 200)
+        .await["room_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    federation_join(&server, &early, REMOTE, &room, "@early:remote.test").await;
+
+    let secret = server
+        .request(
+            Method::PUT,
+            &format!("/_matrix/client/v3/rooms/{}/send/m.room.message/secret", enc(&room)),
+            Some(token),
+            Some(json!({"msgtype": "m.text", "body": "my secret"})),
+            200,
+        )
+        .await["event_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let challenge = server
+        .request(Method::POST, "/_matrix/client/v3/account/deactivate", Some(token), Some(json!({})), 401)
+        .await;
+    server
+        .request(
+            Method::POST,
+            "/_matrix/client/v3/account/deactivate",
+            Some(token),
+            Some(json!({
+                "erase": true,
+                "auth": {
+                    "type": "m.login.password",
+                    "identifier": {"type": "m.id.user", "user": "alice"},
+                    "password": "test-password",
+                    "session": challenge["session"],
+                },
+            })),
+            200,
+        )
+        .await;
+
+    federation_join(&server, &late, "late.test", &room, "@late:late.test").await;
+
+    let event_path = format!("/_matrix/federation/v1/event/{}", enc(&secret));
+    let early_event = fed_as(&server, &early, REMOTE, Method::GET, &event_path, None, 200).await;
+    let early_pdu = &early_event["pdus"][0];
+    let parsed: Pdu = serde_json::from_value(early_pdu.clone()).unwrap();
+    assert_eq!(conduit::hashing::event_id(&parsed).unwrap(), secret, "resident keeps a verifiable PDU");
+    assert_eq!(early_pdu["content"]["body"], "my secret");
+    let hash = early_pdu["hashes"]["sha256"].clone();
+
+    let late_event = fed_as(&server, &late, "late.test", Method::GET, &event_path, None, 200).await;
+    let late_pdu = &late_event["pdus"][0];
+    assert_eq!(late_pdu["hashes"]["sha256"], hash, "redacted copy keeps the original hashes");
+    assert_eq!(late_pdu["content"], json!({}), "{late_pdu}");
+    assert_eq!(late_pdu["sender"], early_pdu["sender"]);
+    assert!(late_pdu.get("unsigned").is_none(), "erasure is not a redaction event: {late_pdu}");
+    assert!(!late_event.to_string().contains("my secret"), "{late_event}");
+
+    let backfill = format!("/_matrix/federation/v1/backfill/{}?limit=50", enc(&room));
+    let early_back = fed_as(&server, &early, REMOTE, Method::GET, &backfill, None, 200).await;
+    let early_copy = pdu_with_hash(early_back["pdus"].as_array().unwrap(), &hash);
+    assert_eq!(early_copy["content"]["body"], "my secret");
+    let late_back = fed_as(&server, &late, "late.test", Method::GET, &backfill, None, 200).await;
+    let late_copy = pdu_with_hash(late_back["pdus"].as_array().unwrap(), &hash);
+    assert_eq!(late_copy["content"], json!({}), "{late_copy}");
+    assert!(!late_back.to_string().contains("my secret"), "{late_back}");
+    assert!(late_back["pdus"].as_array().unwrap().iter().all(|pdu| pdu["type"] != "m.room.redaction"));
+
+    let missing = format!("/_matrix/federation/v1/get_missing_events/{}", enc(&room));
+    let body = json!({"earliest_events": [], "latest_events": [secret], "limit": 10});
+    let early_missing = fed_as(&server, &early, REMOTE, Method::POST, &missing, Some(body.clone()), 200).await;
+    assert_eq!(pdu_with_hash(early_missing["events"].as_array().unwrap(), &hash)["content"]["body"], "my secret");
+    let late_missing = fed_as(&server, &late, "late.test", Method::POST, &missing, Some(body), 200).await;
+    assert_eq!(pdu_with_hash(late_missing["events"].as_array().unwrap(), &hash)["content"], json!({}));
+    assert!(!late_missing.to_string().contains("my secret"), "{late_missing}");
 }

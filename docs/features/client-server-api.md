@@ -424,5 +424,5 @@ conduit-y99.48.
 Events from an account deactivated with `erase: true` are pruned at serve time
 for viewers whose first join to the room is after the erasure (or who never
 joined); earlier members keep originals. No redaction event is created.
-Federation readers are conduit-y99.49.
+Federation `/event`, backfill, `get_missing_events`, state and `event_auth` use the same first-join rule (`federation/server.rs::wire_pdus`).
 

@@ -148,13 +148,79 @@ pub(crate) fn invalid_param(msg: &str) -> Response {
     matrix_error(StatusCode::BAD_REQUEST, "M_INVALID_PARAM", msg)
 }
 
-/// The federation form of stored events, in order. Events whose bytes do not
-/// reproduce their ID are omitted; content-mismatched ones are redacted.
-pub(crate) async fn wire_pdus(storage: &Arc<dyn Storage>, events: &[Event]) -> conduit::Result<Vec<WirePdu>> {
+/// The federation form of stored events, in order, for `origin`.
+///
+/// Events whose bytes do not reproduce their ID are omitted; content-mismatched
+/// ones are the v11 redaction. A sender who asked for erasure is served that
+/// redaction to an origin whose first join in the room is absent or not
+/// strictly before `erased_at`. Origins that already had a member keep the
+/// original. The redacted copy keeps the original hashes and signatures (no
+/// redaction event is invented). It is not a [`WirePdu`]: stripping content
+/// changes the reference hash, and [`WirePdu::checked`] would drop it.
+pub(crate) async fn wire_pdus(
+    storage: &Arc<dyn Storage>,
+    origin: &str,
+    events: &[Event],
+) -> conduit::Result<Vec<Value>> {
+    let redact = erased_ids_for_origin(storage.as_ref(), origin, events).await?;
+    let mut versions: HashMap<String, u32> = HashMap::new();
     let mut out = Vec::with_capacity(events.len());
     for event in events {
-        if let Some(wire) = storage.get_wire_pdu(&event.event_id).await? {
-            out.push(wire);
+        let Some(wire) = storage.get_wire_pdu(&event.event_id).await? else { continue };
+        if redact.contains(&event.event_id) {
+            let version = match versions.get(&event.room_id) {
+                Some(version) => *version,
+                None => {
+                    let version = room_redaction_version(storage.as_ref(), &event.room_id).await?;
+                    versions.insert(event.room_id.clone(), version);
+                    version
+                }
+            };
+            let redacted = conduit::room_version::redact_pdu(wire.pdu(), version);
+            out.push(serde_json::to_value(&redacted).expect("pdu is json"));
+        } else {
+            out.push(serde_json::to_value(&wire).expect("pdu is json"));
+        }
+    }
+    Ok(out)
+}
+
+async fn room_redaction_version(storage: &dyn Storage, room_id: &str) -> conduit::Result<u32> {
+    Ok(match storage.get_state_entry(room_id, "m.room.create", "").await? {
+        Some(create) => conduit::room_version::version_of_event(&create),
+        None => 11,
+    })
+}
+
+/// Event ids `origin` must receive redacted, because the sender was erased
+/// before that server's first join (or the server has never joined).
+async fn erased_ids_for_origin(
+    storage: &dyn Storage,
+    origin: &str,
+    events: &[Event],
+) -> conduit::Result<HashSet<String>> {
+    let mut erased_at: HashMap<String, Option<i64>> = HashMap::new();
+    let mut first_join: HashMap<String, Option<i64>> = HashMap::new();
+    let mut out = HashSet::new();
+    for event in events {
+        if !erased_at.contains_key(&event.sender) {
+            erased_at.insert(event.sender.clone(), storage.account_erased_at(&event.sender).await?);
+        }
+        let Some(erased) = erased_at[&event.sender] else { continue };
+        if !first_join.contains_key(&event.room_id) {
+            let members = storage.member_events_for_server(&event.room_id, origin).await?;
+            let joined = members
+                .iter()
+                .filter(|(_, member)| {
+                    member.content.get("membership").and_then(Value::as_str) == Some("join")
+                })
+                .map(|(_, member)| member.origin_server_ts as i64)
+                .min();
+            first_join.insert(event.room_id.clone(), joined);
+        }
+        let saw_before = first_join[&event.room_id].is_some_and(|ts| ts < erased);
+        if !saw_before {
+            out.insert(event.event_id.clone());
         }
     }
     Ok(out)
@@ -610,8 +676,8 @@ pub async fn send_join(
     };
     let auth_chain = build_auth_chain(&state.storage, &state_events).await;
     let (state_pdus, chain_pdus) = match (
-        wire_pdus(&state.storage, &state_events).await,
-        wire_pdus(&state.storage, &auth_chain).await,
+        wire_pdus(&state.storage, &origin, &state_events).await,
+        wire_pdus(&state.storage, &origin, &auth_chain).await,
     ) {
         (Ok(s), Ok(c)) => (s, c),
         (Err(e), _) | (_, Err(e)) => return internal(&e.to_string()),
@@ -766,8 +832,8 @@ pub async fn state(
 
     let auth_chain = build_auth_chain(&state.storage, &state_events).await;
     let (pdus, auth_chain) = match (
-        wire_pdus(&state.storage, &state_events).await,
-        wire_pdus(&state.storage, &auth_chain).await,
+        wire_pdus(&state.storage, &origin, &state_events).await,
+        wire_pdus(&state.storage, &origin, &auth_chain).await,
     ) {
         (Ok(p), Ok(a)) => (p, a),
         (Err(e), _) | (_, Err(e)) => return internal(&e.to_string()),
@@ -865,7 +931,7 @@ pub async fn backfill(
         Err(e) => return internal(&e.to_string()),
     };
     let filtered: Vec<Event> = visible.into_iter().take(limit).collect();
-    let filtered = match wire_pdus(&state.storage, &filtered).await {
+    let filtered = match wire_pdus(&state.storage, &origin, &filtered).await {
         Ok(pdus) => pdus,
         Err(e) => return internal(&e.to_string()),
     };
@@ -888,22 +954,29 @@ pub async fn get_event(
     origin_ext: Option<axum::extract::Extension<FederationOrigin>>,
     Path(event_id): Path<String>,
 ) -> Response {
-    if origin_ext.is_none() {
-        return unauthorized("Not authenticated");
-    }
+    let origin = match origin_ext {
+        Some(axum::extract::Extension(o)) => o.server_name,
+        None => return unauthorized("Not authenticated"),
+    };
 
-    // Only bytes that reproduce their ID are served; content-mismatched
-    // legacy rows are served as their redaction, ID mismatches as 404.
-    match state.storage.get_wire_pdu(&event_id).await {
-        Ok(Some(ev)) => (StatusCode::OK, Json(json!({
-            "origin": &*state.server_name,
-            "origin_server_ts": crate::federation::now_ms(),
-            "pdus": [ev],
-        })))
-        .into_response(),
-        Ok(None) => not_found("Event not found"),
-        Err(e) => internal(&e.to_string()),
-    }
+    let event = match state.storage.get_event(&event_id).await {
+        Ok(Some(event)) => event,
+        Ok(None) => return not_found("Event not found"),
+        Err(e) => return internal(&e.to_string()),
+    };
+    // ID mismatches stay 404. Erasure strips content for origins that had
+    // not joined before the sender was erased; earlier residents keep it.
+    let pdus = match wire_pdus(&state.storage, &origin, std::slice::from_ref(&event)).await {
+        Ok(pdus) if !pdus.is_empty() => pdus,
+        Ok(_) => return not_found("Event not found"),
+        Err(e) => return internal(&e.to_string()),
+    };
+    (StatusCode::OK, Json(json!({
+        "origin": &*state.server_name,
+        "origin_server_ts": crate::federation::now_ms(),
+        "pdus": pdus,
+    })))
+    .into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -994,7 +1067,7 @@ pub async fn get_missing_events(
         Err(e) => return internal(&e.to_string()),
     };
 
-    let found = match wire_pdus(&state.storage, &found).await {
+    let found = match wire_pdus(&state.storage, &origin, &found).await {
         Ok(pdus) => pdus,
         Err(e) => return internal(&e.to_string()),
     };

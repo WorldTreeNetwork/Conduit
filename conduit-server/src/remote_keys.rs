@@ -20,7 +20,8 @@
 //!
 //! Out of scope for this module (tracked in E08).  For now we fetch directly:
 //! `https://{server_name}/_matrix/key/v2/server`.  A test override base URL
-//! can be set via [`RemoteKeyCache::with_test_base_url`].
+//! can be set via [`RemoteKeyCache::with_test_base_url`] (the server name is
+//! passed as a `server_name` query parameter).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -160,8 +161,10 @@ impl RemoteKeyCache {
 
     /// Override the base URL used for all fetches.
     ///
-    /// When set, requests go to `{base_url}/_matrix/key/v2/server` instead of
-    /// `https://{server_name}/_matrix/key/v2/server`.  Intended for tests only.
+    /// When set, requests go to `{base_url}/_matrix/key/v2/server?server_name=`
+    /// instead of `https://{server_name}/_matrix/key/v2/server`. The query lets
+    /// one test server hand out a different document per origin. Intended for
+    /// tests only; the path is unchanged so existing mocks still match.
     pub fn with_test_base_url(self, base_url: String) -> Self {
         Self {
             base_url_override: Some(base_url),
@@ -172,7 +175,10 @@ impl RemoteKeyCache {
     /// Build the fetch URL for the given server.
     fn key_url(&self, server_name: &str) -> String {
         match &self.base_url_override {
-            Some(base) => format!("{}/_matrix/key/v2/server", base.trim_end_matches('/')),
+            Some(base) => format!(
+                "{}/_matrix/key/v2/server?server_name={server_name}",
+                base.trim_end_matches('/')
+            ),
             None => format!("https://{}/_matrix/key/v2/server", server_name),
         }
     }
