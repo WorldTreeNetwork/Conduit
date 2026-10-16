@@ -34,9 +34,9 @@
     },
     "ss": {
       "endpoint": {
-        "implemented+tested": 29,
+        "implemented+tested": 30,
         "implemented-untested": 0,
-        "partial": 6,
+        "partial": 5,
         "missing": 0,
         "not-applicable": 1,
         "total": 36
@@ -5032,10 +5032,10 @@
       "rate_limited": "No",
       "deprecated": false,
       "role": "homeserver",
-      "status": "partial",
+      "status": "implemented+tested",
       "code": [
         {
-          "loc": "conduit-server/src/federation/server.rs:1072",
+          "loc": "conduit-server/src/federation/server.rs:328",
           "handler": "send_transaction",
           "kind": "exact"
         }
@@ -5046,16 +5046,18 @@
         "conduit-server/tests/federation_inbound.rs::send_transaction_persists_pdus",
         "conduit-server/tests/federation_inbound.rs::standard_v2_routes_require_authentication",
         "conduit-server/tests/federation_roundtrip.rs::rt2_b_sends_transaction_to_a",
-        "conduit-server/tests/iroh_roundtrip.rs::iroh_rt1_send_transaction_a_to_b"
+        "conduit-server/tests/iroh_roundtrip.rs::iroh_rt1_send_transaction_a_to_b",
+        "conduit-server/tests/production_pdu.rs::send_keeps_nul_content_drops_invalid_pdus_and_replays_identically",
+        "conduit-server/tests/production_pdu.rs::server_acl_denies_remote_participation_until_lifted",
+        "conduit-server/tests/production_pdu.rs::auth_event_selection_rejects_and_current_state_soft_fails",
+        "conduit-server/tests/production_pdu.rs::soft_failed_topic_is_omitted_until_referenced_and_syncs_when_selected",
+        "conduit-server/tests/production_pdu.rs::send_applies_acl_per_pdu_and_inbound_edus"
       ],
-      "tests_total": 6,
+      "tests_total": 11,
       "gap_beads": [
-        "conduit-y99.33",
-        "conduit-y99.32",
-        "conduit-y99.22",
-        "conduit-y99.22.4"
+        "conduit-y99.22"
       ],
-      "notes": "PDUs are persisted. Rejection and soft failure are recorded per event. /send still lacks ACLs, and only to-device and device-list EDUs are handled."
+      "notes": "HTTP 200 with a per-event pdus map. A server denied by m.room.server_acl gets an error for that PDU; an allowed room's PDU in the same transaction is accepted. Typing and receipt EDUs for a denied room are ignored. Presence, and master and self-signing key updates, are applied; a user-signing key in the EDU is not stored. A content-hash mismatch is stored redacted. Rejection, soft failure, the 65536-byte limit, NUL EDU isolation, and transaction replay are covered by the named tests."
     },
     {
       "id": "ss.ep.get_matrixfederationv1event_authroomideventid",
@@ -8896,15 +8898,16 @@
         }
       ],
       "tests": [
-        "conduit-server/tests/federation_inbound.rs::inbound_signature_verified_or_rejected"
+        "conduit-server/tests/federation_inbound.rs::inbound_signature_verified_or_rejected",
+        "conduit-server/tests/production_pdu.rs::send_applies_acl_per_pdu_and_inbound_edus"
       ],
-      "tests_total": 1,
+      "tests_total": 2,
       "gap_beads": [
         "conduit-y99.33",
         "conduit-g12",
         "conduit-embed-pdu"
       ],
-      "notes": ""
+      "notes": "Hash-mismatch redaction, rejection, soft failure, and the size limit are asserted on PUT /send. Recursive auth-event verification and byte-exact wire remain."
     },
     {
       "id": "ss.pdu.auth-events-selection",
@@ -8980,12 +8983,14 @@
           "loc": "conduit-server/src/federation/server.rs:951"
         }
       ],
-      "tests": [],
-      "tests_total": 0,
+      "tests": [
+        "conduit-server/tests/production_pdu.rs::send_applies_acl_per_pdu_and_inbound_edus"
+      ],
+      "tests_total": 1,
       "gap_beads": [
         "conduit-y99.32"
       ],
-      "notes": ""
+      "notes": "Inbound typing, receipt, presence, and signing-key updates are applied. Typing and receipt EDUs for an ACL-denied room are ignored. Outbound EDU fanout remains."
     },
     {
       "id": "ss.state-res",
@@ -9551,14 +9556,15 @@
         }
       ],
       "tests": [
-        "conduit-server/tests/federation_inbound.rs::inbound_signature_verified_or_rejected"
+        "conduit-server/tests/federation_inbound.rs::inbound_signature_verified_or_rejected",
+        "conduit-server/tests/production_pdu.rs::send_applies_acl_per_pdu_and_inbound_edus"
       ],
-      "tests_total": 1,
+      "tests_total": 2,
       "gap_beads": [
         "conduit-y99.33",
         "conduit-embed-pdu"
       ],
-      "notes": "Signatures checked; content-hash mismatch handling missing."
+      "notes": "Signatures are checked. A content-hash mismatch on PUT /send is stored as the redacted PDU with the original hashes. Byte-exact wire persistence remains."
     },
     {
       "id": "ss.signing.reference-hash",

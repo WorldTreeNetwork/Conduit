@@ -6,7 +6,8 @@
 //! U+0000 over /send, explicit event_id, depth/size/field limits, transaction
 //! replay, extension persistence across restart with no event_id on the
 //! wire, /invite checks before co-signing, /send_join validation and the
-//! restricted-join co-signature, client float replay, client U+0000 refusal.
+//! restricted-join co-signature, client float replay, client U+0000 refusal,
+//! per-PDU server ACL on /send with typing, receipt, presence, and signing-key EDUs.
 
 mod common;
 
@@ -742,6 +743,309 @@ async fn server_acl_denies_remote_participation_until_lifted() {
     assert!(leaving["error"].as_str().unwrap_or("").contains("not in the room"), "{leaving}");
     let knock_body = fed(&server, &remote, Method::PUT, &send_knock, Some(json!({})), 400).await;
     assert_eq!(knock_body["errcode"], "M_BAD_JSON", "{knock_body}");
+}
+
+/// `/send` applies `m.room.server_acl` per PDU inside HTTP 200. A denied
+/// room's PDU carries an error and is not stored. A PDU for an allowed room
+/// in the same transaction is accepted. Typing and receipt EDUs for the
+/// denied room are ignored; the same EDUs for the allowed room are applied.
+/// Presence and signing-key EDUs are stored. A content-hash mismatch is
+/// kept as the redacted PDU. Lifting the ACL lets a later PDU through.
+#[tokio::test]
+async fn send_applies_acl_per_pdu_and_inbound_edus() {
+    let remote = spawn_remote().await;
+    let server = federated_server(&remote).await;
+    let alice = server.register("alice").await;
+    let token = alice["access_token"].as_str().unwrap();
+    let joiner = "@r:remote.test";
+    let make_room = || {
+        let server = &server;
+        async move {
+            server
+                .request(
+                    Method::POST,
+                    "/_matrix/client/v3/createRoom",
+                    Some(token),
+                    Some(json!({"preset": "public_chat"})),
+                    200,
+                )
+                .await["room_id"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        }
+    };
+    let denied_room = make_room().await;
+    let open_room = make_room().await;
+    federation_join(&server, &remote, REMOTE, &denied_room, joiner).await;
+    federation_join(&server, &remote, REMOTE, &open_room, joiner).await;
+
+    let marker = |room: &str, txn_id: &str| {
+        let room = room.to_owned();
+        let txn_id = txn_id.to_owned();
+        let server = &server;
+        async move {
+            server
+                .request(
+                    Method::PUT,
+                    &format!("/_matrix/client/v3/rooms/{}/send/m.room.message/{txn_id}", enc(&room)),
+                    Some(token),
+                    Some(json!({"msgtype": "m.text", "body": txn_id})),
+                    200,
+                )
+                .await["event_id"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        }
+    };
+    let denied_marker = marker(&denied_room, "denied-marker").await;
+    let open_marker = marker(&open_room, "open-marker").await;
+
+    let auth_ids = |room: String| {
+        let server = &server;
+        async move {
+            let state = server
+                .request(
+                    Method::GET,
+                    &format!("/_matrix/client/v3/rooms/{}/state", enc(&room)),
+                    Some(token),
+                    None,
+                    200,
+                )
+                .await;
+            let mut power = String::new();
+            let mut join = String::new();
+            for event in state.as_array().unwrap() {
+                match event["type"].as_str() {
+                    Some("m.room.power_levels") => power = event["event_id"].as_str().unwrap().to_owned(),
+                    Some("m.room.member") if event["state_key"] == joiner => {
+                        join = event["event_id"].as_str().unwrap().to_owned();
+                    }
+                    _ => {}
+                }
+            }
+            assert!(!power.is_empty() && !join.is_empty(), "{room}: {state}");
+            (power, join)
+        }
+    };
+    let (denied_power, denied_join) = auth_ids(denied_room.clone()).await;
+    let (open_power, open_join) = auth_ids(open_room.clone()).await;
+    let message = |room: &str, body: &str, power: &str, join: &str, depth: i64| {
+        sign(
+            &remote,
+            Pdu::new(
+                room,
+                joiner,
+                "m.room.message",
+                None,
+                json!({"msgtype": "m.text", "body": body}),
+                1_700_000_000_000,
+                vec![power.to_owned(), join.to_owned()],
+                vec![join.to_owned()],
+                depth,
+            ),
+        )
+    };
+    let (blocked_id, blocked) = message(&denied_room, "blocked-by-acl", &denied_power, &denied_join, 30);
+    let (allowed_id, allowed) = message(&open_room, "allowed-by-acl", &open_power, &open_join, 30);
+    let (mismatch_id, mut mismatched) = message(&open_room, "original-secret", &open_power, &open_join, 31);
+    mismatched["content"]["body"] = json!("tampered-secret");
+
+    server
+        .request(
+            Method::PUT,
+            &format!("/_matrix/client/v3/rooms/{}/state/m.room.server_acl", enc(&denied_room)),
+            Some(token),
+            Some(json!({"allow": ["*"], "deny": ["remote.test"], "allow_ip_literals": true})),
+            200,
+        )
+        .await;
+
+    let keys = common::keys::CrossSigning::new(joiner);
+    let sent = fed(
+        &server,
+        &remote,
+        Method::PUT,
+        "/_matrix/federation/v1/send/acl-per-pdu",
+        Some(txn(
+            vec![blocked, allowed, mismatched.clone()],
+            vec![
+                json!({"edu_type": "m.typing", "content": {"room_id": denied_room, "user_id": joiner, "typing": true}}),
+                json!({"edu_type": "m.typing", "content": {"room_id": open_room, "user_id": joiner, "typing": true}}),
+                json!({
+                    "edu_type": "m.receipt",
+                    "content": {
+                        denied_room.clone(): {"m.read": {joiner: {"event_ids": [denied_marker], "data": {"ts": 1_700_000_000_000u64}}}},
+                        open_room.clone(): {"m.read": {joiner: {"event_ids": [open_marker], "data": {"ts": 1_700_000_000_000u64}}}},
+                    }
+                }),
+                json!({
+                    "edu_type": "m.presence",
+                    "content": {"push": [
+                        {"user_id": joiner, "presence": "online", "last_active_ago": 1000u64, "status_msg": "awake"},
+                        {"user_id": "@spy:other.test", "presence": "online", "last_active_ago": 1000u64, "status_msg": "hidden"},
+                    ]}
+                }),
+                json!({
+                    "edu_type": "m.signing_key_update",
+                    "content": {
+                        "user_id": joiner,
+                        "master_key": keys.master_key,
+                        "self_signing_key": keys.self_signing_key,
+                        "user_signing_key": keys.user_signing_key,
+                    }
+                }),
+            ],
+        )),
+        200,
+    )
+    .await;
+    assert_eq!(sent["pdus"][&blocked_id]["error"], "server ACL denies this server", "{sent}");
+    assert_eq!(sent["pdus"][&allowed_id], json!({}), "{sent}");
+    assert_eq!(sent["pdus"][&mismatch_id], json!({}), "{sent}");
+    assert!(sent.get("errcode").is_none(), "a denied PDU does not fail the transaction: {sent}");
+
+    let blocked_get = fed(
+        &server,
+        &remote,
+        Method::GET,
+        &format!("/_matrix/federation/v1/event/{}", enc(&blocked_id)),
+        None,
+        404,
+    )
+    .await;
+    assert_eq!(blocked_get["errcode"], "M_NOT_FOUND", "{blocked_get}");
+    let redacted = fed(
+        &server,
+        &remote,
+        Method::GET,
+        &format!("/_matrix/federation/v1/event/{}", enc(&mismatch_id)),
+        None,
+        200,
+    )
+    .await;
+    let redacted_pdu = &redacted["pdus"][0];
+    assert_eq!(redacted_pdu["content"], json!({}), "a hash mismatch is stored redacted: {redacted_pdu}");
+    assert_eq!(redacted_pdu["hashes"], mismatched["hashes"], "{redacted_pdu}");
+    assert!(!redacted.to_string().contains("tampered-secret"), "{redacted}");
+    assert!(!redacted.to_string().contains("original-secret"), "{redacted}");
+
+    let sync = server.request(Method::GET, "/_matrix/client/v3/sync", Some(token), None, 200).await;
+    let bodies = |room: &str| -> Vec<String> {
+        ["timeline", "state"]
+            .into_iter()
+            .flat_map(|section| {
+                sync["rooms"]["join"][room][section]["events"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|event| event["content"]["body"].as_str().map(str::to_owned))
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    };
+    let denied_bodies = bodies(&denied_room);
+    let open_bodies = bodies(&open_room);
+    assert!(!denied_bodies.iter().any(|body| body == "blocked-by-acl"), "{denied_bodies:?}");
+    assert!(open_bodies.iter().any(|body| body == "allowed-by-acl"), "{open_bodies:?}");
+    assert!(!open_bodies.iter().any(|body| body == "tampered-secret" || body == "original-secret"), "{open_bodies:?}");
+
+    let typing = |room: &str| -> Vec<String> {
+        sync["rooms"]["join"][room]["ephemeral"]["events"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|event| event["type"] == "m.typing")
+            .flat_map(|event| {
+                event["content"]["user_ids"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|user| user.as_str().map(str::to_owned))
+            })
+            .collect()
+    };
+    assert!(!typing(&denied_room).iter().any(|user| user == joiner), "denied typing: {sync}");
+    assert!(typing(&open_room).iter().any(|user| user == joiner), "allowed typing: {sync}");
+    let read = |room: &str, event_id: &str| {
+        sync["rooms"]["join"][room]["ephemeral"]["events"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|event| event["type"] == "m.receipt")
+            .any(|event| event["content"][event_id]["m.read"].get(joiner).is_some())
+    };
+    assert!(!read(&denied_room, &denied_marker), "denied receipt: {sync}");
+    assert!(read(&open_room, &open_marker), "allowed receipt: {sync}");
+    let presence = sync["presence"]["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["sender"] == joiner)
+        .unwrap_or_else(|| panic!("remote presence missing: {sync}"));
+    assert_eq!(presence["content"]["presence"], "online", "{presence}");
+    assert_eq!(presence["content"]["status_msg"], "awake", "{presence}");
+    assert!(
+        sync["presence"]["events"].as_array().unwrap().iter().all(|event| event["sender"] != "@spy:other.test"),
+        "a presence entry from another server is ignored: {sync}"
+    );
+
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&server.database_url)
+        .await
+        .expect("production database");
+    let stored: Vec<(String,)> = sqlx::query_as("SELECT key_type FROM cross_signing_keys WHERE user_id = $1 ORDER BY key_type")
+        .bind(joiner)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    pool.close().await;
+    let stored: Vec<&str> = stored.iter().map(|row| row.0.as_str()).collect();
+    assert_eq!(stored, vec!["master", "self_signing"], "user-signing keys in the EDU are not stored: {stored:?}");
+
+    server
+        .request(
+            Method::PUT,
+            &format!("/_matrix/client/v3/rooms/{}/state/m.room.server_acl", enc(&denied_room)),
+            Some(token),
+            Some(json!({"allow": ["*"], "deny": []})),
+            200,
+        )
+        .await;
+    let (lifted_id, lifted) = message(&denied_room, "after-the-lift", &denied_power, &denied_join, 40);
+    let lifted_txn = fed(
+        &server,
+        &remote,
+        Method::PUT,
+        "/_matrix/federation/v1/send/acl-lifted",
+        Some(txn(
+            vec![lifted],
+            vec![json!({"edu_type": "m.typing", "content": {"room_id": denied_room, "user_id": joiner, "typing": true}})],
+        )),
+        200,
+    )
+    .await;
+    assert_eq!(lifted_txn["pdus"][&lifted_id], json!({}), "{lifted_txn}");
+    let after = server.request(Method::GET, "/_matrix/client/v3/sync", Some(token), None, 200).await;
+    let after_bodies: Vec<&str> = after["rooms"]["join"][&denied_room]["timeline"]["events"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .chain(after["rooms"]["join"][&denied_room]["state"]["events"].as_array().into_iter().flatten())
+        .filter_map(|event| event["content"]["body"].as_str())
+        .collect();
+    assert!(after_bodies.contains(&"after-the-lift"), "{after_bodies:?}");
+    assert!(!after_bodies.contains(&"blocked-by-acl"), "{after_bodies:?}");
+    let typing_after: Vec<&str> = after["rooms"]["join"][&denied_room]["ephemeral"]["events"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|event| event["type"] == "m.typing")
+        .flat_map(|event| event["content"]["user_ids"].as_array().into_iter().flatten().filter_map(|user| user.as_str()))
+        .collect();
+    assert!(typing_after.contains(&joiner), "typing applies once the ACL allows the server: {after}");
 }
 
 #[tokio::test]
