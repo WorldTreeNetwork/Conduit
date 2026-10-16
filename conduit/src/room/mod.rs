@@ -37,6 +37,12 @@ pub trait RoomEventSender: Send + Sync {
         state_key: Option<&str>,
         content: Value,
     ) -> Result<String>;
+
+    /// Map `alias` onto `room_id` before the canonical-alias event is sent.
+    /// The default does nothing; the homeserver binds its directory.
+    async fn bind_room_alias(&self, _creator: &str, _alias: &str, _room_id: &str) -> Result<()> {
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -59,18 +65,17 @@ impl Room {
     // Static constructor — create a brand-new room
     // ------------------------------------------------------------------
 
-    /// Create a room, injecting the initial-state cascade:
+    /// Create a room, applying events in the createRoom order:
     ///
-    /// 1. `m.room.create`
-    /// 2. `m.room.member` (creator joins)
-    /// 3. `m.room.power_levels`
-    /// 4. `m.room.join_rules`
-    /// 5. `m.room.history_visibility`
-    /// 6. Optional `m.room.name` / `m.room.topic`
-    /// 7. `initial_state` entries supplied by the caller
-    /// 8. Room aliases
+    /// 1. `m.room.create` (first event; server overwrites `creator` and `room_version`)
+    /// 2. creator `m.room.member` join
+    /// 3. `m.room.power_levels` (override applied; v12 tombstone power above `state_default`)
+    /// 4. `m.room.canonical_alias`, when an alias was requested
+    /// 5. preset events: join rules, history visibility, guest access
+    /// 6. `initial_state`, in the listed order
+    /// 7. `name` and `topic`, which override `initial_state`
     ///
-    /// On success returns the new `Room`.
+    /// Invites are the caller's step after this returns. On success returns the new `Room`.
     pub async fn create(
         sender: &str,
         room_id: &str,
@@ -94,6 +99,9 @@ impl Room {
         if version_num < 11 {
             content["creator"] = json!(sender);
         }
+        if body.trusted_private_chat {
+            merge_additional_creators(&mut content, sender, &body.invite);
+        }
         let create_room_id = if version_num >= 12 { "" } else { room_id };
         let create_event_id = sender_
             .send_event(sender, create_room_id, "m.room.create", Some(""), content)
@@ -113,6 +121,13 @@ impl Room {
         let mut users = serde_json::Map::new();
         if version_num < 12 {
             users.insert(sender.to_owned(), json!(100));
+            if body.trusted_private_chat {
+                for invitee in &body.invite {
+                    if invitee != sender && crate::room_version::valid_user_id(invitee) {
+                        users.insert(invitee.clone(), json!(100));
+                    }
+                }
+            }
         }
 
         let default_pl = json!({
@@ -126,7 +141,7 @@ impl Room {
             "users": users,
             "events": {},
         });
-        let pl_content = if let Some(override_pl) = &body.power_level_content_override {
+        let mut pl_content = if let Some(override_pl) = &body.power_level_content_override {
             let mut base = default_pl;
             if let (Some(b), Some(o)) = (base.as_object_mut(), override_pl.as_object()) {
                 for (k, v) in o {
@@ -137,30 +152,46 @@ impl Room {
         } else {
             default_pl
         };
+        if version_num >= 12 {
+            raise_tombstone_above_state_default(&mut pl_content);
+        }
         sender_.send_event(sender, room_id, "m.room.power_levels", Some(""), pl_content).await?;
 
-        // 4. m.room.join_rules
+        // 4. Canonical alias, after the directory mapping exists.
+        if let Some(alias) = &body.canonical_alias {
+            sender_.bind_room_alias(sender, alias, room_id).await?;
+            sender_
+                .send_event(sender, room_id, "m.room.canonical_alias", Some(""), json!({ "alias": alias }))
+                .await?;
+        }
+
+        // 5. Preset state. initial_state and name/topic come after, so they win.
         let content = json!({ "join_rule": join_rule });
         sender_.send_event(sender, room_id, "m.room.join_rules", Some(""), content).await?;
-
-        // 5. m.room.history_visibility
         let content = json!({ "history_visibility": history_visibility });
         sender_.send_event(sender, room_id, "m.room.history_visibility", Some(""), content).await?;
-
-        // 6. Optional name / topic
-        if let Some(name) = body.name {
-            let content = json!({ "name": name });
-            sender_.send_event(sender, room_id, "m.room.name", Some(""), content).await?;
-        }
-        if let Some(topic) = body.topic {
-            let content = json!({ "topic": topic });
-            sender_.send_event(sender, room_id, "m.room.topic", Some(""), content).await?;
+        if let Some(access) = &body.guest_access {
+            sender_
+                .send_event(sender, room_id, "m.room.guest_access", Some(""), json!({ "guest_access": access }))
+                .await?;
         }
 
-        // 7. initial_state entries
+        // 6. initial_state, in listed order.
         for ev in &body.initial_state {
             let sk = ev.state_key.as_deref().unwrap_or("");
             sender_.send_event(sender, room_id, &ev.event_type, Some(sk), ev.content.clone()).await?;
+        }
+
+        // 7. name and topic override initial_state of the same type.
+        if let Some(name) = body.name {
+            sender_
+                .send_event(sender, room_id, "m.room.name", Some(""), json!({ "name": name }))
+                .await?;
+        }
+        if let Some(topic) = body.topic {
+            sender_
+                .send_event(sender, room_id, "m.room.topic", Some(""), topic_content(topic))
+                .await?;
         }
 
         Ok(Room::new(room_id))
@@ -315,6 +346,15 @@ pub struct CreateRoomParams<'a> {
     /// Extra `m.room.create` content (e.g. `type`, `m.federate`).
     /// `creator` and `room_version` are always set by the server.
     pub creation_content: Option<Value>,
+    /// Preset `m.room.guest_access` value. Omitted when `None`.
+    pub guest_access: Option<String>,
+    /// Full room alias (`#local:server`) to bind and publish as canonical.
+    pub canonical_alias: Option<String>,
+    /// Users invited by the createRoom request. Trusted-private rooms
+    /// copy them into creator power before any invite event is sent.
+    pub invite: Vec<String>,
+    /// `trusted_private_chat`: invitees share the creator's power.
+    pub trusted_private_chat: bool,
 }
 
 /// An initial state event supplied at room creation.
@@ -349,25 +389,104 @@ pub fn current_state(
 // Preset resolution helper
 // ---------------------------------------------------------------------------
 
-/// Resolve `(join_rule, history_visibility)` from a preset/visibility pair.
-///
-/// | preset                         | join_rule          | history_visibility |
-/// |--------------------------------|--------------------|-------------------|
-/// | `"public_chat"`                | `"public"`         | `"shared"`        |
-/// | `"trusted_private_chat"`       | `"invite"`         | `"shared"`        |
-/// | `"private_chat"`               | `"invite"`         | `"invited"`       |
-/// | fallback + `"public"`          | `"public"`         | `"shared"`        |
-/// | fallback + anything else       | `"invite"`         | `"invited"`       |
-pub fn resolve_preset(preset: Option<&str>, visibility: Option<&str>) -> (&'static str, &'static str) {
+/// Preset state from createRoom. History visibility is `shared` for every
+/// defined preset. Guest access is `forbidden` only for `public_chat`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RoomPreset {
+    pub join_rule: &'static str,
+    pub history_visibility: &'static str,
+    pub guest_access: &'static str,
+    pub trusted_private_chat: bool,
+}
+
+/// Resolve a createRoom preset. An omitted preset follows `visibility`:
+/// `public` is `public_chat`, anything else (including omitted) is `private_chat`.
+pub fn resolve_preset(preset: Option<&str>, visibility: Option<&str>) -> RoomPreset {
     match preset {
-        Some("public_chat") => ("public", "shared"),
-        Some("trusted_private_chat") => ("invite", "shared"),
-        Some("private_chat") => ("invite", "invited"),
+        Some("public_chat") => RoomPreset {
+            join_rule: "public",
+            history_visibility: "shared",
+            guest_access: "forbidden",
+            trusted_private_chat: false,
+        },
+        Some("trusted_private_chat") => RoomPreset {
+            join_rule: "invite",
+            history_visibility: "shared",
+            guest_access: "can_join",
+            trusted_private_chat: true,
+        },
+        Some("private_chat") => private_chat_preset(),
         _ => match visibility {
-            Some("public") => ("public", "shared"),
-            _ => ("invite", "invited"),
+            Some("public") => RoomPreset {
+                join_rule: "public",
+                history_visibility: "shared",
+                guest_access: "forbidden",
+                trusted_private_chat: false,
+            },
+            _ => private_chat_preset(),
         },
     }
+}
+
+fn private_chat_preset() -> RoomPreset {
+    RoomPreset {
+        join_rule: "invite",
+        history_visibility: "shared",
+        guest_access: "can_join",
+        trusted_private_chat: false,
+    }
+}
+
+/// `trusted_private_chat` copies invitees into `additional_creators`.
+fn merge_additional_creators(content: &mut Value, sender: &str, invite: &[String]) {
+    let mut creators: Vec<String> = content
+        .get("additional_creators")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .filter(|id| crate::room_version::valid_user_id(id))
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    for invitee in invite {
+        if invitee != sender
+            && crate::room_version::valid_user_id(invitee)
+            && !creators.iter().any(|existing| existing == invitee)
+        {
+            creators.push(invitee.clone());
+        }
+    }
+    if !creators.is_empty() {
+        content["additional_creators"] = json!(creators);
+    }
+}
+
+/// Room versions 12+ require the tombstone event level to be strictly
+/// above `state_default`. The spec's example is 150 when the default is 50.
+fn raise_tombstone_above_state_default(content: &mut Value) {
+    let Some(map) = content.as_object_mut() else { return };
+    let state_default = map.get("state_default").and_then(Value::as_i64).unwrap_or(50);
+    let events = map.entry("events").or_insert_with(|| json!({}));
+    if !events.is_object() {
+        *events = json!({});
+    }
+    let current = events.get("m.room.tombstone").and_then(Value::as_i64);
+    if current.is_none_or(|level| level <= state_default) {
+        events
+            .as_object_mut()
+            .expect("events object")
+            .insert("m.room.tombstone".into(), json!(state_default.saturating_add(100)));
+    }
+}
+
+fn topic_content(topic: &str) -> Value {
+    json!({
+        "topic": topic,
+        "m.topic": { "m.text": [{ "body": topic, "mimetype": "text/plain" }] },
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -725,5 +844,81 @@ mod tests {
         assert!(state_map.contains_key(&("m.room.power_levels".to_owned(), String::new())));
         assert!(state_map.contains_key(&("m.room.join_rules".to_owned(), String::new())));
         assert!(state_map.contains_key(&("m.room.history_visibility".to_owned(), String::new())));
+    }
+
+    #[tokio::test]
+    async fn create_room_event_order_matches_the_spec() {
+        let storage = test_storage();
+        let sender = TestSender::new(storage.clone());
+        let room_id = "!order:localhost";
+        let params = CreateRoomParams {
+            name: Some("Final name"),
+            topic: Some("Final topic"),
+            canonical_alias: Some("#order:localhost".into()),
+            guest_access: Some("can_join".into()),
+            trusted_private_chat: true,
+            invite: vec!["@bob:localhost".into(), "@carol:localhost".into()],
+            creation_content: Some(json!({ "additional_creators": ["@carol:localhost"] })),
+            initial_state: vec![
+                CreateRoomInitialState {
+                    event_type: "m.room.name".into(),
+                    state_key: Some(String::new()),
+                    content: json!({ "name": "Initial name" }),
+                },
+                CreateRoomInitialState {
+                    event_type: "m.room.history_visibility".into(),
+                    state_key: Some(String::new()),
+                    content: json!({ "history_visibility": "world_readable" }),
+                },
+            ],
+            power_level_content_override: Some(json!({ "state_default": 50 })),
+        };
+        let room = Room::create("@alice:localhost", room_id, "12", "invite", "shared", &params, &sender)
+            .await
+            .expect("create");
+        let room_id = room.room_id.as_str();
+
+        let ids = sender.events.read().await.clone();
+        let mut types = Vec::new();
+        for id in &ids {
+            types.push(storage.get_event(id).await.unwrap().unwrap().event_type.clone());
+        }
+        assert_eq!(
+            types,
+            vec![
+                "m.room.create",
+                "m.room.member",
+                "m.room.power_levels",
+                "m.room.canonical_alias",
+                "m.room.join_rules",
+                "m.room.history_visibility",
+                "m.room.guest_access",
+                "m.room.name",
+                "m.room.history_visibility",
+                "m.room.name",
+                "m.room.topic",
+            ]
+        );
+
+        let create = storage.get_state_entry(room_id, "m.room.create", "").await.unwrap().unwrap();
+        assert_eq!(create.room_id, "");
+        let creators = create.content["additional_creators"].as_array().unwrap();
+        assert_eq!(creators, &vec![json!("@carol:localhost"), json!("@bob:localhost")]);
+        let name = storage.get_state_entry(room_id, "m.room.name", "").await.unwrap().unwrap();
+        assert_eq!(name.content["name"], "Final name");
+        let history = storage.get_state_entry(room_id, "m.room.history_visibility", "").await.unwrap().unwrap();
+        assert_eq!(history.content["history_visibility"], "world_readable");
+        let topic = storage.get_state_entry(room_id, "m.room.topic", "").await.unwrap().unwrap();
+        assert_eq!(topic.content["m.topic"]["m.text"][0]["mimetype"], "text/plain");
+        let power = storage.get_state_entry(room_id, "m.room.power_levels", "").await.unwrap().unwrap();
+        assert!(power.content["users"].get("@alice:localhost").is_none());
+        assert!(power.content["users"].get("@bob:localhost").is_none());
+        assert!(power.content["events"]["m.room.tombstone"].as_i64().unwrap() > power.content["state_default"].as_i64().unwrap());
+
+        let preset = resolve_preset(Some("private_chat"), None);
+        assert_eq!(preset.history_visibility, "shared");
+        assert_eq!(preset.guest_access, "can_join");
+        assert_eq!(resolve_preset(None, Some("public")).guest_access, "forbidden");
+        assert!(resolve_preset(Some("trusted_private_chat"), None).trusted_private_chat);
     }
 }

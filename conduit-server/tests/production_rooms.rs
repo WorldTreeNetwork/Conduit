@@ -283,6 +283,165 @@ async fn redaction_permissions_idempotency_and_serving() {
 }
 
 #[tokio::test]
+async fn redaction_keeps_aliases_through_version_5_and_strips_them_after() {
+    let server = Server::new().await;
+    let alice = user(&server, "alice").await;
+    let content = json!({"aliases": ["#kept:production.test"], "note": "drop-me"});
+
+    for (version, keep_aliases) in [("5", true), ("12", false)] {
+        let room = create_room(
+            &server,
+            &alice,
+            json!({"preset": "private_chat", "room_version": version}),
+        )
+        .await;
+        let alias_event = state(
+            &server,
+            &alice,
+            &room,
+            "m.room.aliases",
+            "production.test",
+            content.clone(),
+        )
+        .await;
+        let before = get(&server, &alice, &format!("/_matrix/client/v3/rooms/{room}/event/{alias_event}"), 200).await;
+        assert_eq!(before["content"]["aliases"], json!(["#kept:production.test"]), "{version}");
+        assert_eq!(before["content"]["note"], "drop-me");
+        put(
+            &server,
+            &alice,
+            &format!("/_matrix/client/v3/rooms/{room}/redact/{alias_event}/alias-{version}"),
+            json!({}),
+            200,
+        )
+        .await;
+        let served = get(&server, &alice, &format!("/_matrix/client/v3/rooms/{room}/event/{alias_event}"), 200).await;
+        assert!(served["content"].get("note").is_none(), "{version}: {served}");
+        assert_eq!(served["content"].get("aliases").is_some(), keep_aliases, "{version}: {served}");
+        let page = get(&server, &alice, &format!("/_matrix/client/v3/rooms/{room}/messages?dir=b&limit=20"), 200).await;
+        let listed = page["chunk"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|event| event["event_id"] == alias_event)
+            .unwrap();
+        assert_eq!(listed["content"].get("aliases").is_some(), keep_aliases, "{version} messages: {listed}");
+    }
+}
+
+#[tokio::test]
+async fn create_room_applies_preset_order_power_and_creators() {
+    let server = Server::new().await;
+    let alice = user(&server, "alice").await;
+    let bob = user(&server, "bob").await;
+
+    let unsupported = post(&server, &alice, "/_matrix/client/v3/createRoom", json!({"room_version": "13"}), 400).await;
+    assert_eq!(unsupported["errcode"], "M_UNSUPPORTED_ROOM_VERSION");
+
+    let room = create_room(
+        &server,
+        &alice,
+        json!({
+            "preset": "public_chat",
+            "room_version": "12",
+            "room_alias_name": "order",
+            "name": "Final name",
+            "topic": "Final topic",
+            "initial_state": [
+                {"type": "m.room.name", "state_key": "", "content": {"name": "Initial name"}},
+                {"type": "m.room.history_visibility", "state_key": "", "content": {"history_visibility": "world_readable"}},
+                {"type": "m.room.topic", "state_key": "", "content": {"topic": "Initial topic"}},
+            ],
+        }),
+    )
+    .await;
+    assert!(!room.contains(':'), "v12 room id omits the server name: {room}");
+
+    let page = get(&server, &alice, &format!("/_matrix/client/v3/rooms/{room}/messages?dir=f&limit=30"), 200).await;
+    let types: Vec<&str> = page["chunk"].as_array().unwrap().iter().map(|event| event["type"].as_str().unwrap()).collect();
+    assert_eq!(
+        types,
+        vec![
+            "m.room.create",
+            "m.room.member",
+            "m.room.power_levels",
+            "m.room.canonical_alias",
+            "m.room.join_rules",
+            "m.room.history_visibility",
+            "m.room.guest_access",
+            "m.room.name",
+            "m.room.history_visibility",
+            "m.room.topic",
+            "m.room.name",
+            "m.room.topic",
+        ]
+    );
+
+    let state_of = |kind: &str| format!("/_matrix/client/v3/rooms/{room}/state/{kind}");
+    let power = get(&server, &alice, &state_of("m.room.power_levels"), 200).await;
+    let state_default = power["state_default"].as_i64().unwrap();
+    let tombstone = power["events"]["m.room.tombstone"].as_i64().unwrap();
+    assert!(tombstone > state_default, "tombstone {tombstone} must exceed state_default {state_default}");
+    assert!(power["users"].get(&alice.id).is_none(), "v12 creator is not listed in users: {power}");
+    assert_eq!(get(&server, &alice, &state_of("m.room.join_rules"), 200).await["join_rule"], "public");
+    assert_eq!(get(&server, &alice, &state_of("m.room.guest_access"), 200).await["guest_access"], "forbidden");
+    assert_eq!(get(&server, &alice, &state_of("m.room.history_visibility"), 200).await["history_visibility"], "world_readable");
+    assert_eq!(get(&server, &alice, &state_of("m.room.name"), 200).await["name"], "Final name");
+    let topic = get(&server, &alice, &state_of("m.room.topic"), 200).await;
+    assert_eq!(topic["topic"], "Final topic");
+    assert_eq!(topic["m.topic"]["m.text"][0]["mimetype"], "text/plain");
+    assert_eq!(topic["m.topic"]["m.text"][0]["body"], "Final topic");
+    assert_eq!(
+        get(&server, &alice, &state_of("m.room.canonical_alias"), 200).await["alias"],
+        "#order:production.test"
+    );
+    let directory = get(&server, &alice, &format!("/_matrix/client/v3/directory/room/{}", encode("#order:production.test")), 200).await;
+    assert_eq!(directory["room_id"], room);
+
+    let trusted = create_room(
+        &server,
+        &alice,
+        json!({
+            "preset": "trusted_private_chat",
+            "room_version": "12",
+            "invite": [bob.id],
+            "is_direct": true,
+            "creation_content": {"additional_creators": ["@carol:production.test"]},
+        }),
+    )
+    .await;
+    let create = get(&server, &alice, &format!("/_matrix/client/v3/rooms/{trusted}/state/m.room.create"), 200).await;
+    assert_eq!(
+        create["additional_creators"],
+        json!(["@carol:production.test", bob.id]),
+    );
+    let levels = get(&server, &alice, &format!("/_matrix/client/v3/rooms/{trusted}/state/m.room.power_levels"), 200).await;
+    assert!(levels["users"].get(&bob.id).is_none(), "v12 invitee is a creator, not a power-level user: {levels}");
+    let invite = get(&server, &alice, &format!("/_matrix/client/v3/rooms/{trusted}/state/m.room.member/{}", encode(&bob.id)), 200).await;
+    assert_eq!(invite["membership"], "invite");
+    assert_eq!(invite["is_direct"], true);
+    assert_eq!(get(&server, &alice, &format!("/_matrix/client/v3/rooms/{trusted}/state/m.room.guest_access"), 200).await["guest_access"], "can_join");
+
+    let older = create_room(
+        &server,
+        &alice,
+        json!({
+            "preset": "trusted_private_chat",
+            "room_version": "11",
+            "invite": [bob.id],
+        }),
+    )
+    .await;
+    assert!(older.contains(":production.test"), "{older}");
+    let older_create = get(&server, &alice, &format!("/_matrix/client/v3/rooms/{older}/state/m.room.create"), 200).await;
+    assert!(older_create.get("creator").is_none(), "v11 create has no creator field: {older_create}");
+    let older_levels = get(&server, &alice, &format!("/_matrix/client/v3/rooms/{older}/state/m.room.power_levels"), 200).await;
+    assert_eq!(older_levels["users"][&alice.id], 100);
+    assert_eq!(older_levels["users"][&bob.id], 100, "invitees share the creator's power before v12: {older_levels}");
+    assert_eq!(get(&server, &alice, &format!("/_matrix/client/v3/rooms/{older}/state/m.room.history_visibility"), 200).await["history_visibility"], "shared");
+}
+
+#[tokio::test]
 async fn forget_hides_departed_rooms_until_rejoin() {
     let server = Server::new().await;
     let alice = user(&server, "alice").await;
@@ -798,7 +957,7 @@ async fn ignored_users_are_filtered_from_sync_messages_and_invites() {
     let room = create_room(
         &server,
         &alice,
-        json!({"preset": "public_chat", "power_level_content_override": {"users": {alice.id.clone(): 100, bob.id.clone(): 50}}}),
+        json!({"preset": "public_chat", "power_level_content_override": {"users": {bob.id.clone(): 50}}}),
     )
     .await;
     join(&server, &bob, &room).await;

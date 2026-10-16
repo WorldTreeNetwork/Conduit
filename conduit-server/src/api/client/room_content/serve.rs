@@ -3,9 +3,8 @@
 //! One place decides how a stored event looks to a particular user:
 //!
 //! - **Redactions** are applied at serve time from the event log: the
-//!   target is pruned with the room-version algorithm
-//!   ([`conduit::redaction::redact_event`]) and carries the redaction under
-//!   `unsigned.redacted_because`.
+//!   target is pruned with that room's redaction algorithm and carries
+//!   the redaction under `unsigned.redacted_because`.
 //! - **Bundled aggregations** (`unsigned.m.relations`) for `m.thread`,
 //!   `m.replace` and `m.reference`, computed from visible, unredacted
 //!   children only.
@@ -136,6 +135,28 @@ impl<'a> Viewer<'a> {
         Ok(out)
     }
 
+    /// Room version that selects the redaction algorithm. A room this
+    /// server created always has `content.room_version`; a missing create
+    /// event uses the same default as auth (`11`).
+    async fn redaction_version(&self, room_id: &str) -> conduit::Result<u32> {
+        let version = match self.storage.get_state_entry(room_id, "m.room.create", "").await? {
+            Some(create) => conduit::room_version::version_of_content(&create.content),
+            None => 11,
+        };
+        Ok(version)
+    }
+
+    async fn redaction_versions(&self, events: &[Event]) -> conduit::Result<HashMap<String, u32>> {
+        let mut versions = HashMap::new();
+        for event in events {
+            if versions.contains_key(&event.room_id) {
+                continue;
+            }
+            versions.insert(event.room_id.clone(), self.redaction_version(&event.room_id).await?);
+        }
+        Ok(versions)
+    }
+
     /// Serve events in the client format, applying redactions and, when
     /// `bundle`, attaching `unsigned.m.relations`.
     pub async fn serve(&self, events: &[Event], bundle: bool) -> conduit::Result<Vec<Value>> {
@@ -146,18 +167,20 @@ impl<'a> Viewer<'a> {
             HashMap::new()
         };
         let erased = self.erased_for_viewer(events).await?;
+        let versions = self.redaction_versions(events).await?;
         let now = now_ms();
         let mut values: Vec<Value> = events
             .iter()
             .map(|event| {
+                let version = versions[&event.room_id];
                 let mut value = match redactions.get(&event.event_id) {
                     Some(redaction) => {
-                        let mut value = client_event(&conduit::redaction::redact_event(event), now);
+                        let mut value = client_event(&redacted_for_version(event, version), now);
                         value["unsigned"]["redacted_because"] = client_event(redaction, now);
                         value
                     }
                     None if erased.contains(&event.event_id) => {
-                        client_event(&conduit::redaction::redact_event(event), now)
+                        client_event(&redacted_for_version(event, version), now)
                     }
                     None => client_event(event, now),
                 };
@@ -193,11 +216,13 @@ impl<'a> Viewer<'a> {
             HashMap::new()
         };
         let erased = self.erased_for_viewer(&events).await?;
+        let versions = self.redaction_versions(&events).await?;
         let now = now_ms();
         for value in values.iter_mut() {
             let Ok(event) = serde_json::from_value::<Event>(value.clone()) else { continue };
+            let version = versions.get(&event.room_id).copied().unwrap_or(11);
             if erased.contains(&event.event_id) && !redactions.contains_key(&event.event_id) {
-                value["content"] = conduit::redaction::redact_event(&event).pdu.content;
+                value["content"] = redacted_for_version(&event, version).pdu.content;
             }
             if event.event_type == "m.room.redaction" && value.get("redacts").is_none() {
                 if let Some(target) = redaction_target(&event) {
@@ -213,7 +238,7 @@ impl<'a> Viewer<'a> {
                 value["unsigned"] = json!({});
             }
             if let Some(redaction) = redaction {
-                value["content"] = conduit::redaction::redact_event(&event).pdu.content;
+                value["content"] = redacted_for_version(&event, version).pdu.content;
                 value["unsigned"]["redacted_because"] = client_event(redaction, now);
             }
             if let Some(relations) = relations {
@@ -493,6 +518,14 @@ async fn authorizing_power(
     Ok((power_levels, creator))
 }
 
+fn redacted_for_version(event: &Event, version: u32) -> Event {
+    Event {
+        event_id: event.event_id.clone(),
+        pdu: conduit::room_version::redact_pdu(&event.pdu, version),
+        unsigned: None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -520,7 +553,11 @@ mod tests {
     }
 
     async fn room(storage: &MemoryStorage, events: &[Event]) {
-        let mut create = event("$create", "@a:a.test", "m.room.create", json!({"room_version": "11"}));
+        room_at_version(storage, events, "11").await
+    }
+
+    async fn room_at_version(storage: &MemoryStorage, events: &[Event], version: &str) {
+        let mut create = event("$create", "@a:a.test", "m.room.create", json!({"room_version": version}));
         create.state_key = Some(String::new());
         let mut join = event("$join", "@a:a.test", "m.room.member", json!({"membership": "join"}));
         join.state_key = Some("@a:a.test".into());
@@ -536,6 +573,32 @@ mod tests {
         for event in events {
             storage.put_event(event).await.unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn alias_redaction_follows_the_room_version() {
+        async fn served(version: &str) -> Value {
+            let storage = MemoryStorage::default();
+            let mut aliases = event(
+                "$aliases",
+                "@a:a.test",
+                "m.room.aliases",
+                json!({"aliases": ["#a:a.test"], "note": "secret"}),
+            );
+            aliases.state_key = Some("a.test".into());
+            let redaction = event("$redact", "@a:a.test", "m.room.redaction", json!({"redacts": "$aliases"}));
+            room_at_version(&storage, &[aliases.clone(), redaction], version).await;
+            let viewer = Viewer::load(&storage, "@a:a.test").await.unwrap();
+            viewer.serve_one(&aliases, false).await.unwrap()
+        }
+
+        let v5 = served("5").await;
+        assert_eq!(v5["content"]["aliases"], json!(["#a:a.test"]), "{v5}");
+        assert!(v5["content"].get("note").is_none(), "{v5}");
+        assert_eq!(v5["unsigned"]["redacted_because"]["event_id"], "$redact");
+        let v6 = served("6").await;
+        assert!(v6["content"].get("aliases").is_none(), "{v6}");
+        assert!(v6["content"].get("note").is_none(), "{v6}");
     }
 
     #[tokio::test]

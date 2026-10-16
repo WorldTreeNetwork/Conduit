@@ -16,18 +16,18 @@
   "summary": {
     "cs": {
       "endpoint": {
-        "implemented+tested": 146,
+        "implemented+tested": 148,
         "implemented-untested": 0,
-        "partial": 17,
+        "partial": 15,
         "missing": 0,
         "not-applicable": 1,
         "total": 164
       },
       "requirement": {
-        "implemented+tested": 49,
+        "implemented+tested": 57,
         "implemented-untested": 0,
-        "partial": 26,
-        "missing": 2,
+        "partial": 20,
+        "missing": 0,
         "not-applicable": 9,
         "total": 86
       }
@@ -1693,7 +1693,7 @@
       "rate_limited": "No",
       "deprecated": false,
       "role": "homeserver",
-      "status": "partial",
+      "status": "implemented+tested",
       "code": [
         {
           "loc": "conduit-server/src/main.rs:534",
@@ -1702,6 +1702,8 @@
         }
       ],
       "tests": [
+        "conduit-server/tests/production_rooms.rs::create_room_applies_preset_order_power_and_creators",
+        "conduit/src/room/mod.rs::create_room_event_order_matches_the_spec",
         "conduit-server/src/api/client/session.rs::guest_allowlist_matches_spec_endpoints",
         "conduit-server/tests/e2e.rs::e2e_membership_kick_visible_in_sync",
         "conduit-server/tests/e2e.rs::e2e_two_users_send_and_receive_messages",
@@ -1717,9 +1719,9 @@
         "conduit-server/tests/production_basics.rs::invite_blocking_rejects_invites_and_hides_pending_ones",
         "conduit-server/tests/production_appservice.rs::third_party_invites_lookup_store_invite_and_onbind"
       ],
-      "tests_total": 69,
+      "tests_total": 71,
       "gap_beads": [],
-      "notes": "Supports preset/initial_state/invite/invite_3pid/alias/is_direct/room_version/power_level_content_override/creation_content; invitees blocking invites are 403 M_INVITE_BLOCKED; aliases in exclusive AS namespaces are 400 M_EXCLUSIVE."
+      "notes": "Preset order, guest access, v12 tombstone power, trusted-private creators, canonical alias, and topic mimetype are asserted. A blocked invitee fails the request with 403 M_INVITE_BLOCKED. Exclusive AS aliases are 400 M_EXCLUSIVE."
     },
     {
       "id": "cs.ep.get_matrixclientv3directoryroomroomalias",
@@ -7413,14 +7415,16 @@
       ],
       "tests": [
         "conduit-server/tests/production_rooms.rs::redaction_permissions_idempotency_and_serving",
+        "conduit-server/tests/production_rooms.rs::redaction_keeps_aliases_through_version_5_and_strips_them_after",
+        "conduit-server/src/api/client/room_content/serve.rs::alias_redaction_follows_the_room_version",
         "conduit/tests/matrix_v11_crypto.rs"
       ],
-      "tests_total": 2,
+      "tests_total": 4,
       "gap_beads": [
         "conduit-y99.23",
         "conduit-y99.19.4"
       ],
-      "notes": "Serve-time pruning for v11 algorithm; other room versions (y99.23); stored content not pruned (y99.19.4)."
+      "notes": "Client reads (event, messages, sync, relations, search) prune with the room version's algorithm. Federation get_event and stored PDUs still return the original (y99.23, y99.19.4)."
     },
     {
       "id": "cs.events.relationships",
@@ -7452,7 +7456,7 @@
       "title": "Room creation (presets, initial state ordering, invite, invite_3pid, room_version)",
       "source": "https://spec.matrix.org/v1.19/client-server-api/#creation",
       "role": "homeserver",
-      "status": "partial",
+      "status": "implemented+tested",
       "code": [
         {
           "loc": "conduit-server/src/api/client/rooms.rs"
@@ -7462,12 +7466,14 @@
         }
       ],
       "tests": [
+        "conduit-server/tests/production_rooms.rs::create_room_applies_preset_order_power_and_creators",
+        "conduit/src/room/mod.rs::create_room_event_order_matches_the_spec",
         "conduit-server/tests/rooms.rs::create_room_creator_is_joined",
         "conduit-server/tests/production_appservice.rs::third_party_invites_lookup_store_invite_and_onbind"
       ],
-      "tests_total": 2,
+      "tests_total": 4,
       "gap_beads": [],
-      "notes": ""
+      "notes": "Events follow the spec order. Presets set join rules, shared history, and guest access. Name and topic override initial_state. v12 tombstone power is above state_default and trusted-private invitees become additional creators. v1-v11 invitees share power 100."
     },
     {
       "id": "cs.rooms.aliases",

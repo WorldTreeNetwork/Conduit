@@ -67,6 +67,10 @@ impl<S: AuthState + Send + Sync> RoomEventSender for RoomEventSenderWrapper<'_, 
                 }
             })
     }
+
+    async fn bind_room_alias(&self, creator: &str, alias: &str, room_id: &str) -> ConduitResult<()> {
+        self.0.storage().upsert_alias(alias, room_id, creator).await
+    }
 }
 
 // ---------------------------------------------------------------------------

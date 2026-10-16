@@ -109,8 +109,8 @@ pub async fn create_room<S: AuthState>(
         generate_room_id(&server_name)
     };
 
-    // Determine join_rule and history_visibility from preset / visibility.
-    let (join_rule, history_visibility) = resolve_preset(&body);
+    // Preset state: join rule, history visibility, guest access.
+    let preset = resolve_preset(&body);
 
     // The requested alias must be free before anything is created
     // (`400 M_ROOM_IN_USE`), per the createRoom spec.
@@ -152,11 +152,15 @@ pub async fn create_room<S: AuthState>(
         }).collect(),
         power_level_content_override: body.power_level_content_override.clone(),
         creation_content: body.creation_content.clone(),
+        guest_access: Some(preset.guest_access.to_owned()),
+        canonical_alias: alias.clone(),
+        invite: body.invite.clone(),
+        trusted_private_chat: preset.trusted_private_chat,
     };
 
     // Delegate room creation to the Room struct.
     let room_id = match Room::create(
-        sender, &room_id, &room_version, join_rule, history_visibility, &params,
+        sender, &room_id, &room_version, preset.join_rule, preset.history_visibility, &params,
         &RoomEventSenderWrapper(&state),
     ).await {
         Ok(room) => room.room_id,
@@ -179,35 +183,6 @@ pub async fn create_room<S: AuthState>(
         }
     }
 
-    // Bind alias if `room_alias_name` was supplied, and make it the
-    // room's canonical alias so directory listings carry it.
-    if let Some(alias) = alias {
-        match state.storage().upsert_alias(&alias, &room_id, sender).await {
-            Ok(()) => {
-                let room = Room::new(&room_id);
-                if let Err(e) = room
-                    .send_state_event(
-                        sender,
-                        "m.room.canonical_alias",
-                        "",
-                        json!({ "alias": alias }),
-                        &RoomEventSenderWrapper(&state),
-                    )
-                    .await
-                {
-                    tracing::warn!(room_id, alias, error = %e, "createRoom: canonical alias failed");
-                }
-            }
-            // Lost a race for the alias after the up-front check.
-            Err(e) => tracing::warn!(
-                room_id,
-                alias,
-                error = %e,
-                "createRoom: room_alias_name binding failed"
-            ),
-        }
-    }
-
     // `invite_3pid`: third-party invites through the identity server
     // (conduit-y99.36), after the alias so store-invite can name it.
     for invite in &body.invite_3pid {
@@ -226,9 +201,8 @@ pub async fn create_room<S: AuthState>(
     (StatusCode::OK, Json(CreateRoomResponse { room_id })).into_response()
 }
 
-/// Return `(join_rule, history_visibility)` based on preset/visibility.
-/// Delegated to `conduit::room::resolve_preset`.
-fn resolve_preset(body: &CreateRoomRequest) -> (&'static str, &'static str) {
+/// Preset state from the createRoom body.
+fn resolve_preset(body: &CreateRoomRequest) -> conduit::room::RoomPreset {
     conduit::room::resolve_preset(body.preset.as_deref(), body.visibility.as_deref())
 }
 
