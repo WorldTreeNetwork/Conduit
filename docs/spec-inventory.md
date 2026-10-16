@@ -16,9 +16,9 @@ Statuses: **tested** = present and asserted by a named test; **untested** = pres
 | API | kind | tested | untested | partial | missing | n/a | total |
 |---|---|---:|---:|---:|---:|---:|---:|
 | Client-Server API | endpoints | 148 | 0 | 15 | 0 | 1 | 164 |
-| Client-Server API | requirements | 63 | 0 | 14 | 0 | 9 | 86 |
+| Client-Server API | requirements | 64 | 0 | 13 | 0 | 9 | 86 |
 | Server-Server API | endpoints | 20 | 3 | 8 | 4 | 1 | 36 |
-| Server-Server API | requirements | 12 | 0 | 15 | 11 | 3 | 41 |
+| Server-Server API | requirements | 13 | 0 | 15 | 10 | 3 | 41 |
 | Application Service API | endpoints | 11 | 0 | 0 | 0 | 0 | 11 |
 | Application Service API | requirements | 16 | 0 | 0 | 0 | 2 | 18 |
 | Push Gateway API (homeserver as client) | endpoints | 1 | 0 | 0 | 0 | 0 | 1 |
@@ -27,7 +27,7 @@ Statuses: **tested** = present and asserted by a named test; **untested** = pres
 | Identity Service API (homeserver as consumer) | requirements | 1 | 0 | 0 | 0 | 0 | 1 |
 | Room versions 1–12 | requirements | 30 | 0 | 6 | 25 | 0 | 61 |
 | Appendices | requirements | 9 | 0 | 4 | 4 | 4 | 21 |
-| All |  | 317 | 3 | 64 | 44 | 37 | 465 |
+| All |  | 319 | 3 | 63 | 43 | 37 | 465 |
 ## Gap beads
 
 New beads filed by this inventory (children of `conduit-y99`):
@@ -36,7 +36,7 @@ New beads filed by this inventory (children of `conduit-y99`):
 - `conduit-y99.29` - Room membership, summary and invite-permission gaps (POST /rooms/{id}/join, room_summary, mutual_rooms, M_INVITE_BLOCKED) (0 row(s))
 - `conduit-y99.30` - Push rule evaluation, predefined rules, GET /pushrules/global/, /notifications and thread counts (10 row(s))
 - `conduit-y99.31` - Push gateway delivery conformance (/notify payload, rejected pushkeys, retries) (4 row(s))
-- `conduit-y99.32` - Federation EDUs: m.typing, m.receipt, m.presence, m.signing_key_update in+out (7 row(s))
+- `conduit-y99.32` - Federation EDUs: m.typing, m.receipt, m.presence, m.signing_key_update in+out (5 row(s))
 - `conduit-y99.33` - PDU receipt checks: rejection, soft failure, hash-mismatch redaction, size limits (7 row(s))
 - `conduit-y99.34` - Application service transaction push conformance (Bearer hs_token, durable retry, interest rules, ephemeral) (0 row(s))
 - `conduit-y99.35` - Application service CS-API extensions (identity assertion, ts massaging, m.login.application_service login, rate-limit exemption) (0 row(s))
@@ -56,7 +56,7 @@ In-flight / pre-existing beads referenced (not duplicated):
 
 - `conduit-2c7` - email/phone UIA stages (7 row(s))
 - `conduit-4w1` - notary key fetch (3 row(s))
-- `conduit-7pk` - outbound presence EDU (1 row(s))
+- `conduit-7pk` - outbound presence EDU (0 row(s))
 - `conduit-c3u` - AS query negative-result cache (1 row(s))
 - `conduit-embed-auth` - membership/visibility on reads (kernel) (2 row(s))
 - `conduit-embed-pdu` - PDU wire model (in flight) (9 row(s))
@@ -318,7 +318,7 @@ In-flight / pre-existing beads referenced (not duplicated):
 | `cs.mod.typing` | [Typing notifications](https://spec.matrix.org/v1.19/client-server-api/#typing-notifications) | tested | `conduit-server/src/api/client/typing.rs`<br>`conduit-server/src/federation/server.rs` | `production_e2e.rs::production_typing_expiry_and_restart_clear_client_state`<br>`federation_inbound.rs::inbound_typing_edu_reaches_local_typers_and_rejects_spoofs` (+1) |  | Local typing plus inbound and outbound m.typing EDUs. The user must belong to the sending server and be joined; a denied server's EDU is ignored; stopping typing is federated. |
 | `cs.mod.receipts` | [Receipts (m.read, m.read.private, threaded)](https://spec.matrix.org/v1.19/client-server-api/#receipts) | tested | `conduit-server/src/api/client/receipts.rs`<br>`conduit-server/src/federation/server.rs` | `production_sync.rs::threaded_and_unthreaded_receipts_coexist`<br>`presence.rs::local_public_receipt_is_federated_and_private_is_not` (+2) |  | Unthreaded, main, and thread-root receipts coexist, and m.read.private stays local. A public m.read is federated as an m.receipt EDU. A version-12 create event with an empty room_id still belongs to its room. |
 | `cs.mod.read-markers` | [Read and unread markers (m.fully_read, m.marked_unread)](https://spec.matrix.org/v1.19/client-server-api/#read-and-unread-markers) | tested | `conduit-server/src/api/client/room_content/events.rs` | `production_rooms.rs::read_markers_and_room_tags`<br>`production_sync.rs::threaded_and_unthreaded_receipts_coexist` |  | POST /read_markers stores m.fully_read plus public and private receipts. The receipt endpoint rejects m.fully_read and honours thread_id. |
-| `cs.mod.presence` | [Presence](https://spec.matrix.org/v1.19/client-server-api/#presence) | partial | `conduit-server/src/api/client/presence.rs` | `production_e2e.rs::production_receipt_overwrites_and_presence_respect_privacy` | `conduit-y99.32` | Local presence tested; no federation. |
+| `cs.mod.presence` | [Presence](https://spec.matrix.org/v1.19/client-server-api/#presence) | tested | `conduit-server/src/api/client/presence.rs`<br>`conduit-server/src/federation/server.rs` | `production_e2e.rs::production_receipt_overwrites_and_presence_respect_privacy`<br>`federation_inbound.rs::inbound_presence_edu_applies_only_the_sending_servers_users` (+1) |  | Local presence plus inbound and outbound m.presence EDUs. A push entry must name a user of the sending server, a known presence, and last_active_ago. Outbound updates go to servers that share a joined room. The five-minute idle transition stays local. |
 | `cs.mod.content-repo` | [Content repository](https://spec.matrix.org/v1.19/client-server-api/#content-repository) | partial | `conduit-server/src/api/client/media.rs` | `production_media.rs::production_media_async_upload_lifecycle` | `conduit-y99.21.1` `conduit-y99.21.2` `conduit-y99.21.3` |  |
 | `cs.mod.send-to-device` | [Send-to-Device messaging (store until ack, 100/sync, federation)](https://spec.matrix.org/v1.19/client-server-api/#send-to-device-messaging) | tested | `conduit-server/src/api/client/keys.rs`<br>`conduit-server/src/api/client/sync.rs (drain_to_device limit 100)` | `production_e2e.rs::production_to_device_sync_retries_until_acknowledged`<br>`production_e2e.rs::production_to_device_transactions_are_durable_and_do_not_reexpand_wildcards` |  |  |
 | `cs.mod.device-management` | [Device management](https://spec.matrix.org/v1.19/client-server-api/#device-management) | tested | `conduit-server/src/api/client/devices.rs` | `production_account.rs::production_device_lifecycle_with_uia_keys_and_device_lists`<br>`production_appservice.rs::identity_assertion_devices_registration_and_login` |  | Includes AS device creation (PUT 201) and UIA-free deletion. |
@@ -431,7 +431,7 @@ In-flight / pre-existing beads referenced (not duplicated):
 | `ss.public-rooms` | [Published room directory over federation](https://spec.matrix.org/v1.19/server-server-api/#published-room-directory) | missing |  |  | `conduit-y99.22` `conduit-y99.20.1` |  |
 | `ss.spaces` | [Spaces hierarchy over federation](https://spec.matrix.org/v1.19/server-server-api/#spaces) | missing |  |  | `conduit-y99.19.2` `conduit-y99.22` |  |
 | `ss.typing` | [Typing notifications (m.typing EDU)](https://spec.matrix.org/v1.19/server-server-api/#typing-notifications) | tested | `conduit-server/src/api/client/typing.rs`<br>`conduit-server/src/federation/server.rs` | `federation_inbound.rs::inbound_typing_edu_reaches_local_typers_and_rejects_spoofs`<br>`presence.rs::local_typing_is_federated_to_joined_remote_servers` |  | Inbound EDU requires a joined user of the sending server and is dropped when the room ACL denies that server. Outbound EDUs go to every other server with a joined member, including typing false. |
-| `ss.presence` | [Presence (m.presence EDU)](https://spec.matrix.org/v1.19/server-server-api/#presence) | missing |  |  | `conduit-y99.32` `conduit-7pk` |  |
+| `ss.presence` | [Presence (m.presence EDU)](https://spec.matrix.org/v1.19/server-server-api/#presence) | tested | `conduit-server/src/api/client/presence.rs`<br>`conduit-server/src/federation/server.rs` | `federation_inbound.rs::inbound_presence_edu_applies_only_the_sending_servers_users`<br>`presence.rs::local_presence_is_federated_to_servers_that_share_a_room` |  | An m.presence EDU carries a push list. Entries for another server, an unknown presence, or a missing last_active_ago are ignored. Outbound updates go only to servers that share a joined room. |
 | `ss.receipts` | [Receipts (m.receipt EDU)](https://spec.matrix.org/v1.19/server-server-api/#receipts) | tested | `conduit-server/src/api/client/receipts.rs`<br>`conduit-server/src/federation/server.rs` | `federation_inbound.rs::inbound_receipt_edu_updates_only_listed_public_reads`<br>`presence.rs::local_public_receipt_is_federated_and_private_is_not` |  | An m.receipt EDU updates only listed m.read entries. Private receipts, spoofed users, and unjoined users are ignored. An ACL-denied room is skipped; other rooms in the EDU still apply. Outbound public receipts go to joined remote servers. |
 | `ss.query` | [Querying for information (directory, profile, generic)](https://spec.matrix.org/v1.19/server-server-api/#querying-for-information) | partial | `conduit-server/src/federation/server.rs` | `federation_inbound.rs::query_profile_for_local_user` | `conduit-y99.22` |  |
 | `ss.openid` | [OpenID userinfo](https://spec.matrix.org/v1.19/server-server-api/#openid) | tested | `conduit-server/src/federation/spec_v119.rs (openid_userinfo)` | `production_pdu.rs::minted_openid_token_is_redeemed_by_federation_userinfo`<br>`federation_inbound.rs::federation_directory_openid_and_local_key_query` |  | A minted client token is accepted; an unknown token is 401. |

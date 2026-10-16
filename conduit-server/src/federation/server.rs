@@ -67,6 +67,8 @@ pub struct FedState {
     pub app_services: Arc<Vec<crate::app_service::AppService>>,
     /// Ephemeral typing state shared with client /sync.
     pub typing: Arc<crate::api::client::TypingStore>,
+    /// Ephemeral presence state shared with client /sync.
+    pub presence: Arc<crate::api::client::PresenceStore>,
 }
 
 impl MediaState for FedState {
@@ -1203,6 +1205,9 @@ pub(crate) async fn handle_edu(
     }
     if edu_type == "m.receipt" {
         crate::api::client::receipts::apply_inbound_receipt(state.storage.as_ref(), origin, edu).await?;
+    }
+    if edu_type == "m.presence" {
+        crate::api::client::presence::apply_inbound_presence(&state.presence, origin, edu).await?;
     }
     if edu_type == "m.direct_to_device" {
         #[derive(Deserialize)]

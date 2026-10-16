@@ -43,6 +43,7 @@ async fn spawn_test_server(
     Arc<MemoryStorage>,
     Arc<conduit::keys::ServerKey>,
     Arc<conduit_server::api::client::TypingStore>,
+    Arc<conduit_server::api::client::PresenceStore>,
 ) {
     let server_key = Arc::new(generate_server_key());
     let storage = Arc::new(MemoryStorage::default());
@@ -76,6 +77,7 @@ async fn spawn_test_server(
     ).with_test_base_url(base_url.clone()));
 
     let typing = Arc::new(conduit_server::api::client::TypingStore::default());
+    let presence = Arc::new(conduit_server::api::client::PresenceStore::default());
     let fed_state = FedState {
         storage: Arc::clone(&storage) as Arc<dyn Storage>,
         server_name: Arc::from(server_name),
@@ -88,6 +90,7 @@ async fn spawn_test_server(
         recent: Arc::new(conduit_server::federation::RecentEventCache::new()),
         app_services: Arc::new(Vec::new()),
         typing: Arc::clone(&typing),
+        presence: Arc::clone(&presence),
     };
 
     let rate_limiter = RateLimiter::new(1000.0, 1000.0); // permissive for tests
@@ -133,7 +136,7 @@ async fn spawn_test_server(
         axum::serve(listener, app).await.unwrap();
     });
 
-    (addr, storage, server_key, typing)
+    (addr, storage, server_key, typing, presence)
 }
 
 /// Build a signed X-Matrix Authorization header.
@@ -154,7 +157,7 @@ fn sign_req(
 
 #[tokio::test]
 async fn inbound_signature_verified_or_rejected() {
-    let (addr, _storage, _server_key, _typing) = spawn_test_server("server-a.test").await;
+    let (addr, _storage, _server_key, _typing, _presence) = spawn_test_server("server-a.test").await;
     let base = format!("http://{}", addr);
 
     // A remote server key (the "origin").
@@ -273,7 +276,7 @@ async fn inbound_signature_verified_or_rejected() {
 
 #[tokio::test]
 async fn send_transaction_persists_pdus() {
-    let (addr_a, storage_a, key_a, _typing) = spawn_test_server("server-a.test").await;
+    let (addr_a, storage_a, key_a, _typing, _presence) = spawn_test_server("server-a.test").await;
     let base_a = format!("http://{}", addr_a);
 
     // Seed the room and sender membership needed to authorize a message.
@@ -350,7 +353,7 @@ async fn send_transaction_persists_pdus() {
 
 #[tokio::test]
 async fn standard_v2_routes_require_authentication() {
-    let (addr, _, _, _typing) = spawn_test_server("routes.test").await;
+    let (addr, _, _, _typing, _presence) = spawn_test_server("routes.test").await;
     let client = reqwest::Client::new();
     for path in [
         "/_matrix/federation/v1/send/txn",
@@ -373,7 +376,7 @@ async fn standard_v2_routes_require_authentication() {
 
 #[tokio::test]
 async fn standard_v2_routes_verify_the_full_signed_uri() {
-    let (addr, _, key, _typing) = spawn_test_server("routes.test").await;
+    let (addr, _, key, _typing, _presence) = spawn_test_server("routes.test").await;
     let client = reqwest::Client::new();
     for (path, body) in [
         (
@@ -422,7 +425,7 @@ async fn standard_v2_routes_verify_the_full_signed_uri() {
 
 #[tokio::test]
 async fn incorrectly_versioned_routes_are_not_exposed() {
-    let (addr, _, _, _typing) = spawn_test_server("routes.test").await;
+    let (addr, _, _, _typing, _presence) = spawn_test_server("routes.test").await;
     let client = reqwest::Client::new();
     for path in [
         "/_matrix/federation/v1/send_join/v2/!room:routes.test/$join",
@@ -444,7 +447,7 @@ async fn incorrectly_versioned_routes_are_not_exposed() {
 
 #[tokio::test]
 async fn make_send_join_roundtrip() {
-    let (addr_a, storage_a, key_a, _typing) = spawn_test_server("server-a.test").await;
+    let (addr_a, storage_a, key_a, _typing, _presence) = spawn_test_server("server-a.test").await;
     let base_a = format!("http://{}", addr_a);
 
     // Seed a public room on server-a so make_join works.
@@ -534,7 +537,7 @@ async fn make_send_join_roundtrip() {
 
 #[tokio::test]
 async fn state_endpoint_returns_room_state() {
-    let (addr_a, storage_a, key_a, _typing) = spawn_test_server("server-a.test").await;
+    let (addr_a, storage_a, key_a, _typing, _presence) = spawn_test_server("server-a.test").await;
     let base_a = format!("http://{}", addr_a);
 
     let room_id = "!state_room:server-a.test";
@@ -573,7 +576,7 @@ async fn state_endpoint_returns_room_state() {
 
 #[tokio::test]
 async fn backfill_returns_history_visibility_filtered_events() {
-    let (addr_a, storage_a, key_a, _typing) = spawn_test_server("server-a.test").await;
+    let (addr_a, storage_a, key_a, _typing, _presence) = spawn_test_server("server-a.test").await;
     let base_a = format!("http://{}", addr_a);
 
     let room_id = "!backfill_room:server-a.test";
@@ -660,6 +663,7 @@ async fn rate_limit_kicks_in_after_burst() {
         recent: Arc::new(conduit_server::federation::RecentEventCache::new()),
         app_services: Arc::new(Vec::new()),
         typing: Arc::new(conduit_server::api::client::TypingStore::default()),
+        presence: Arc::new(conduit_server::api::client::PresenceStore::default()),
     };
 
 
@@ -738,7 +742,7 @@ async fn rate_limit_kicks_in_after_burst() {
 
 #[tokio::test]
 async fn query_profile_for_local_user() {
-    let (addr_a, storage_a, key_a, _typing) = spawn_test_server("server-a.test").await;
+    let (addr_a, storage_a, key_a, _typing, _presence) = spawn_test_server("server-a.test").await;
     let base_a = format!("http://{}", addr_a);
 
     let user_id = "@alice:server-a.test";
@@ -781,7 +785,7 @@ async fn query_profile_for_local_user() {
 
 #[tokio::test]
 async fn federation_version_is_public_and_stable() {
-    let (addr, _storage, _key, _typing) = spawn_test_server("version.test").await;
+    let (addr, _storage, _key, _typing, _presence) = spawn_test_server("version.test").await;
     let client = reqwest::Client::new();
     let resp = client
         .get(format!("http://{addr}/_matrix/federation/v1/version"))
@@ -797,7 +801,7 @@ async fn federation_version_is_public_and_stable() {
 
 #[tokio::test]
 async fn federation_directory_openid_and_local_key_query() {
-    let (addr, storage, key, _typing) = spawn_test_server("fed.test").await;
+    let (addr, storage, key, _typing, _presence) = spawn_test_server("fed.test").await;
     let client = reqwest::Client::new();
     let base = format!("http://{addr}");
 
@@ -1098,7 +1102,7 @@ async fn federation_directory_openid_and_local_key_query() {
 /// and a denied server's EDU is ignored.
 #[tokio::test]
 async fn inbound_typing_edu_reaches_local_typers_and_rejects_spoofs() {
-    let (addr, storage, key, typing) = spawn_test_server("server-a.test").await;
+    let (addr, storage, key, typing, _presence) = spawn_test_server("server-a.test").await;
     let base = format!("http://{addr}");
     let room = "!typing:server-a.test";
     let john = "@john:server-a.test";
@@ -1227,7 +1231,7 @@ async fn inbound_typing_edu_reaches_local_typers_and_rejects_spoofs() {
 /// Inbound `m.receipt` updates only the listed public read receipts.
 #[tokio::test]
 async fn inbound_receipt_edu_updates_only_listed_public_reads() {
-    let (addr, storage, key, _typing) = spawn_test_server("server-a.test").await;
+    let (addr, storage, key, _typing, _presence) = spawn_test_server("server-a.test").await;
     let base = format!("http://{addr}");
     let room = "!receipts:server-a.test";
     let other = "!other:server-a.test";
@@ -1375,6 +1379,64 @@ async fn inbound_receipt_edu_updates_only_listed_public_reads() {
     let after = storage.user_receipts_in_room(room, john).await.unwrap();
     let main = after.iter().find(|row| row.thread_id.as_deref() == Some("main")).unwrap();
     assert_eq!(main.event_id, "$read", "a denied server's receipt must not replace the stored one");
+}
+
+/// Inbound `m.presence` stores only push entries for users of the sending
+/// server. A missing `last_active_ago`, an unknown presence, or a user from
+/// another server is ignored, and users absent from the EDU stay as they were.
+#[tokio::test]
+async fn inbound_presence_edu_applies_only_the_sending_servers_users() {
+    let (addr, _storage, key, _typing, presence) = spawn_test_server("server-a.test").await;
+    let base = format!("http://{addr}");
+    presence
+        .set_presence("@kept:server-a.test", "unavailable".into(), Some("away".into()))
+        .await;
+
+    let client = reqwest::Client::new();
+    let body = json!({
+        "origin": "server-a.test",
+        "origin_server_ts": 1_700_000_000_000u64,
+        "pdus": [],
+        "edus": [{
+            "edu_type": "m.presence",
+            "content": {
+                "push": [
+                    {
+                        "user_id": "@john:server-a.test",
+                        "presence": "online",
+                        "last_active_ago": 5000,
+                        "currently_active": true,
+                        "status_msg": "Making cupcakes"
+                    },
+                    { "user_id": "@eve:other.test", "presence": "online", "last_active_ago": 1 },
+                    { "user_id": "@bad:server-a.test", "presence": "asleep", "last_active_ago": 1 },
+                    { "user_id": "@stale:server-a.test", "presence": "online" }
+                ]
+            }
+        }],
+    });
+    let path = "/_matrix/federation/v1/send/presence";
+    let auth = sign_req("PUT", path, "server-a.test", "server-a.test", Some(&body), &key);
+    let response = client
+        .put(format!("{base}{path}"))
+        .header("Authorization", auth)
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200, "{}", response.text().await.unwrap_or_default());
+
+    let john = presence.get_presence("@john:server-a.test").await.expect("john");
+    assert_eq!(john.presence, "online");
+    assert_eq!(john.status_msg.as_deref(), Some("Making cupcakes"));
+    let ago = john.last_changed_at.elapsed().as_millis() as u64;
+    assert!(ago >= 5000 && ago < 20_000, "last_active_ago was {ago}");
+    assert!(presence.get_presence("@eve:other.test").await.is_none());
+    assert!(presence.get_presence("@bad:server-a.test").await.is_none());
+    assert!(presence.get_presence("@stale:server-a.test").await.is_none());
+    let kept = presence.get_presence("@kept:server-a.test").await.expect("kept");
+    assert_eq!(kept.presence, "unavailable");
+    assert_eq!(kept.status_msg.as_deref(), Some("away"));
 }
 
 // ---------------------------------------------------------------------------

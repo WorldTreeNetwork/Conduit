@@ -3,8 +3,8 @@
 //! GET /_matrix/client/v3/presence/:userId/status
 //! PUT /_matrix/client/v3/presence/:userId/status
 //!
-//! Presence is ephemeral (in-memory only, no DB table).
-//! Local-only for v0; federation of presence EDUs is filed as a follow-up.
+//! Presence is ephemeral (in-memory only, no DB table). A local change is
+//! also sent as an `m.presence` EDU to servers that share a room.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -17,7 +17,7 @@ use axum::{
     Json,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
 use tokio::sync::{watch, RwLock};
 
 use super::{AuthState, AuthedUser, MatrixError};
@@ -105,6 +105,23 @@ impl PresenceStore {
         }
         state.entries.insert(user_id.to_owned(), (position, entry));
         self.changed.send_replace(position);
+    }
+
+    /// Record a presence update whose last activity was `last_active_ago_ms`
+    /// before now. Used for an inbound `m.presence` EDU.
+    pub async fn apply_remote_presence(
+        &self,
+        user_id: &str,
+        presence: String,
+        status_msg: Option<String>,
+        last_active_ago_ms: u64,
+    ) {
+        self.set_presence(user_id, presence, status_msg).await;
+        let ago = std::time::Duration::from_millis(last_active_ago_ms);
+        let mut state = self.inner.write().await;
+        if let Some((_, entry)) = state.entries.get_mut(user_id) {
+            entry.last_changed_at = Instant::now().checked_sub(ago).unwrap_or_else(Instant::now);
+        }
     }
 
     /// Announce a profile change through presence: the user's current
@@ -224,10 +241,107 @@ pub async fn put_presence<S: AuthState>(
 
     state
         .presence_store()
-        .set_presence(&user_id, body.presence, body.status_msg)
+        .set_presence(&user_id, body.presence.clone(), body.status_msg.clone())
         .await;
 
+    // Servers that share a room with this user receive an m.presence EDU.
+    if let Some(queue) = state.federation_queue() {
+        let entry = state.presence_store().get_presence(&user_id).await;
+        let last_active_ago = entry
+            .as_ref()
+            .map(|entry| entry.last_changed_at.elapsed().as_millis() as u64)
+            .unwrap_or(0);
+        fanout_presence(
+            state.storage(),
+            queue,
+            state.server_name(),
+            &user_id,
+            &body.presence,
+            body.status_msg.as_deref(),
+            last_active_ago,
+        )
+        .await;
+    }
+
     (StatusCode::OK, Json(json!({}))).into_response()
+}
+
+/// Apply an inbound `m.presence` EDU. Only push entries for users of
+/// `origin`, with a known presence and `last_active_ago`, are stored.
+/// Entries not in the list are left alone.
+pub(crate) async fn apply_inbound_presence(
+    store: &PresenceStore,
+    origin: &str,
+    edu: &Value,
+) -> conduit::Result<()> {
+    let Some(push) = edu
+        .get("content")
+        .and_then(|content| content.get("push"))
+        .and_then(Value::as_array)
+    else {
+        return Ok(());
+    };
+    for update in push {
+        let Some(user_id) = update.get("user_id").and_then(Value::as_str) else {
+            continue;
+        };
+        if conduit::signing::server_of_user_id(user_id) != Some(origin) {
+            continue;
+        }
+        let Some(presence) = update.get("presence").and_then(Value::as_str) else {
+            continue;
+        };
+        if !matches!(presence, "online" | "offline" | "unavailable") {
+            continue;
+        }
+        let Some(last_active_ago) = update.get("last_active_ago").and_then(Value::as_u64) else {
+            continue;
+        };
+        let status_msg = update.get("status_msg").and_then(Value::as_str).map(str::to_owned);
+        store
+            .apply_remote_presence(user_id, presence.to_owned(), status_msg, last_active_ago)
+            .await;
+    }
+    Ok(())
+}
+
+/// Send one `m.presence` EDU to every other server that shares a joined room
+/// with `user_id`.
+pub(crate) async fn fanout_presence(
+    storage: &std::sync::Arc<dyn conduit::storage::Storage>,
+    queue: &crate::federation::Queue,
+    server_name: &str,
+    user_id: &str,
+    presence: &str,
+    status_msg: Option<&str>,
+    last_active_ago: u64,
+) {
+    let servers = match storage.get_remote_servers_for_user(user_id, server_name).await {
+        Ok(servers) => servers,
+        Err(error) => {
+            tracing::warn!(%error, "presence federation fanout skipped");
+            return;
+        }
+    };
+    if servers.is_empty() {
+        return;
+    }
+    let mut update = json!({
+        "user_id": user_id,
+        "presence": presence,
+        "last_active_ago": last_active_ago,
+        "currently_active": presence == "online",
+    });
+    if let Some(status_msg) = status_msg {
+        update["status_msg"] = json!(status_msg);
+    }
+    let edu = json!({
+        "edu_type": "m.presence",
+        "content": { "push": [update] }
+    });
+    for dest in servers {
+        queue.enqueue(&dest, vec![], vec![edu.clone()]).await;
+    }
 }
 
 // ---------------------------------------------------------------------------

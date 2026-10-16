@@ -24,9 +24,9 @@
         "total": 164
       },
       "requirement": {
-        "implemented+tested": 63,
+        "implemented+tested": 64,
         "implemented-untested": 0,
-        "partial": 14,
+        "partial": 13,
         "missing": 0,
         "not-applicable": 9,
         "total": 86
@@ -42,10 +42,10 @@
         "total": 36
       },
       "requirement": {
-        "implemented+tested": 12,
+        "implemented+tested": 13,
         "implemented-untested": 0,
         "partial": 15,
-        "missing": 11,
+        "missing": 10,
         "not-applicable": 3,
         "total": 41
       }
@@ -7791,20 +7791,23 @@
       "title": "Presence",
       "source": "https://spec.matrix.org/v1.19/client-server-api/#presence",
       "role": "homeserver",
-      "status": "partial",
+      "status": "implemented+tested",
       "code": [
         {
           "loc": "conduit-server/src/api/client/presence.rs"
+        },
+        {
+          "loc": "conduit-server/src/federation/server.rs"
         }
       ],
       "tests": [
-        "conduit-server/tests/production_e2e.rs::production_receipt_overwrites_and_presence_respect_privacy"
+        "conduit-server/tests/production_e2e.rs::production_receipt_overwrites_and_presence_respect_privacy",
+        "conduit-server/tests/federation_inbound.rs::inbound_presence_edu_applies_only_the_sending_servers_users",
+        "conduit-server/tests/presence.rs::local_presence_is_federated_to_servers_that_share_a_room"
       ],
-      "tests_total": 1,
-      "gap_beads": [
-        "conduit-y99.32"
-      ],
-      "notes": "Local presence tested; no federation."
+      "tests_total": 3,
+      "gap_beads": [],
+      "notes": "Local presence plus inbound and outbound m.presence EDUs. A push entry must name a user of the sending server, a known presence, and last_active_ago. Outbound updates go to servers that share a joined room and include currently_active and status_msg. The five-minute idle transition to offline is local sync state and is not itself an EDU."
     },
     {
       "id": "cs.mod.content-repo",
@@ -9182,15 +9185,22 @@
       "title": "Presence (m.presence EDU)",
       "source": "https://spec.matrix.org/v1.19/server-server-api/#presence",
       "role": "homeserver",
-      "status": "missing",
-      "code": [],
-      "tests": [],
-      "tests_total": 0,
-      "gap_beads": [
-        "conduit-y99.32",
-        "conduit-7pk"
+      "status": "implemented+tested",
+      "code": [
+        {
+          "loc": "conduit-server/src/api/client/presence.rs"
+        },
+        {
+          "loc": "conduit-server/src/federation/server.rs"
+        }
       ],
-      "notes": ""
+      "tests": [
+        "conduit-server/tests/federation_inbound.rs::inbound_presence_edu_applies_only_the_sending_servers_users",
+        "conduit-server/tests/presence.rs::local_presence_is_federated_to_servers_that_share_a_room"
+      ],
+      "tests_total": 2,
+      "gap_beads": [],
+      "notes": "An m.presence EDU carries a push list. Entries for another server, an unknown presence, or a missing last_active_ago are ignored, and users absent from the list are left unchanged. Outbound updates go only to servers that share a joined room."
     },
     {
       "id": "ss.receipts",

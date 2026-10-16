@@ -89,6 +89,7 @@ async fn spawn_server(server_name: &str) -> TestServer {
         recent: Arc::new(conduit_server::federation::RecentEventCache::new()),
         app_services: Arc::new(Vec::new()),
         typing: Arc::new(conduit_server::api::client::TypingStore::default()),
+        presence: Arc::new(conduit_server::api::client::PresenceStore::default()),
     };
 
     let rate_limiter = RateLimiter::new(10000.0, 10000.0);
