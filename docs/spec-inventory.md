@@ -25,9 +25,9 @@ Statuses: **tested** = present and asserted by a named test; **untested** = pres
 | Push Gateway API (homeserver as client) | requirements | 1 | 0 | 0 | 0 | 1 | 2 |
 | Identity Service API (homeserver as consumer) | endpoints | 5 | 0 | 2 | 0 | 16 | 23 |
 | Identity Service API (homeserver as consumer) | requirements | 1 | 0 | 0 | 0 | 0 | 1 |
-| Room versions 1–12 | requirements | 50 | 0 | 6 | 5 | 0 | 61 |
+| Room versions 1–12 | requirements | 51 | 0 | 6 | 4 | 0 | 61 |
 | Appendices | requirements | 10 | 0 | 3 | 4 | 4 | 21 |
-| All |  | 347 | 3 | 56 | 22 | 37 | 465 |
+| All |  | 348 | 3 | 56 | 21 | 37 | 465 |
 ## Gap beads
 
 New beads filed by this inventory (children of `conduit-y99`):
@@ -89,7 +89,7 @@ In-flight / pre-existing beads referenced (not duplicated):
 - `conduit-y99.22.3` - event_auth endpoint (1 row(s))
 - `conduit-y99.22.4` - EDU U+0000 / per-EDU error isolation (2 row(s))
 - `conduit-y99.22.5` - transactions/outbox retention (1 row(s))
-- `conduit-y99.23` - room versions 1-12 (17 row(s))
+- `conduit-y99.23` - room versions 1-12 (16 row(s))
 - `conduit-y99.24` - sync unread_notifications hard-coded to zero (3 row(s))
 - `conduit-y99.25` - profile changes not propagated to member events (0 row(s))
 - `conduit-y99.26` - /messages hides create/initial join (2 row(s))
@@ -587,7 +587,7 @@ In-flight / pre-existing beads referenced (not duplicated):
 | `rv.v8.canonical-json` | [Room version 8: Canonical JSON / integer rules](https://spec.matrix.org/v1.19/rooms/v8/#canonical-json) | partial | `conduit/src/canonical_json.rs` |  | `conduit-y99.23` | Version-independent canonical JSON implemented; v6+ integer-range enforcement shared with v11. |
 | `rv.v9.event-format` | [Room version 9: Event format and event IDs](https://spec.matrix.org/v1.19/rooms/v9/#event-format) | tested |  | `conduit/src/room_version.rs::event_ids_follow_the_version_encoding` | | Reference-hash event ids. v3 is standard base64; v4-v10 share the URL-safe hash; v11 and v12 share the v11 redaction. A v12 create omits room_id. |
 | `rv.v9.auth-rules` | [Room version 9: Authorisation rules](https://spec.matrix.org/v1.19/rooms/v9/#authorisation-rules) | missing |  |  | `conduit-y99.23` | Kernel implements room version 11 only. |
-| `rv.v9.redaction` | [Room version 9: Redaction algorithm](https://spec.matrix.org/v1.19/rooms/v9/#redactions) | missing |  |  | `conduit-y99.23` | Kernel implements room version 11 only. |
+| `rv.v9.redaction` | [Room version 9: Redaction algorithm](https://spec.matrix.org/v1.19/rooms/v9/#redactions) | tested | `conduit/src/room_version.rs` | `room_version.rs::v9_redaction_keeps_the_authorising_user` |  | Room version 9 keeps join_authorised_via_users_server on a redacted member event. Version 8 drops it. Power-level invite stays stripped until version 11. |
 | `rv.v9.state-res` | [Room version 9: State resolution algorithm](https://spec.matrix.org/v1.19/rooms/v9/#state-resolution) | missing |  |  | `conduit-y99.23` | Kernel implements room version 11 only. |
 | `rv.v9.canonical-json` | [Room version 9: Canonical JSON / integer rules](https://spec.matrix.org/v1.19/rooms/v9/#canonical-json) | partial | `conduit/src/canonical_json.rs` |  | `conduit-y99.23` | Version-independent canonical JSON implemented; v6+ integer-range enforcement shared with v11. |
 | `rv.v10.event-format` | [Room version 10: Event format and event IDs](https://spec.matrix.org/v1.19/rooms/v10/#event-format) | tested |  | `conduit/src/room_version.rs::event_ids_follow_the_version_encoding` | | Reference-hash event ids. v3 is standard base64; v4-v10 share the URL-safe hash; v11 and v12 share the v11 redaction. A v12 create omits room_id. |

@@ -126,7 +126,7 @@ fn redact_content(event_type: &str, content: &Value, version: u32) -> Value {
 
 fn allowed_content_fields(event_type: &str, version: u32) -> &'static [&'static str] {
     match event_type {
-        "m.room.member" if version >= 11 => &["membership", "join_authorised_via_users_server"],
+        "m.room.member" if version >= 9 => &["membership", "join_authorised_via_users_server"],
         "m.room.member" => &["membership"],
         "m.room.create" => &["creator"],
         "m.room.join_rules" if version >= 8 => &["join_rule", "allow"],
@@ -625,6 +625,36 @@ mod tests {
         aliases.event_type = "m.room.aliases".into();
         aliases.content = json!({"aliases": ["#a:example.org"]});
         assert!(redact_pdu(&aliases, 8).content.get("aliases").is_none());
+    }
+
+    /// Room version 9 keeps `join_authorised_via_users_server` on a redacted
+    /// member event. Version 8 drops it. `invite` stays stripped, and a
+    /// third-party invite is not kept until version 11.
+    #[test]
+    fn v9_redaction_keeps_the_authorising_user() {
+        let mut member = message();
+        member.event_type = "m.room.member".into();
+        member.state_key = Some("@b:example.org".into());
+        member.content = json!({
+            "membership": "join",
+            "join_authorised_via_users_server": "@a:example.org",
+            "displayname": "B",
+            "third_party_invite": {"signed": {"mxid": "@b:example.org", "token": "t"}}
+        });
+        assert_eq!(redact_pdu(&member, 8).content, json!({"membership": "join"}));
+        assert_eq!(
+            redact_pdu(&member, 9).content,
+            json!({
+                "membership": "join",
+                "join_authorised_via_users_server": "@a:example.org"
+            })
+        );
+
+        let mut levels = message();
+        levels.event_type = "m.room.power_levels".into();
+        levels.content = json!({"invite": 50, "ban": 50});
+        assert!(redact_pdu(&levels, 9).content.get("invite").is_none());
+        assert_eq!(redact_pdu(&levels, 9).content["ban"], 50);
     }
 
     #[test]

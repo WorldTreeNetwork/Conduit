@@ -106,10 +106,10 @@
     },
     "rv": {
       "requirement": {
-        "implemented+tested": 50,
+        "implemented+tested": 51,
         "implemented-untested": 0,
         "partial": 6,
-        "missing": 5,
+        "missing": 4,
         "not-applicable": 0,
         "total": 61
       }
@@ -10847,14 +10847,18 @@
       "title": "Room version 9: Redaction algorithm",
       "source": "https://spec.matrix.org/v1.19/rooms/v9/#redactions",
       "role": "homeserver",
-      "status": "missing",
-      "code": [],
-      "tests": [],
-      "tests_total": 0,
-      "gap_beads": [
-        "conduit-y99.23"
+      "status": "implemented+tested",
+      "code": [
+        {
+          "loc": "conduit/src/room_version.rs"
+        }
       ],
-      "notes": "Kernel implements room version 11 only."
+      "tests": [
+        "conduit/src/room_version.rs::v9_redaction_keeps_the_authorising_user"
+      ],
+      "tests_total": 1,
+      "gap_beads": [],
+      "notes": "Room version 9 keeps join_authorised_via_users_server on a redacted member event. Version 8 drops it. Power-level invite stays stripped, and third-party invite content stays stripped until version 11."
     },
     {
       "id": "rv.v9.state-res",
