@@ -25,9 +25,9 @@ Statuses: **tested** = present and asserted by a named test; **untested** = pres
 | Push Gateway API (homeserver as client) | requirements | 1 | 0 | 0 | 0 | 1 | 2 |
 | Identity Service API (homeserver as consumer) | endpoints | 5 | 0 | 2 | 0 | 16 | 23 |
 | Identity Service API (homeserver as consumer) | requirements | 1 | 0 | 0 | 0 | 0 | 1 |
-| Room versions 1–12 | requirements | 29 | 0 | 6 | 26 | 0 | 61 |
+| Room versions 1–12 | requirements | 30 | 0 | 6 | 25 | 0 | 61 |
 | Appendices | requirements | 9 | 0 | 4 | 4 | 4 | 21 |
-| All |  | 312 | 3 | 66 | 47 | 37 | 465 |
+| All |  | 313 | 3 | 66 | 46 | 37 | 465 |
 ## Gap beads
 
 New beads filed by this inventory (children of `conduit-y99`):
@@ -553,7 +553,7 @@ In-flight / pre-existing beads referenced (not duplicated):
 | `rv.v2.event-format` | [Room version 2: Event format and event IDs](https://spec.matrix.org/v1.19/rooms/v2/#event-format) | missing |  |  | `conduit-y99.23` | Kernel implements room version 11 only. |
 | `rv.v2.auth-rules` | [Room version 2: Authorisation rules](https://spec.matrix.org/v1.19/rooms/v2/#authorisation-rules) | missing |  |  | `conduit-y99.23` | Kernel implements room version 11 only. |
 | `rv.v2.redaction` | [Room version 2: Redaction algorithm](https://spec.matrix.org/v1.19/rooms/v2/#redactions) | missing |  |  | `conduit-y99.23` | Kernel implements room version 11 only. |
-| `rv.v2.state-res` | [Room version 2: State resolution algorithm](https://spec.matrix.org/v1.19/rooms/v2/#state-resolution) | missing |  |  | `conduit-y99.23` | Kernel implements room version 11 only. |
+| `rv.v2.state-res` | [Room version 2: State resolution algorithm](https://spec.matrix.org/v1.19/rooms/v2/#state-resolution) | tested | `conduit/src/room/state_res.rs` | `state_res.rs::room_version_2_prefers_later_timestamp_over_greater_depth` |  | State resolution v2: a later origin_server_ts beats a greater depth. Version 1 keeps the deeper event. |
 | `rv.v2.canonical-json` | [Room version 2: Canonical JSON / integer rules](https://spec.matrix.org/v1.19/rooms/v2/#canonical-json) | missing | `conduit/src/canonical_json.rs` |  | `conduit-y99.23` | Version-independent canonical JSON implemented; v1-5 accept out-of-range/float power levels (lenient) - not modelled. |
 | `rv.v3.event-format` | [Room version 3: Event format and event IDs](https://spec.matrix.org/v1.19/rooms/v3/#event-format) | tested |  | `conduit/src/room_version.rs::event_ids_follow_the_version_encoding` | | Reference-hash event ids. v3 is standard base64; v4-v10 share the URL-safe hash; v11 and v12 share the v11 redaction. A v12 create omits room_id. |
 | `rv.v3.auth-rules` | [Room version 3: Authorisation rules](https://spec.matrix.org/v1.19/rooms/v3/#authorisation-rules) | missing |  |  | `conduit-y99.23` | Kernel implements room version 11 only. |

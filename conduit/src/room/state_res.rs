@@ -1581,6 +1581,82 @@ mod tests {
         );
         assert!(v12.contains_key(&("m.room.create".into(), String::new())));
     }
+
+    /// Room version 2 uses state resolution v2: a later `origin_server_ts`
+    /// beats a greater depth. Version 1 keeps the deeper event.
+    #[test]
+    fn room_version_2_prefers_later_timestamp_over_greater_depth() {
+        let room = "!r:example.org";
+        let alice = "@alice:example.org";
+        let bob = "@bob:example.org";
+        let mut create = make_create(room, alice);
+        create.content = json!({"creator": alice, "room_version": "2"});
+        let alice_join = make_member(
+            "$alice",
+            alice,
+            alice,
+            room,
+            "join",
+            vec!["$create".into()],
+            2,
+            1_100,
+        );
+        let rules = make_join_rules(
+            "$rules",
+            alice,
+            room,
+            "public",
+            vec!["$create".into(), "$alice".into()],
+            3,
+            1_200,
+        );
+        let shallow_late = make_member(
+            "$shallow-late",
+            bob,
+            bob,
+            room,
+            "join",
+            vec!["$create".into(), "$alice".into(), "$rules".into()],
+            4,
+            9_000,
+        );
+        let deep_early = make_member(
+            "$deep-early",
+            bob,
+            bob,
+            room,
+            "join",
+            vec!["$create".into(), "$alice".into(), "$rules".into()],
+            20,
+            2_000,
+        );
+        let mut chain = HashMap::new();
+        for event in [&create, &alice_join, &rules, &shallow_late, &deep_early] {
+            chain.insert(event.event_id.clone(), event.clone());
+        }
+        let left = state_set_from(&[&create, &alice_join, &rules, &shallow_late]);
+        let right = state_set_from(&[&create, &alice_join, &rules, &deep_early]);
+        let key = ("m.room.member".to_owned(), bob.to_owned());
+
+        let v2 = resolve(vec![left.clone(), right.clone()], chain).unwrap();
+        assert_eq!(v2.get(&key).map(|event| event.event_id.as_str()), Some("$shallow-late"));
+
+        let v1 = crate::room_version::resolve_v1(&[left, right], |_, _| true);
+        assert_eq!(v1.get(&key).map(|event| event.event_id.as_str()), Some("$deep-early"));
+
+        let (snapshot, _) = snapshot_from_arrival(&[
+            create,
+            alice_join,
+            rules,
+            shallow_late,
+            deep_early,
+        ]);
+        assert_eq!(
+            snapshot.get(&key).map(|event| event.event_id.as_str()),
+            Some("$shallow-late"),
+            "a version 2 room must not let the later, deeper arrival replace the timestamp winner"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
