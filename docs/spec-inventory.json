@@ -16,17 +16,17 @@
   "summary": {
     "cs": {
       "endpoint": {
-        "implemented+tested": 149,
+        "implemented+tested": 150,
         "implemented-untested": 0,
-        "partial": 14,
+        "partial": 13,
         "missing": 0,
         "not-applicable": 1,
         "total": 164
       },
       "requirement": {
-        "implemented+tested": 65,
+        "implemented+tested": 66,
         "implemented-untested": 0,
-        "partial": 12,
+        "partial": 11,
         "missing": 0,
         "not-applicable": 9,
         "total": 86
@@ -2258,7 +2258,7 @@
       "rate_limited": "No",
       "deprecated": false,
       "role": "homeserver",
-      "status": "partial",
+      "status": "implemented+tested",
       "code": [
         {
           "loc": "conduit-server/src/api/client/room_membership.rs:120",
@@ -2267,13 +2267,12 @@
         }
       ],
       "tests": [
-        "conduit-server/tests/production_basics.rs::room_summary_respects_visibility_and_reports_state"
+        "conduit-server/tests/production_basics.rs::room_summary_respects_visibility_and_reports_state",
+        "conduit-server/tests/production_basics.rs::remote_room_summary_is_fetched_over_federation"
       ],
-      "tests_total": 1,
-      "gap_beads": [
-        "conduit-y99.29.2"
-      ],
-      "notes": "Local rooms by ID or alias with every RoomSummary field; optional auth (anonymous only for public/knock/world_readable); invisible rooms 404. Remote rooms via federation are y99.29.2."
+      "tests_total": 2,
+      "gap_beads": [],
+      "notes": "Local rooms by ID or alias with every RoomSummary field; optional auth (anonymous only for public/knock/world_readable); invisible rooms 404. An unknown room or alias is fetched from each via server: aliases through GET /query/directory, then the hierarchy room object. A private remote summary is 404. A local room is not fetched."
     },
     {
       "id": "cs.ep.post_matrixclientv3user_directorysearch",
@@ -7598,20 +7597,22 @@
       "title": "Room summaries",
       "source": "https://spec.matrix.org/v1.19/client-server-api/#room-summaries",
       "role": "homeserver",
-      "status": "partial",
+      "status": "implemented+tested",
       "code": [
         {
           "loc": "conduit-server/src/api/client/room_membership.rs"
+        },
+        {
+          "loc": "conduit-server/src/federation/client.rs"
         }
       ],
       "tests": [
-        "conduit-server/tests/production_basics.rs::room_summary_respects_visibility_and_reports_state"
+        "conduit-server/tests/production_basics.rs::room_summary_respects_visibility_and_reports_state",
+        "conduit-server/tests/production_basics.rs::remote_room_summary_is_fetched_over_federation"
       ],
-      "tests_total": 1,
-      "gap_beads": [
-        "conduit-y99.29.2"
-      ],
-      "notes": "Local rooms complete; remote summaries via federation are y99.29.2."
+      "tests_total": 2,
+      "gap_beads": [],
+      "notes": "Local rooms are summarised from current state. An unknown room or alias is requested from each via server. Aliases resolve through GET /query/directory, and the summary is the hierarchy room object. A caller who may not see the remote room gets 404. A local room is not fetched."
     },
     {
       "id": "cs.user.directory",

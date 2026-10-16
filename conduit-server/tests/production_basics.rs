@@ -464,6 +464,261 @@ async fn room_summary_respects_visibility_and_reports_state() {
 }
 
 #[tokio::test]
+async fn remote_room_summary_is_fetched_over_federation() {
+    use std::sync::{Arc, Mutex};
+
+    use axum::response::IntoResponse;
+
+    let asked = Arc::new(Mutex::new(Vec::<String>::new()));
+    let allowed = Arc::new(Mutex::new(String::new()));
+    let asked_route = Arc::clone(&asked);
+    let allowed_route = Arc::clone(&allowed);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        let directory_asked = Arc::clone(&asked_route);
+        let hierarchy_asked = Arc::clone(&asked_route);
+        let allowed_room = Arc::clone(&allowed_route);
+        let app = axum::Router::new()
+            .route(
+                "/_matrix/federation/v1/query/directory",
+                axum::routing::get(
+                    move |headers: axum::http::HeaderMap,
+                          axum::extract::Query(query): axum::extract::Query<std::collections::HashMap<String, String>>| {
+                        let asked = Arc::clone(&directory_asked);
+                        async move {
+                            let host = headers.get("host").and_then(|value| value.to_str().ok()).unwrap_or("");
+                            let alias = query.get("room_alias").cloned().unwrap_or_default();
+                            asked.lock().unwrap().push(format!("{host} directory {alias}"));
+                            if alias == "#cheese:remote.test" {
+                                (
+                                    axum::http::StatusCode::OK,
+                                    axum::Json(json!({
+                                        "room_id": "!cheese:remote.test",
+                                        "servers": ["holder.test"]
+                                    })),
+                                )
+                                    .into_response()
+                            } else {
+                                (
+                                    axum::http::StatusCode::NOT_FOUND,
+                                    axum::Json(json!({"errcode": "M_NOT_FOUND", "error": "unknown alias"})),
+                                )
+                                    .into_response()
+                            }
+                        }
+                    },
+                ),
+            )
+            .route(
+                "/_matrix/federation/v1/hierarchy/:room_id",
+                axum::routing::get(move |headers: axum::http::HeaderMap, axum::extract::Path(room_id): axum::extract::Path<String>| {
+                    let asked = Arc::clone(&hierarchy_asked);
+                    let allowed_room = Arc::clone(&allowed_room);
+                    async move {
+                        let host = headers.get("host").and_then(|value| value.to_str().ok()).unwrap_or("").to_owned();
+                        asked.lock().unwrap().push(format!("{host} hierarchy {room_id}"));
+                        let allowed_id = allowed_room.lock().unwrap().clone();
+                        let summary = |name: &str, join_rule: &str, world_readable: bool, allowed_ids: Vec<String>| {
+                            json!({
+                                "room": {
+                                    "room_id": room_id,
+                                    "name": name,
+                                    "join_rule": join_rule,
+                                    "world_readable": world_readable,
+                                    "guest_can_join": false,
+                                    "num_joined_members": 4,
+                                    "room_version": "12",
+                                    "topic": "From the remote",
+                                    "avatar_url": "mxc://remote.test/room",
+                                    "encryption": "m.megolm.v1.aes-sha2",
+                                    "room_type": "m.space",
+                                    "allowed_room_ids": allowed_ids,
+                                    "children_state": [{"type": "m.space.child", "state_key": "!child:remote.test"}]
+                                },
+                                "children": [],
+                                "inaccessible_children": []
+                            })
+                        };
+                        let ok = |body: Value| (axum::http::StatusCode::OK, axum::Json(body)).into_response();
+                        let missing = (
+                            axum::http::StatusCode::NOT_FOUND,
+                            axum::Json(json!({"errcode": "M_NOT_FOUND", "error": "unknown room"})),
+                        )
+                            .into_response();
+                        match (host.as_str(), room_id.as_str()) {
+                            ("down.test", "!far:remote.test") => missing,
+                            ("remote.test", "!far:remote.test") => ok(summary("Far", "public", false, Vec::new())),
+                            (_, "!secret:remote.test") => ok(summary("Secret", "invite", false, Vec::new())),
+                            ("holder.test", "!cheese:remote.test") => ok(summary("Cheese", "public", false, Vec::new())),
+                            (_, "!restricted:remote.test") => ok(summary("Gate", "restricted", false, vec![allowed_id])),
+                            _ => missing,
+                        }
+                    }
+                }),
+            );
+        axum::serve(listener, app).await.ok();
+    });
+
+    let server = Server::with_env(&[
+        ("CONDUIT_FEDERATION", "1"),
+        ("CONDUIT_FEDERATION_BASE_URL", &base_url),
+    ])
+    .await;
+    let alice = user(&server, "alice").await;
+    let bob = user(&server, "bob").await;
+    let local = create_room(&server, &alice, json!({"preset": "public_chat", "name": "Local"})).await;
+
+    let local_summary = server
+        .request(
+            Method::GET,
+            &format!("/_matrix/client/v1/room_summary/{}?via=remote.test", encode(&local)),
+            Some(&alice.token),
+            None,
+            200,
+        )
+        .await;
+    assert_eq!(local_summary["name"], "Local");
+    assert!(asked.lock().unwrap().is_empty(), "a local room is not fetched: {:?}", asked.lock().unwrap());
+
+    let missing = server
+        .request(
+            Method::GET,
+            &format!("/_matrix/client/v1/room_summary/{}", encode("!missing:remote.test")),
+            Some(&alice.token),
+            None,
+            404,
+        )
+        .await;
+    assert_eq!(missing["errcode"], "M_NOT_FOUND");
+    let only_us = server
+        .request(
+            Method::GET,
+            &format!("/_matrix/client/v1/room_summary/{}?via=production.test", encode("!missing:remote.test")),
+            Some(&alice.token),
+            None,
+            404,
+        )
+        .await;
+    assert_eq!(only_us["errcode"], "M_NOT_FOUND");
+    assert!(asked.lock().unwrap().is_empty(), "via naming this server is not a federation query: {:?}", asked.lock().unwrap());
+
+    let far = server
+        .request(
+            Method::GET,
+            &format!(
+                "/_matrix/client/v1/room_summary/{}?via=down.test&via=remote.test",
+                encode("!far:remote.test")
+            ),
+            Some(&alice.token),
+            None,
+            200,
+        )
+        .await;
+    assert_eq!(far["room_id"], "!far:remote.test");
+    assert_eq!(far["name"], "Far");
+    assert_eq!(far["topic"], "From the remote");
+    assert_eq!(far["avatar_url"], "mxc://remote.test/room");
+    assert_eq!(far["encryption"], "m.megolm.v1.aes-sha2");
+    assert_eq!(far["room_type"], "m.space");
+    assert_eq!(far["room_version"], "12");
+    assert_eq!(far["join_rule"], "public");
+    assert_eq!(far["num_joined_members"], 4);
+    assert_eq!(far["world_readable"], false);
+    assert_eq!(far["guest_can_join"], false);
+    assert!(far.get("membership").is_none(), "a remote summary has no local membership: {far}");
+    assert!(far.get("children_state").is_none(), "federation children_state is not a client summary field: {far}");
+    assert!(far.get("allowed_room_ids").is_none(), "{far}");
+    let asked_now = asked.lock().unwrap().clone();
+    assert!(
+        asked_now.iter().any(|line| line == "down.test hierarchy !far:remote.test"),
+        "the first via server is tried: {asked_now:?}"
+    );
+    assert!(
+        asked_now.iter().any(|line| line == "remote.test hierarchy !far:remote.test"),
+        "a later via server supplies the summary: {asked_now:?}"
+    );
+
+    let anon = server
+        .request(
+            Method::GET,
+            &format!("/_matrix/client/v1/room_summary/{}?via=remote.test", encode("!far:remote.test")),
+            None,
+            None,
+            200,
+        )
+        .await;
+    assert_eq!(anon["name"], "Far");
+    assert!(anon.get("membership").is_none(), "{anon}");
+
+    let secret = server
+        .request(
+            Method::GET,
+            &format!("/_matrix/client/v1/room_summary/{}?via=remote.test", encode("!secret:remote.test")),
+            Some(&alice.token),
+            None,
+            404,
+        )
+        .await;
+    assert_eq!(secret["errcode"], "M_NOT_FOUND");
+
+    let cheese = server
+        .request(
+            Method::GET,
+            &format!("/_matrix/client/v1/room_summary/{}?via=remote.test", encode("#cheese:remote.test")),
+            None,
+            None,
+            200,
+        )
+        .await;
+    assert_eq!(cheese["room_id"], "!cheese:remote.test");
+    assert_eq!(cheese["name"], "Cheese");
+    let asked_now = asked.lock().unwrap().clone();
+    assert!(
+        asked_now.iter().any(|line| line == "remote.test directory #cheese:remote.test"),
+        "an unknown alias is resolved with /query/directory: {asked_now:?}"
+    );
+    assert!(
+        asked_now.iter().any(|line| line == "holder.test hierarchy !cheese:remote.test"),
+        "the directory's server is asked for the summary: {asked_now:?}"
+    );
+
+    let gate = create_room(&server, &bob, json!({"preset": "public_chat", "name": "Gate"})).await;
+    *allowed.lock().unwrap() = gate.clone();
+    let hidden = server
+        .request(
+            Method::GET,
+            &format!("/_matrix/client/v1/room_summary/{}?via=remote.test", encode("!restricted:remote.test")),
+            Some(&alice.token),
+            None,
+            404,
+        )
+        .await;
+    assert_eq!(hidden["errcode"], "M_NOT_FOUND");
+    server
+        .request(
+            Method::POST,
+            &format!("/_matrix/client/v3/join/{}", encode(&gate)),
+            Some(&alice.token),
+            Some(json!({})),
+            200,
+        )
+        .await;
+    let opened = server
+        .request(
+            Method::GET,
+            &format!("/_matrix/client/v1/room_summary/{}?via=remote.test", encode("!restricted:remote.test")),
+            Some(&alice.token),
+            None,
+            200,
+        )
+        .await;
+    assert_eq!(opened["name"], "Gate");
+    assert_eq!(opened["join_rule"], "restricted");
+    assert_eq!(opened["allowed_room_ids"][0], gate.as_str());
+}
+
+#[tokio::test]
 async fn mutual_rooms_lists_shared_joins_in_batches() {
     let server = Server::with_env(&[("CONDUIT_MUTUAL_ROOMS_BATCH", "2")]).await;
     let alice = user(&server, "alice").await;

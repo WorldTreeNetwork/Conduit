@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Path, Query, RawQuery, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -276,21 +276,36 @@ fn plain_topic(content: &Value) -> Option<String> {
     content.get("topic").and_then(Value::as_str).map(str::to_owned)
 }
 
+/// Repeated `via` query parameters. One value and many values are both
+/// legal; axum's `Query<Vec<_>>` rejects a single value.
+fn via_servers(query: Option<&str>) -> Vec<String> {
+    let Some(query) = query else {
+        return Vec::new();
+    };
+    url::form_urlencoded::parse(query.as_bytes())
+        .filter(|(key, value)| key == "via" && !value.is_empty())
+        .map(|(_, value)| value.into_owned())
+        .collect()
+}
+
 /// `GET /_matrix/client/v1/room_summary/{roomIdOrAlias}`. Authentication is
 /// optional: anonymous callers only see rooms that are publicly joinable,
 /// knockable or world-readable. Rooms the caller may not see are `404`,
-/// so the endpoint does not reveal their existence.
+/// so the endpoint does not reveal their existence. A room this server
+/// cannot summarise is requested from each `via` server.
 pub async fn room_summary<S: AuthState>(
     State(state): State<S>,
     MaybeAuthed(authed): MaybeAuthed,
     Path(room_id_or_alias): Path<String>,
+    RawQuery(raw_query): RawQuery,
 ) -> Response {
     let storage = state.storage();
     let not_found = || MatrixError::new_not_found("Room not found.").into_response();
+    let via = via_servers(raw_query.as_deref());
     let room_id = if room_id_or_alias.starts_with('#') {
         match storage.get_room_for_alias(&room_id_or_alias).await {
             Ok(Some(room_id)) => room_id,
-            Ok(None) => return not_found(),
+            Ok(None) => return remote_room_summary(&state, &room_id_or_alias, &via, authed.as_ref()).await,
             Err(e) => return MatrixError::unknown(e.to_string()).into_response(),
         }
     } else {
@@ -305,7 +320,7 @@ pub async fn room_summary<S: AuthState>(
         .filter_map(|e| Some(((e.event_type.clone(), e.state_key.clone()?), e)))
         .collect();
     let Some(create) = state_content(&current, "m.room.create", "") else {
-        return not_found();
+        return remote_room_summary(&state, &room_id, &via, authed.as_ref()).await;
     };
     let join_rules = state_content(&current, "m.room.join_rules", "");
     let join_rule = join_rules
@@ -404,6 +419,159 @@ pub async fn room_summary<S: AuthState>(
         summary.insert("membership".into(), json!(membership));
     }
     (StatusCode::OK, Json(Value::Object(summary))).into_response()
+}
+
+fn federation_enabled() -> bool {
+    std::env::var("CONDUIT_FEDERATION").ok().as_deref() != Some("0")
+}
+
+fn push_unique(dests: &mut Vec<String>, name: &str, local: &str) {
+    if name.is_empty() || name == local || dests.iter().any(|existing| existing == name) {
+        return;
+    }
+    dests.push(name.to_owned());
+}
+
+/// Copy the federation hierarchy `room` object into a client RoomSummary.
+/// `children_state` stays on the federation object. A summary that omits a
+/// required field, or names a different room, is not usable.
+fn client_summary_from_hierarchy(room: &serde_json::Map<String, Value>, expected_room_id: &str) -> Option<serde_json::Map<String, Value>> {
+    let room_id = room.get("room_id")?.as_str()?;
+    if room_id != expected_room_id {
+        return None;
+    }
+    let guest_can_join = room.get("guest_can_join")?.as_bool()?;
+    let world_readable = room.get("world_readable")?.as_bool()?;
+    let num_joined_members = room.get("num_joined_members")?.as_i64().filter(|count| *count >= 0)?;
+    let mut summary = serde_json::Map::new();
+    summary.insert("room_id".into(), json!(room_id));
+    summary.insert("num_joined_members".into(), json!(num_joined_members));
+    summary.insert("world_readable".into(), json!(world_readable));
+    summary.insert("guest_can_join".into(), json!(guest_can_join));
+    if let Some(rule) = room.get("join_rule").and_then(Value::as_str).filter(|rule| !rule.is_empty()) {
+        summary.insert("join_rule".into(), json!(rule));
+    }
+    for key in ["avatar_url", "canonical_alias", "encryption", "name", "topic", "room_type", "room_version"] {
+        if let Some(value) = room.get(key).and_then(Value::as_str).filter(|value| !value.is_empty()) {
+            summary.insert(key.to_owned(), json!(value));
+        }
+    }
+    if let Some(ids) = room.get("allowed_room_ids").and_then(Value::as_array) {
+        let ids: Vec<&str> = ids.iter().filter_map(Value::as_str).filter(|id| !id.is_empty()).collect();
+        if !ids.is_empty() {
+            summary.insert("allowed_room_ids".into(), json!(ids));
+        }
+    }
+    Some(summary)
+}
+
+fn summary_is_visible(summary: &serde_json::Map<String, Value>, joined: &[String]) -> bool {
+    let join_rule = summary.get("join_rule").and_then(Value::as_str).unwrap_or("public");
+    let world_readable = summary.get("world_readable").and_then(Value::as_bool).unwrap_or(false);
+    if matches!(join_rule, "public" | "knock" | "knock_restricted") || world_readable {
+        return true;
+    }
+    if matches!(
+        summary.get("membership").and_then(Value::as_str),
+        Some("join" | "invite" | "knock")
+    ) {
+        return true;
+    }
+    if join_rule == "restricted" {
+        return summary
+            .get("allowed_room_ids")
+            .and_then(Value::as_array)
+            .is_some_and(|ids| ids.iter().any(|id| id.as_str().is_some_and(|id| joined.iter().any(|room| room == id))));
+    }
+    false
+}
+
+/// Ask `via` for a summary this server cannot build. An alias is resolved
+/// with `/query/directory` first. The summary itself comes from the `room`
+/// object of `GET /hierarchy/{roomId}`. A summary the caller may not see is
+/// `404`, the same as a local room.
+async fn remote_room_summary<S: AuthState>(
+    state: &S,
+    room_id_or_alias: &str,
+    via: &[String],
+    authed: Option<&AuthedUser>,
+) -> Response {
+    let not_found = || MatrixError::new_not_found("Room not found.").into_response();
+    if via.is_empty() || !federation_enabled() {
+        return not_found();
+    }
+    let Some(client) = state.federation_client() else {
+        return not_found();
+    };
+    let local = state.server_name();
+    let vias: Vec<&str> = via.iter().map(String::as_str).filter(|name| !name.is_empty() && *name != local).collect();
+    if vias.is_empty() {
+        return not_found();
+    }
+
+    let (room_id, dests) = if let Some(alias) = room_id_or_alias.strip_prefix('#') {
+        if alias.is_empty() {
+            return not_found();
+        }
+        let mut resolved = None;
+        let mut dests = Vec::new();
+        for via_server in &vias {
+            match client.query_directory(via_server, room_id_or_alias).await {
+                Ok(directory) if directory.room_id.starts_with('!') => {
+                    if directory.servers.is_empty() {
+                        push_unique(&mut dests, via_server, local);
+                    } else {
+                        for server in &directory.servers {
+                            push_unique(&mut dests, server, local);
+                        }
+                    }
+                    for via_server in &vias {
+                        push_unique(&mut dests, via_server, local);
+                    }
+                    resolved = Some(directory.room_id);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        let Some(room_id) = resolved else {
+            return not_found();
+        };
+        (room_id, dests)
+    } else if room_id_or_alias.starts_with('!') {
+        let mut dests = Vec::new();
+        for via_server in &vias {
+            push_unique(&mut dests, via_server, local);
+        }
+        (room_id_or_alias.to_owned(), dests)
+    } else {
+        return not_found();
+    };
+
+    for dest in &dests {
+        let value = match client.room_hierarchy(dest, &room_id).await {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        let Some(room) = value.get("room").and_then(Value::as_object) else {
+            continue;
+        };
+        let Some(summary) = client_summary_from_hierarchy(room, &room_id) else {
+            continue;
+        };
+        let joined = match authed {
+            Some(user) => match state.storage().joined_rooms(&user.user_id).await {
+                Ok(joined) => joined,
+                Err(error) => return MatrixError::unknown(error.to_string()).into_response(),
+            },
+            None => Vec::new(),
+        };
+        if !summary_is_visible(&summary, &joined) {
+            return not_found();
+        }
+        return (StatusCode::OK, Json(Value::Object(summary))).into_response();
+    }
+    not_found()
 }
 
 // ---------------------------------------------------------------------------

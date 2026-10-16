@@ -734,6 +734,15 @@ impl Client {
         })]).await.map(|_| serde_json::json!({}))
     }
 
+    /// `GET /_matrix/federation/v1/hierarchy/{roomId}`.
+    ///
+    /// The v1.19 body is `{room, children, inaccessible_children}`. Callers
+    /// that only need a room summary use the `room` object.
+    pub async fn room_hierarchy(&self, dest: &str, room_id: &str) -> Result<Value, FederationError> {
+        let path = format!("/_matrix/federation/v1/hierarchy/{}", urlencoding(room_id));
+        self.signed_get(dest, &path).await
+    }
+
     /// `GET /_matrix/federation/v1/query/directory?room_alias={alias}`
     pub async fn query_directory(
         &self,
