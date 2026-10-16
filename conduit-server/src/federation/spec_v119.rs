@@ -215,7 +215,9 @@ pub async fn timestamp_to_event(
     let Some(ts) = query.get("ts").and_then(|raw| raw.parse::<u64>().ok()) else {
         return invalid_param("ts is required");
     };
-    let dir = query.get("dir").map(String::as_str).unwrap_or("f");
+    let Some(dir) = query.get("dir").map(String::as_str) else {
+        return invalid_param("dir is required");
+    };
     if dir != "f" && dir != "b" {
         return invalid_param("dir must be f or b");
     }

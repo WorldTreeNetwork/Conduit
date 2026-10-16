@@ -42,9 +42,9 @@
         "total": 36
       },
       "requirement": {
-        "implemented+tested": 33,
+        "implemented+tested": 34,
         "implemented-untested": 0,
-        "partial": 5,
+        "partial": 4,
         "missing": 0,
         "not-applicable": 3,
         "total": 41
@@ -5255,11 +5255,12 @@
         }
       ],
       "tests": [
-        "conduit-server/tests/federation_inbound.rs::federation_directory_openid_and_local_key_query"
+        "conduit-server/tests/federation_inbound.rs::federation_directory_openid_and_local_key_query",
+        "conduit-server/tests/production_pdu.rs::timestamp_to_event_picks_the_closest_event_in_each_direction"
       ],
-      "tests_total": 1,
+      "tests_total": 2,
       "gap_beads": [],
-      "notes": "Nearest event at or after ts when dir=f, and at or before ts when dir=b."
+      "notes": "dir and ts are required. dir=f is the nearest event at or after ts. dir=b is the nearest at or before ts. An equal timestamp keeps the lower depth. A side with no event is 404. An unknown room is 404. An unsigned request is 401."
     },
     {
       "id": "ss.ep.get_matrixfederationv1make_joinroomiduserid",
@@ -9049,17 +9050,23 @@
       "title": "Retrieving events (event, state, state_ids, timestamp_to_event)",
       "source": "https://spec.matrix.org/v1.19/server-server-api/#retrieving-events",
       "role": "homeserver",
-      "status": "partial",
-      "code": [],
+      "status": "implemented+tested",
+      "code": [
+        {
+          "loc": "conduit-server/src/federation/server.rs"
+        },
+        {
+          "loc": "conduit-server/src/federation/spec_v119.rs"
+        }
+      ],
       "tests": [
-        "conduit-server/tests/production_pdu.rs::state_ids_are_the_room_state_before_the_event"
+        "conduit-server/tests/production_pdu.rs::state_ids_are_the_room_state_before_the_event",
+        "conduit-server/tests/production_pdu.rs::received_pdu_is_served_as_the_same_canonical_bytes",
+        "conduit-server/tests/production_pdu.rs::timestamp_to_event_picks_the_closest_event_in_each_direction"
       ],
-      "tests_total": 1,
-      "gap_beads": [
-        "conduit-y99.22",
-        "conduit-embed-pdu"
-      ],
-      "notes": "state and state_ids return the resolved state before the requested event. timestamp_to_event remains open."
+      "tests_total": 3,
+      "gap_beads": [],
+      "notes": "state and state_ids return the resolved state before the requested event. GET /event serves the stored PDU. timestamp_to_event returns the closest event in the requested direction."
     },
     {
       "id": "ss.joining",

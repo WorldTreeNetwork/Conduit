@@ -3897,6 +3897,125 @@ async fn generic_query_serves_known_types_and_rejects_unknown() {
     assert_eq!(posted_body["errcode"], "M_UNRECOGNIZED", "{posted_body}");
 }
 
+/// Federation timestamp search returns the closest event in the requested
+/// direction. An equal distance keeps the lower depth. `ts` and `dir` are
+/// required. A side with no event is 404.
+#[tokio::test]
+async fn timestamp_to_event_picks_the_closest_event_in_each_direction() {
+    let remote = spawn_remote().await;
+    let server = federated_server(&remote).await;
+    let alice = server.register("alice").await;
+    let token = alice["access_token"].as_str().unwrap();
+    let room = server
+        .request(Method::POST, "/_matrix/client/v3/createRoom", Some(token), Some(json!({"preset": "public_chat"})), 200)
+        .await["room_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let joiner = "@r:remote.test";
+    federation_join(&server, &remote, REMOTE, &room, joiner).await;
+    let state = server
+        .request(Method::GET, &format!("/_matrix/client/v3/rooms/{}/state", enc(&room)), Some(token), None, 200)
+        .await;
+    let mut power_id = String::new();
+    let mut join_id = String::new();
+    for event in state.as_array().unwrap() {
+        match event["type"].as_str() {
+            Some("m.room.power_levels") => power_id = event["event_id"].as_str().unwrap().to_owned(),
+            Some("m.room.member") if event["state_key"] == joiner => {
+                join_id = event["event_id"].as_str().unwrap().to_owned();
+            }
+            _ => {}
+        }
+    }
+    assert!(!power_id.is_empty() && !join_id.is_empty(), "{state}");
+
+    let mut prev = join_id.clone();
+    let mut send_at = |ts: u64, depth: i64, txn_id: &'static str| {
+        let (id, pdu) = sign(
+            &remote,
+            Pdu::new(
+                &room,
+                joiner,
+                "m.room.message",
+                None,
+                json!({"msgtype": "m.text", "body": txn_id}),
+                ts,
+                vec![power_id.clone(), join_id.clone()],
+                vec![prev.clone()],
+                depth,
+            ),
+        );
+        prev = id.clone();
+        (id, pdu, txn_id)
+    };
+    let (early_id, early, early_txn) = send_at(1_000, 40, "early");
+    let (near_id, near, near_txn) = send_at(5_000, 41, "near");
+    let (tied_id, tied, tied_txn) = send_at(5_000, 42, "tied");
+    for (pdu, txn_id) in [(early, early_txn), (near, near_txn), (tied, tied_txn)] {
+        let result = fed(
+            &server,
+            &remote,
+            Method::PUT,
+            &format!("/_matrix/federation/v1/send/{txn_id}"),
+            Some(txn(vec![pdu], vec![])),
+            200,
+        )
+        .await;
+        assert!(
+            result["pdus"].as_object().unwrap().values().all(|value| value == &json!({})),
+            "{txn_id}: {result}"
+        );
+    }
+
+    let ask = |query: &str, status: u16| {
+        let path = format!("/_matrix/federation/v1/timestamp_to_event/{}?{query}", enc(&room));
+        let server = &server;
+        let remote = &remote;
+        async move { fed(server, remote, Method::GET, &path, None, status).await }
+    };
+    let found = ask("ts=1000&dir=f", 200).await;
+    assert_eq!(found["event_id"], early_id, "{found}");
+    assert_eq!(found["origin_server_ts"], 1000, "{found}");
+    let backward = ask("ts=3000&dir=b", 200).await;
+    assert_eq!(backward["event_id"], early_id, "{backward}");
+    assert_eq!(backward["origin_server_ts"], 1000, "{backward}");
+    let forward = ask("ts=3000&dir=f", 200).await;
+    assert_eq!(forward["event_id"], near_id, "{forward}");
+    assert_eq!(forward["origin_server_ts"], 5000, "{forward}");
+    let tie = ask("ts=5000&dir=b", 200).await;
+    assert_eq!(tie["event_id"], near_id, "lower depth wins an equal timestamp: {tie} vs {tied_id}");
+    assert_eq!(tie["origin_server_ts"], 5000, "{tie}");
+
+    assert_eq!(ask("ts=50&dir=b", 404).await["errcode"], "M_NOT_FOUND");
+    assert_eq!(ask("ts=32503680000000&dir=f", 404).await["errcode"], "M_NOT_FOUND");
+    assert_eq!(ask("dir=f", 400).await["errcode"], "M_INVALID_PARAM");
+    assert_eq!(ask("ts=1000", 400).await["errcode"], "M_INVALID_PARAM");
+    assert_eq!(ask("ts=1000&dir=z", 400).await["errcode"], "M_INVALID_PARAM");
+    let unknown = fed(
+        &server,
+        &remote,
+        Method::GET,
+        "/_matrix/federation/v1/timestamp_to_event/!missing:remote.test?ts=1000&dir=f",
+        None,
+        404,
+    )
+    .await;
+    assert_eq!(unknown["errcode"], "M_NOT_FOUND", "{unknown}");
+
+    let unsigned = server
+        .http
+        .get(format!(
+            "{}/_matrix/federation/v1/timestamp_to_event/{}?ts=1000&dir=f",
+            server.base_url,
+            enc(&room)
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unsigned.status().as_u16(), 401);
+}
+
 fn remote_key_document(remote: &Remote) -> Value {
     let unsigned = json!({
         "server_name": REMOTE,
