@@ -918,7 +918,7 @@ async fn require_password_uia<S: AuthState>(state: &S, user_id: &str, auth: Opti
     match super::verify_password(password.to_owned(), hash).await {
         Ok(true) => {
             if let Some(session) = auth["session"].as_str() {
-                super::uia::mark_session_used(session);
+                super::uia::mark_session_used(state, session).await;
             }
             None
         }

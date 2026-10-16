@@ -24,9 +24,9 @@
         "total": 164
       },
       "requirement": {
-        "implemented+tested": 74,
+        "implemented+tested": 76,
         "implemented-untested": 0,
-        "partial": 3,
+        "partial": 1,
         "missing": 0,
         "not-applicable": 9,
         "total": 86
@@ -6865,26 +6865,28 @@
       "title": "User-Interactive Authentication API (flows, session, stages, fallback)",
       "source": "https://spec.matrix.org/v1.19/client-server-api/#user-interactive-authentication-api",
       "role": "homeserver",
-      "status": "partial",
+      "status": "implemented+tested",
       "code": [
         {
           "loc": "conduit-server/src/api/client/uia.rs"
         },
         {
           "loc": "conduit-server/src/api/client/auth_fallback.rs"
+        },
+        {
+          "loc": "conduit-server/migrations/0094_uia_sessions.sql"
         }
       ],
       "tests": [
         "conduit-server/tests/production_account.rs::production_device_lifecycle_with_uia_keys_and_device_lists",
         "conduit-server/tests/production_account.rs::production_password_fallback_page_completes_uia",
-        "conduit-server/tests/production_account.rs::homeserver_validated_threepids_require_the_delivered_token"
+        "conduit-server/tests/production_account.rs::homeserver_validated_threepids_require_the_delivered_token",
+        "conduit-server/tests/production_account.rs::production_uia_session_survives_restart_and_passwordless_accounts_are_not_dummy",
+        "conduit-server/tests/sso.rs::sso_fallback_completes_uia_for_passwordless_account"
       ],
-      "tests_total": 3,
-      "gap_beads": [
-        "conduit-y99.18.2",
-        "conduit-vfm"
-      ],
-      "notes": "Password, dummy, registration_token, and (when CONDUIT_THREEPID_SINK is set) email.identity and msisdn stages, with fallback pages. Passwordless accounts get m.login.dummy (y99.18.2). Sessions stay in process memory (conduit-vfm)."
+      "tests_total": 5,
+      "gap_beads": [],
+      "notes": "Password, dummy (registration only), registration_token, m.login.sso, io.identikey.auth, and (when CONDUIT_THREEPID_SINK is set) email.identity and msisdn stages, with fallback pages. Password accounts re-prove m.login.password. Passwordless device deletion, deactivation, and get_token offer m.login.sso when SSO is configured and io.identikey.auth, never only m.login.dummy. Sessions live in uia_sessions and survive a process restart."
     },
     {
       "id": "cs.auth.uia.token-registration",
@@ -8189,21 +8191,23 @@
       "title": "SSO client login/authentication (login redirect, callback, SSO during UIA)",
       "source": "https://spec.matrix.org/v1.19/client-server-api/#sso-client-loginauthentication",
       "role": "homeserver",
-      "status": "partial",
+      "status": "implemented+tested",
       "code": [
         {
           "loc": "conduit-server/src/api/client/sso.rs"
+        },
+        {
+          "loc": "conduit-server/src/api/client/auth_fallback.rs"
         }
       ],
       "tests": [
         "conduit-server/tests/sso.rs::sso_redirect_302_to_op",
-        "conduit-server/tests/sso.rs::login_token_roundtrip"
+        "conduit-server/tests/sso.rs::login_token_roundtrip",
+        "conduit-server/tests/sso.rs::sso_fallback_completes_uia_for_passwordless_account"
       ],
-      "tests_total": 2,
-      "gap_beads": [
-        "conduit-y99.18.2"
-      ],
-      "notes": "SSO login tested; SSO during UIA (/auth/m.login.sso/fallback/web) not offered (y99.18.2)."
+      "tests_total": 3,
+      "gap_beads": [],
+      "notes": "SSO login redirect and one-shot m.login.token. During UIA, GET /auth/m.login.sso/fallback/web redirects to the provider; the callback completes that stage and serves onAuthDone. An unlinked subject does not complete the stage. The client retries with only the session id."
     },
     {
       "id": "cs.mod.direct-messaging",

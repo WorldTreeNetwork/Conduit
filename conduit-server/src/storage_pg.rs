@@ -20,7 +20,7 @@ use conduit::{
         RefreshTokenRecord,
         Account, AuditEntry, Device, DirectoryScope, DlqEntry, MediaMetadata, OutboundEntry,
         Pusher, PushRule, RoomKeyVersion, SigningKey, Storage, ThumbnailMetadata,
-        ToDeviceMessage, TokenOwner, UserDirectoryEntry,
+        ToDeviceMessage, TokenOwner, UiaSessionRecord, UserDirectoryEntry,
     },
 };
 
@@ -98,6 +98,28 @@ fn map_sqlx(e: sqlx::Error) -> Error {
         }
     }
     Error::Storage(e.to_string())
+}
+
+fn json_strings(value: &Value) -> Result<Vec<String>> {
+    value
+        .as_array()
+        .ok_or_else(|| Error::Storage("uia session list is not an array".into()))?
+        .iter()
+        .map(|item| {
+            item.as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| Error::Storage("uia session list entry is not a string".into()))
+        })
+        .collect()
+}
+
+fn json_flows(value: &Value) -> Result<Vec<Vec<String>>> {
+    value
+        .as_array()
+        .ok_or_else(|| Error::Storage("uia flows are not an array".into()))?
+        .iter()
+        .map(json_strings)
+        .collect()
 }
 
 fn media_from_row(row: &sqlx::postgres::PgRow) -> Result<MediaMetadata> {
@@ -764,6 +786,88 @@ impl Storage for PostgresStorage {
             avatar_url: r.avatar_url,
             is_guest: r.is_guest,
         }))
+    }
+
+    async fn put_uia_session(&self, session_id: &str, session: &UiaSessionRecord) -> Result<()> {
+        let flows = serde_json::to_value(&session.flows)
+            .map_err(|e| Error::Storage(format!("uia flows: {e}")))?;
+        let completed = serde_json::to_value(&session.completed)
+            .map_err(|e| Error::Storage(format!("uia completed: {e}")))?;
+        sqlx::query(
+            r#"
+            INSERT INTO uia_sessions
+                (session_id, operation, user_id, flows, params, completed, threepid, expires_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            ON CONFLICT (session_id) DO UPDATE SET
+                operation = EXCLUDED.operation,
+                user_id = EXCLUDED.user_id,
+                flows = EXCLUDED.flows,
+                params = EXCLUDED.params,
+                completed = EXCLUDED.completed,
+                threepid = EXCLUDED.threepid,
+                expires_at = EXCLUDED.expires_at
+            "#,
+        )
+        .bind(session_id)
+        .bind(&session.operation)
+        .bind(&session.user_id)
+        .bind(flows)
+        .bind(&session.params)
+        .bind(completed)
+        .bind(&session.threepid)
+        .bind(session.expires_at_unix)
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(())
+    }
+
+    async fn get_uia_session(&self, session_id: &str) -> Result<Option<UiaSessionRecord>> {
+        let row = sqlx::query(
+            r#"
+            SELECT operation, user_id, flows, params, completed, threepid, expires_at
+            FROM uia_sessions
+            WHERE session_id = $1
+            "#,
+        )
+        .bind(session_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let expires_at: i64 = row.try_get("expires_at").map_err(map_sqlx)?;
+        if expires_at <= Utc::now().timestamp() {
+            sqlx::query("DELETE FROM uia_sessions WHERE session_id = $1")
+                .bind(session_id)
+                .execute(&self.pool)
+                .await
+                .map_err(map_sqlx)?;
+            return Ok(None);
+        }
+        let flows: Value = row.try_get("flows").map_err(map_sqlx)?;
+        let completed: Value = row.try_get("completed").map_err(map_sqlx)?;
+        let params: Value = row.try_get("params").map_err(map_sqlx)?;
+        let threepid: Option<Value> = row.try_get("threepid").map_err(map_sqlx)?;
+        Ok(Some(UiaSessionRecord {
+            operation: row.try_get("operation").map_err(map_sqlx)?,
+            user_id: row.try_get("user_id").map_err(map_sqlx)?,
+            flows: json_flows(&flows)?,
+            params,
+            completed: json_strings(&completed)?,
+            threepid,
+            expires_at_unix: expires_at,
+        }))
+    }
+
+    async fn delete_uia_session(&self, session_id: &str) -> Result<()> {
+        sqlx::query("DELETE FROM uia_sessions WHERE session_id = $1")
+            .bind(session_id)
+            .execute(&self.pool)
+            .await
+            .map_err(map_sqlx)?;
+        Ok(())
     }
 
     async fn deactivate_account(&self, user_id: &str) -> Result<()> {

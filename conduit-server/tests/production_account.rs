@@ -1845,3 +1845,142 @@ async fn production_password_fallback_page_completes_uia() {
         .await;
     assert_eq!(r["errcode"], "M_UNKNOWN");
 }
+
+fn account_stages(body: &Value) -> Vec<Vec<String>> {
+    body["flows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|flow| {
+            flow["stages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|stage| stage.as_str().unwrap().to_owned())
+                .collect()
+        })
+        .collect()
+}
+
+fn assert_passwordless_reauth(body: &Value) {
+    let stages = account_stages(body);
+    assert!(!stages.is_empty(), "{body}");
+    assert!(
+        stages.iter().all(|flow| flow != &vec!["m.login.dummy".to_owned()]),
+        "passwordless account was offered only m.login.dummy: {body}"
+    );
+    assert!(
+        stages.iter().flatten().all(|stage| stage != "m.login.dummy"),
+        "passwordless account operation offered m.login.dummy: {body}"
+    );
+    assert!(
+        stages.iter().any(|flow| flow.iter().any(|stage| stage == "io.identikey.auth" || stage == "m.login.sso")),
+        "passwordless account was not offered a real re-auth stage: {body}"
+    );
+}
+
+#[tokio::test]
+async fn production_uia_session_survives_restart_and_passwordless_accounts_are_not_dummy() {
+    let mut server = Server::new().await;
+    let alice = server.register("alice").await;
+    let phone = login(&server, "alice", PASSWORD, json!({"device_id": "PHONE"})).await;
+    let challenge = server
+        .request(
+            Method::DELETE,
+            "/_matrix/client/v3/devices/PHONE",
+            Some(token(&alice)),
+            Some(json!({})),
+            401,
+        )
+        .await;
+    assert_eq!(challenge["flows"], json!([{"stages": ["m.login.password"]}]));
+    let session = challenge["session"].clone();
+
+    server.stop();
+    server.start().await;
+    server
+        .request(Method::GET, "/_matrix/client/v3/account/whoami", Some(token(&alice)), None, 200)
+        .await;
+    server
+        .request(
+            Method::DELETE,
+            "/_matrix/client/v3/devices/PHONE",
+            Some(token(&alice)),
+            Some(json!({"auth": password_auth("alice", PASSWORD, &session)})),
+            200,
+        )
+        .await;
+    server
+        .request(Method::GET, "/_matrix/client/v3/account/whoami", Some(token(&phone)), None, 401)
+        .await;
+
+    let pool = sqlx::PgPool::connect(&server.database_url).await.unwrap();
+    sqlx::query("UPDATE accounts SET password_hash = NULL WHERE user_id = $1")
+        .bind("@alice:production.test")
+        .execute(&pool)
+        .await
+        .unwrap();
+    pool.close().await;
+
+    let get_token = server
+        .request(
+            Method::POST,
+            "/_matrix/client/v1/login/get_token",
+            Some(token(&alice)),
+            Some(json!({})),
+            401,
+        )
+        .await;
+    assert_passwordless_reauth(&get_token);
+    assert!(
+        account_stages(&get_token).iter().any(|flow| flow == &vec!["io.identikey.auth".to_owned()]),
+        "{get_token}"
+    );
+    let saved = get_token["session"].clone();
+    server.stop();
+    server.start().await;
+    let resumed = server
+        .request(
+            Method::POST,
+            "/_matrix/client/v1/login/get_token",
+            Some(token(&alice)),
+            Some(json!({"auth": {"session": saved}})),
+            401,
+        )
+        .await;
+    assert_eq!(resumed["session"], saved);
+    assert!(resumed.get("errcode").is_none(), "restarted server forgot the session: {resumed}");
+    assert_passwordless_reauth(&resumed);
+
+    let deactivate = server
+        .request(
+            Method::POST,
+            "/_matrix/client/v3/account/deactivate",
+            Some(token(&alice)),
+            Some(json!({})),
+            401,
+        )
+        .await;
+    assert_passwordless_reauth(&deactivate);
+    let delete = server
+        .request(
+            Method::POST,
+            "/_matrix/client/v3/delete_devices",
+            Some(token(&alice)),
+            Some(json!({"devices": [alice["device_id"]]})),
+            401,
+        )
+        .await;
+    assert_passwordless_reauth(&delete);
+
+    let registration = server
+        .request(
+            Method::POST,
+            "/_matrix/client/v3/register",
+            None,
+            Some(json!({"username": "bob", "password": PASSWORD})),
+            401,
+        )
+        .await;
+    assert!(account_stages(&registration).iter().any(|flow| flow == &vec!["m.login.dummy".to_owned()]));
+}

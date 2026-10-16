@@ -16,7 +16,7 @@ Statuses: **tested** = present and asserted by a named test; **untested** = pres
 | API | kind | tested | untested | partial | missing | n/a | total |
 |---|---|---:|---:|---:|---:|---:|---:|
 | Client-Server API | endpoints | 163 | 0 | 0 | 0 | 1 | 164 |
-| Client-Server API | requirements | 74 | 0 | 3 | 0 | 9 | 86 |
+| Client-Server API | requirements | 76 | 0 | 1 | 0 | 9 | 86 |
 | Server-Server API | endpoints | 23 | 2 | 6 | 4 | 1 | 36 |
 | Server-Server API | requirements | 15 | 0 | 14 | 9 | 3 | 41 |
 | Application Service API | endpoints | 11 | 0 | 0 | 0 | 0 | 11 |
@@ -27,7 +27,7 @@ Statuses: **tested** = present and asserted by a named test; **untested** = pres
 | Identity Service API (homeserver as consumer) | requirements | 1 | 0 | 0 | 0 | 0 | 1 |
 | Room versions 1–12 | requirements | 61 | 0 | 0 | 0 | 0 | 61 |
 | Appendices | requirements | 10 | 0 | 3 | 4 | 4 | 21 |
-| All |  | 381 | 2 | 28 | 17 | 37 | 465 |
+| All |  | 383 | 2 | 26 | 17 | 37 | 465 |
 ## Gap beads
 
 New beads filed by this inventory (children of `conduit-y99`):
@@ -65,14 +65,14 @@ In-flight / pre-existing beads referenced (not duplicated):
 - `conduit-kqy` - federation knock (rv7+) (2 row(s))
 - `conduit-nq5` - keys/query merges cross-signing signatures (2 row(s))
 - `conduit-s6m` - state res v2 strictness + per-event visibility (1 row(s))
-- `conduit-vfm` - distributed UIA session store (1 row(s))
+- `conduit-vfm` - distributed UIA session store (0 row(s))
 - `conduit-y99.13` - sync membership/state/pagination semantics (4 row(s))
 - `conduit-y99.13.4` - structured filters across sync streams (3 row(s))
 - `conduit-y99.14` - device-list visibility and key identities (7 row(s))
 - `conduit-y99.15` - threaded receipts, fully-read markers, typing (1 row(s))
 - `conduit-y99.16` - commit-ordered sync cursors (2 row(s))
 - `conduit-y99.18.1` - AS device create/delete (0 row(s))
-- `conduit-y99.18.2` - UIA for passwordless accounts (2 row(s))
+- `conduit-y99.18.2` - UIA for passwordless accounts (0 row(s))
 - `conduit-y99.18.3` - deactivation erase serving (0 row(s))
 - `conduit-y99.18.4` - remove guests when guest_access changes (0 row(s))
 - `conduit-y99.19.2` - space hierarchy over federation (0 row(s))
@@ -278,7 +278,7 @@ In-flight / pre-existing beads referenced (not duplicated):
 | `cs.discovery.well-known` | [Well-known URIs (client, support)](https://spec.matrix.org/v1.19/client-server-api/#well-known-uris) | tested | `conduit-server/src/api/client/well_known.rs` | `production_account.rs::production_well_known_defaults_and_cors`<br>`production_account.rs::production_well_known_configured` |  |  |
 | `cs.discovery.versions` | [API versions (/versions accuracy, unstable_features)](https://spec.matrix.org/v1.19/client-server-api/#api-versions) | tested | `conduit/src/api.rs SUPPORTED_VERSIONS`<br>`conduit-server/src/api/client/standards.rs` | `production_basics.rs::versions_advertise_v1_19_and_unstable_features` |  |  |
 | `cs.auth.api-discovery` | [Authentication API discovery (legacy vs OAuth 2.0)](https://spec.matrix.org/v1.19/client-server-api/#authentication-api-discovery) | tested | `conduit-server/src/api/client/standards.rs` | `production_basics.rs::auth_metadata_reports_oauth_unsupported` |  | Legacy API served (GET /login flows); auth_metadata answers 404 M_UNRECOGNIZED. |
-| `cs.auth.uia` | [User-Interactive Authentication API (flows, session, stages, fallback)](https://spec.matrix.org/v1.19/client-server-api/#user-interactive-authentication-api) | partial | `conduit-server/src/api/client/uia.rs`<br>`conduit-server/src/api/client/auth_fallback.rs` | `production_account.rs::production_device_lifecycle_with_uia_keys_and_device_lists`<br>`production_account.rs::production_password_fallback_page_completes_uia`<br>`production_account.rs::homeserver_validated_threepids_require_the_delivered_token` | `conduit-y99.18.2` `conduit-vfm` | Password, dummy, registration_token, and (when the sink is set) email.identity and msisdn stages. Passwordless accounts get m.login.dummy (y99.18.2). Sessions stay in process memory (conduit-vfm). |
+| `cs.auth.uia` | [User-Interactive Authentication API (flows, session, stages, fallback)](https://spec.matrix.org/v1.19/client-server-api/#user-interactive-authentication-api) | tested | `conduit-server/src/api/client/uia.rs`<br>`conduit-server/src/api/client/auth_fallback.rs`<br>`conduit-server/migrations/0094_uia_sessions.sql` | `production_account.rs::production_device_lifecycle_with_uia_keys_and_device_lists`<br>`production_account.rs::production_password_fallback_page_completes_uia`<br>`production_account.rs::homeserver_validated_threepids_require_the_delivered_token`<br>`production_account.rs::production_uia_session_survives_restart_and_passwordless_accounts_are_not_dummy`<br>`sso.rs::sso_fallback_completes_uia_for_passwordless_account` |  | Password accounts re-prove m.login.password. Passwordless device deletion, deactivation, and get_token offer m.login.sso (when configured) and io.identikey.auth, never only m.login.dummy. Registration still uses dummy. Sessions in uia_sessions survive a process restart. |
 | `cs.auth.uia.token-registration` | [m.login.registration_token stage](https://spec.matrix.org/v1.19/client-server-api/#token-authenticated-registration) | tested | `conduit-server/src/api/client/registration.rs` | `production_account.rs::production_registration_tokens_gate_registration` |  |  |
 | `cs.auth.uia.terms` | [m.login.terms stage (optional for servers with ToS)](https://spec.matrix.org/v1.19/client-server-api/#terms-of-service-at-registration) | n/a |  |  |  | *optional* Optional; only required when the server has terms to accept. Conduit has none. |
 | `cs.auth.uia.recaptcha` | [m.login.recaptcha stage](https://spec.matrix.org/v1.19/client-server-api/#google-recaptcha) | n/a |  |  |  | *optional* Optional stage; Conduit does not offer captcha registration. |
@@ -334,7 +334,7 @@ In-flight / pre-existing beads referenced (not duplicated):
 | `cs.mod.client-config` | [Client config (account data; 405 for m.fully_read/m.push_rules)](https://spec.matrix.org/v1.19/client-server-api/#client-config) | tested | `conduit-server/src/api/client/account_data.rs` | `presence.rs::account_data_per_room_round_trip`<br>`production_basics.rs::server_managed_account_data_is_rejected_with_405` |  | 405 M_BAD_JSON for m.fully_read/m.push_rules, global and per-room. |
 | `cs.mod.server-admin` | [Server administration (whois, lock, suspend)](https://spec.matrix.org/v1.19/client-server-api/#server-administration) | tested | `conduit-server/src/api/client/account.rs (whois)`<br>`conduit-server/src/api/client/moderation.rs` | `production_account.rs::production_whois_reports_sessions_to_self_and_admins`<br>`production_modules.rs::admin_lock_endpoints_and_locked_account_enforcement` (+1) |  | whois, lock, suspend. Conduit admin API also under /_matrix/conduit/admin/v1 (non-spec). |
 | `cs.mod.event-context` | [Event context](https://spec.matrix.org/v1.19/client-server-api/#event-context) | tested | `conduit-server/src/api/client/room_content/events.rs` | `production_rooms.rs::events_members_context_and_joined_rooms` |  |  |
-| `cs.mod.sso` | [SSO client login/authentication (login redirect, callback, SSO during UIA)](https://spec.matrix.org/v1.19/client-server-api/#sso-client-loginauthentication) | partial | `conduit-server/src/api/client/sso.rs` | `sso.rs::sso_redirect_302_to_op`<br>`sso.rs::login_token_roundtrip` | `conduit-y99.18.2` | SSO login tested; SSO during UIA (/auth/m.login.sso/fallback/web) not offered (y99.18.2). |
+| `cs.mod.sso` | [SSO client login/authentication (login redirect, callback, SSO during UIA)](https://spec.matrix.org/v1.19/client-server-api/#sso-client-loginauthentication) | tested | `conduit-server/src/api/client/sso.rs`<br>`conduit-server/src/api/client/auth_fallback.rs` | `sso.rs::sso_redirect_302_to_op`<br>`sso.rs::login_token_roundtrip`<br>`sso.rs::sso_fallback_completes_uia_for_passwordless_account` |  | Login redirect and m.login.token. During UIA, GET /auth/m.login.sso/fallback/web redirects to the provider; the callback completes that stage and serves onAuthDone. An unlinked subject does not complete the stage. |
 | `cs.mod.direct-messaging` | [Direct messaging (is_direct on createRoom invites)](https://spec.matrix.org/v1.19/client-server-api/#direct-messaging) | tested | `conduit-server/src/api/client/rooms.rs (create_room is_direct)`<br>`conduit/src/room/mod.rs` | `production_modules.rs::turn_openid_cors_direct_invites_and_unban` |  | createRoom is_direct sets is_direct on the invite member event, visible in the invitee invite_state. |
 | `cs.mod.ignoring-users` | [Ignoring users (m.ignored_user_list filtering)](https://spec.matrix.org/v1.19/client-server-api/#ignoring-users) | tested | `conduit-server/src/api/client/sync.rs`<br>`conduit-server/src/api/client/room_content/serve.rs` | `production_rooms.rs::ignored_users_are_filtered_from_sync_messages_and_invites` |  |  |
 | `cs.mod.invite-permission` | [Invite permission (M_INVITE_BLOCKED)](https://spec.matrix.org/v1.19/client-server-api/#invite-permission) | tested | `conduit-server/src/api/client/room_membership.rs`<br>`conduit-server/src/federation/server.rs` | `production_basics.rs::invite_blocking_rejects_invites_and_hides_pending_ones`<br>`production_pdu.rs::blocked_invitee_rejects_federation_invites_on_v1_and_v2` |  | `default_action=block` returns 403 `M_INVITE_BLOCKED` on client invite, createRoom, member state, and federation v1 and v2 invite. A refused federation invite is not stored. Pending invites stay hidden from `/sync` until blocking is cleared. |

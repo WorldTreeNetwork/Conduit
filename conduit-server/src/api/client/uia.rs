@@ -2,22 +2,21 @@
 //!
 //! <https://spec.matrix.org/v1.19/client-server-api/#user-interactive-authentication-api>
 //!
-//! Sessions live in process memory (single-node homeserver).  A session
-//! is bound to the operation that created it and, once known, to the
-//! user it authenticates: replaying a session against another endpoint
-//! or another user is refused.  Completed stages are remembered, so a
-//! retry of a completed stage either succeeds (flow complete) or reports
-//! the completed stages again — never re-runs the stage.  Sessions are
-//! deleted once the operation is authorised, so every protected request
-//! (notably `/login/get_token`) re-prompts.
+//! A session is stored with the homeserver data, so a restarted process
+//! can still finish it.  It is bound to the operation that created it
+//! and, once known, to the user it authenticates: replaying a session
+//! against another endpoint or another user is refused.  Completed
+//! stages are remembered, so a retry of a completed stage either
+//! succeeds (flow complete) or reports the completed stages again —
+//! never re-runs the stage.  Sessions are deleted once the operation is
+//! authorised, so every protected request (notably `/login/get_token`)
+//! re-prompts.
 //!
 //! Supported stages: `m.login.password`, `m.login.dummy`,
-//! `m.login.registration_token`, and, when a validation sink is
-//! configured, `m.login.email.identity` and `m.login.msisdn`.
-
-use std::collections::HashMap;
-use std::sync::Mutex;
-use std::time::{Duration, Instant};
+//! `m.login.registration_token`, `m.login.sso` (completed by the
+//! fallback, not by the client naming the type), `io.identikey.auth`,
+//! and, when a validation sink is configured, `m.login.email.identity`
+//! and `m.login.msisdn`.
 
 use axum::{
     http::StatusCode,
@@ -28,16 +27,20 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use rand::RngCore;
 use serde_json::{json, Value};
 
+use conduit::storage::UiaSessionRecord;
+
 use super::account_config::AccountConfig;
-use super::{verify_password, AuthState, MatrixError};
+use super::{now_unix, verify_password, AuthState, MatrixError};
 
 pub const PASSWORD: &str = "m.login.password";
 pub const DUMMY: &str = "m.login.dummy";
 pub const REGISTRATION_TOKEN: &str = "m.login.registration_token";
 pub const EMAIL_IDENTITY: &str = "m.login.email.identity";
 pub const MSISDN: &str = "m.login.msisdn";
+pub const SSO: &str = "m.login.sso";
+pub const IDENTIKEY: &str = "io.identikey.auth";
 
-const SESSION_TTL: Duration = Duration::from_secs(30 * 60);
+const SESSION_TTL_SECS: i64 = 30 * 60;
 
 #[derive(Debug, Clone)]
 struct Session {
@@ -46,20 +49,74 @@ struct Session {
     flows: Vec<Vec<String>>,
     params: Value,
     completed: Vec<String>,
-    created: Instant,
+    expires_at_unix: i64,
     threepid: Option<super::threepid_validation::ValidatedThreepid>,
 }
 
-static SESSIONS: Mutex<Option<HashMap<String, Session>>> = Mutex::new(None);
+fn to_record(session: &Session) -> UiaSessionRecord {
+    UiaSessionRecord {
+        operation: session.operation.clone(),
+        user_id: session.user_id.clone(),
+        flows: session.flows.clone(),
+        params: session.params.clone(),
+        completed: session.completed.clone(),
+        threepid: session.threepid.as_ref().map(|proved| {
+            json!({
+                "medium": proved.medium,
+                "address": proved.address,
+                "validated_at": proved.validated_at,
+            })
+        }),
+        expires_at_unix: session.expires_at_unix,
+    }
+}
 
-fn with_sessions<F, R>(f: F) -> R
-where
-    F: FnOnce(&mut HashMap<String, Session>) -> R,
-{
-    let mut guard = SESSIONS.lock().unwrap_or_else(|p| p.into_inner());
-    let map = guard.get_or_insert_with(HashMap::new);
-    map.retain(|_, s| s.created.elapsed() < SESSION_TTL);
-    f(map)
+fn from_record(record: UiaSessionRecord) -> Session {
+    let threepid = record.threepid.as_ref().and_then(|value| {
+        Some(super::threepid_validation::ValidatedThreepid {
+            medium: value.get("medium")?.as_str()?.to_owned(),
+            address: value.get("address")?.as_str()?.to_owned(),
+            validated_at: value.get("validated_at")?.as_i64()?,
+        })
+    });
+    Session {
+        operation: record.operation,
+        user_id: record.user_id,
+        flows: record.flows,
+        params: record.params,
+        completed: record.completed,
+        expires_at_unix: record.expires_at_unix,
+        threepid,
+    }
+}
+
+async fn load_session<S: AuthState>(state: &S, session_id: &str) -> Result<Option<Session>, String> {
+    state
+        .storage()
+        .get_uia_session(session_id)
+        .await
+        .map(|found| found.map(from_record))
+        .map_err(|e| e.to_string())
+}
+
+async fn store_session<S: AuthState>(state: &S, session_id: &str, session: &Session) -> Result<(), String> {
+    state
+        .storage()
+        .put_uia_session(session_id, &to_record(session))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+async fn drop_session<S: AuthState>(state: &S, session_id: &str) -> Result<(), String> {
+    state
+        .storage()
+        .delete_uia_session(session_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+fn storage_failure(error: String) -> Response {
+    MatrixError::unknown(error).into_response()
 }
 
 fn random_id() -> String {
@@ -75,8 +132,8 @@ pub fn new_session_id() -> String {
 }
 
 /// Forget a session.
-pub fn mark_session_used(session_id: &str) {
-    with_sessions(|s| s.remove(session_id));
+pub async fn mark_session_used<S: AuthState>(state: &S, session_id: &str) {
+    let _ = drop_session(state, session_id).await;
 }
 
 /// What an endpoint requires.
@@ -116,14 +173,22 @@ pub struct UiaPassed {
 
 /// The flows protecting an account operation for `user_id`.
 ///
-/// Accounts with a password re-prove it.  Accounts without one
-/// (identikey / SSO only) have no re-authentication stage this server
-/// can run yet, so they are offered `m.login.dummy`: possession of a
-/// valid access token is the proof (tracked as a follow-up).
+/// Accounts with a password re-prove it.  Accounts without one are not
+/// offered `m.login.dummy`: an access token is not a second factor.
+/// They re-prove with `m.login.sso` when this server has an SSO client,
+/// and with `io.identikey.auth`.  Registration still uses `m.login.dummy`
+/// as its own flow; that path does not call this function.
 pub async fn account_flows<S: AuthState>(state: &S, user_id: &str) -> Vec<Vec<&'static str>> {
     match state.storage().get_account(user_id).await {
         Ok(Some(a)) if a.password_hash.is_some() => vec![vec![PASSWORD]],
-        _ => vec![vec![DUMMY]],
+        _ => {
+            let mut flows = Vec::new();
+            if state.oidc_sso().is_some() {
+                flows.push(vec![SSO]);
+            }
+            flows.push(vec![IDENTIKEY]);
+            flows
+        }
     }
 }
 
@@ -234,6 +299,32 @@ async fn run_stage<S: AuthState>(
                 return Err(("M_FORBIDDEN", "Invalid registration token".into()));
             }
         }
+        SSO => {
+            return Err((
+                "M_FORBIDDEN",
+                "complete m.login.sso through the fallback page".into(),
+            ));
+        }
+        IDENTIKEY => {
+            let encoded = auth.get("response").and_then(Value::as_str).unwrap_or_default();
+            let bytes = URL_SAFE_NO_PAD
+                .decode(encoded)
+                .map_err(|_| ("M_FORBIDDEN", "response is not url-safe base64".to_owned()))?;
+            let logged_in = state
+                .identity_verifier()
+                .login(state.storage().as_ref(), &bytes, now_unix().max(0) as u64)
+                .await
+                .map_err(|e| ("M_FORBIDDEN", e.to_string()))?;
+            if let Some(expected) = &session.user_id {
+                if expected != &logged_in.user_id {
+                    return Err((
+                        "M_FORBIDDEN",
+                        "identifier does not match the authenticated user".into(),
+                    ));
+                }
+            }
+            session.user_id = Some(logged_in.user_id);
+        }
         EMAIL_IDENTITY | MSISDN => {
             let medium = if stage == EMAIL_IDENTITY { "email" } else { "msisdn" };
             let creds = auth.get("threepid_creds").cloned().unwrap_or(Value::Null);
@@ -278,7 +369,10 @@ pub async fn authenticate<S: AuthState>(
 
     let (session_id, mut session) = match session_id {
         Some(id) => {
-            let found = with_sessions(|m| m.get(&id).cloned());
+            let found = match load_session(state, &id).await {
+                Ok(found) => found,
+                Err(e) => return Err(storage_failure(e)),
+            };
             let Some(session) = found else {
                 return Err((
                     StatusCode::BAD_REQUEST,
@@ -309,7 +403,7 @@ pub async fn authenticate<S: AuthState>(
                 flows: req.flows.clone(),
                 params: req.params.clone(),
                 completed: Vec::new(),
-                created: Instant::now(),
+                expires_at_unix: now_unix().saturating_add(SESSION_TTL_SECS),
                 threepid: None,
             };
             (random_id(), session)
@@ -320,7 +414,9 @@ pub async fn authenticate<S: AuthState>(
     }
 
     let Some(auth) = auth else {
-        with_sessions(|m| m.insert(session_id.clone(), session.clone()));
+        if let Err(e) = store_session(state, &session_id, &session).await {
+            return Err(storage_failure(e));
+        }
         return Err(challenge(&session_id, &session, None));
     };
 
@@ -339,10 +435,14 @@ pub async fn authenticate<S: AuthState>(
     }
 
     if error.is_none() && flow_complete(&session) {
-        with_sessions(|m| m.remove(&session_id));
+        if let Err(e) = drop_session(state, &session_id).await {
+            return Err(storage_failure(e));
+        }
         return Ok(UiaPassed { user_id: session.user_id, threepid: session.threepid });
     }
-    with_sessions(|m| m.insert(session_id.clone(), session.clone()));
+    if let Err(e) = store_session(state, &session_id, &session).await {
+        return Err(storage_failure(e));
+    }
     Err(challenge(&session_id, &session, error))
 }
 
@@ -353,19 +453,21 @@ pub struct PendingSession {
     pub expects: Vec<String>,
 }
 
-pub fn pending(session_id: &str) -> Option<PendingSession> {
-    with_sessions(|m| {
-        m.get(session_id).map(|s| {
-            let done = s.completed.len();
-            let expects = s
-                .flows
-                .iter()
-                .filter(|f| f.len() > done && f[..done] == s.completed[..])
-                .map(|f| f[done].clone())
-                .collect();
-            PendingSession { user_id: s.user_id.clone(), expects }
-        })
-    })
+pub async fn pending<S: AuthState>(
+    state: &S,
+    session_id: &str,
+) -> Result<Option<PendingSession>, String> {
+    let Some(session) = load_session(state, session_id).await? else {
+        return Ok(None);
+    };
+    let done = session.completed.len();
+    let expects = session
+        .flows
+        .iter()
+        .filter(|f| f.len() > done && f[..done] == session.completed[..])
+        .map(|f| f[done].clone())
+        .collect();
+    Ok(Some(PendingSession { user_id: session.user_id.clone(), expects }))
 }
 
 /// Complete a stage out of band (the fallback web page).  The client
@@ -376,7 +478,7 @@ pub async fn complete_out_of_band<S: AuthState>(
     stage: &str,
     auth: &Value,
 ) -> Result<(), String> {
-    let Some(mut session) = with_sessions(|m| m.get(session_id).cloned()) else {
+    let Some(mut session) = load_session(state, session_id).await? else {
         return Err("Unknown or expired session".into());
     };
     if session.completed.iter().any(|c| c == stage) {
@@ -388,8 +490,35 @@ pub async fn complete_out_of_band<S: AuthState>(
     run_stage(state, &mut session, stage, auth)
         .await
         .map_err(|(_, msg)| msg)?;
-    with_sessions(|m| m.insert(session_id.to_owned(), session));
-    Ok(())
+    store_session(state, session_id, &session).await
+}
+
+/// Record a completed `m.login.sso` stage after the identity provider
+/// has authenticated `user_id`. The client cannot do this itself: posting
+/// `type: m.login.sso` is refused.
+pub async fn complete_sso_stage<S: AuthState>(
+    state: &S,
+    session_id: &str,
+    user_id: &str,
+) -> Result<(), String> {
+    let Some(mut session) = load_session(state, session_id).await? else {
+        return Err("Unknown or expired session".into());
+    };
+    if let Some(expected) = &session.user_id {
+        if expected != user_id {
+            return Err("identifier does not match the authenticated user".into());
+        }
+    } else {
+        session.user_id = Some(user_id.to_owned());
+    }
+    if session.completed.iter().any(|c| c == SSO) {
+        return Ok(());
+    }
+    if !stage_allowed(&session, SSO) {
+        return Err("m.login.sso is not expected for this session".into());
+    }
+    session.completed.push(SSO.to_owned());
+    store_session(state, session_id, &session).await
 }
 
 #[cfg(test)]
@@ -406,7 +535,7 @@ mod tests {
                 .collect(),
             params: json!({}),
             completed: completed.iter().map(|s| s.to_string()).collect(),
-            created: Instant::now(),
+            expires_at_unix: 0,
             threepid: None,
         }
     }

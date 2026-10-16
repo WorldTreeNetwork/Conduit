@@ -51,6 +51,9 @@ struct PendingAuth {
     code_verifier: String,
     client_redirect: String,
     created: Instant,
+    /// Set when this authorize round is completing a UIA stage rather
+    /// than issuing an `m.login.token`.
+    uia_session: Option<String>,
 }
 
 /// One-shot OAuth `state` → PKCE/nonce/Element redirectUrl.
@@ -136,6 +139,41 @@ pub async fn sso_redirect<S: AuthState>(
     start_sso(&state, query.redirect_url.as_deref()).await
 }
 
+/// `GET /_matrix/client/v3/auth/m.login.sso/fallback/web?session=`.
+///
+/// Starts the same authorize redirect as login SSO. The callback
+/// completes the UIA stage instead of minting a login token.
+pub async fn start_uia_sso<S: AuthState>(state: &S, uia_session: &str) -> Response {
+    let Some(client) = state.oidc_client() else {
+        return MatrixError::forbidden("oidc sso is not configured").into_response();
+    };
+    let Some(sso) = state.oidc_sso() else {
+        return MatrixError::forbidden("oidc sso is not configured").into_response();
+    };
+    let (oauth_state, nonce, pkce, authorize) = match authorize_request(&client, &sso) {
+        Ok(ready) => ready,
+        Err(resp) => return resp,
+    };
+    state
+        .sso_sessions()
+        .insert(
+            oauth_state,
+            PendingAuth {
+                nonce,
+                code_verifier: pkce.verifier,
+                client_redirect: String::new(),
+                created: Instant::now(),
+                uia_session: Some(uia_session.to_owned()),
+            },
+        )
+        .await;
+    (
+        StatusCode::FOUND,
+        [(axum::http::header::LOCATION, authorize)],
+    )
+        .into_response()
+}
+
 /// `GET /_matrix/client/v3/login/sso/redirect/:idpId`
 pub async fn sso_redirect_idp<S: AuthState>(
     State(state): State<S>,
@@ -163,28 +201,9 @@ async fn start_sso<S: AuthState>(state: &S, redirect_url: Option<&str>) -> Respo
         return MatrixError::forbidden("redirectUrl is not allowed").into_response();
     }
 
-    let pkce = match identikey_oidc_client::generate_pkce() {
-        Ok(p) => p,
-        Err(e) => return MatrixError::unknown(e.to_string()).into_response(),
-    };
-    let oauth_state = match identikey_oidc_client::generate_state() {
-        Ok(s) => s,
-        Err(e) => return MatrixError::unknown(e.to_string()).into_response(),
-    };
-    let nonce = match identikey_oidc_client::generate_state() {
-        Ok(s) => s,
-        Err(e) => return MatrixError::unknown(e.to_string()).into_response(),
-    };
-
-    let authorize = match client.authorize_url(&AuthorizeRequest {
-        client_id: sso.client_id.clone(),
-        redirect_uri: sso.redirect_uri.clone(),
-        state: oauth_state.clone(),
-        nonce: nonce.clone(),
-        code_challenge: pkce.challenge.clone(),
-    }) {
-        Ok(u) => u,
-        Err(e) => return MatrixError::unknown(e.to_string()).into_response(),
+    let (oauth_state, nonce, pkce, authorize) = match authorize_request(&client, &sso) {
+        Ok(ready) => ready,
+        Err(resp) => return resp,
     };
 
     state
@@ -196,6 +215,7 @@ async fn start_sso<S: AuthState>(state: &S, redirect_url: Option<&str>) -> Respo
                 code_verifier: pkce.verifier,
                 client_redirect: redirect_url.to_owned(),
                 created: Instant::now(),
+                uia_session: None,
             },
         )
         .await;
@@ -205,6 +225,28 @@ async fn start_sso<S: AuthState>(state: &S, redirect_url: Option<&str>) -> Respo
         [(axum::http::header::LOCATION, authorize)],
     )
         .into_response()
+}
+
+fn authorize_request(
+    client: &identikey_oidc_client::OidcClient,
+    sso: &OidcSsoConfig,
+) -> Result<(String, String, identikey_oidc_client::Pkce, String), Response> {
+    let pkce = identikey_oidc_client::generate_pkce()
+        .map_err(|e| MatrixError::unknown(e.to_string()).into_response())?;
+    let oauth_state = identikey_oidc_client::generate_state()
+        .map_err(|e| MatrixError::unknown(e.to_string()).into_response())?;
+    let nonce = identikey_oidc_client::generate_state()
+        .map_err(|e| MatrixError::unknown(e.to_string()).into_response())?;
+    let authorize = client
+        .authorize_url(&AuthorizeRequest {
+            client_id: sso.client_id.clone(),
+            redirect_uri: sso.redirect_uri.clone(),
+            state: oauth_state.clone(),
+            nonce: nonce.clone(),
+            code_challenge: pkce.challenge.clone(),
+        })
+        .map_err(|e| MatrixError::unknown(e.to_string()).into_response())?;
+    Ok((oauth_state, nonce, pkce, authorize))
 }
 
 /// `GET /_matrix/client/v3/login/identikey/callback`
@@ -268,6 +310,10 @@ pub async fn identikey_callback<S: AuthState>(
         }
     };
 
+    if let Some(uia_session) = pending.uia_session {
+        return finish_uia_sso(state, &uia_session, &identity.subject).await;
+    }
+
     let user_id = match provision_or_login(state.clone(), &identity.subject).await {
         Ok(u) => u,
         Err(resp) => return resp,
@@ -280,6 +326,31 @@ pub async fn identikey_callback<S: AuthState>(
         [(axum::http::header::LOCATION, dest)],
     )
         .into_response()
+}
+
+/// Finish `m.login.sso` for an existing UIA session. This does not create
+/// an account and does not issue a login token: the browser page tells
+/// the client the stage is done, and the client retries with the session.
+async fn finish_uia_sso<S: AuthState>(state: S, uia_session: &str, subject: &str) -> Response {
+    let user_id = match conduit::identity::login_oidc_subject(state.storage().as_ref(), subject).await {
+        Ok(logged_in) => logged_in.user_id,
+        Err(conduit::identity::IdentityError::Unlinked) => {
+            return html_error(StatusCode::FORBIDDEN, "identity is not linked to an account");
+        }
+        Err(e) => return html_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    };
+    match state.storage().get_account(&user_id).await {
+        Ok(Some(account)) if account.deactivated_at.is_some() => {
+            return html_error(StatusCode::FORBIDDEN, "account deactivated");
+        }
+        Ok(Some(_)) => {}
+        Ok(None) => return html_error(StatusCode::FORBIDDEN, "unknown user"),
+        Err(e) => return html_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    }
+    match super::uia::complete_sso_stage(&state, uia_session, &user_id).await {
+        Ok(()) => super::auth_fallback::auth_done_page(),
+        Err(e) => html_error(StatusCode::FORBIDDEN, &e),
+    }
 }
 
 /// Resolve a verified OIDC `sub` to an MXID. Linked subjects log in;

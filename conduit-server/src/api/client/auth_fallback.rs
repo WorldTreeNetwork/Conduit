@@ -6,7 +6,8 @@
 //!   POST /_matrix/client/v3/auth/{authType}/fallback/web   (form submit)
 //!
 //! Supported stages: `m.login.password`, `m.login.dummy`,
-//! `m.login.registration_token`.  On success the page runs the
+//! `m.login.registration_token`, and `m.login.sso`.  SSO is a redirect
+//! to the identity provider, not a form.  On success the page runs the
 //! spec-mandated `onAuthDone` / `postMessage("authDone")` script and the
 //! client resubmits its request with only the session ID.
 
@@ -19,7 +20,7 @@ use axum::{
 use serde::Deserialize;
 use serde_json::json;
 
-use super::{uia, AuthState};
+use super::{sso, uia, AuthState};
 
 #[derive(Debug, Deserialize)]
 pub struct FallbackQuery {
@@ -58,6 +59,15 @@ input,button{{padding:.6rem;font-size:1rem}}.error{{color:#b00020}}</style>\
 
 const DONE_SCRIPT: &str = "<script>\nif (window.onAuthDone) {\n    window.onAuthDone();\n} else if (window.opener && window.opener.postMessage) {\n    window.opener.postMessage(\"authDone\", \"*\");\n}\n</script>";
 
+/// The page the SSO callback serves once the UIA stage is complete.
+pub(crate) fn auth_done_page() -> Response {
+    page(
+        StatusCode::OK,
+        "Authentication complete",
+        &format!("<p>You may now close this window and return to the application.</p>{DONE_SCRIPT}"),
+    )
+}
+
 fn form(auth_type: &str, session: &str, error: Option<&str>) -> String {
     let err = error
         .map(|e| format!("<p class=\"error\" role=\"alert\">{}</p>", escape(e)))
@@ -90,16 +100,30 @@ fn unsupported(auth_type: &str) -> Response {
 }
 
 #[allow(clippy::result_large_err)]
-fn check_session(auth_type: &str, session: Option<&str>) -> Result<String, Response> {
+async fn check_session<S: AuthState>(
+    state: &S,
+    auth_type: &str,
+    session: Option<&str>,
+) -> Result<String, Response> {
     let Some(session) = session.filter(|s| !s.is_empty()) else {
         return Err(page(StatusCode::BAD_REQUEST, "Missing session", "<p>No session was given.</p>"));
     };
-    let Some(pending) = uia::pending(session) else {
-        return Err(page(
-            StatusCode::BAD_REQUEST,
-            "Unknown session",
-            "<p>This authentication session is unknown or has expired.</p>",
-        ));
+    let pending = match uia::pending(state, session).await {
+        Ok(Some(pending)) => pending,
+        Ok(None) => {
+            return Err(page(
+                StatusCode::BAD_REQUEST,
+                "Unknown session",
+                "<p>This authentication session is unknown or has expired.</p>",
+            ))
+        }
+        Err(e) => {
+            return Err(page(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Authentication",
+                &format!("<p>{}</p>", escape(&e)),
+            ))
+        }
     };
     if !pending.expects.iter().any(|s| s == auth_type) {
         return Err(page(
@@ -112,13 +136,21 @@ fn check_session(auth_type: &str, session: Option<&str>) -> Result<String, Respo
 }
 
 pub async fn fallback_page<S: AuthState>(
+    State(state): State<S>,
     Path(auth_type): Path<String>,
     Query(q): Query<FallbackQuery>,
 ) -> Response {
+    if auth_type == uia::SSO {
+        let session = match check_session(&state, &auth_type, q.session.as_deref()).await {
+            Ok(session) => session,
+            Err(r) => return r,
+        };
+        return sso::start_uia_sso(&state, &session).await;
+    }
     if !supported(&auth_type) {
         return unsupported(&auth_type);
     }
-    match check_session(&auth_type, q.session.as_deref()) {
+    match check_session(&state, &auth_type, q.session.as_deref()).await {
         Ok(session) => page(StatusCode::OK, "Authentication", &form(&auth_type, &session, None)),
         Err(r) => r,
     }
@@ -132,13 +164,22 @@ pub async fn fallback_submit<S: AuthState>(
     if !supported(&auth_type) {
         return unsupported(&auth_type);
     }
-    let session = match check_session(&auth_type, f.session.as_deref()) {
+    let session = match check_session(&state, &auth_type, f.session.as_deref()).await {
         Ok(s) => s,
         Err(r) => return r,
     };
     let auth = match auth_type.as_str() {
         uia::PASSWORD => {
-            let user = uia::pending(&session).and_then(|p| p.user_id);
+            let user = match uia::pending(&state, &session).await {
+                Ok(pending) => pending.and_then(|p| p.user_id),
+                Err(e) => {
+                    return page(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "Authentication",
+                        &format!("<p>{}</p>", escape(&e)),
+                    )
+                }
+            };
             let Some(user) = user else {
                 return page(
                     StatusCode::BAD_REQUEST,
@@ -159,11 +200,7 @@ pub async fn fallback_submit<S: AuthState>(
         _ => json!({ "type": uia::DUMMY }),
     };
     match uia::complete_out_of_band(&state, &session, &auth_type, &auth).await {
-        Ok(()) => page(
-            StatusCode::OK,
-            "Authentication complete",
-            &format!("<p>You may now close this window and return to the application.</p>{DONE_SCRIPT}"),
-        ),
+        Ok(()) => auth_done_page(),
         Err(e) => page(StatusCode::UNAUTHORIZED, "Authentication", &form(&auth_type, &session, Some(&e))),
     }
 }

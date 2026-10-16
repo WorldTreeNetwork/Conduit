@@ -175,6 +175,22 @@ pub struct Account {
     pub is_guest: bool,
 }
 
+/// One User-Interactive Authentication exchange.
+///
+/// `expires_at_unix` is seconds since the Unix epoch. Rows past that
+/// instant are treated as absent.
+#[derive(Debug, Clone)]
+pub struct UiaSessionRecord {
+    pub operation: String,
+    pub user_id: Option<String>,
+    pub flows: Vec<Vec<String>>,
+    pub params: Value,
+    pub completed: Vec<String>,
+    /// Homeserver-validated email or phone proof, when that stage passed.
+    pub threepid: Option<Value>,
+    pub expires_at_unix: i64,
+}
+
 /// A client device registered to a user.
 #[derive(Debug, Clone)]
 pub struct Device {
@@ -467,6 +483,15 @@ pub trait Storage: Send + Sync + 'static {
     ) -> Result<()>;
 
     async fn get_account(&self, user_id: &str) -> Result<Option<Account>>;
+
+    /// Insert or replace a UIA session. The row outlives the process.
+    async fn put_uia_session(&self, session_id: &str, session: &UiaSessionRecord) -> Result<()>;
+
+    /// The session, or `None` when it is missing or past `expires_at_unix`.
+    async fn get_uia_session(&self, session_id: &str) -> Result<Option<UiaSessionRecord>>;
+
+    /// Forget a UIA session. Missing rows are success.
+    async fn delete_uia_session(&self, session_id: &str) -> Result<()>;
 
     /// Mark the account as deactivated (soft-delete).
     async fn deactivate_account(&self, user_id: &str) -> Result<()>;
@@ -1766,6 +1791,8 @@ struct MemoryInner {
     event_positions: HashMap<String, i64>,
     event_next_position: i64,
     accounts: HashMap<String, Account>,
+    /// session_id → UIA exchange. Expired rows are dropped on read.
+    uia_sessions: HashMap<String, UiaSessionRecord>,
     /// (user_id, device_id) → Device
     devices: HashMap<(String, String), Device>,
     /// token_hash → (user_id, device_id, expires_at)
@@ -1856,6 +1883,7 @@ impl Default for MemoryInner {
             requests: HashMap::new(),
             transactions: HashMap::new(),
             accounts: HashMap::new(),
+            uia_sessions: HashMap::new(),
             devices: HashMap::new(),
             tokens: HashMap::new(),
             signing_keys: Vec::new(),
@@ -2149,6 +2177,34 @@ impl Storage for MemoryStorage {
 
     async fn get_account(&self, user_id: &str) -> Result<Option<Account>> {
         Ok(self.inner.read().await.accounts.get(user_id).cloned())
+    }
+
+    async fn put_uia_session(&self, session_id: &str, session: &UiaSessionRecord) -> Result<()> {
+        self.inner
+            .write()
+            .await
+            .uia_sessions
+            .insert(session_id.to_owned(), session.clone());
+        Ok(())
+    }
+
+    async fn get_uia_session(&self, session_id: &str) -> Result<Option<UiaSessionRecord>> {
+        let mut inner = self.inner.write().await;
+        let now = Utc::now().timestamp();
+        let expired = inner
+            .uia_sessions
+            .get(session_id)
+            .is_some_and(|session| session.expires_at_unix <= now);
+        if expired {
+            inner.uia_sessions.remove(session_id);
+            return Ok(None);
+        }
+        Ok(inner.uia_sessions.get(session_id).cloned())
+    }
+
+    async fn delete_uia_session(&self, session_id: &str) -> Result<()> {
+        self.inner.write().await.uia_sessions.remove(session_id);
+        Ok(())
     }
 
     async fn deactivate_account(&self, user_id: &str) -> Result<()> {
