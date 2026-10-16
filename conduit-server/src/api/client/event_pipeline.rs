@@ -14,6 +14,7 @@
 //! Returns the canonical `event_id` string on success.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::http::StatusCode;
@@ -117,11 +118,51 @@ async fn build_sign_and_persist_inner<S: AuthState>(
     state: &S, sender: &str, room_id: &str, type_: &str, state_key: Option<&str>, content: Value,
     transaction_key: Option<&conduit::storage::TransactionKey>,
 ) -> Result<String, (StatusCode, Json<MatrixError>)> {
-    let storage = state.storage();
-    let server_name = state.server_name();
     // Own joins carry the member's profile (spec §Profiles, conduit-y99.38).
     let content = super::profile::with_join_profile(state, sender, type_, state_key, content).await;
+    let revoke = state_key == Some("") && type_ == "m.room.guest_access";
+    let revoke_content = revoke.then(|| content.clone());
+    let event_id = author_event(
+        state.storage().as_ref(),
+        &state.server_key(),
+        state.server_name(),
+        state.events_tx(),
+        state.federation_client(),
+        sender,
+        room_id,
+        type_,
+        state_key,
+        content,
+        transaction_key,
+    ).await?;
+    if let Some(content) = revoke_content {
+        super::guest_access::after_state_event(
+            state.storage().as_ref(),
+            state.server_name(),
+            &RoomEventSenderWrapper(state),
+            room_id,
+            type_,
+            &content,
+        ).await;
+    }
+    Ok(event_id)
+}
 
+/// Sign and store one locally authored event. Callers that have an account
+/// profile pass content through [`super::profile::with_join_profile`] first.
+pub async fn author_event(
+    storage: &dyn conduit::storage::Storage,
+    server_key: &conduit::keys::ServerKey,
+    server_name: &str,
+    events_tx: &tokio::sync::broadcast::Sender<i64>,
+    federation: Option<&Arc<crate::federation::Client>>,
+    sender: &str,
+    room_id: &str,
+    type_: &str,
+    state_key: Option<&str>,
+    content: Value,
+    transaction_key: Option<&conduit::storage::TransactionKey>,
+) -> Result<String, (StatusCode, Json<MatrixError>)> {
     // PostgreSQL TEXT key columns cannot hold U+0000, and a U+FFFD stand-in
     // could merge two state keys, so refuse it before building the event.
     if type_.contains('\0') || state_key.is_some_and(|k| k.contains('\0')) {
@@ -179,7 +220,7 @@ async fn build_sign_and_persist_inner<S: AuthState>(
     // ------------------------------------------------------------------
     // Step 5 & 6 — content hash + sign (sign_event sets hashes internally)
     // ------------------------------------------------------------------
-    sign_authored(&mut event.pdu, &state.server_key(), server_name).map_err(|e| match e {
+    sign_authored(&mut event.pdu, server_key, server_name).map_err(|e| match e {
         SigningError::TooLarge { .. } => MatrixError::too_large("event exceeds the 65536-byte PDU limit"),
         e => MatrixError::unknown(format!("signing error: {e}")),
     })?;
@@ -201,7 +242,7 @@ async fn build_sign_and_persist_inner<S: AuthState>(
 
     // A room with an enabled policy server must have that server's
     // signature on the event before the event is stored or sent.
-    crate::federation::policy::ensure_policy_signature(state, &mut event).await?;
+    crate::federation::policy::ensure_policy_signature(storage, federation, &mut event).await?;
 
     // ------------------------------------------------------------------
     // Step 9 — persist
@@ -234,12 +275,7 @@ async fn build_sign_and_persist_inner<S: AuthState>(
     // ------------------------------------------------------------------
     if let Ok(pos) = storage.global_max_stream_position().await {
         // Ignore send errors: no subscribers is fine.
-        let _ = state.events_tx().send(pos);
-    }
-
-    // Revoking guest access removes local guests (conduit-y99.18.4).
-    if state_key == Some("") {
-        super::guest_access::after_state_event(state, room_id, type_, &event.content).await;
+        let _ = events_tx.send(pos);
     }
 
     Ok(eid)

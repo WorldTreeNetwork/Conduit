@@ -712,3 +712,213 @@ async fn policy_server_signature_is_required_before_a_client_event_is_sent() {
     send("after-disable", 200).await;
     assert_eq!(policy.calls.load(Ordering::SeqCst), calls_before_disable, "a disabled policy server is not asked");
 }
+
+#[tokio::test]
+async fn blocked_invitee_rejects_federation_invites_on_v1_and_v2() {
+    let remote = spawn_remote().await;
+    let server = federated_server(&remote).await;
+    let alice = server.register("alice").await;
+    let alice_id = alice["user_id"].as_str().unwrap();
+    let token = alice["access_token"].as_str().unwrap();
+    let config = format!(
+        "/_matrix/client/v3/user/{}/account_data/m.invite_permission_config",
+        enc(alice_id)
+    );
+    server
+        .request(Method::PUT, &config, Some(token), Some(json!({"default_action": "block"})), 200)
+        .await;
+
+    let blocked = invite(&remote, "!blocked:remote.test", "@r:remote.test", alice_id);
+    let id = conduit::hashing::event_id(&blocked).unwrap();
+    let member = format!(
+        "/_matrix/client/v3/rooms/{}/state/m.room.member/{}",
+        enc("!blocked:remote.test"),
+        enc(alice_id)
+    );
+    for version in ["v1", "v2"] {
+        let path = format!(
+            "/_matrix/federation/{version}/invite/{}/{}",
+            enc("!blocked:remote.test"),
+            enc(&id)
+        );
+        let error = fed(
+            &server,
+            &remote,
+            Method::PUT,
+            &path,
+            Some(json!({"event": &blocked, "invite_room_state": [], "room_version": "11"})),
+            403,
+        )
+        .await;
+        assert_eq!(error["errcode"], "M_INVITE_BLOCKED", "{version}: {error}");
+        assert_eq!(error["error"], format!("{alice_id} is not accepting invites"));
+        let stored = server.request(Method::GET, &member, Some(token), None, 403).await;
+        assert!(stored.get("membership").is_none(), "{stored}");
+    }
+
+    server.request(Method::PUT, &config, Some(token), Some(json!({})), 200).await;
+    let path = format!("/_matrix/federation/v2/invite/{}/{}", enc("!blocked:remote.test"), enc(&id));
+    let accepted = fed(
+        &server,
+        &remote,
+        Method::PUT,
+        &path,
+        Some(json!({"event": &blocked, "invite_room_state": [], "room_version": "11"})),
+        200,
+    )
+    .await;
+    assert!(accepted["event"]["signatures"][LOCAL].is_object(), "{accepted}");
+    let sync = server.request(Method::GET, "/_matrix/client/v3/sync", Some(token), None, 200).await;
+    assert!(sync["rooms"]["invite"].get("!blocked:remote.test").is_some(), "{sync}");
+}
+
+#[tokio::test]
+async fn federation_guest_access_revocation_removes_local_guests() {
+    let remote = spawn_remote().await;
+    let server = Server::with_env(&[
+        ("CONDUIT_FEDERATION", "1"),
+        ("CONDUIT_REMOTE_KEYS_OVERRIDE", &remote.keys_url),
+        ("CONDUIT_ALLOW_GUEST_ACCESS", "true"),
+    ])
+    .await;
+    let alice = server.register("alice").await;
+    let token = alice["access_token"].as_str().unwrap();
+    let bob = server.register("bob").await;
+    let room = server
+        .request(
+            Method::POST,
+            "/_matrix/client/v3/createRoom",
+            Some(token),
+            Some(json!({
+                "preset": "public_chat",
+                "room_version": "11",
+                "initial_state": [{
+                    "type": "m.room.guest_access",
+                    "state_key": "",
+                    "content": {"guest_access": "can_join"}
+                }]
+            })),
+            200,
+        )
+        .await["room_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    server
+        .request(Method::POST, &format!("/_matrix/client/v3/join/{}", enc(&room)), Some(bob["access_token"].as_str().unwrap()), Some(json!({})), 200)
+        .await;
+    let guest = server
+        .request(Method::POST, "/_matrix/client/v3/register?kind=guest", None, Some(json!({})), 200)
+        .await;
+    let guest_id = guest["user_id"].as_str().unwrap().to_owned();
+    server
+        .request(Method::POST, &format!("/_matrix/client/v3/join/{}", enc(&room)), Some(guest["access_token"].as_str().unwrap()), Some(json!({})), 200)
+        .await;
+
+    let joiner = "@r:remote.test";
+    let make_join = format!("/_matrix/federation/v1/make_join/{}/{}?ver=11", enc(&room), enc(joiner));
+    let template = fed(&server, &remote, Method::GET, &make_join, None, 200).await["event"].clone();
+    let join_pdu: Pdu = serde_json::from_value(template).unwrap();
+    let (join_id, join_body) = sign(&remote, join_pdu);
+    let joined = fed(
+        &server,
+        &remote,
+        Method::PUT,
+        &format!("/_matrix/federation/v2/send_join/{}/{}", enc(&room), enc(&join_id)),
+        Some(join_body),
+        200,
+    )
+    .await;
+    assert!(joined["event"].is_object(), "{joined}");
+
+    let mut levels = server
+        .request(
+            Method::GET,
+            &format!("/_matrix/client/v3/rooms/{}/state/m.room.power_levels", enc(&room)),
+            Some(token),
+            None,
+            200,
+        )
+        .await;
+    levels["users"][joiner] = json!(100);
+    server
+        .request(
+            Method::PUT,
+            &format!("/_matrix/client/v3/rooms/{}/state/m.room.power_levels", enc(&room)),
+            Some(token),
+            Some(levels),
+            200,
+        )
+        .await;
+
+    let state = server
+        .request(Method::GET, &format!("/_matrix/client/v3/rooms/{}/state", enc(&room)), Some(token), None, 200)
+        .await;
+    let event_id_of = |kind: &str, key: &str| {
+        state
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|event| event["type"] == kind && event["state_key"] == key)
+            .unwrap_or_else(|| panic!("missing {kind} {key} in {state}"))["event_id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let (revoke_id, revoke) = sign(
+        &remote,
+        Pdu::new(
+            &room,
+            joiner,
+            "m.room.guest_access",
+            Some(String::new()),
+            json!({"guest_access": "forbidden"}),
+            // Later than the creator's event, and still inside the remote key's validity window.
+            chrono::Utc::now().timestamp_millis() as u64 + 1_000,
+            vec![event_id_of("m.room.create", ""), event_id_of("m.room.power_levels", ""), event_id_of("m.room.member", joiner)],
+            vec![join_id],
+            20,
+        ),
+    );
+    let sent = fed(
+        &server,
+        &remote,
+        Method::PUT,
+        "/_matrix/federation/v1/send/guest-revoke-1",
+        Some(txn(vec![revoke], vec![])),
+        200,
+    )
+    .await;
+    assert_eq!(sent["pdus"][&revoke_id], json!({}), "{sent}");
+
+    let guest_member = server
+        .request(
+            Method::GET,
+            &format!("/_matrix/client/v3/rooms/{}/state/m.room.member/{}", enc(&room), enc(&guest_id)),
+            Some(token),
+            None,
+            200,
+        )
+        .await;
+    assert_eq!(guest_member["membership"], "leave", "{guest_member}");
+    let bob_member = server
+        .request(
+            Method::GET,
+            &format!("/_matrix/client/v3/rooms/{}/state/m.room.member/{}", enc(&room), enc(bob["user_id"].as_str().unwrap())),
+            Some(token),
+            None,
+            200,
+        )
+        .await;
+    assert_eq!(bob_member["membership"], "join", "{bob_member}");
+    let refused = server
+        .request(
+            Method::POST,
+            &format!("/_matrix/client/v3/join/{}", enc(&room)),
+            Some(guest["access_token"].as_str().unwrap()),
+            Some(json!({})),
+            403,
+        )
+        .await;
+    assert_eq!(refused["errcode"], "M_GUEST_ACCESS_FORBIDDEN", "{refused}");
+}

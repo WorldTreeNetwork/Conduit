@@ -82,6 +82,44 @@ impl MediaState for FedState {
     }
 }
 
+#[async_trait::async_trait]
+impl conduit::room::RoomEventSender for FedState {
+    async fn send_event(
+        &self,
+        sender: &str,
+        room_id: &str,
+        event_type: &str,
+        state_key: Option<&str>,
+        content: Value,
+    ) -> conduit::Result<String> {
+        // Local leaves authored because a remote server revoked guest access.
+        // Joins still go through the client pipeline so they carry a profile.
+        crate::api::client::event_pipeline::author_event(
+            self.storage.as_ref(),
+            &self.server_key,
+            &self.server_name,
+            &self.events_tx,
+            Some(&self.fed_client),
+            sender,
+            room_id,
+            event_type,
+            state_key,
+            content,
+            None,
+        )
+        .await
+        .map_err(|(status, err)| {
+            if status == StatusCode::FORBIDDEN {
+                conduit::Error::Forbidden(err.0.error)
+            } else if status == StatusCode::PAYLOAD_TOO_LARGE {
+                conduit::Error::TooLarge(err.0.error)
+            } else {
+                conduit::Error::Storage(err.0.error)
+            }
+        })
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Error helpers
 // ---------------------------------------------------------------------------
@@ -232,6 +270,10 @@ pub async fn send_transaction(
             }
         };
         let eid = conduit::hashing::event_id(&decoded.pdu).unwrap_or_default();
+        let room_id = decoded.pdu.room_id.clone();
+        let event_type = decoded.pdu.event_type.clone();
+        let state_key = decoded.pdu.state_key.clone();
+        let content = decoded.pdu.content.clone();
         match conduit::server_acl::server_allowed_by_room(state.storage.as_ref(), &decoded.pdu.room_id, &origin).await {
             Ok(false) => {
                 pdu_results.insert(eid, json!({ "error": "server ACL denies this server" }));
@@ -254,6 +296,18 @@ pub async fn send_transaction(
         {
             Ok(event_id) => {
                 pdu_results.insert(event_id, json!({}));
+                // A remote guest_access change must remove this server's guests.
+                if state_key.as_deref() == Some("") {
+                    crate::api::client::guest_access::after_state_event(
+                        state.storage.as_ref(),
+                        &state.server_name,
+                        &state,
+                        &room_id,
+                        &event_type,
+                        &content,
+                    )
+                    .await;
+                }
             }
             Err(e) => {
                 tracing::warn!(%eid, error = %e, "PDU rejected");
@@ -590,6 +644,18 @@ pub async fn invite(
     }
     if received.redacted_on_receipt {
         return invalid_param("Invite content hash does not match");
+    }
+
+    // Invite permission (v1.18): a local user who blocks invites is refused
+    // before this server co-signs or stores the membership.
+    if let Some(target) = pdu.state_key.as_deref() {
+        if crate::api::client::room_membership::blocks_invites(state.storage.as_ref(), target).await {
+            return matrix_error(
+                StatusCode::FORBIDDEN,
+                "M_INVITE_BLOCKED",
+                &format!("{target} is not accepting invites"),
+            );
+        }
     }
 
     if let Err(e) = add_signature(&mut pdu, &state.server_key, &state.server_name) {

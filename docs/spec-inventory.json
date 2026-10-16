@@ -5410,14 +5410,14 @@
       "tests": [
         "conduit-server/tests/federation_inbound.rs::standard_v2_routes_require_authentication",
         "conduit-server/tests/federation_inbound.rs::standard_v2_routes_verify_the_full_signed_uri",
-        "conduit-server/tests/production_e2e.rs::production_chat_survives_restart"
+        "conduit-server/tests/production_e2e.rs::production_chat_survives_restart",
+        "conduit-server/tests/production_pdu.rs::blocked_invitee_rejects_federation_invites_on_v1_and_v2"
       ],
-      "tests_total": 3,
+      "tests_total": 4,
       "gap_beads": [
-        "conduit-embed-pdu",
-        "conduit-y99.29.1"
+        "conduit-embed-pdu"
       ],
-      "notes": "Inviter signature/hash verification before co-signing is in conduit-embed-pdu amendments; invite blocking hook is conduit-y99.29.1."
+      "notes": "Inviter signature, path, and content-hash checks run before co-signing. Invite blocking is asserted. Byte-exact wire amendments remain conduit-embed-pdu."
     },
     {
       "id": "ss.ep.get_matrixfederationv1make_leaveroomiduserid",
@@ -8007,24 +8007,26 @@
       "title": "Guest access",
       "source": "https://spec.matrix.org/v1.19/client-server-api/#guest-access",
       "role": "homeserver",
-      "status": "partial",
+      "status": "implemented+tested",
       "code": [
+        {
+          "loc": "conduit-server/src/api/client/guest_access.rs"
+        },
         {
           "loc": "conduit-server/src/api/client/session.rs"
         },
         {
-          "loc": "conduit-server/src/api/client/guest_access.rs"
+          "loc": "conduit-server/src/federation/server.rs"
         }
       ],
       "tests": [
-        "conduit-server/tests/production_account.rs::production_guest_access_is_restricted_and_upgradable",
-        "conduit-server/tests/production_modules.rs::revoking_guest_access_removes_joined_guests"
+        "conduit-server/tests/production_modules.rs::revoking_guest_access_removes_joined_guests",
+        "conduit-server/tests/production_pdu.rs::federation_guest_access_revocation_removes_local_guests",
+        "conduit-server/tests/production_account.rs::production_guest_access_is_restricted_and_upgradable"
       ],
-      "tests_total": 2,
-      "gap_beads": [
-        "conduit-y99.48"
-      ],
-      "notes": "Local guest_access changes away from can_join make joined local guests leave; changes received over federation are not yet hooked (conduit-y99.48)."
+      "tests_total": 3,
+      "gap_beads": [],
+      "notes": "A room admits guests only while m.room.guest_access is can_join. When that state stops admitting guests, whether the change was local or accepted over federation, joined local guests leave and cannot rejoin. Registered members stay."
     },
     {
       "id": "cs.mod.room-previews",
@@ -8213,7 +8215,7 @@
       "title": "Invite permission (M_INVITE_BLOCKED)",
       "source": "https://spec.matrix.org/v1.19/client-server-api/#invite-permission",
       "role": "homeserver",
-      "status": "partial",
+      "status": "implemented+tested",
       "code": [
         {
           "loc": "conduit-server/src/api/client/room_membership.rs"
@@ -8222,17 +8224,19 @@
           "loc": "conduit-server/src/api/client/rooms.rs"
         },
         {
+          "loc": "conduit-server/src/federation/server.rs"
+        },
+        {
           "loc": "conduit-server/src/api/client/sync.rs"
         }
       ],
       "tests": [
-        "conduit-server/tests/production_basics.rs::invite_blocking_rejects_invites_and_hides_pending_ones"
+        "conduit-server/tests/production_basics.rs::invite_blocking_rejects_invites_and_hides_pending_ones",
+        "conduit-server/tests/production_pdu.rs::blocked_invitee_rejects_federation_invites_on_v1_and_v2"
       ],
-      "tests_total": 1,
-      "gap_beads": [
-        "conduit-y99.29.1"
-      ],
-      "notes": "m.invite_permission_config default_action=block: 403 M_INVITE_BLOCKED on /invite, createRoom invite list and PUT state member invite; pending invites hidden from /sync and restored on unblock. Federation /invite hook is y99.29.1."
+      "tests_total": 2,
+      "gap_beads": [],
+      "notes": "default_action=block returns 403 M_INVITE_BLOCKED from POST /invite, createRoom, PUT m.room.member invite, and federation PUT /invite on v1 and v2. A refused federation invite is not stored. Pending invites are hidden from /sync and return when blocking is cleared."
     },
     {
       "id": "cs.mod.sticker",

@@ -10,11 +10,14 @@ use axum::Json;
 use base64::{engine::general_purpose::{STANDARD_NO_PAD, URL_SAFE_NO_PAD}, Engine as _};
 use serde_json::{json, Value};
 
+use std::sync::Arc;
+
 use conduit::event::Event;
 use conduit::signing::{server_of_user_id, verify_event_signature};
+use conduit::storage::Storage;
 
-use super::client::FederationError;
-use crate::api::client::{AuthState, MatrixError};
+use super::client::{Client, FederationError};
+use crate::api::client::MatrixError;
 
 pub const POLICY_KEY_ID: &str = "ed25519:policy_server";
 
@@ -93,14 +96,14 @@ fn merge_signature(event: &mut Event, via: &str, body: &Value) -> bool {
 /// Ask the room's policy server to sign `event` and attach
 /// `ed25519:policy_server`. No-op when the room has no enabled policy server.
 /// An error means the event must not be persisted.
-pub async fn ensure_policy_signature<S: AuthState>(
-    state: &S,
+pub async fn ensure_policy_signature(
+    storage: &dyn Storage,
+    client: Option<&Arc<Client>>,
     event: &mut Event,
 ) -> Result<(), (StatusCode, Json<MatrixError>)> {
     if exempt(event) || event.room_id.is_empty() {
         return Ok(());
     }
-    let storage = state.storage();
     let policy = match storage.get_state_entry(&event.room_id, "m.room.policy", "").await {
         Ok(Some(policy)) => policy,
         Ok(None) => return Ok(()),
@@ -123,7 +126,7 @@ pub async fn ensure_policy_signature<S: AuthState>(
     if !joined {
         return Ok(());
     }
-    let Some(client) = state.federation_client() else {
+    let Some(client) = client else {
         return Err(MatrixError::forbidden("a policy server signature is required, but federation is disabled"));
     };
     let body = serde_json::to_value(&event.pdu).map_err(|error| MatrixError::unknown(format!("event encode failed: {error}")))?;
