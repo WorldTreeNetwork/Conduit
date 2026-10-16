@@ -1957,3 +1957,222 @@ async fn production_filter_stream_limits_do_not_skip_pending_updates() {
         second["presence"]["events"][0]["sender"]
     );
 }
+
+/// A peer that answers federation key query/claim for `remote.test` and
+/// fails `down.test` with a body the client must not echo.
+struct RemoteKeyPeer {
+    url: String,
+    queries: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    hosts: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+async fn spawn_remote_key_peer() -> RemoteKeyPeer {
+    use std::sync::atomic::AtomicU32;
+    use std::sync::{Arc, Mutex};
+
+    use axum::extract::State;
+    use axum::http::{HeaderMap, StatusCode};
+    use axum::response::IntoResponse;
+    use axum::routing::post;
+    use axum::{Json, Router};
+
+    #[derive(Clone)]
+    struct Peer {
+        queries: Arc<AtomicU32>,
+        hosts: Arc<Mutex<Vec<String>>>,
+    }
+    let peer = Peer {
+        queries: Arc::new(AtomicU32::new(0)),
+        hosts: Arc::new(Mutex::new(Vec::new())),
+    };
+    let queries = Arc::clone(&peer.queries);
+    let hosts = Arc::clone(&peer.hosts);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let app = Router::new()
+        .route(
+            "/_matrix/federation/v1/user/keys/query",
+            post(|State(peer): State<Peer>, headers: HeaderMap, Json(body): Json<Value>| async move {
+                let _ = body;
+                peer.queries.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let host = host_of(&headers);
+                peer.hosts.lock().expect("hosts").push(host.clone());
+                if host == "down.test" {
+                    return (
+                        StatusCode::BAD_GATEWAY,
+                        Json(json!({"errcode": "M_UNKNOWN", "error": "SECRET-DOWN-BODY"})),
+                    )
+                        .into_response();
+                }
+                Json(json!({
+                    "device_keys": {
+                        "@carol:remote.test": {
+                            "DEV1": {
+                                "user_id": "@carol:remote.test",
+                                "device_id": "DEV1",
+                                "algorithms": ["m.olm.v1.curve25519-aes-sha2"],
+                                "keys": {"ed25519:DEV1": "REMOTE-ED", "curve25519:DEV1": "REMOTE-CURVE"},
+                                "signatures": {"remote.test": {"ed25519:DEV1": "SIG-REMOTE-DEVICE-DISTINCTIVE"}}
+                            }
+                        }
+                    },
+                    "master_keys": {
+                        "@carol:remote.test": {
+                            "user_id": "@carol:remote.test",
+                            "usage": ["master"],
+                            "keys": {"ed25519:MASTER": "REMOTE-MASTER"},
+                            "signatures": {"remote.test": {"ed25519:MASTER": "SIG-REMOTE-MASTER"}}
+                        }
+                    },
+                    "self_signing_keys": {
+                        "@carol:remote.test": {
+                            "user_id": "@carol:remote.test",
+                            "usage": ["self_signing"],
+                            "keys": {"ed25519:SELF": "REMOTE-SELF"}
+                        }
+                    },
+                    "user_signing_keys": {
+                        "@carol:remote.test": {
+                            "user_id": "@carol:remote.test",
+                            "usage": ["user_signing"],
+                            "keys": {"ed25519:USER": "MUST-NOT-LEAK-USER-SIGNING"}
+                        }
+                    }
+                }))
+                .into_response()
+            }),
+        )
+        .route(
+            "/_matrix/federation/v1/user/keys/claim",
+            post(|State(peer): State<Peer>, headers: HeaderMap, Json(_body): Json<Value>| async move {
+                let host = host_of(&headers);
+                peer.hosts.lock().expect("hosts").push(format!("claim:{host}"));
+                if host == "down.test" {
+                    return (
+                        StatusCode::BAD_GATEWAY,
+                        Json(json!({"errcode": "M_UNKNOWN", "error": "SECRET-DOWN-BODY"})),
+                    )
+                        .into_response();
+                }
+                Json(json!({
+                    "one_time_keys": {
+                        "@carol:remote.test": {
+                            "DEV1": {
+                                "signed_curve25519:AAAA": {
+                                    "key": "REMOTE-OTK-DISTINCTIVE",
+                                    "signatures": {"remote.test": {"ed25519:DEV1": "SIG-REMOTE-OTK"}}
+                                }
+                            }
+                        }
+                    }
+                }))
+                .into_response()
+            }),
+        )
+        .with_state(peer);
+    tokio::spawn(async move { axum::serve(listener, app).await.ok() });
+    RemoteKeyPeer { url, queries, hosts }
+}
+
+fn host_of(headers: &axum::http::HeaderMap) -> String {
+    headers
+        .get(axum::http::header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .to_owned()
+}
+
+#[tokio::test]
+async fn remote_keys_query_and_claim_fetch_peer_devices() {
+    let peer = spawn_remote_key_peer().await;
+    let server = Server::with_env(&[("CONDUIT_FEDERATION_BASE_URL", peer.url.as_str())]).await;
+    let alice = server.register("alice").await;
+    let token = alice["access_token"].as_str().unwrap();
+    let query_body = json!({
+        "device_keys": {
+            "@alice:production.test": [],
+            "@carol:remote.test": ["DEV1"],
+            "@dave:down.test": []
+        }
+    });
+    let queried = server
+        .request(
+            Method::POST,
+            "/_matrix/client/v3/keys/query",
+            Some(token),
+            Some(query_body.clone()),
+            200,
+        )
+        .await;
+    let queried_text = queried.to_string();
+    assert_eq!(
+        queried["device_keys"]["@carol:remote.test"]["DEV1"]["signatures"]["remote.test"]["ed25519:DEV1"],
+        "SIG-REMOTE-DEVICE-DISTINCTIVE"
+    );
+    assert_eq!(
+        queried["master_keys"]["@carol:remote.test"]["signatures"]["remote.test"]["ed25519:MASTER"],
+        "SIG-REMOTE-MASTER"
+    );
+    assert_eq!(
+        queried["self_signing_keys"]["@carol:remote.test"]["keys"]["ed25519:SELF"],
+        "REMOTE-SELF"
+    );
+    assert!(queried["user_signing_keys"].get("@carol:remote.test").is_none());
+    assert!(!queried_text.contains("MUST-NOT-LEAK-USER-SIGNING"));
+    assert!(queried["failures"]["down.test"].is_object());
+    assert!(!queried_text.contains("SECRET-DOWN-BODY"));
+    assert!(queried["failures"].get("production.test").is_none());
+    assert!(queried["failures"].get("remote.test").is_none());
+    let hosts = peer.hosts.lock().expect("hosts").clone();
+    assert!(hosts.iter().any(|host| host == "remote.test"));
+    assert!(hosts.iter().any(|host| host == "down.test"));
+
+    let claimed = server
+        .request(
+            Method::POST,
+            "/_matrix/client/v3/keys/claim",
+            Some(token),
+            Some(json!({
+                "one_time_keys": {
+                    "@alice:production.test": {"ALICE": "signed_curve25519"},
+                    "@carol:remote.test": {"DEV1": "signed_curve25519"},
+                    "@dave:down.test": {"DEV1": "signed_curve25519"}
+                }
+            })),
+            200,
+        )
+        .await;
+    let claimed_text = claimed.to_string();
+    assert_eq!(
+        claimed["one_time_keys"]["@carol:remote.test"]["DEV1"]["signed_curve25519:AAAA"]["key"],
+        "REMOTE-OTK-DISTINCTIVE"
+    );
+    assert!(claimed["failures"]["down.test"].is_object());
+    assert!(!claimed_text.contains("SECRET-DOWN-BODY"));
+    assert!(claimed["failures"].get("production.test").is_none());
+    assert!(claimed["failures"].get("remote.test").is_none());
+
+    let queries_before = peer.queries.load(std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(queries_before, 2, "query must call each remote server once: {hosts:?}");
+    let timed_out = server
+        .request(
+            Method::POST,
+            "/_matrix/client/v3/keys/query",
+            Some(token),
+            Some(json!({
+                "timeout": 0,
+                "device_keys": query_body["device_keys"].clone()
+            })),
+            200,
+        )
+        .await;
+    assert_eq!(
+        peer.queries.load(std::sync::atomic::Ordering::SeqCst),
+        queries_before,
+        "timeout 0 must not call the remote"
+    );
+    assert!(timed_out["failures"]["remote.test"].is_object());
+    assert!(timed_out["failures"]["down.test"].is_object());
+    assert!(timed_out["device_keys"].get("@carol:remote.test").is_none());
+    assert!(timed_out["failures"].get("production.test").is_none());
+}

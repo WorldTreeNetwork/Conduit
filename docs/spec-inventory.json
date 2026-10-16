@@ -16,9 +16,9 @@
   "summary": {
     "cs": {
       "endpoint": {
-        "implemented+tested": 152,
+        "implemented+tested": 154,
         "implemented-untested": 0,
-        "partial": 11,
+        "partial": 9,
         "missing": 0,
         "not-applicable": 1,
         "total": 164
@@ -3585,12 +3585,15 @@
       "rate_limited": "No",
       "deprecated": false,
       "role": "homeserver",
-      "status": "partial",
+      "status": "implemented+tested",
       "code": [
         {
           "loc": "conduit-server/src/main.rs:572",
           "handler": "keys_api::keys_claim",
           "kind": "exact"
+        },
+        {
+          "loc": "conduit-server/src/federation/client.rs (Client::claim_one_time_keys)"
         }
       ],
       "tests": [
@@ -3600,13 +3603,12 @@
         "conduit-server/tests/e2ee.rs::keys_claim_consumes_atomically",
         "conduit-server/tests/e2ee.rs::keys_upload_persists",
         "conduit-server/tests/production_account.rs::production_device_lifecycle_with_uia_keys_and_device_lists",
-        "conduit-server/tests/production_e2e.rs::production_key_inventory_wakes_sync_and_quiets_after_acknowledgement"
+        "conduit-server/tests/production_e2e.rs::production_key_inventory_wakes_sync_and_quiets_after_acknowledgement",
+        "conduit-server/tests/production_e2e.rs::remote_keys_query_and_claim_fetch_peer_devices"
       ],
-      "tests_total": 7,
-      "gap_beads": [
-        "conduit-y99.22"
-      ],
-      "notes": "Local claim tested incl. concurrency; remote users need federation user/keys/claim (y99.22)."
+      "tests_total": 8,
+      "gap_beads": [],
+      "notes": "Local claim is atomic. Remote users are claimed with POST /_matrix/federation/v1/user/keys/claim. timeout 0 does not call out. Unreachable servers and non-2xx responses are recorded in failures without the remote body."
     },
     {
       "id": "cs.ep.post_matrixclientv3keysquery",
@@ -3620,12 +3622,15 @@
       "rate_limited": "No",
       "deprecated": false,
       "role": "homeserver",
-      "status": "partial",
+      "status": "implemented+tested",
       "code": [
         {
           "loc": "conduit-server/src/main.rs:570",
           "handler": "keys_api::keys_query",
           "kind": "exact"
+        },
+        {
+          "loc": "conduit-server/src/federation/client.rs (Client::query_user_keys)"
         }
       ],
       "tests": [
@@ -3633,15 +3638,13 @@
         "conduit-server/tests/e2ee.rs::keys_upload_persists",
         "conduit-server/tests/e2ee.rs::send_to_device_delivered_via_sync",
         "conduit-server/tests/production_account.rs::production_device_lifecycle_with_uia_keys_and_device_lists",
-        "conduit-server/tests/production_account.rs::production_refresh_tokens_rotate_and_soft_logout"
+        "conduit-server/tests/production_account.rs::production_refresh_tokens_rotate_and_soft_logout",
+        "conduit-server/tests/production_sync.rs::signature_uploads_verify_signers_and_respect_visibility",
+        "conduit-server/tests/production_e2e.rs::remote_keys_query_and_claim_fetch_peer_devices"
       ],
-      "tests_total": 5,
-      "gap_beads": [
-        "conduit-y99.14",
-        "conduit-y99.22",
-        "conduit-nq5"
-      ],
-      "notes": "No remote query; signatures not merged."
+      "tests_total": 7,
+      "gap_beads": [],
+      "notes": "Local device keys must be self-signed; cross-signing signatures are merged, and user-signing signatures are visible only to their author. Remote users are queried with POST /_matrix/federation/v1/user/keys/query. Remote user_signing_keys are not forwarded. timeout 0 does not call out. failures records unreachable servers without the remote body."
     },
     {
       "id": "cs.ep.post_matrixclientv3keysupload",

@@ -12,7 +12,9 @@
 //!   GET/PUT/DELETE /_matrix/client/v3/room_keys/keys[/:roomId[/:sessionId]]
 
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::{
     extract::{Path, Query, State},
@@ -228,6 +230,63 @@ pub struct KeysQueryRequest {
     pub timeout: Option<u64>,
 }
 
+/// Users whose server is not this one, grouped by that server name.
+fn users_by_remote_server(server_name: &str, user_ids: impl Iterator<Item = impl AsRef<str>>) -> HashMap<String, Vec<String>> {
+    let mut grouped: HashMap<String, Vec<String>> = HashMap::new();
+    for user_id in user_ids {
+        let user_id = user_id.as_ref();
+        let Some(server) = conduit::signing::server_of_user_id(user_id) else {
+            continue;
+        };
+        if server != server_name {
+            grouped.entry(server.to_owned()).or_default().push(user_id.to_owned());
+        }
+    }
+    grouped
+}
+
+enum RemoteFailure {
+    Timeout,
+    Status(u16),
+    Unreachable,
+}
+
+fn failure_object(failure: &RemoteFailure) -> Value {
+    match failure {
+        RemoteFailure::Timeout => json!({"status": 408, "message": "Request timed out"}),
+        RemoteFailure::Status(status) => {
+            json!({"status": status, "message": "Remote homeserver request failed"})
+        }
+        RemoteFailure::Unreachable => json!({"message": "Remote homeserver could not be reached"}),
+    }
+}
+
+fn classify_federation_error(error: crate::federation::FederationError) -> RemoteFailure {
+    match error {
+        crate::federation::FederationError::RemoteError { status, .. } => RemoteFailure::Status(status),
+        _ => RemoteFailure::Unreachable,
+    }
+}
+
+/// `timeout` 0 does not poll `call`. The remote body is never copied into
+/// a failure: `RemoteError`'s body stays inside the error value.
+async fn call_remote<F>(timeout_ms: Option<u64>, call: F) -> Result<Value, RemoteFailure>
+where
+    F: Future<Output = Result<Value, crate::federation::FederationError>>,
+{
+    if timeout_ms == Some(0) {
+        return Err(RemoteFailure::Timeout);
+    }
+    let result = match timeout_ms {
+        Some(ms) => match tokio::time::timeout(Duration::from_millis(ms), call).await {
+            Ok(result) => result,
+            Err(_) => return Err(RemoteFailure::Timeout),
+        },
+        None => call.await,
+    };
+    result.map_err(classify_federation_error)
+}
+
 /// Merge stored cross-signing signatures into a key object.
 fn merge_signatures<'a>(
     key: &mut Value,
@@ -258,6 +317,9 @@ pub async fn keys_query<S: AuthState>(
     let mut result_user_signing: HashMap<String, Value> = HashMap::new();
 
     for (uid, device_filter) in &body.device_keys {
+        if conduit::signing::server_of_user_id(uid).is_some_and(|server| server != state.server_name()) {
+            continue;
+        }
         let all_device_keys = match storage.get_device_keys_for_user(uid).await {
             Ok(m) => m,
             Err(e) => return MatrixError::unknown(e.to_string()).into_response(),
@@ -329,6 +391,18 @@ pub async fn keys_query<S: AuthState>(
         }
     }
 
+    let mut failures = serde_json::Map::new();
+    merge_remote_device_keys(
+        &state,
+        &body.device_keys,
+        body.timeout,
+        &mut result_device_keys,
+        &mut result_master_keys,
+        &mut result_self_signing,
+        &mut failures,
+    )
+    .await;
+
     (
         StatusCode::OK,
         Json(json!({
@@ -336,10 +410,93 @@ pub async fn keys_query<S: AuthState>(
             "master_keys": result_master_keys,
             "self_signing_keys": result_self_signing,
             "user_signing_keys": result_user_signing,
-            "failures": {}
+            "failures": failures
         })),
     )
         .into_response()
+}
+
+async fn merge_remote_device_keys<S: AuthState>(
+    state: &S,
+    requested: &HashMap<String, Vec<String>>,
+    timeout_ms: Option<u64>,
+    device_keys: &mut HashMap<String, Value>,
+    master_keys: &mut HashMap<String, Value>,
+    self_signing_keys: &mut HashMap<String, Value>,
+    failures: &mut serde_json::Map<String, Value>,
+) {
+    let grouped = users_by_remote_server(state.server_name(), requested.keys());
+    let client = state.federation_client().map(Arc::clone);
+    for (server, users) in grouped {
+        let outcome = if timeout_ms == Some(0) {
+            Err(RemoteFailure::Timeout)
+        } else if let Some(client) = client.as_ref() {
+            let mut device_filter = serde_json::Map::new();
+            for user_id in &users {
+                let filter = requested.get(user_id).cloned().unwrap_or_default();
+                device_filter.insert(user_id.clone(), json!(filter));
+            }
+            call_remote(timeout_ms, client.query_user_keys(&server, &device_filter)).await
+        } else {
+            Err(RemoteFailure::Unreachable)
+        };
+        match outcome {
+            Ok(body) => {
+                merge_remote_query_body(&users, requested, &body, device_keys, master_keys, self_signing_keys);
+            }
+            Err(failure) => {
+                failures.insert(server, failure_object(&failure));
+            }
+        }
+    }
+}
+
+/// Copy device, master, and self-signing keys for the users we asked this
+/// server about. `user_signing_keys` are private to that user and are not
+/// forwarded. Device ids outside the caller's filter are dropped.
+fn merge_remote_query_body(
+    users: &[String],
+    requested: &HashMap<String, Vec<String>>,
+    body: &Value,
+    device_keys: &mut HashMap<String, Value>,
+    master_keys: &mut HashMap<String, Value>,
+    self_signing_keys: &mut HashMap<String, Value>,
+) {
+    for user_id in users {
+        let filter = requested.get(user_id).map(Vec::as_slice).unwrap_or(&[]);
+        if let Some(devices) = body
+            .get("device_keys")
+            .and_then(|value| value.get(user_id))
+            .and_then(Value::as_object)
+        {
+            let entry = device_keys.entry(user_id.clone()).or_insert_with(|| json!({}));
+            if let Some(entry) = entry.as_object_mut() {
+                for (device_id, keys) in devices {
+                    let wanted = filter.is_empty() || filter.iter().any(|id| id == device_id);
+                    if wanted && !entry.contains_key(device_id) {
+                        entry.insert(device_id.clone(), keys.clone());
+                    }
+                }
+            }
+            if device_keys.get(user_id).is_some_and(|value| value.as_object().is_some_and(|map| map.is_empty())) {
+                device_keys.remove(user_id);
+            }
+        }
+        if !master_keys.contains_key(user_id) {
+            if let Some(master) = body.get("master_keys").and_then(|value| value.get(user_id)) {
+                if master.is_object() {
+                    master_keys.insert(user_id.clone(), master.clone());
+                }
+            }
+        }
+        if !self_signing_keys.contains_key(user_id) {
+            if let Some(key) = body.get("self_signing_keys").and_then(|value| value.get(user_id)) {
+                if key.is_object() {
+                    self_signing_keys.insert(user_id.clone(), key.clone());
+                }
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -364,6 +521,9 @@ pub async fn keys_claim<S: AuthState>(
     let mut claimed: HashMap<String, HashMap<String, Value>> = HashMap::new();
 
     for (uid, devices) in &body.one_time_keys {
+        if conduit::signing::server_of_user_id(uid).is_some_and(|server| server != state.server_name()) {
+            continue;
+        }
         let mut user_claimed: HashMap<String, Value> = HashMap::new();
         for (did, algorithm) in devices {
             // Try OTK first; fall back to fallback key.
@@ -388,8 +548,69 @@ pub async fn keys_claim<S: AuthState>(
         }
     }
 
+    let mut failures = serde_json::Map::new();
+    merge_remote_one_time_keys(&state, &body.one_time_keys, body.timeout, &mut claimed, &mut failures).await;
+
     state.sync_notify().notify_waiters();
-    (StatusCode::OK, Json(json!({ "one_time_keys": claimed }))).into_response()
+    (
+        StatusCode::OK,
+        Json(json!({ "one_time_keys": claimed, "failures": failures })),
+    )
+        .into_response()
+}
+
+async fn merge_remote_one_time_keys<S: AuthState>(
+    state: &S,
+    requested: &HashMap<String, HashMap<String, String>>,
+    timeout_ms: Option<u64>,
+    claimed: &mut HashMap<String, HashMap<String, Value>>,
+    failures: &mut serde_json::Map<String, Value>,
+) {
+    let grouped = users_by_remote_server(state.server_name(), requested.keys());
+    let client = state.federation_client().map(Arc::clone);
+    for (server, users) in grouped {
+        let outcome = if timeout_ms == Some(0) {
+            Err(RemoteFailure::Timeout)
+        } else if let Some(client) = client.as_ref() {
+            let mut one_time_keys = serde_json::Map::new();
+            for user_id in &users {
+                let devices = requested.get(user_id).cloned().unwrap_or_default();
+                one_time_keys.insert(user_id.clone(), json!(devices));
+            }
+            call_remote(timeout_ms, client.claim_one_time_keys(&server, &one_time_keys)).await
+        } else {
+            Err(RemoteFailure::Unreachable)
+        };
+        match outcome {
+            Ok(body) => {
+                let Some(returned) = body.get("one_time_keys").and_then(Value::as_object) else {
+                    continue;
+                };
+                for user_id in &users {
+                    let Some(devices) = returned.get(user_id).and_then(Value::as_object) else {
+                        continue;
+                    };
+                    let wanted = requested.get(user_id);
+                    for (device_id, key) in devices {
+                        let asked = wanted.is_some_and(|devices| devices.contains_key(device_id));
+                        if !asked || !key.is_object() {
+                            continue;
+                        }
+                        let user_claimed = claimed.entry(user_id.clone()).or_default();
+                        if !user_claimed.contains_key(device_id) {
+                            user_claimed.insert(device_id.clone(), key.clone());
+                        }
+                    }
+                    if claimed.get(user_id).is_some_and(HashMap::is_empty) {
+                        claimed.remove(user_id);
+                    }
+                }
+            }
+            Err(failure) => {
+                failures.insert(server, failure_object(&failure));
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -396,6 +396,40 @@ impl Client {
         self.signed_post(dest, "/_matrix/policy/v1/sign", event).await
     }
 
+    /// `POST /_matrix/federation/v1/user/keys/query`.
+    ///
+    /// `device_keys` is `{user_id: [device_id, ...]}`. An empty list asks for
+    /// every device. The response may include device, master, and
+    /// self-signing keys. Callers must not forward `user_signing_keys`.
+    pub async fn query_user_keys(
+        &self,
+        dest: &str,
+        device_keys: &serde_json::Map<String, Value>,
+    ) -> Result<Value, FederationError> {
+        self.signed_post(
+            dest,
+            "/_matrix/federation/v1/user/keys/query",
+            &serde_json::json!({ "device_keys": device_keys }),
+        )
+        .await
+    }
+
+    /// `POST /_matrix/federation/v1/user/keys/claim`.
+    ///
+    /// `one_time_keys` is `{user_id: {device_id: algorithm}}`.
+    pub async fn claim_one_time_keys(
+        &self,
+        dest: &str,
+        one_time_keys: &serde_json::Map<String, Value>,
+    ) -> Result<Value, FederationError> {
+        self.signed_post(
+            dest,
+            "/_matrix/federation/v1/user/keys/claim",
+            &serde_json::json!({ "one_time_keys": one_time_keys }),
+        )
+        .await
+    }
+
     // ------------------------------------------------------------------
     // iroh helpers (91r.5, 91r.7)
     // ------------------------------------------------------------------

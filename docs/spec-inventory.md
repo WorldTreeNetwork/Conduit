@@ -15,7 +15,7 @@ Statuses: **tested** = present and asserted by a named test; **untested** = pres
 
 | API | kind | tested | untested | partial | missing | n/a | total |
 |---|---|---:|---:|---:|---:|---:|---:|
-| Client-Server API | endpoints | 152 | 0 | 11 | 0 | 1 | 164 |
+| Client-Server API | endpoints | 154 | 0 | 9 | 0 | 1 | 164 |
 | Client-Server API | requirements | 68 | 0 | 9 | 0 | 9 | 86 |
 | Server-Server API | endpoints | 22 | 3 | 6 | 4 | 1 | 36 |
 | Server-Server API | requirements | 14 | 0 | 15 | 9 | 3 | 41 |
@@ -27,7 +27,7 @@ Statuses: **tested** = present and asserted by a named test; **untested** = pres
 | Identity Service API (homeserver as consumer) | requirements | 1 | 0 | 0 | 0 | 0 | 1 |
 | Room versions 1–12 | requirements | 61 | 0 | 0 | 0 | 0 | 61 |
 | Appendices | requirements | 10 | 0 | 3 | 4 | 4 | 21 |
-| All |  | 362 | 3 | 46 | 17 | 37 | 465 |
+| All |  | 364 | 3 | 44 | 17 | 37 | 465 |
 ## Gap beads
 
 New beads filed by this inventory (children of `conduit-y99`):
@@ -63,12 +63,12 @@ In-flight / pre-existing beads referenced (not duplicated):
 - `conduit-g12` - recursive auth-event verification (1 row(s))
 - `conduit-jt5` - restricted join rule evaluation (2 row(s))
 - `conduit-kqy` - federation knock (rv7+) (2 row(s))
-- `conduit-nq5` - keys/query merges cross-signing signatures (3 row(s))
+- `conduit-nq5` - keys/query merges cross-signing signatures (2 row(s))
 - `conduit-s6m` - state res v2 strictness + per-event visibility (2 row(s))
 - `conduit-vfm` - distributed UIA session store (1 row(s))
 - `conduit-y99.13` - sync membership/state/pagination semantics (4 row(s))
 - `conduit-y99.13.4` - structured filters across sync streams (3 row(s))
-- `conduit-y99.14` - device-list visibility and key identities (8 row(s))
+- `conduit-y99.14` - device-list visibility and key identities (7 row(s))
 - `conduit-y99.15` - threaded receipts, fully-read markers, typing (1 row(s))
 - `conduit-y99.16` - commit-ordered sync cursors (2 row(s))
 - `conduit-y99.18.1` - AS device create/delete (0 row(s))
@@ -83,7 +83,7 @@ In-flight / pre-existing beads referenced (not duplicated):
 - `conduit-y99.21.1` - federation media multipart/mixed (2 row(s))
 - `conduit-y99.21.2` - animated thumbnails / non-UTF-8 previews (2 row(s))
 - `conduit-y99.21.3` - media blob hygiene (1 row(s))
-- `conduit-y99.22` - federation API completeness (20 row(s))
+- `conduit-y99.22` - federation API completeness (18 row(s))
 - `conduit-y99.22.1` - send_join state before join (2 row(s))
 - `conduit-y99.22.2` - make_join ver / M_INCOMPATIBLE_ROOM_VERSION (2 row(s))
 - `conduit-y99.22.3` - event_auth endpoint (1 row(s))
@@ -219,8 +219,8 @@ In-flight / pre-existing beads referenced (not duplicated):
 | PUT | [`/_matrix/client/v3/room_keys/version/{version}`](https://spec.matrix.org/v1.19/client-server-api/#put_matrixclientv3room_keysversionversion) | tested | `conduit-server/src/api/client/keys.rs (room key backup)` | `production_modules.rs::key_backup_versions_keys_etags_and_errors` |  | etag counter + count on every mutation; writes only to the current version (403 M_WRONG_ROOM_KEYS_VERSION + current_version), 404 for unknown versions; replacement rules (is_verified, first_message_index, forwarded_count); version update keeps algorithm/version (M_INVALID_PARAM); version delete removes keys and is idempotent. |
 | DELETE | [`/_matrix/client/v3/room_keys/version/{version}`](https://spec.matrix.org/v1.19/client-server-api/#delete_matrixclientv3room_keysversionversion) | tested | `conduit-server/src/api/client/keys.rs (room key backup)` | `production_modules.rs::key_backup_versions_keys_etags_and_errors` |  | etag counter + count on every mutation; writes only to the current version (403 M_WRONG_ROOM_KEYS_VERSION + current_version), 404 for unknown versions; replacement rules (is_verified, first_message_index, forwarded_count); version update keeps algorithm/version (M_INVALID_PARAM); version delete removes keys and is idempotent. |
 | GET | [`/_matrix/client/v3/keys/changes`](https://spec.matrix.org/v1.19/client-server-api/#get_matrixclientv3keyschanges) | tested | `conduit-server/src/main.rs:574` | `production_sync.rs::device_lists_report_only_shared_users_and_departures` |  | changed/left include only users who share a room with the caller. An unrelated user's key update is omitted. from is required. |
-| POST | [`/_matrix/client/v3/keys/claim`](https://spec.matrix.org/v1.19/client-server-api/#post_matrixclientv3keysclaim) | partial | `conduit-server/src/main.rs:572` | `e2ee.rs::fallback_key_used_only_when_otks_exhausted`<br>`e2ee.rs::keys_changes_returns_delta` (+5) | `conduit-y99.22` | Local claim tested incl. concurrency; remote users need federation user/keys/claim (y99.22). |
-| POST | [`/_matrix/client/v3/keys/query`](https://spec.matrix.org/v1.19/client-server-api/#post_matrixclientv3keysquery) | partial | `conduit-server/src/main.rs:570` | `e2ee.rs::cross_signing_upload_round_trip`<br>`e2ee.rs::keys_upload_persists` (+3) | `conduit-y99.14` `conduit-y99.22` `conduit-nq5` | No remote query; signatures not merged. |
+| POST | [`/_matrix/client/v3/keys/claim`](https://spec.matrix.org/v1.19/client-server-api/#post_matrixclientv3keysclaim) | tested | `conduit-server/src/main.rs:572`<br>`conduit-server/src/federation/client.rs (Client::claim_one_time_keys)` | `production_e2e.rs::remote_keys_query_and_claim_fetch_peer_devices`<br>`e2ee.rs::keys_claim_consumes_atomically` (+6) |  | Remote users are claimed via federation user/keys/claim. timeout 0 does not call out. failures omits the remote body. |
+| POST | [`/_matrix/client/v3/keys/query`](https://spec.matrix.org/v1.19/client-server-api/#post_matrixclientv3keysquery) | tested | `conduit-server/src/main.rs:570`<br>`conduit-server/src/federation/client.rs (Client::query_user_keys)` | `production_e2e.rs::remote_keys_query_and_claim_fetch_peer_devices`<br>`production_sync.rs::signature_uploads_verify_signers_and_respect_visibility` (+5) |  | Remote users are queried via federation user/keys/query. Local cross-signing signatures are merged. Remote user-signing keys are not forwarded. failures omits the remote body. |
 | POST | [`/_matrix/client/v3/keys/upload`](https://spec.matrix.org/v1.19/client-server-api/#post_matrixclientv3keysupload) | tested | `conduit-server/src/main.rs:568` | `conduit-server/tests/production_sync.rs::key_uploads_must_match_and_be_signed_by_the_authenticated_device` | | Device key user_id and device_id must match the access token; the object must be signed by that device's Ed25519 key. |
 | GET | [`/_matrix/client/v3/pushrules/`](https://spec.matrix.org/v1.19/client-server-api/#get_matrixclientv3pushrules) | tested | `conduit-server/src/api/client/push.rs:240` | `push.rs::default_push_rules_seeded`<br>`push.rs::push_rules_crud` (+2) |  | Full v1.19 server-default ruleset (v1.17 removed body-mention rules) in spec order with user rules before defaults; also republishes m.push_rules account data. |
 | GET | [`/_matrix/client/v3/pushrules/global/`](https://spec.matrix.org/v1.19/client-server-api/#get_matrixclientv3pushrulesglobal) | tested | `conduit-server/src/api/client/push.rs:253` | `production_push.rs::push_rules_api_follows_spec` |  | Returns the global Ruleset object directly. |

@@ -135,6 +135,12 @@ persisted.
   self-signing signatures into device keys and the owner's device signatures
   into the master key. User-signing keys, and signatures made with them, are
   returned only to their owner.
+- Users on another server are fetched with
+  `POST /_matrix/federation/v1/user/keys/query` and
+  `POST /_matrix/federation/v1/user/keys/claim`, one request per remote
+  server. `timeout` 0 does not call out. An unreachable server or a non-2xx
+  response is recorded under `failures` without the remote body. Remote
+  `user_signing_keys` are not returned to the local client.
 - `keys/device_signing/upload`: each key names the user, carries its usage,
   and has exactly one `ed25519:<public>` key whose ID is that key. Self- and
   user-signing keys must be signed by the accompanying (or stored) master key.
