@@ -601,6 +601,29 @@ impl Storage for PostgresStorage {
         Ok(())
     }
 
+    async fn clear_event_disposition(&self, event_id: &str) -> Result<()> {
+        sqlx::query("DELETE FROM event_disposition WHERE event_id = $1")
+            .bind(event_id)
+            .execute(&self.pool)
+            .await
+            .map_err(map_sqlx)?;
+        Ok(())
+    }
+
+    async fn event_dispositions(&self, event_ids: &[String]) -> Result<HashMap<String, String>> {
+        if event_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let rows = sqlx::query_as::<_, (String, String)>(
+            "SELECT event_id, kind FROM event_disposition WHERE event_id = ANY($1)",
+        )
+        .bind(event_ids)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(rows.into_iter().collect())
+    }
+
     async fn get_event(&self, event_id: &str) -> Result<Option<Event>> {
         let row = sqlx::query!(
             r#"

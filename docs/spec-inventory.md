@@ -18,7 +18,7 @@ Statuses: **tested** = present and asserted by a named test; **untested** = pres
 | Client-Server API | endpoints | 163 | 0 | 0 | 0 | 1 | 164 |
 | Client-Server API | requirements | 77 | 0 | 0 | 0 | 9 | 86 |
 | Server-Server API | endpoints | 29 | 0 | 6 | 0 | 1 | 36 |
-| Server-Server API | requirements | 24 | 0 | 14 | 0 | 3 | 41 |
+| Server-Server API | requirements | 25 | 0 | 13 | 0 | 3 | 41 |
 | Application Service API | endpoints | 11 | 0 | 0 | 0 | 0 | 11 |
 | Application Service API | requirements | 16 | 0 | 0 | 0 | 2 | 18 |
 | Push Gateway API (homeserver as client) | endpoints | 1 | 0 | 0 | 0 | 0 | 1 |
@@ -27,7 +27,7 @@ Statuses: **tested** = present and asserted by a named test; **untested** = pres
 | Identity Service API (homeserver as consumer) | requirements | 1 | 0 | 0 | 0 | 0 | 1 |
 | Room versions 1–12 | requirements | 61 | 0 | 0 | 0 | 0 | 61 |
 | Appendices | requirements | 10 | 0 | 3 | 4 | 4 | 21 |
-| All |  | 399 | 0 | 25 | 4 | 37 | 465 |
+| All |  | 400 | 0 | 24 | 4 | 37 | 465 |
 ## Gap beads
 
 New beads filed by this inventory (children of `conduit-y99`):
@@ -37,7 +37,7 @@ New beads filed by this inventory (children of `conduit-y99`):
 - `conduit-y99.30` - Push rule evaluation, predefined rules, GET /pushrules/global/, /notifications and thread counts (10 row(s))
 - `conduit-y99.31` - Push gateway delivery conformance (/notify payload, rejected pushkeys, retries) (4 row(s))
 - `conduit-y99.32` - Federation EDUs: m.typing, m.receipt, m.presence, m.signing_key_update in+out (3 row(s))
-- `conduit-y99.33` - PDU receipt checks: rejection, soft failure, hash-mismatch redaction, size limits (5 row(s))
+- `conduit-y99.33` - PDU receipt checks: rejection, soft failure, hash-mismatch redaction, size limits (4 row(s))
 - `conduit-y99.34` - Application service transaction push conformance (Bearer hs_token, durable retry, interest rules, ephemeral) (0 row(s))
 - `conduit-y99.35` - Application service CS-API extensions (identity assertion, ts massaging, m.login.application_service login, rate-limit exemption) (0 row(s))
 - `conduit-y99.36` - Third-party invites and identity-server integration (lookup, store-invite, onbind, 3PID bind/unbind) (28 row(s))
@@ -417,7 +417,7 @@ In-flight / pre-existing beads referenced (not duplicated):
 | `ss.pdu.checks` | [Checks performed on receipt of a PDU (format, signatures, hashes, auth events, state-before, current state)](https://spec.matrix.org/v1.19/server-server-api/#checks-performed-on-receipt-of-a-pdu) | partial | `conduit-server/src/federation/pipeline.rs` | `federation_inbound.rs::inbound_signature_verified_or_rejected` | `conduit-y99.33` `conduit-g12` `conduit-embed-pdu` |  |
 | `ss.pdu.auth-events-selection` | [Auth events selection](https://spec.matrix.org/v1.19/server-server-api/#auth-events-selection) | tested | `conduit-server/src/federation/pipeline.rs` | `production_pdu.rs::auth_event_selection_rejects_and_current_state_soft_fails` |  | A message whose auth events are not exactly the selection from the state at its prev events is rejected. Room version 12 does not cite m.room.create. |
 | `ss.pdu.rejection` | [Rejection](https://spec.matrix.org/v1.19/server-server-api/#rejection) | tested | `conduit-server/src/federation/pipeline.rs` | `production_pdu.rs::auth_event_selection_rejects_and_current_state_soft_fails` |  | The transaction stays 200. The PDU is stored and omitted from client sync, federation GET /event, and later prev_events. Current state is unchanged. |
-| `ss.pdu.soft-failure` | [Soft failure](https://spec.matrix.org/v1.19/server-server-api/#soft-failure) | partial | `conduit-server/src/federation/pipeline.rs` | `production_pdu.rs::auth_event_selection_rejects_and_current_state_soft_fails` | `conduit-y99.33` | Stored, hidden from client sync, omitted from new prev_events, and returned by federation GET /event. Backfill and get_missing_events still return an unreferenced soft-failed event. A soft-failed state event is not pushed to clients if later resolution selects it. |
+| `ss.pdu.soft-failure` | [Soft failure](https://spec.matrix.org/v1.19/server-server-api/#soft-failure) | tested | `conduit-server/src/federation/pipeline.rs` | `production_pdu.rs::auth_event_selection_rejects_and_current_state_soft_fails`<br>`production_pdu.rs::soft_failed_topic_is_omitted_until_referenced_and_syncs_when_selected` |  | Stored, hidden from client sync until resolution selects it, omitted from new prev_events, and returned by federation GET /event. Backfill and get_missing_events return a soft-failed event only when a named event lists it in prev_events or auth_events. A later resolution that selects a soft-failed state event is pushed to clients. |
 | `ss.edus` | [EDUs (general)](https://spec.matrix.org/v1.19/server-server-api/#edus) | partial | `conduit-server/src/federation/server.rs:951` |  | `conduit-y99.32` |  |
 | `ss.state-res` | [Room state resolution](https://spec.matrix.org/v1.19/server-server-api/#room-state-resolution) | partial | `conduit/src/room/state_res.rs` | `conduit/src/room/state_res.rs (unit tests)` | `conduit-y99.23` `conduit-s6m` | State res v2 only. |
 | `ss.backfill` | [Backfilling and retrieving missing events](https://spec.matrix.org/v1.19/server-server-api/#backfilling-and-retrieving-missing-events) | tested | `conduit-server/src/federation/server.rs`<br>`conduit-server/src/federation/client.rs` | `production_pdu.rs::backfill_returns_the_named_events_and_their_predecessors`<br>`production_pdu.rs::get_missing_events_returns_prev_events_between_the_bounds` (+1) |  | Backfill returns the named events and their predecessors. get_missing_events walks prev_events of latest_events and stops at earliest_events. |

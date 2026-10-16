@@ -959,18 +959,52 @@ fn backfill_params(raw: &str) -> (Vec<String>, Option<i64>) {
     (seeds, limit)
 }
 
+/// `prev_events` and `auth_events` of the events named by the request.
+///
+/// A soft-failed event is included only when one of those named events lists
+/// it. An id discovered later in the walk does not count.
+fn referenced_event_ids(events: &[Event], named: &[String]) -> HashSet<String> {
+    let by_id: HashMap<&str, &Event> = events.iter().map(|event| (event.event_id.as_str(), event)).collect();
+    let mut referenced = HashSet::new();
+    for event_id in named {
+        let Some(event) = by_id.get(event_id.as_str()) else { continue };
+        referenced.extend(event.prev_events.iter().cloned());
+        referenced.extend(event.auth_events.iter().cloned());
+    }
+    referenced
+}
+
+fn is_unreferenced_soft_fail(event_id: &str, soft_failed: &HashSet<String>, referenced: &HashSet<String>) -> bool {
+    soft_failed.contains(event_id) && !referenced.contains(event_id)
+}
+
 /// Events in `seeds` and the events that preceded them, breadth-first, up to `limit`.
-fn backfill_window(events: &[Event], seeds: &[String], limit: usize) -> Vec<Event> {
+///
+/// Soft-failed events are omitted unless `referenced` contains them. Their
+/// `prev_events` are still walked, and they do not consume `limit`.
+fn backfill_window(
+    events: &[Event],
+    seeds: &[String],
+    limit: usize,
+    soft_failed: &HashSet<String>,
+    referenced: &HashSet<String>,
+) -> Vec<Event> {
     let by_id: HashMap<&str, &Event> = events.iter().map(|event| (event.event_id.as_str(), event)).collect();
     let mut selected = Vec::new();
     let mut seen = HashSet::new();
     let mut queue: VecDeque<String> = seeds.iter().cloned().collect();
     while let Some(event_id) = queue.pop_front() {
-        if !seen.insert(event_id.clone()) || selected.len() >= limit {
+        if !seen.insert(event_id.clone()) {
             continue;
         }
         let Some(event) = by_id.get(event_id.as_str()) else { continue };
-        selected.push((*event).clone());
+        let hidden = is_unreferenced_soft_fail(&event.event_id, soft_failed, referenced);
+        if !hidden {
+            if selected.len() >= limit {
+                continue;
+            }
+            selected.push((*event).clone());
+        }
         for prev in &event.prev_events {
             if !seen.contains(prev) {
                 queue.push_back(prev.clone());
@@ -978,6 +1012,16 @@ fn backfill_window(events: &[Event], seeds: &[String], limit: usize) -> Vec<Even
         }
     }
     selected
+}
+
+async fn soft_failed_ids(storage: &dyn Storage, events: &[Event]) -> Result<HashSet<String>, conduit::Error> {
+    let ids: Vec<String> = events.iter().map(|event| event.event_id.clone()).collect();
+    let dispositions = storage.event_dispositions(&ids).await?;
+    Ok(dispositions
+        .into_iter()
+        .filter(|(_, kind)| kind == "soft_failed")
+        .map(|(event_id, _)| event_id)
+        .collect())
 }
 
 /// `GET /_matrix/federation/v1/backfill/:roomId?v=...&limit=...`
@@ -1007,7 +1051,12 @@ pub async fn backfill(
         Ok(evs) => evs,
         Err(e) => return internal(&e.to_string()),
     };
-    let window = backfill_window(&all_events, &seeds, limit);
+    let soft_failed = match soft_failed_ids(state.storage.as_ref(), &all_events).await {
+        Ok(ids) => ids,
+        Err(e) => return internal(&e.to_string()),
+    };
+    let referenced = referenced_event_ids(&all_events, &seeds);
+    let window = backfill_window(&all_events, &seeds, limit, &soft_failed, &referenced);
 
     // History visibility, against the requesting origin's membership —
     // the same derivation the client-server read paths use, not a
@@ -1127,6 +1176,13 @@ pub async fn get_missing_events(
     // latest events are the ones the caller already has, so they are not
     // returned. earliest_events stop the walk.
     let event_map: HashMap<String, &Event> = all_events.iter().map(|e| (e.event_id.clone(), e)).collect();
+    let soft_failed = match soft_failed_ids(state.storage.as_ref(), &all_events).await {
+        Ok(ids) => ids,
+        Err(e) => return internal(&e.to_string()),
+    };
+    let mut named: Vec<String> = earliest.iter().cloned().collect();
+    named.extend(latest.iter().cloned());
+    let referenced = referenced_event_ids(&all_events, &named);
 
     let mut found: Vec<Event> = Vec::new();
     let mut visited: HashSet<String> = earliest.union(&latest).cloned().collect();
@@ -1142,14 +1198,22 @@ pub async fn get_missing_events(
     }
 
     while let Some(eid) = queue.pop_front() {
-        if !visited.insert(eid.clone()) || found.len() >= limit {
+        if !visited.insert(eid.clone()) {
             continue;
         }
         let Some(event) = event_map.get(&eid) else { continue };
         if event.depth < min_depth {
             continue;
         }
-        found.push((*event).clone());
+        // Same rule as backfill: an unreferenced soft-failed event is not
+        // returned, but its predecessors still are.
+        let hidden = is_unreferenced_soft_fail(&event.event_id, &soft_failed, &referenced);
+        if !hidden {
+            if found.len() >= limit {
+                continue;
+            }
+            found.push((*event).clone());
+        }
         for prev in &event.prev_events {
             if !visited.contains(prev) {
                 queue.push_back(prev.clone());

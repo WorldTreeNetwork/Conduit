@@ -281,6 +281,11 @@ pub async fn process_received(
     }
     auth_chain.insert(pdu.event_id.clone(), pdu.clone());
 
+    let room_version = prior_state
+        .get(&("m.room.create".to_owned(), String::new()))
+        .map(|event| conduit::room_version::version_of_content(&event.content))
+        .unwrap_or(11);
+
     let resolved_state = if current_state_map.is_empty() {
         if let Some(state_key) = &pdu.state_key {
             let mut m = StateMap::new();
@@ -294,9 +299,45 @@ pub async fn process_received(
         if let Some(state_key) = &pdu.state_key {
             incoming_state.insert((pdu.event_type.clone(), state_key.clone()), pdu.clone());
         }
-        let state_sets = vec![current_state_map.clone(), incoming_state];
-        state_res::resolve(state_sets, auth_chain)
-            .map_err(|e| PipelineError::StateRes(e.to_string()))?
+        let mut state_sets = vec![current_state_map.clone(), incoming_state];
+        // A soft-failed state event cited by this PDU is another fork. State
+        // resolution decides whether it becomes current state.
+        let mut seen_refs = HashSet::new();
+        for event_id in pdu.prev_events.iter().chain(pdu.auth_events.iter()) {
+            if !seen_refs.insert(event_id.clone()) {
+                continue;
+            }
+            let Ok(Some(referenced)) = storage.get_event(event_id).await else { continue };
+            let Some(state_key) = referenced.state_key.clone() else { continue };
+            let disposition = storage
+                .event_disposition(event_id)
+                .await
+                .map_err(|error| PipelineError::Storage(error.to_string()))?;
+            if disposition.as_deref() != Some("soft_failed") {
+                continue;
+            }
+            // The branch state cites the power that authorised the event.
+            // Swapping only the event into current state would hide that
+            // conflict, and the event would pass auth on its own power.
+            let mut fork = current_state_map.clone();
+            for auth_id in &referenced.auth_events {
+                if let Ok(Some(auth)) = storage.get_event(auth_id).await {
+                    if let Some(auth_key) = auth.state_key.clone() {
+                        fork.insert((auth.event_type.clone(), auth_key), auth);
+                    }
+                }
+            }
+            fork.insert((referenced.event_type.clone(), state_key), referenced.clone());
+            state_sets.push(fork);
+            auth_chain.extend(build_auth_chain(storage, &referenced).await?);
+            auth_chain.insert(referenced.event_id.clone(), referenced);
+        }
+        let resolve = if state_sets.len() > 2 && room_version >= 12 {
+            state_res::resolve_v12
+        } else {
+            state_res::resolve
+        };
+        resolve(state_sets, auth_chain).map_err(|error| PipelineError::StateRes(error.to_string()))?
     };
 
     // --- Auth check against resolved state ---------------------------------
@@ -318,6 +359,31 @@ pub async fn process_received(
         .publish_event(&pdu)
         .await
         .map_err(|e| PipelineError::Storage(e.to_string()))?;
+
+    // Resolution selected a previously soft-failed state event. It is current
+    // state now, so the hold is lifted and clients can be told about it.
+    for event in resolved_state.values() {
+        if event.event_id == pdu.event_id {
+            continue;
+        }
+        let disposition = storage
+            .event_disposition(&event.event_id)
+            .await
+            .map_err(|error| PipelineError::Storage(error.to_string()))?;
+        if disposition.as_deref() != Some("soft_failed") {
+            continue;
+        }
+        if let Some(state_key) = &event.state_key {
+            storage
+                .set_state_entry(&pdu.room_id, &event.event_type, state_key, &event.event_id)
+                .await
+                .map_err(|error| PipelineError::Storage(error.to_string()))?;
+        }
+        storage
+            .clear_event_disposition(&event.event_id)
+            .await
+            .map_err(|error| PipelineError::Storage(error.to_string()))?;
+    }
 
     // --- Notify local /sync ---------------------------------------------------
     notify_sync(storage, events_tx).await;

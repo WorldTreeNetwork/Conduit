@@ -5,7 +5,7 @@
 //! Resolved-DAG snapshot conformance remains under conduit-y99.13.
 
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use axum::{
     extract::{Query, State},
@@ -1329,6 +1329,113 @@ async fn state_before(
     Ok(state)
 }
 
+/// A state event that lost when it arrived can still be selected once a later
+/// event references it. Rejected events are not candidates. The winner is
+/// inserted into `state` so `/sync` carries it in the state block.
+async fn promote_referenced_state(
+    storage: &dyn conduit::storage::Storage,
+    events: &[conduit::event::Event],
+    won: &HashSet<String>,
+    state: &mut HashMap<(String, String), conduit::event::Event>,
+) -> Result<(), Response> {
+    if events.is_empty() {
+        return Ok(());
+    }
+    let ids: Vec<String> = events.iter().map(|event| event.event_id.clone()).collect();
+    let dispositions = storage
+        .event_dispositions(&ids)
+        .await
+        .map_err(|error| MatrixError::unknown(error.to_string()).into_response())?;
+    let by_id: HashMap<&str, &conduit::event::Event> =
+        events.iter().map(|event| (event.event_id.as_str(), event)).collect();
+    let mut candidates = Vec::new();
+    let mut seen = HashSet::new();
+    for event in events {
+        for prev in &event.prev_events {
+            if !seen.insert(prev.clone()) {
+                continue;
+            }
+            let Some(referenced) = by_id.get(prev.as_str()) else { continue };
+            if referenced.state_key.is_none() || won.contains(&referenced.event_id) {
+                continue;
+            }
+            if dispositions.get(&referenced.event_id).is_some_and(|kind| kind == "rejected") {
+                continue;
+            }
+            candidates.push((*referenced).clone());
+        }
+    }
+    if candidates.is_empty() {
+        return Ok(());
+    }
+    let version12 = events
+        .iter()
+        .find(|event| event.event_type == "m.room.create")
+        .is_some_and(|event| conduit::room_version::version_of_content(&event.content) >= 12);
+    let chain: HashMap<String, conduit::event::Event> =
+        events.iter().map(|event| (event.event_id.clone(), event.clone())).collect();
+    for event in candidates {
+        let Some(state_key) = event.state_key.clone() else { continue };
+        let key = (event.event_type.clone(), state_key);
+        if state.get(&key).is_some_and(|winner| winner.event_id == event.event_id) {
+            continue;
+        }
+        let mut fork = state.clone();
+        for auth_id in &event.auth_events {
+            if let Some(auth) = by_id.get(auth_id.as_str()) {
+                if let Some(auth_key) = &auth.state_key {
+                    fork.insert((auth.event_type.clone(), auth_key.clone()), (*auth).clone());
+                }
+            }
+        }
+        fork.insert(key.clone(), event.clone());
+        let sets = vec![state.clone(), fork];
+        let resolved = if version12 {
+            conduit::room::state_res::resolve_v12(sets, chain.clone())
+        } else {
+            conduit::room::state_res::resolve(sets, chain.clone())
+        };
+        if let Ok(next) = resolved {
+            if next.get(&key).is_some_and(|winner| winner.event_id == event.event_id) {
+                *state = next;
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn resolved_snapshot(
+    storage: &dyn conduit::storage::Storage,
+    rows: &[(i64, conduit::event::Event)],
+    limit: i64,
+) -> Result<HashMap<(String, String), conduit::event::Event>, Response> {
+    let events: Vec<_> = rows
+        .iter()
+        .filter(|(position, _)| *position <= limit)
+        .map(|(_, event)| event.clone())
+        .collect();
+    let ids: Vec<String> = events.iter().map(|event| event.event_id.clone()).collect();
+    let dispositions = storage
+        .event_dispositions(&ids)
+        .await
+        .map_err(|error| MatrixError::unknown(error.to_string()).into_response())?;
+    // Soft-failed and rejected PDUs stay in the DAG but are not applied as
+    // ordinary arrivals. A soft-failed state event re-enters below only when
+    // a later reference and state resolution select it.
+    let admitted: Vec<_> = events
+        .iter()
+        .filter(|event| {
+            dispositions
+                .get(&event.event_id)
+                .is_none_or(|kind| kind != "soft_failed" && kind != "rejected")
+        })
+        .cloned()
+        .collect();
+    let (mut state, won) = conduit::room::state_res::snapshot_from_arrival(&admitted);
+    promote_referenced_state(storage, &events, &won, &mut state).await?;
+    Ok(state)
+}
+
 /// Produce the full state or state delta at the requested sync boundary.
 /// Legacy sync also carries state excluded by timeline filters; a returned
 /// timeline state event supplies its own change after the before-state.
@@ -1348,24 +1455,16 @@ async fn state_for_sync(
             }
         }
     }
-    let snapshot = |limit: i64| -> HashMap<(String, String), conduit::event::Event> {
-        let events: Vec<_> = rows
-            .iter()
-            .filter(|(position, _)| *position <= limit)
-            .map(|(_, event)| event.clone())
-            .collect();
-        conduit::room::state_res::snapshot_from_arrival(&events).0
-    };
-    let end = snapshot(boundary.until);
+    let end = resolved_snapshot(storage, &rows, boundary.until).await?;
     let before = if boundary.state_after {
         HashMap::new()
     } else {
-        snapshot(first.saturating_sub(1))
+        resolved_snapshot(storage, &rows, first.saturating_sub(1)).await?
     };
     let previous = if boundary.full_state || boundary.since.is_none() {
         HashMap::new()
     } else {
-        snapshot(boundary.since.unwrap_or(0))
+        resolved_snapshot(storage, &rows, boundary.since.unwrap_or(0)).await?
     };
     let timeline_state: std::collections::HashSet<_> = timeline.iter().filter_map(|event| {
         event.state_key.as_ref().map(|key| (event.event_type.clone(), key.clone()))

@@ -2520,6 +2520,270 @@ async fn auth_event_selection_rejects_and_current_state_soft_fails() {
     );
 }
 
+fn event_texts(value: &Value, field: &str) -> Vec<String> {
+    value[field]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|pdu| {
+            pdu["content"]["topic"]
+                .as_str()
+                .or_else(|| pdu["content"]["body"].as_str())
+                .map(str::to_owned)
+        })
+        .collect()
+}
+
+/// A topic that fails current-state auth is stored and served by GET /event,
+/// but backfill and get_missing_events omit it unless a named event lists it.
+/// After a later event is resolved with the sender's power restored, /sync
+/// state carries the topic.
+#[tokio::test]
+async fn soft_failed_topic_is_omitted_until_referenced_and_syncs_when_selected() {
+    let remote = spawn_remote().await;
+    let server = federated_server(&remote).await;
+    let alice = server.register("alice").await;
+    let token = alice["access_token"].as_str().unwrap();
+    let room = server
+        .request(
+            Method::POST,
+            "/_matrix/client/v3/createRoom",
+            Some(token),
+            Some(json!({"preset": "public_chat"})),
+            200,
+        )
+        .await["room_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let joiner = "@r:remote.test";
+    let other = "@r2:remote.test";
+    federation_join(&server, &remote, REMOTE, &room, joiner).await;
+    federation_join(&server, &remote, REMOTE, &room, other).await;
+
+    let state = server
+        .request(Method::GET, &format!("/_matrix/client/v3/rooms/{}/state", enc(&room)), Some(token), None, 200)
+        .await;
+    let event_id_of = |kind: &str, key: &str| {
+        state
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|event| event["type"] == kind && event["state_key"] == key)
+            .unwrap_or_else(|| panic!("missing {kind} {key} in {state}"))["event_id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let join_id = event_id_of("m.room.member", joiner);
+    let other_id = event_id_of("m.room.member", other);
+
+    let power_path = format!("/_matrix/client/v3/rooms/{}/state/m.room.power_levels", enc(&room));
+    let mut levels = server.request(Method::GET, &power_path, Some(token), None, 200).await;
+    levels["users"][joiner] = json!(100);
+    let high_id = server
+        .request(Method::PUT, &power_path, Some(token), Some(levels), 200)
+        .await["event_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let mut levels = server.request(Method::GET, &power_path, Some(token), None, 200).await;
+    levels["users"][joiner] = json!(0);
+    let low_id = server
+        .request(Method::PUT, &power_path, Some(token), Some(levels), 200)
+        .await["event_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let now = chrono::Utc::now().timestamp_millis() as u64;
+    let (topic_id, topic) = sign(
+        &remote,
+        Pdu::new(
+            &room,
+            joiner,
+            "m.room.topic",
+            Some(String::new()),
+            json!({"topic": "fork"}),
+            now,
+            vec![high_id.clone(), join_id.clone()],
+            vec![join_id.clone(), high_id.clone()],
+            40,
+        ),
+    );
+    let accepted = fed(
+        &server,
+        &remote,
+        Method::PUT,
+        "/_matrix/federation/v1/send/soft-topic-1",
+        Some(txn(vec![topic], vec![])),
+        200,
+    )
+    .await;
+    assert_eq!(accepted["pdus"][&topic_id], json!({}), "topic soft-fails against the lowered power: {accepted}");
+    let served = fed(
+        &server,
+        &remote,
+        Method::GET,
+        &format!("/_matrix/federation/v1/event/{}", enc(&topic_id)),
+        None,
+        200,
+    )
+    .await;
+    assert_eq!(served["pdus"][0]["content"]["topic"], "fork", "{served}");
+
+    let (linker_id, linker) = sign(
+        &remote,
+        Pdu::new(
+            &room,
+            other,
+            "m.room.message",
+            None,
+            json!({"msgtype": "m.text", "body": "linker"}),
+            now + 1,
+            vec![low_id.clone(), other_id.clone()],
+            vec![low_id.clone(), topic_id.clone()],
+            500,
+        ),
+    );
+    let linked = fed(
+        &server,
+        &remote,
+        Method::PUT,
+        "/_matrix/federation/v1/send/soft-topic-link",
+        Some(txn(vec![linker], vec![])),
+        200,
+    )
+    .await;
+    assert_eq!(linked["pdus"][&linker_id], json!({}), "linker passes current auth and keeps the topic soft-failed: {linked}");
+
+    let mainline = server
+        .request(
+            Method::PUT,
+            &format!("/_matrix/client/v3/rooms/{}/send/m.room.message/soft-topic-main", enc(&room)),
+            Some(token),
+            Some(json!({"msgtype": "m.text", "body": "mainline"})),
+            200,
+        )
+        .await["event_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let backfill = |event_id: &str| format!("/_matrix/federation/v1/backfill/{}?limit=50&v={}", enc(&room), enc(event_id));
+    let from_main = event_texts(
+        &fed(&server, &remote, Method::GET, &backfill(&mainline), None, 200).await,
+        "pdus",
+    );
+    assert!(
+        !from_main.iter().any(|text| text == "fork"),
+        "backfill from an event that does not list the topic omits it: {from_main:?}"
+    );
+    assert!(
+        from_main.iter().any(|text| text == "linker"),
+        "the walk still returns the event that cites the topic: {from_main:?}"
+    );
+    let from_linker = event_texts(
+        &fed(&server, &remote, Method::GET, &backfill(&linker_id), None, 200).await,
+        "pdus",
+    );
+    assert!(
+        from_linker.iter().any(|text| text == "fork"),
+        "backfill includes the topic when v lists it: {from_linker:?}"
+    );
+    let from_topic = event_texts(
+        &fed(&server, &remote, Method::GET, &backfill(&topic_id), None, 200).await,
+        "pdus",
+    );
+    assert!(
+        !from_topic.iter().any(|text| text == "fork"),
+        "naming the soft-failed event itself is not a reference: {from_topic:?}"
+    );
+
+    let missing = format!("/_matrix/federation/v1/get_missing_events/{}", enc(&room));
+    let missing_of = |latest: &str| json!({"earliest_events": [], "latest_events": [latest], "limit": 20});
+    let missing_main = event_texts(
+        &fed(&server, &remote, Method::POST, &missing, Some(missing_of(&mainline)), 200).await,
+        "events",
+    );
+    assert!(
+        !missing_main.iter().any(|text| text == "fork"),
+        "get_missing_events omits an unreferenced soft-failed topic: {missing_main:?}"
+    );
+    let missing_linker = event_texts(
+        &fed(&server, &remote, Method::POST, &missing, Some(missing_of(&linker_id)), 200).await,
+        "events",
+    );
+    assert!(
+        missing_linker.iter().any(|text| text == "fork"),
+        "get_missing_events returns the topic when latest_events lists it: {missing_linker:?}"
+    );
+
+    let topics = |sync: &Value| -> Vec<String> {
+        let room_sync = &sync["rooms"]["join"][&room];
+        ["state", "timeline"]
+            .into_iter()
+            .flat_map(|section| {
+                room_sync[section]["events"]
+                    .as_array()
+                    .map(|events| events.iter())
+                    .into_iter()
+                    .flatten()
+                    .filter(|event| event["type"] == "m.room.topic")
+                    .filter_map(|event| event["content"]["topic"].as_str().map(str::to_owned))
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    };
+    let before = server.request(Method::GET, "/_matrix/client/v3/sync", Some(token), None, 200).await;
+    let before_topics = topics(&before);
+    assert!(
+        !before_topics.iter().any(|topic| topic == "fork"),
+        "clients are not told about the topic while power still rejects it: {before_topics:?}"
+    );
+
+    let mut levels = server.request(Method::GET, &power_path, Some(token), None, 200).await;
+    levels["users"][joiner] = json!(100);
+    let restored = server
+        .request(Method::PUT, &power_path, Some(token), Some(levels), 200)
+        .await["event_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (after_id, after) = sign(
+        &remote,
+        Pdu::new(
+            &room,
+            other,
+            "m.room.message",
+            None,
+            json!({"msgtype": "m.text", "body": "after"}),
+            now + 2,
+            vec![restored.clone(), other_id],
+            vec![restored, topic_id.clone()],
+            600,
+        ),
+    );
+    let selected = fed(
+        &server,
+        &remote,
+        Method::PUT,
+        "/_matrix/federation/v1/send/soft-topic-select",
+        Some(txn(vec![after], vec![])),
+        200,
+    )
+    .await;
+    assert_eq!(selected["pdus"][&after_id], json!({}), "the referencing event is accepted: {selected}");
+
+    let after_sync = server.request(Method::GET, "/_matrix/client/v3/sync", Some(token), None, 200).await;
+    let after_topics = topics(&after_sync);
+    assert!(
+        after_topics.iter().any(|topic| topic == "fork"),
+        "sync state includes the topic once resolution selects it: {after_topics:?} {}",
+        after_sync["rooms"]["join"][&room]
+    );
+}
+
 fn remote_key_document(remote: &Remote) -> Value {
     let unsigned = json!({
         "server_name": REMOTE,

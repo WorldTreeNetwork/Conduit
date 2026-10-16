@@ -433,6 +433,20 @@ pub trait Storage: Send + Sync + 'static {
     async fn set_event_disposition(&self, _event_id: &str, _kind: &str) -> Result<()> {
         Ok(())
     }
+    /// Drop a hold once state resolution selects the event into current state.
+    async fn clear_event_disposition(&self, _event_id: &str) -> Result<()> {
+        Ok(())
+    }
+    /// `event_id` → `rejected` or `soft_failed` for the ids that have a hold.
+    async fn event_dispositions(&self, event_ids: &[String]) -> Result<HashMap<String, String>> {
+        let mut found = HashMap::new();
+        for event_id in event_ids {
+            if let Some(kind) = self.event_disposition(event_id).await? {
+                found.insert(event_id.clone(), kind);
+            }
+        }
+        Ok(found)
+    }
     /// Event row and current-state pointer, visible together or not at all.
     async fn publish_event(&self, event: &Event) -> Result<()> {
         self.put_event(event).await?;
