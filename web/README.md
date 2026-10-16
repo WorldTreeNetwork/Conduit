@@ -16,9 +16,10 @@ then `http://localhost:8008`.
 
 Sign-in is Identikey when the homeserver lists `m.login.sso`. The button
 follows the homeserver SSO redirect, and the built files never contain the
-OIDC client secret. If that flow is absent, the page says Identikey is not
-offered. A key you hold uses the Identikey wallet (`io.identikey.auth`)
-against the homeserver. This page does not collect that response.
+OIDC client secret. If that flow is absent and password sign-in is off,
+the page says Identikey sign-in is turned off and that it cannot sign
+anyone in. A fixed address says the page is locked to that homeserver. An
+editable address says to enter one that has Identikey turned on.
 
 Password fields are off. Set `VITE_CONDUIT_PASSWORD=1` in the environment
 that runs `bun run dev` or `bun run build` to offer password registration,

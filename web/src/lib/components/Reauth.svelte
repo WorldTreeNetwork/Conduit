@@ -38,7 +38,7 @@
 		{#if offered}
 			<Button type="button" onclick={identikey}>Continue with Identikey</Button>
 		{:else if !passwords}
-			<p>This homeserver is not offering Identikey.</p>
+			<p>Identikey sign-in is turned off, so this page cannot sign you back in. Ask the person who runs the homeserver to turn it on.</p>
 		{/if}
 		{#if passwords}
 			<form class="rest-stack" onsubmit={(e) => { e.preventDefault(); void submitPassword(); }}>
@@ -48,7 +48,6 @@
 			</form>
 		{/if}
 		{#if error}<p class="rest-error" role="alert">{error}</p>{/if}
-		<p>A key you hold signs in through the Identikey wallet.</p>
 		<Button variant="outline" onclick={signOut}>Sign out instead</Button>
 	</div>
 </main>

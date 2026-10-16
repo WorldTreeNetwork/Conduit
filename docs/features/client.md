@@ -108,9 +108,12 @@ The default build has no username or password fields. Set
 `VITE_CONDUIT_PASSWORD` to `1`, `true`, `on`, or `yes` for the command
 that runs `bun run dev` or `bun run build` to offer password registration,
 login, password change, other-device sign-out, and deactivation. Anything
-else, including an unset variable, leaves those controls out. A key the
-person holds signs in through the Identikey wallet and `io.identikey.auth`.
-This page does not collect that response.
+else, including an unset variable, leaves those controls out. When the
+homeserver does not list `m.login.sso` and password sign-in is off, the
+page says Identikey sign-in is turned off and that this page cannot sign
+anyone in. A fixed address says the page is locked to that homeserver. An
+editable address says to enter one that has Identikey turned on. An expired
+session says the page cannot sign the person back in, and sign-out stays.
 
 Room list (invites with accept/decline, unread lamps,
 previews, skeleton loading, empty state), room view (topic, invite,

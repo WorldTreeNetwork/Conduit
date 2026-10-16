@@ -38,7 +38,8 @@ try {
 	await page.goto(url);
 	await signedOut();
 	await expect(page.getByRole('button', { name: 'Continue with Identikey' })).toHaveCount(0);
-	await expect(page.getByText('This homeserver is not offering Identikey.')).toBeVisible();
+	await expect(page.getByRole('heading', { name: 'Identikey sign-in is turned off' })).toBeVisible();
+	await expect(page.getByText('It is locked to this homeserver')).toBeVisible();
 	await enterSession(page, await registerAccount(hs, username, password));
 	await signedIn();
 	await assertAccessibleShell(page, testInfo);
@@ -101,7 +102,7 @@ try {
 	await page.goto(url);
 	await expect(page.getByRole('button', { name: 'Continue with Identikey' })).toBeVisible();
 	await expect(page.getByLabel('Password')).toHaveCount(0);
-	await expect(page.getByText('This homeserver is not offering Identikey.')).toHaveCount(0);
+	await expect(page.getByRole('heading', { name: 'Identikey sign-in is turned off' })).toHaveCount(0);
 	await page.route(`${hs}/_matrix/client/v3/login/sso/redirect?**`, (route) => route.fulfill({ contentType: 'text/html', body: 'SSO redirect captured' }));
 	await page.getByRole('button', { name: 'Continue with Identikey' }).click();
 	await page.waitForURL(`${hs}/_matrix/client/v3/login/sso/redirect?**`);

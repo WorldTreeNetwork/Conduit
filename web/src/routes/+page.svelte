@@ -212,7 +212,17 @@
 					{busy && !passwords ? 'Please wait…' : 'Continue with Identikey'}
 				</Button>
 			{:else if !passwords && !checking && probe?.state === 'ok'}
-				<p class="status">This homeserver is not offering Identikey.</p>
+				<div class="blocked">
+					<h2>Identikey sign-in is turned off</h2>
+					<p class="help">
+						This page cannot sign you in.
+						{#if pinned}
+							It is locked to this homeserver, and the person who runs it has to turn Identikey on.
+						{:else}
+							Enter a homeserver that has Identikey turned on, or ask the person who runs this one to turn it on.
+						{/if}
+					</p>
+				</div>
 			{/if}
 			{#if passwords}
 				<div class="flex flex-col gap-1.5">
@@ -235,7 +245,6 @@
 					</Button>
 				</div>
 			{/if}
-			<p class="help">A key you hold signs in through the Identikey wallet.</p>
 			<p class="status" aria-live="polite">
 				{#if checking}Checking homeserver…
 				{:else if probe?.state === 'ok'}Homeserver is answering (Matrix {probe.versions.at(-1)}).{/if}
@@ -308,6 +317,21 @@
 		background: var(--color-surface-sunk);
 		color: var(--color-ink);
 		overflow-wrap: anywhere;
+	}
+
+	.blocked {
+		display: flex;
+		flex-direction: column;
+		gap: var(--space-2);
+		padding: var(--space-3) var(--space-4);
+		border-radius: var(--radius-md);
+		background: var(--color-surface-sunk);
+	}
+
+	.blocked h2 {
+		font-size: var(--text-sm);
+		font-weight: 600;
+		color: var(--color-ink);
 	}
 
 	.help,

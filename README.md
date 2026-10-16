@@ -71,14 +71,13 @@ bun run dev    # http://localhost:5173/?hs=http://127.0.0.1:8008
 The signed-out screen offers Identikey when `GET /_matrix/client/v3/login`
 lists `m.login.sso`. That button starts the homeserver SSO redirect. The
 browser never calls `https://auth.identikey.me` and never sees
-`CONDUIT_OIDC_CLIENT_SECRET`. A homeserver that does not offer SSO says so.
+`CONDUIT_OIDC_CLIENT_SECRET`. A homeserver that does not offer SSO says
+Identikey sign-in is turned off and that this page cannot sign anyone in.
 
 Password fields, password change, other-device sign-out, and deactivation
 stay off unless the command that runs `bun run dev` or `bun run build` has
 `VITE_CONDUIT_PASSWORD` set to `1`, `true`, `on`, or `yes`. Restart that
 command after changing it. The homeserver still accepts `m.login.password`.
-A key you hold signs in through the Identikey wallet (`io.identikey.auth`),
-not through a form on this page.
 
 Details: [docs/features/client.md](docs/features/client.md) and
 [web/README.md](web/README.md).

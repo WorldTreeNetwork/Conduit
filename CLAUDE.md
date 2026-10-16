@@ -83,8 +83,10 @@ bun run dev         # http://localhost:5173/?hs=http://127.0.0.1:8008
 The default web build signs in with Identikey only. Password fields,
 password change, other-device sign-out, and deactivation appear when
 `VITE_CONDUIT_PASSWORD` is `1`, `true`, `on`, or `yes`. The protocol core
-still speaks `m.login.password`. A key the person holds uses the Identikey
-wallet (`io.identikey.auth`); the page does not collect that response.
+still speaks `m.login.password`. When the homeserver does not list
+`m.login.sso` and password sign-in is off, the page says Identikey sign-in
+is turned off and how to proceed. It does not describe a wallet sign-in it
+does not perform.
 
 ## Architecture Overview
 
