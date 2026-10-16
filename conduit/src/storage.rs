@@ -1221,7 +1221,7 @@ pub trait Storage: Send + Sync + 'static {
     }
 
     /// State events at or before stream position `through`, ascending.
-    /// Folding them yields the room state as of that position.
+    /// Resolving them yields the room state as of that position.
     async fn state_events_through(&self, room_id: &str, through: i64) -> Result<Vec<(i64, Event)>> {
         Ok(self
             .room_events_with_positions(room_id)

@@ -48,10 +48,14 @@ pub async fn authorize_redaction<S: AuthState>(
         .await
         .map_err(failed)?;
     let power_levels = room_state.get(&("m.room.power_levels".to_owned(), String::new()));
-    let creator = room_state
-        .get(&("m.room.create".to_owned(), String::new()))
-        .map(|create| create.sender.as_str());
-    if conduit::room_content::may_redact_others(user_id, power_levels, creator) {
+    // Room version 12 creators have infinite power and are omitted from
+    // `users`, so the numeric users_default is not their redact level.
+    let level = conduit::auth::effective_user_level(user_id, &room_state);
+    let required = power_levels
+        .and_then(|event| conduit::state_events::parse_power_levels(&event.content).ok())
+        .map(|content| content.redact)
+        .unwrap_or(50);
+    if level >= required {
         return Ok(());
     }
     let local_target = conduit::auth::server_of(&target.sender) == state.server_name();

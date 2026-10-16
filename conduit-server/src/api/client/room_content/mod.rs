@@ -247,7 +247,10 @@ pub(crate) async fn visible_events(
     conduit::auth::filter_visible_for_user(storage, room_id, user_id, events).await
 }
 
-/// Room state folded from state events, as of `through` (`None`: current).
+/// Room state as of `through` (`None`: the writer's current map).
+///
+/// A historical position is the resolved state of events at or before that
+/// stream position, not the last event to arrive for each key.
 pub(crate) async fn state_at(
     storage: &dyn Storage,
     room_id: &str,
@@ -256,12 +259,13 @@ pub(crate) async fn state_at(
     match through {
         None => storage.get_current_state(room_id).await,
         Some(position) => {
-            let mut state: HashMap<(String, String), Event> = HashMap::new();
-            for (_, event) in storage.state_events_through(room_id, position).await? {
-                let key = (event.event_type.clone(), event.state_key.clone().unwrap_or_default());
-                state.insert(key, event);
-            }
-            Ok(state.into_values().collect())
+            let events: Vec<Event> = storage
+                .state_events_through(room_id, position)
+                .await?
+                .into_iter()
+                .map(|(_, event)| event)
+                .collect();
+            Ok(conduit::room::state_res::snapshot_from_arrival(&events).0.into_values().collect())
         }
     }
 }

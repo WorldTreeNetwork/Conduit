@@ -24,9 +24,9 @@
         "total": 164
       },
       "requirement": {
-        "implemented+tested": 59,
+        "implemented+tested": 60,
         "implemented-untested": 0,
-        "partial": 18,
+        "partial": 17,
         "missing": 0,
         "not-applicable": 9,
         "total": 86
@@ -1353,13 +1353,12 @@
       ],
       "tests": [
         "conduit-server/tests/production_rooms.rs::events_members_context_and_joined_rooms",
-        "conduit-server/tests/production_rooms.rs::forget_hides_departed_rooms_until_rejoin"
+        "conduit-server/tests/production_rooms.rs::forget_hides_departed_rooms_until_rejoin",
+        "conduit-server/tests/production_sync.rs::sync_state_follows_resolution_not_arrival_order"
       ],
-      "tests_total": 2,
-      "gap_beads": [
-        "conduit-y99.13"
-      ],
-      "notes": "at/membership/not_membership; historical state folded from stream order (y99.13)."
+      "tests_total": 3,
+      "gap_beads": [],
+      "notes": "at/membership/not_membership. Historical at= uses the same resolved snapshot as context state, which production_sync.rs::sync_state_follows_resolution_not_arrival_order asserts (a later name with an earlier origin_server_ts does not win)."
     },
     {
       "id": "cs.ep.get_matrixclientv3roomsroomidstate",
@@ -7362,13 +7361,16 @@
       "title": "Getting events for a room (event, members, state, messages, context, timestamp_to_event)",
       "source": "https://spec.matrix.org/v1.19/client-server-api/#getting-events-for-a-room",
       "role": "homeserver",
-      "status": "partial",
+      "status": "implemented+tested",
       "code": [
         {
           "loc": "conduit-server/src/api/client/rooms.rs"
         },
         {
           "loc": "conduit-server/src/api/client/room_content/events.rs"
+        },
+        {
+          "loc": "conduit-server/src/api/client/room_content/mod.rs"
         }
       ],
       "tests": [
@@ -7376,14 +7378,12 @@
         "conduit-server/tests/production_rooms.rs::timestamp_to_event_finds_nearest_visible_event",
         "conduit-server/tests/rooms.rs::get_messages_paginates",
         "conduit-server/tests/production_sync.rs::back_pagination_reaches_the_room_creation_under_any_visibility",
-        "conduit-server/tests/production_rooms.rs::messages_filter_backfills_to_the_limit_and_to_is_exclusive"
+        "conduit-server/tests/production_rooms.rs::messages_filter_backfills_to_the_limit_and_to_is_exclusive",
+        "conduit-server/tests/production_sync.rs::sync_state_follows_resolution_not_arrival_order"
       ],
-      "tests_total": 5,
-      "gap_beads": [
-        "conduit-y99.26",
-        "conduit-y99.13"
-      ],
-      "notes": "Back-pagination includes the creator create and join, and /messages applies a RoomEventFilter. Historical state reconstructed from stream order is still open (conduit-y99.13)."
+      "tests_total": 6,
+      "gap_beads": [],
+      "notes": "Back-pagination includes the creator create and join, and /messages applies a RoomEventFilter. Historical state (context and /members?at=) is the resolved state at that stream position, not the last arrival."
     },
     {
       "id": "cs.events.send",
@@ -7524,11 +7524,14 @@
         }
       ],
       "tests": [
-        "conduit-server/tests/rooms.rs::kick_with_power_succeeds"
+        "conduit-server/tests/rooms.rs::kick_with_power_succeeds",
+        "conduit/src/auth.rs::first_power_levels_event_may_exceed_the_sender",
+        "conduit-server/tests/production_rooms.rs::room_upgrade_replaces_and_tombstones",
+        "conduit-server/tests/production_rooms.rs::redaction_permissions_idempotency_and_serving"
       ],
-      "tests_total": 1,
+      "tests_total": 4,
       "gap_beads": [],
-      "notes": ""
+      "notes": "The first power-levels event may set levels above the sender. A later event may not. A room v12 creator, omitted from users, still holds the redact level."
     },
     {
       "id": "cs.rooms.membership",

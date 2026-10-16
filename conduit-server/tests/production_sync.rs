@@ -1457,6 +1457,32 @@ async fn sync_state_follows_resolution_not_arrival_order() {
     let ended = names(&at_end, "state_after");
     assert!(ended.contains(&"Resolved".to_owned()), "{at_end}");
     assert!(!ended.iter().any(|name| name == "Arrived later"), "{at_end}");
+
+    let anchor = send_text(
+        &server,
+        &alice,
+        &room,
+        "after-fork",
+        json!({"msgtype": "m.text", "body": "after the fork"}),
+    )
+    .await;
+    let context = server
+        .request(
+            Method::GET,
+            &format!("/_matrix/client/v3/rooms/{room}/context/{anchor}?limit=1"),
+            Some(token(&alice)),
+            None,
+            200,
+        )
+        .await;
+    let historical: Vec<String> = context["state"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|event| event["type"] == "m.room.name")
+        .map(|event| event["content"]["name"].as_str().unwrap_or("").to_owned())
+        .collect();
+    assert_eq!(historical, vec!["Resolved".to_owned()], "{context}");
 }
 
 #[tokio::test]

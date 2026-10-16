@@ -948,6 +948,13 @@ fn check_power_levels(event: &Event, auth_state: &StateMap<Event>) -> Result<(),
         }
     }
 
+    // Spec rule: with no previous power-levels event, the integer content is
+    // allowed. The sender's right to send the event was already checked, and
+    // room version 12 still rejects creators listed in `users`.
+    if !auth_state.contains_key(&("m.room.power_levels".to_owned(), String::new())) {
+        return Ok(());
+    }
+
     // Sender cannot grant anyone (including themselves) a level above their own.
     for (user, &level) in &new_pl.users {
         if level > sender_level {
@@ -2590,5 +2597,51 @@ mod tests {
         apply_state_event(&mut state, &member("@alice:example.com", KNOCKER, "ban"));
         assert!(check_auth(&member("@bob:example.com", KNOCKER, "leave"), &state).is_err());
         assert!(check_auth(&member("@alice:example.com", KNOCKER, "leave"), &state).is_ok());
+    }
+
+    /// Room v11 auth rule 9.4: the first power-levels event may set values
+    /// above the sender. A later event is still bounded by the sender.
+    #[test]
+    fn first_power_levels_event_may_exceed_the_sender() {
+        let alice = "@alice:example.com";
+        let room = "!room:example.com";
+        let mut state = HashMap::new();
+        apply_state_event(&mut state, &create_with("11", alice, room, json!({ "creator": alice })));
+        apply_state_event(&mut state, &make_member_event("$join", alice, alice, room, "join"));
+        let first = make_power_levels_event(
+            "$pl",
+            alice,
+            room,
+            json!({ "users": { alice: 100 }, "events": { "m.room.tombstone": 150 } }),
+        );
+        assert!(check_auth(&first, &state).is_ok(), "{:?}", check_auth(&first, &state));
+
+        apply_state_event(&mut state, &first);
+        let raised = make_power_levels_event(
+            "$pl2",
+            alice,
+            room,
+            json!({ "users": { alice: 100 }, "events": { "m.room.tombstone": 200 } }),
+        );
+        assert!(matches!(
+            check_auth(&raised, &state),
+            Err(AuthError::PowerLevelExceedsSelf { sender_has: 100 })
+        ));
+
+        let mut v12 = HashMap::new();
+        let mut create = create_with("12", alice, "", json!({}));
+        create.room_id.clear();
+        apply_state_event(&mut v12, &create);
+        apply_state_event(&mut v12, &make_member_event("$join", alice, alice, room, "join"));
+        let lists_creator = make_power_levels_event(
+            "$pl",
+            alice,
+            room,
+            json!({ "users": { alice: 100 }, "events": { "m.room.tombstone": 150 } }),
+        );
+        assert!(matches!(
+            check_auth(&lists_creator, &v12),
+            Err(AuthError::CreatorInPowerLevels)
+        ));
     }
 }

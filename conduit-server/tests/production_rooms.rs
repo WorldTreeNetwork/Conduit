@@ -568,7 +568,7 @@ async fn relations_threads_and_edit_aggregation() {
     let e2 = send(&server, &alice, &room, "m.room.message", edit("edited twice")).await;
     let forged = send(&server, &bob, &room, "m.room.message", edit("not yours")).await;
     let reaction = send(&server, &bob, &room, "m.reaction", json!({"m.relates_to": {"rel_type": "m.annotation", "event_id": root, "key": "👍"}})).await;
-    let nested = send(&server, &carol, &room, "m.room.message", json!({"body": "ref", "m.relates_to": {"rel_type": "m.reference", "event_id": t1}})).await;
+    let nested = send(&server, &carol, &room, "m.room.message", json!({"msgtype": "m.text", "body": "ref", "m.relates_to": {"rel_type": "m.reference", "event_id": t1}})).await;
 
     // All direct children, newest first.
     let all = get(&server, &carol, &format!("/_matrix/client/v1/rooms/{room}/relations/{root}"), 200).await;
@@ -625,7 +625,7 @@ async fn relations_threads_and_edit_aggregation() {
 
     // /threads lists roots by latest activity, with bundles.
     let other_root = text(&server, &carol, &room, "second thread").await;
-    let t3 = send(&server, &carol, &room, "m.room.message", json!({"body": "x", "m.relates_to": {"rel_type": "m.thread", "event_id": other_root}})).await;
+    let t3 = send(&server, &carol, &room, "m.room.message", json!({"msgtype": "m.text", "body": "x", "m.relates_to": {"rel_type": "m.thread", "event_id": other_root}})).await;
     let threads = get(&server, &carol, &format!("/_matrix/client/v1/rooms/{room}/threads"), 200).await;
     assert_eq!(ids(&threads["chunk"]), vec![other_root.clone(), root.clone()]);
     assert_eq!(threads["chunk"][0]["unsigned"]["m.relations"]["m.thread"]["latest_event"]["event_id"], t3.as_str());
@@ -656,7 +656,7 @@ async fn relations_threads_and_edit_aggregation() {
         &server,
         &carol,
         &format!("/_matrix/client/v3/rooms/{room}/send/m.room.message/nest1"),
-        json!({"body": "x", "m.relates_to": {"rel_type": "m.thread", "event_id": t1}}),
+        json!({"msgtype": "m.text", "body": "x", "m.relates_to": {"rel_type": "m.thread", "event_id": t1}}),
         400,
     )
     .await;
