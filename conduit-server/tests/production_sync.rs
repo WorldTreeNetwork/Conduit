@@ -390,6 +390,97 @@ async fn cross_signing_key_ids_may_not_collide_with_device_ids() {
     assert_eq!(rejected["errcode"], "M_FORBIDDEN");
 }
 
+/// POST /login refuses a device_id that is already a cross-signing key ID,
+/// and an unknown 3PID or login token is 403 M_FORBIDDEN.
+#[tokio::test]
+async fn login_refuses_a_device_id_equal_to_a_cross_signing_key() {
+    let server = Server::new().await;
+    let alice = server.register("alice").await;
+    let cross = CrossSigning::new(user(&alice));
+    server
+        .request(
+            Method::POST,
+            "/_matrix/client/v3/keys/device_signing/upload",
+            Some(token(&alice)),
+            Some(cross.upload_body()),
+            200,
+        )
+        .await;
+
+    let flows = server.request(Method::GET, "/_matrix/client/v3/login", None, None, 200).await;
+    let flow_list = flows["flows"].as_array().unwrap();
+    assert!(flow_list.iter().any(|flow| flow["type"] == "m.login.password"));
+    assert!(flow_list.iter().any(|flow| flow["type"] == "m.login.token" && flow["get_login_token"] == true));
+
+    let master = keys::public(&cross.master);
+    let rejected = server
+        .request(
+            Method::POST,
+            "/_matrix/client/v3/login",
+            None,
+            Some(json!({
+                "type": "m.login.password",
+                "identifier": {"type": "m.id.user", "user": "alice"},
+                "password": "test-password",
+                "device_id": master,
+            })),
+            403,
+        )
+        .await;
+    assert_eq!(rejected["errcode"], "M_FORBIDDEN");
+
+    let devices = server
+        .request(Method::GET, "/_matrix/client/v3/devices", Some(token(&alice)), None, 200)
+        .await;
+    assert!(devices["devices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|device| device["device_id"] != master));
+
+    let ok = server
+        .request(
+            Method::POST,
+            "/_matrix/client/v3/login",
+            None,
+            Some(json!({
+                "type": "m.login.password",
+                "identifier": {"type": "m.id.user", "user": "alice"},
+                "password": "test-password",
+                "device_id": "PHONE",
+            })),
+            200,
+        )
+        .await;
+    assert_eq!(ok["device_id"], "PHONE");
+
+    let unknown_threepid = server
+        .request(
+            Method::POST,
+            "/_matrix/client/v3/login",
+            None,
+            Some(json!({
+                "type": "m.login.password",
+                "identifier": {"type": "m.id.thirdparty", "medium": "email", "address": "nobody@example.com"},
+                "password": "test-password",
+            })),
+            403,
+        )
+        .await;
+    assert_eq!(unknown_threepid["errcode"], "M_FORBIDDEN");
+
+    let bad_token = server
+        .request(
+            Method::POST,
+            "/_matrix/client/v3/login",
+            None,
+            Some(json!({"type": "m.login.token", "token": "not-a-login-token"})),
+            403,
+        )
+        .await;
+    assert_eq!(bad_token["errcode"], "M_FORBIDDEN");
+}
+
 #[tokio::test]
 async fn signature_uploads_verify_signers_and_respect_visibility() {
     let server = Server::new().await;

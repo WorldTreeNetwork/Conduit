@@ -68,6 +68,15 @@ pub async fn mint_with_expiry<S: AuthState>(
         .map_err(|e| e.to_string())
 }
 
+/// True when `device_id` is this cross-signing key's public key or key ID.
+fn cross_signing_key_id_is(key: &Value, device_id: &str) -> bool {
+    let Some(keys) = key.get("keys").and_then(Value::as_object) else {
+        return false;
+    };
+    let prefixed = format!("ed25519:{device_id}");
+    keys.iter().any(|(id, value)| id == &prefixed || value.as_str() == Some(device_id))
+}
+
 /// Lifetime (ms) of access tokens issued alongside a refresh token.
 /// Rounded up to whole seconds, the token's time-check resolution.
 fn refreshable_lifetime_ms() -> i64 {
@@ -102,6 +111,20 @@ pub async fn issue_session<S: AuthState>(
         .clone()
         .filter(|d| !d.is_empty())
         .unwrap_or_else(generate_device_id);
+    // The client-supplied device ID shares a namespace with cross-signing
+    // key IDs. A match is 403 M_FORBIDDEN and must not create the device.
+    if opts.device_id.as_deref().is_some_and(|id| !id.is_empty()) {
+        let keys = storage
+            .get_cross_signing_keys(user_id)
+            .await
+            .map_err(|e| MatrixError::unknown(e.to_string()).into_response())?;
+        if keys.values().any(|key| cross_signing_key_id_is(key, &device_id)) {
+            return Err(MatrixError::forbidden(
+                "device_id must not be the same as a cross-signing key ID",
+            )
+            .into_response());
+        }
+    }
     let created = storage
         .create_device_if_absent(user_id, &device_id, opts.initial_device_display_name.as_deref())
         .await

@@ -24,9 +24,9 @@
         "total": 164
       },
       "requirement": {
-        "implemented+tested": 60,
+        "implemented+tested": 61,
         "implemented-untested": 0,
-        "partial": 17,
+        "partial": 16,
         "missing": 0,
         "not-applicable": 9,
         "total": 86
@@ -392,11 +392,12 @@
         "conduit-server/tests/production_account.rs::production_get_login_token_reprompts_and_logs_in_once",
         "conduit-server/tests/production_account.rs::production_guest_access_is_restricted_and_upgradable",
         "conduit-server/tests/production_account.rs::production_logout_deletes_devices",
-        "conduit-server/tests/production_appservice.rs::identity_assertion_devices_registration_and_login"
+        "conduit-server/tests/production_appservice.rs::identity_assertion_devices_registration_and_login",
+        "conduit-server/tests/production_sync.rs::login_refuses_a_device_id_equal_to_a_cross_signing_key"
       ],
-      "tests_total": 21,
+      "tests_total": 22,
       "gap_beads": [],
-      "notes": "refresh_token/expires_in_ms, get_login_token, and m.login.application_service (as_token; M_EXCLUSIVE outside the namespace, M_FORBIDDEN for unregistered users) supported."
+      "notes": "refresh_token/expires_in_ms, get_login_token, and m.login.application_service (as_token; M_EXCLUSIVE outside the namespace, M_FORBIDDEN for unregistered users) supported. A client-supplied device_id equal to a cross-signing key ID is 403 M_FORBIDDEN."
     },
     {
       "id": "cs.ep.post_matrixclientv1loginget_token",
@@ -7029,7 +7030,7 @@
       "title": "Login types: m.login.password / m.login.token / m.login.sso / m.login.application_service",
       "source": "https://spec.matrix.org/v1.19/client-server-api/#legacy-login",
       "role": "homeserver",
-      "status": "partial",
+      "status": "implemented+tested",
       "code": [
         {
           "loc": "conduit-server/src/api/client/mod.rs"
@@ -7044,11 +7045,12 @@
       "tests": [
         "conduit-server/tests/sso.rs::login_token_roundtrip",
         "conduit-server/tests/production_account.rs::production_get_login_token_reprompts_and_logs_in_once",
-        "conduit-server/tests/production_appservice.rs::identity_assertion_devices_registration_and_login"
+        "conduit-server/tests/production_appservice.rs::identity_assertion_devices_registration_and_login",
+        "conduit-server/tests/production_sync.rs::login_refuses_a_device_id_equal_to_a_cross_signing_key"
       ],
-      "tests_total": 3,
+      "tests_total": 4,
       "gap_beads": [],
-      "notes": "m.login.application_service implemented (conduit-y99.35); remaining deviations are listed on the login endpoint rows."
+      "notes": "Password, token (get_login_token), SSO when an identity provider is configured, and application-service login. An unknown 3PID and an invalid login token are 403 M_FORBIDDEN. A client-supplied device_id equal to a cross-signing key ID is 403 M_FORBIDDEN and does not create the device."
     },
     {
       "id": "cs.auth.registration",
