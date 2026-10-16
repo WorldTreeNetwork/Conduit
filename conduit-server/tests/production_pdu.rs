@@ -296,6 +296,178 @@ async fn send_join_validates_sender_state_key_origin_and_path() {
     assert!(event.signatures[LOCAL].is_object(), "resident co-signature present: {}", response["event"]);
 }
 
+/// make_join names a resident who can invite when the joiner is in an
+/// allowed room, and uses the restricted-room error codes otherwise.
+#[tokio::test]
+async fn restricted_make_join_names_an_authoriser_or_refuses() {
+    let remote = spawn_remote().await;
+    let server = federated_server(&remote).await;
+    let alice = server.register("alice").await;
+    let token = alice["access_token"].as_str().unwrap();
+    let alice_id = alice["user_id"].as_str().unwrap();
+
+    let space = server
+        .request(Method::POST, "/_matrix/client/v3/createRoom", Some(token), Some(json!({"preset": "public_chat"})), 200)
+        .await["room_id"].as_str().unwrap().to_owned();
+    let join_remote = |room: &str, user: &str| {
+        let room = room.to_owned();
+        let user = user.to_owned();
+        let server = &server;
+        let remote = &remote;
+        async move {
+            let path = format!("/_matrix/federation/v1/make_join/{}/{}", enc(&room), enc(&user));
+            let template = fed(server, remote, Method::GET, &path, None, 200).await["event"].clone();
+            let pdu: Pdu = serde_json::from_value(template).unwrap();
+            let (id, body) = sign(remote, pdu);
+            let send = format!("/_matrix/federation/v2/send_join/{}/{}", enc(&room), enc(&id));
+            fed(server, remote, Method::PUT, &send, Some(body), 200).await;
+        }
+    };
+    join_remote(&space, "@r:remote.test").await;
+    join_remote(&space, "@r2:remote.test").await;
+
+    let room = server
+        .request(Method::POST, "/_matrix/client/v3/createRoom", Some(token), Some(json!({"preset": "private_chat"})), 200)
+        .await["room_id"].as_str().unwrap().to_owned();
+    server
+        .request(
+            Method::PUT,
+            &format!("/_matrix/client/v3/rooms/{}/state/m.room.join_rules", enc(&room)),
+            Some(token),
+            Some(json!({
+                "join_rule": "restricted",
+                "allow": [{ "type": "m.room_membership", "room_id": space }]
+            })),
+            200,
+        )
+        .await;
+
+    let make = |user: &str| {
+        let path = format!("/_matrix/federation/v1/make_join/{}/{}", enc(&room), enc(user));
+        let server = &server;
+        let remote = &remote;
+        async move { fed(server, remote, Method::GET, &path, None, 200).await }
+    };
+    let made = make("@r:remote.test").await;
+    let template = &made["event"];
+    assert_eq!(template["content"]["membership"], "join");
+    assert_eq!(template["content"]["join_authorised_via_users_server"], alice_id);
+    assert_eq!(template["sender"], "@r:remote.test");
+    assert_eq!(template["state_key"], "@r:remote.test");
+    let messages = server
+        .request(
+            Method::GET,
+            &format!("/_matrix/client/v3/rooms/{}/messages?dir=b&limit=30", enc(&room)),
+            Some(token),
+            None,
+            200,
+        )
+        .await;
+    let alice_member = messages["chunk"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["type"] == "m.room.member" && event["state_key"] == alice_id)
+        .unwrap();
+    let alice_event = alice_member["event_id"].as_str().unwrap();
+    assert!(
+        template["auth_events"].as_array().unwrap().iter().any(|id| id == alice_event),
+        "auth events include the authoriser: {template}"
+    );
+
+    let pdu: Pdu = serde_json::from_value(template.clone()).unwrap();
+    let (id, body) = sign(&remote, pdu);
+    let response = fed(
+        &server,
+        &remote,
+        Method::PUT,
+        &format!("/_matrix/federation/v2/send_join/{}/{}", enc(&room), enc(&id)),
+        Some(body),
+        200,
+    )
+    .await;
+    let event: Pdu = serde_json::from_value(response["event"].clone()).unwrap();
+    assert_eq!(event.content["join_authorised_via_users_server"], alice_id);
+    assert!(event.signatures[LOCAL].is_object(), "resident co-signed: {}", response["event"]);
+    assert!(event.signatures[REMOTE].is_object(), "joining server signed: {}", response["event"]);
+
+    let refused = fed(
+        &server,
+        &remote,
+        Method::GET,
+        &format!("/_matrix/federation/v1/make_join/{}/{}", enc(&room), enc("@outsider:remote.test")),
+        None,
+        403,
+    )
+    .await;
+    assert_eq!(refused["errcode"], "M_FORBIDDEN");
+
+    server
+        .request(
+            Method::PUT,
+            &format!("/_matrix/client/v3/rooms/{}/state/m.room.join_rules", enc(&room)),
+            Some(token),
+            Some(json!({
+                "join_rule": "restricted",
+                "allow": [{ "type": "m.room_membership", "room_id": "!unknown:remote.test" }]
+            })),
+            200,
+        )
+        .await;
+    let unknown = fed(
+        &server,
+        &remote,
+        Method::GET,
+        &format!("/_matrix/federation/v1/make_join/{}/{}", enc(&room), enc("@r2:remote.test")),
+        None,
+        400,
+    )
+    .await;
+    assert_eq!(unknown["errcode"], "M_UNABLE_TO_AUTHORISE_JOIN");
+
+    server
+        .request(
+            Method::PUT,
+            &format!("/_matrix/client/v3/rooms/{}/state/m.room.join_rules", enc(&room)),
+            Some(token),
+            Some(json!({
+                "join_rule": "restricted",
+                "allow": [{ "type": "m.room_membership", "room_id": space }]
+            })),
+            200,
+        )
+        .await;
+    server
+        .request(
+            Method::POST,
+            &format!("/_matrix/client/v3/rooms/{}/invite", enc(&room)),
+            Some(token),
+            Some(json!({"user_id": "@outsider:remote.test"})),
+            200,
+        )
+        .await;
+    let invited = make("@outsider:remote.test").await;
+    assert!(
+        invited["event"]["content"].get("join_authorised_via_users_server").is_none(),
+        "an invite does not need an authoriser: {}",
+        invited["event"]
+    );
+
+    server
+        .request(Method::POST, &format!("/_matrix/client/v3/rooms/{}/leave", enc(&room)), Some(token), Some(json!({})), 200)
+        .await;
+    let ungranted = fed(
+        &server,
+        &remote,
+        Method::GET,
+        &format!("/_matrix/federation/v1/make_join/{}/{}", enc(&room), enc("@r2:remote.test")),
+        None,
+        400,
+    )
+    .await;
+    assert_eq!(ungranted["errcode"], "M_UNABLE_TO_GRANT_JOIN");
+}
+
 #[tokio::test]
 async fn client_floats_replay_and_client_nul_rules() {
     let server = Server::new().await;

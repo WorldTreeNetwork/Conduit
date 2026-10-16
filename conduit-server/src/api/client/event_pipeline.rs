@@ -83,6 +83,41 @@ tokio::task_local! {
     pub static ORIGIN_SERVER_TS: u64;
 }
 
+/// Self-joins into `restricted` / `knock_restricted` rooms carry
+/// `join_authorised_via_users_server` when an allow condition matches.
+/// An invite, or a room that is not restricted, is left unchanged.
+async fn apply_restricted_join(
+    storage: &dyn conduit::storage::Storage,
+    server_name: &str,
+    sender: &str,
+    room_id: &str,
+    type_: &str,
+    state_key: Option<&str>,
+    mut content: Value,
+) -> Result<Value, (StatusCode, Json<MatrixError>)> {
+    if type_ != "m.room.member" || state_key != Some(sender) {
+        return Ok(content);
+    }
+    if content.get("membership").and_then(Value::as_str) != Some("join") {
+        return Ok(content);
+    }
+    use super::room_membership::{decide_restricted_join, RestrictedDecision};
+    match decide_restricted_join(storage, server_name, sender, room_id).await {
+        Ok(RestrictedDecision::Open) => Ok(content),
+        Ok(RestrictedDecision::Authorise(via)) => {
+            content["join_authorised_via_users_server"] = serde_json::json!(via);
+            Ok(content)
+        }
+        Ok(RestrictedDecision::UnableToGrant) => {
+            Err(MatrixError::forbidden("No resident user can authorise this join"))
+        }
+        Ok(RestrictedDecision::UnableToAuthorise | RestrictedDecision::Forbidden) => {
+            Err(MatrixError::forbidden("You do not meet the requirements to join this room"))
+        }
+        Err(error) => Err(MatrixError::unknown(format!("storage error: {error}"))),
+    }
+}
+
 fn now_ms() -> u64 {
     if let Ok(ts) = ORIGIN_SERVER_TS.try_with(|ts| *ts) {
         return ts;
@@ -197,6 +232,11 @@ pub async fn author_event(
         Ok(None) => (vec![], 1),
         Err(e) => return Err(MatrixError::unknown(format!("storage error: {e}"))),
     };
+
+    // ------------------------------------------------------------------
+    // Restricted joins name a local authoriser before auth events are chosen.
+    // ------------------------------------------------------------------
+    let content = apply_restricted_join(storage, server_name, sender, room_id, type_, state_key, content).await?;
 
     // ------------------------------------------------------------------
     // Build the unsigned event template (no event_id yet, no hashes, no sig)

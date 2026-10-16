@@ -22,7 +22,10 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use conduit::auth::{effective_user_level, StateMap};
 use conduit::event::Event;
+use conduit::signing::server_of_user_id;
+use conduit::state_events::parse_power_levels;
 use conduit::storage::Storage;
 
 use super::rooms::{join_room, JoinRequest};
@@ -70,6 +73,166 @@ pub async fn check_invite_allowed<S: AuthState>(state: &S, target: &str) -> Resu
         ));
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Restricted / knock_restricted joins
+// ---------------------------------------------------------------------------
+
+/// What the server authoring a join should do with allow conditions.
+///
+/// Event auth never looks up the other room. It checks
+/// `join_authorised_via_users_server`. This decision is that lookup.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RestrictedDecision {
+    /// Not a restricted join, or the user is already invited or joined.
+    Open,
+    /// Stamp this local joined user, who can invite, onto the join.
+    Authorise(String),
+    /// No allow condition could be checked (the rooms are unknown here).
+    UnableToAuthorise,
+    /// The conditions were checked and the user does not satisfy them.
+    Forbidden,
+    /// A condition matched, but no local joined user can issue invites.
+    UnableToGrant,
+}
+
+/// Decide a restricted join for `user_id` into `room_id`.
+///
+/// An invite or an existing join is [`RestrictedDecision::Open`]: the
+/// restrictions do not apply. Otherwise each `m.room_membership` condition
+/// is checked against that room's real member event. Unknown condition
+/// types are skipped. A satisfied condition needs a local joined user with
+/// invite power; the room creator is preferred.
+pub async fn decide_restricted_join(
+    storage: &dyn Storage,
+    server_name: &str,
+    user_id: &str,
+    room_id: &str,
+) -> Result<RestrictedDecision, conduit::Error> {
+    if let Some(event) = storage.get_state_entry(room_id, "m.room.member", user_id).await? {
+        let membership = event.content.get("membership").and_then(Value::as_str);
+        if matches!(membership, Some("invite" | "join")) {
+            return Ok(RestrictedDecision::Open);
+        }
+    }
+    let Some(rules) = storage.get_state_entry(room_id, "m.room.join_rules", "").await? else {
+        return Ok(RestrictedDecision::Open);
+    };
+    let rule = rules.content.get("join_rule").and_then(Value::as_str).unwrap_or("invite");
+    if rule != "restricted" && rule != "knock_restricted" {
+        return Ok(RestrictedDecision::Open);
+    }
+    let create = storage.get_state_entry(room_id, "m.room.create", "").await?;
+    let version = create
+        .as_ref()
+        .map(|event| conduit::room_version::version_of_content(&event.content))
+        .unwrap_or(11);
+    let supported = if rule == "knock_restricted" { version >= 9 } else { version >= 8 };
+    if !supported {
+        return Ok(RestrictedDecision::Forbidden);
+    }
+
+    let allow = rules
+        .content
+        .get("allow")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut satisfied = false;
+    let mut unknown = 0u32;
+    let mut known_failed = 0u32;
+    let mut well_formed = 0u32;
+    for condition in &allow {
+        if condition.get("type").and_then(Value::as_str) != Some("m.room_membership") {
+            continue;
+        }
+        let Some(allowed_room) = condition.get("room_id").and_then(Value::as_str) else {
+            continue;
+        };
+        well_formed += 1;
+        let member = storage.get_state_entry(allowed_room, "m.room.member", user_id).await?;
+        let joined = member
+            .as_ref()
+            .and_then(|event| event.content.get("membership"))
+            .and_then(Value::as_str)
+            == Some("join");
+        if joined {
+            satisfied = true;
+            break;
+        }
+        let known = storage
+            .get_state_entry(allowed_room, "m.room.create", "")
+            .await?
+            .is_some();
+        if known {
+            known_failed += 1;
+        } else {
+            unknown += 1;
+        }
+    }
+    if !satisfied {
+        if well_formed > 0 && known_failed == 0 && unknown > 0 {
+            return Ok(RestrictedDecision::UnableToAuthorise);
+        }
+        return Ok(RestrictedDecision::Forbidden);
+    }
+    Ok(match pick_authoriser(storage, server_name, room_id).await? {
+        Some(user) => RestrictedDecision::Authorise(user),
+        None => RestrictedDecision::UnableToGrant,
+    })
+}
+
+/// A local user who is joined and whose power is at least the invite level.
+/// The create sender wins when they qualify; otherwise the lowest user id.
+async fn pick_authoriser(
+    storage: &dyn Storage,
+    server_name: &str,
+    room_id: &str,
+) -> Result<Option<String>, conduit::Error> {
+    let current = storage.get_current_state(room_id).await?;
+    let mut map: StateMap<Event> = HashMap::new();
+    for event in &current {
+        if event.state_key.is_some()
+            && (event.event_type == "m.room.create" || event.event_type == "m.room.power_levels")
+        {
+            map.insert((event.event_type.clone(), event.state_key.clone().unwrap_or_default()), event.clone());
+        }
+    }
+    let invite = map
+        .get(&("m.room.power_levels".to_owned(), String::new()))
+        .and_then(|event| parse_power_levels(&event.content).ok())
+        .map(|levels| levels.invite)
+        .unwrap_or(50);
+    let creator = map
+        .get(&("m.room.create".to_owned(), String::new()))
+        .map(|event| event.sender.clone());
+    let mut able = Vec::new();
+    for event in &current {
+        if event.event_type != "m.room.member" {
+            continue;
+        }
+        if event.content.get("membership").and_then(Value::as_str) != Some("join") {
+            continue;
+        }
+        let Some(user) = event.state_key.clone() else {
+            continue;
+        };
+        if server_of_user_id(&user) != Some(server_name) {
+            continue;
+        }
+        map.insert(("m.room.member".to_owned(), user.clone()), event.clone());
+        if effective_user_level(&user, &map) >= invite {
+            able.push(user);
+        }
+    }
+    if let Some(creator) = creator {
+        if able.iter().any(|user| user == &creator) {
+            return Ok(Some(creator));
+        }
+    }
+    able.sort();
+    Ok(able.into_iter().next())
 }
 
 // ---------------------------------------------------------------------------

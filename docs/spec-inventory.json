@@ -24,9 +24,9 @@
         "total": 164
       },
       "requirement": {
-        "implemented+tested": 57,
+        "implemented+tested": 58,
         "implemented-untested": 0,
-        "partial": 20,
+        "partial": 19,
         "missing": 0,
         "not-applicable": 9,
         "total": 86
@@ -42,10 +42,10 @@
         "total": 36
       },
       "requirement": {
-        "implemented+tested": 7,
+        "implemented+tested": 10,
         "implemented-untested": 0,
-        "partial": 14,
-        "missing": 17,
+        "partial": 15,
+        "missing": 13,
         "not-applicable": 3,
         "total": 41
       }
@@ -116,9 +116,9 @@
     },
     "app": {
       "requirement": {
-        "implemented+tested": 8,
+        "implemented+tested": 9,
         "implemented-untested": 0,
-        "partial": 5,
+        "partial": 4,
         "missing": 4,
         "not-applicable": 4,
         "total": 21
@@ -1914,6 +1914,7 @@
         }
       ],
       "tests": [
+        "conduit-server/tests/production_basics.rs::restricted_room_join_requires_space_membership",
         "conduit-server/src/api/client/session.rs::guest_allowlist_matches_spec_endpoints",
         "conduit-server/src/api/client/session.rs::join_targets_are_decoded",
         "conduit-server/tests/e2e.rs::e2e_membership_kick_visible_in_sync",
@@ -1927,9 +1928,9 @@
         "conduit-server/tests/production_directory.rs::appservice_ping_thirdparty_and_network_directory",
         "conduit-server/tests/production_directory.rs::directory_visibility_changes_are_authorized"
       ],
-      "tests_total": 54,
+      "tests_total": 55,
       "gap_beads": [],
-      "notes": "Restricted-room allow evaluation is conduit-jt5."
+      "notes": "Restricted and knock_restricted joins require membership of an allowed room and record join_authorised_via_users_server."
     },
     {
       "id": "cs.ep.post_matrixclientv3roomsroomidjoin",
@@ -7523,7 +7524,7 @@
       "title": "Room membership (join/invite/knock/leave/kick/ban/unban/forget)",
       "source": "https://spec.matrix.org/v1.19/client-server-api/#room-membership",
       "role": "homeserver",
-      "status": "partial",
+      "status": "implemented+tested",
       "code": [
         {
           "loc": "conduit-server/src/api/client/rooms.rs"
@@ -7536,15 +7537,15 @@
         }
       ],
       "tests": [
+        "conduit-server/tests/production_basics.rs::restricted_room_join_requires_space_membership",
+        "conduit/src/auth.rs::restricted_join_requires_a_joined_authoriser_with_invite_power",
         "conduit-server/tests/production_e2e.rs::production_invite_accept_and_kick_are_visible_in_sync",
         "conduit-server/tests/production_rooms.rs::forget_hides_departed_rooms_until_rejoin",
         "conduit-server/tests/production_basics.rs::join_by_room_id_and_membership_reasons_reach_member_events"
       ],
-      "tests_total": 3,
-      "gap_beads": [
-        "conduit-jt5"
-      ],
-      "notes": "POST /rooms/{roomId}/join added; reason recorded on join/invite/leave/kick/ban/unban."
+      "tests_total": 5,
+      "gap_beads": [],
+      "notes": "Join, invite, knock, leave, kick, ban, unban and forget record a reason. A restricted or knock_restricted join requires joined membership of an allowed room and stores join_authorised_via_users_server naming a local user who can invite. An invite omits that field. When no local user can invite, the join is 403 M_FORBIDDEN."
     },
     {
       "id": "cs.rooms.directory",
@@ -8986,15 +8987,25 @@
       "title": "Restricted rooms (join_authorised_via_users_server)",
       "source": "https://spec.matrix.org/v1.19/server-server-api/#restricted-rooms",
       "role": "homeserver",
-      "status": "missing",
-      "code": [],
-      "tests": [],
-      "tests_total": 0,
-      "gap_beads": [
-        "conduit-jt5",
-        "conduit-y99.23"
+      "status": "implemented+tested",
+      "code": [
+        {
+          "loc": "conduit-server/src/federation/server.rs"
+        },
+        {
+          "loc": "conduit-server/src/api/client/room_membership.rs"
+        },
+        {
+          "loc": "conduit/src/auth.rs"
+        }
       ],
-      "notes": ""
+      "tests": [
+        "conduit-server/tests/production_pdu.rs::restricted_make_join_names_an_authoriser_or_refuses",
+        "conduit/src/auth.rs::restricted_join_requires_a_joined_authoriser_with_invite_power"
+      ],
+      "tests_total": 2,
+      "gap_beads": [],
+      "notes": "make_join names a local user who can invite when an allow condition matches, and that user's member event is an auth event. Unknown allow rooms are 400 M_UNABLE_TO_AUTHORISE_JOIN. A matched condition with no local inviter is 400 M_UNABLE_TO_GRANT_JOIN. A failed condition is 403 M_FORBIDDEN. An invite omits the field. send_join co-signs the resident."
     },
     {
       "id": "ss.knocking",

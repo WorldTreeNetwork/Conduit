@@ -229,6 +229,22 @@ pub fn auth_event_keys(event: &Event) -> Vec<(String, String)> {
                         keys.push(("m.room.third_party_invite".to_owned(), token.to_owned()));
                     }
                 }
+                // Restricted joins (room versions that support them) are
+                // authorised by the named user's member event. The field is
+                // only written for those versions; selecting it here is what
+                // puts that event in auth state.
+                if matches!(mc.membership, Membership::Join) {
+                    if let Some(authoriser) = event
+                        .content
+                        .get("join_authorised_via_users_server")
+                        .and_then(|value| value.as_str())
+                        .filter(|authoriser| !authoriser.is_empty())
+                    {
+                        if authoriser != event.sender && authoriser != state_key.as_str() {
+                            keys.push(("m.room.member".to_owned(), authoriser.to_owned()));
+                        }
+                    }
+                }
             }
         }
     }
@@ -257,6 +273,10 @@ fn get_join_rule(auth_state: &StateMap<Event>) -> JoinRule {
 
 /// Check whether `event` satisfies the `allow` conditions of the room's
 /// join_rules (applicable only to `restricted` / `knock_restricted` rules).
+///
+/// Event auth does not call this. A foreign `allow.room_id` is unevaluable
+/// from this room's state and fails closed; the tests keep that pin.
+#[cfg_attr(not(test), allow(dead_code))]
 ///
 /// Returns `true` if:
 /// - The join rule is NOT restricted/knock_restricted (no extra check needed), OR
@@ -321,6 +341,23 @@ fn check_allow_conditions(event: &Event, state: &StateMap<Event>) -> bool {
     }
 
     false
+}
+
+/// Room-version auth for a restricted join: `join_authorised_via_users_server`
+/// names a user who is joined to this room and whose power is at least the
+/// invite level. The other room's membership is not visible here.
+fn authoriser_may_invite(event: &Event, auth_state: &StateMap<Event>, pl: &PowerLevelsContent) -> bool {
+    let Some(authoriser) = event
+        .content
+        .get("join_authorised_via_users_server")
+        .and_then(|value| value.as_str())
+    else {
+        return false;
+    };
+    if get_membership(auth_state, authoriser) != Some(Membership::Join) {
+        return false;
+    }
+    effective_user_level(authoriser, auth_state) >= pl.invite
 }
 
 fn get_membership(auth_state: &StateMap<Event>, user_id: &str) -> Option<Membership> {
@@ -702,19 +739,18 @@ fn check_member(
                         if (matches!(join_rule, JoinRule::Restricted) && version >= 8)
                             || (matches!(join_rule, JoinRule::KnockRestricted) && version >= 9) =>
                     {
-                        // First check allow conditions (e.g. membership in a space).
-                        // If they pass, the join is allowed regardless of invite status.
-                        if check_allow_conditions(event, auth_state) {
-                            // Allow conditions satisfied — join permitted.
-                        } else {
-                            // Allow conditions not satisfied; fall through to invite check.
-                            match &target_membership {
-                                Some(Membership::Invite) | Some(Membership::Join) => {}
-                                _ => {
-                                    return Err(AuthError::JoinRequiresInvite {
-                                        join_rule: join_rule.clone(),
-                                    })
-                                }
+                        // An invite (or an existing join) bypasses allow
+                        // conditions. Otherwise the event must name a joined
+                        // user who can invite. Membership in the allowed room
+                        // is decided by the server authoring the join, not
+                        // from this room's state.
+                        match &target_membership {
+                            Some(Membership::Invite) | Some(Membership::Join) => {}
+                            _ if authoriser_may_invite(event, auth_state, &pl) => {}
+                            _ => {
+                                return Err(AuthError::JoinRequiresInvite {
+                                    join_rule: join_rule.clone(),
+                                })
                             }
                         }
                     }
@@ -1965,6 +2001,99 @@ mod tests {
             check_auth(&join, &state).is_ok(),
             "an invite authorizes the join, without the stub allow check"
         );
+    }
+
+    /// A restricted join is allowed only when the named authoriser is joined
+    /// and can invite. Membership of some other room is not in this state.
+    #[test]
+    fn restricted_join_requires_a_joined_authoriser_with_invite_power() {
+        let alice = "@alice:example.com";
+        let dave = "@dave:example.com";
+        let carol = "@carol:example.com";
+        let bob = "@bob:example.com";
+        let room_id = "!room:example.com";
+
+        let mut state = base_state(alice, room_id, "invite");
+        apply_state_event(
+            &mut state,
+            &make_join_rules_event_with_allow(
+                alice,
+                room_id,
+                "restricted",
+                json!([{ "type": "m.room_membership", "room_id": "!space:example.com" }]),
+            ),
+        );
+        apply_state_event(
+            &mut state,
+            &make_power_levels_event(
+                "$pl",
+                alice,
+                room_id,
+                json!({ "invite": 50, "users": { alice: 100, carol: 49, dave: 50 } }),
+            ),
+        );
+        apply_state_event(&mut state, &make_member_event("$dave", alice, dave, room_id, "join"));
+        apply_state_event(&mut state, &make_member_event("$carol", alice, carol, room_id, "join"));
+
+        let join_via = |authoriser: &str| {
+            let mut join = make_member_event("$bob_join", bob, bob, room_id, "join");
+            join.content["join_authorised_via_users_server"] = json!(authoriser);
+            join
+        };
+        let bare = make_member_event("$bob_join", bob, bob, room_id, "join");
+        assert!(
+            matches!(check_auth(&bare, &state), Err(AuthError::JoinRequiresInvite { .. })),
+            "no invite and no authoriser"
+        );
+        assert!(check_auth(&join_via(dave), &state).is_ok(), "dave has invite power and is joined");
+        assert!(check_auth(&join_via(alice), &state).is_ok(), "the creator can invite");
+        assert!(
+            matches!(check_auth(&join_via(carol), &state), Err(AuthError::JoinRequiresInvite { .. })),
+            "carol is below the invite level"
+        );
+        assert!(
+            matches!(check_auth(&join_via("@ghost:example.com"), &state), Err(AuthError::JoinRequiresInvite { .. })),
+            "an authoriser who is not joined is rejected"
+        );
+        let mut without_dave = state.clone();
+        without_dave.remove(&("m.room.member".to_owned(), dave.to_owned()));
+        assert!(
+            check_auth(&join_via(dave), &without_dave).is_err(),
+            "the authoriser's member event has to be in auth state"
+        );
+
+        let via_dave = join_via(dave);
+        let keys = auth_event_keys(&via_dave);
+        assert!(
+            keys.contains(&("m.room.member".to_owned(), dave.to_owned())),
+            "auth events include the authoriser: {keys:?}"
+        );
+        assert!(
+            !auth_event_keys(&bare).iter().any(|(_, key)| key == dave),
+            "a join without the field does not select the authoriser"
+        );
+
+        // Room version 7 does not support restricted joins.
+        let mut old = state.clone();
+        apply_state_event(&mut old, &create_with("7", alice, room_id, json!({ "creator": alice })));
+        assert!(check_auth(&join_via(dave), &old).is_err(), "v7 ignores the authoriser");
+
+        // knock_restricted starts at room version 9.
+        apply_state_event(
+            &mut state,
+            &make_join_rules_event_with_allow(
+                alice,
+                room_id,
+                "knock_restricted",
+                json!([{ "type": "m.room_membership", "room_id": "!space:example.com" }]),
+            ),
+        );
+        let mut v8 = state.clone();
+        apply_state_event(&mut v8, &create_with("8", alice, room_id, json!({ "creator": alice })));
+        assert!(check_auth(&join_via(dave), &v8).is_err(), "v8 has no knock_restricted");
+        let mut v9 = state.clone();
+        apply_state_event(&mut v9, &create_with("9", alice, room_id, json!({ "creator": alice })));
+        assert!(check_auth(&join_via(dave), &v9).is_ok(), "v9 knock_restricted accepts the authoriser");
     }
 
     // -----------------------------------------------------------------------

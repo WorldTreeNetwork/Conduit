@@ -641,3 +641,156 @@ async fn invite_blocking_rejects_invites_and_hides_pending_ones() {
     let other = create_room(&server, &alice, json!({"invite": [bob.id]})).await;
     assert!(other.starts_with('!'));
 }
+
+/// A user joined to an allowed room joins a restricted room, and the member
+/// event names a local user who can invite. Someone outside the room, or
+/// only invited to it, does not get that field. Once nobody local can
+/// invite, the join is refused.
+#[tokio::test]
+async fn restricted_room_join_requires_space_membership() {
+    let server = Server::new().await;
+    let alice = user(&server, "alice").await;
+    let bob = user(&server, "bob").await;
+    let carol = user(&server, "carol").await;
+    let dave = user(&server, "dave").await;
+    let eve = user(&server, "eve").await;
+    let frank = user(&server, "frank").await;
+    let greg = user(&server, "greg").await;
+
+    let space = create_room(&server, &alice, json!({"preset": "public_chat", "name": "Space"})).await;
+    for member in [&bob, &eve, &frank, &greg] {
+        server
+            .request(
+                Method::POST,
+                &format!("/_matrix/client/v3/join/{}", encode(&space)),
+                Some(&member.token),
+                Some(json!({})),
+                200,
+            )
+            .await;
+    }
+    server
+        .request(
+            Method::POST,
+            &format!("/_matrix/client/v3/rooms/{}/leave", encode(&space)),
+            Some(&frank.token),
+            Some(json!({})),
+            200,
+        )
+        .await;
+
+    let room = create_room(&server, &alice, json!({"preset": "private_chat", "name": "Restricted"})).await;
+    let allow = json!({
+        "join_rule": "restricted",
+        "allow": [{ "type": "m.room_membership", "room_id": space }, { "type": "org.example.unknown" }]
+    });
+    server
+        .request(
+            Method::PUT,
+            &format!("/_matrix/client/v3/rooms/{}/state/m.room.join_rules", encode(&room)),
+            Some(&alice.token),
+            Some(allow),
+            200,
+        )
+        .await;
+
+    let joined = server
+        .request(
+            Method::POST,
+            &format!("/_matrix/client/v3/join/{}", encode(&room)),
+            Some(&bob.token),
+            Some(json!({})),
+            200,
+        )
+        .await;
+    assert_eq!(joined["room_id"], room);
+    let bob_member = member_content(&server, &alice, &room, &bob.id).await;
+    assert_eq!(bob_member["membership"], "join");
+    assert_eq!(bob_member["join_authorised_via_users_server"], alice.id);
+
+    for outsider in [&carol, &frank] {
+        let (status, _, body) = raw(
+            &server,
+            Method::POST,
+            &format!("/_matrix/client/v3/join/{}", encode(&room)),
+            Some(&outsider.token),
+            Some(json!({})),
+        )
+        .await;
+        assert_eq!(status, 403, "{body}");
+        assert_eq!(body["errcode"], "M_FORBIDDEN");
+        assert_eq!(body["error"], "You do not meet the requirements to join this room");
+    }
+
+    server
+        .request(
+            Method::POST,
+            &format!("/_matrix/client/v3/rooms/{}/invite", encode(&room)),
+            Some(&alice.token),
+            Some(json!({"user_id": dave.id, "reason": "come in"})),
+            200,
+        )
+        .await;
+    server
+        .request(
+            Method::POST,
+            &format!("/_matrix/client/v3/join/{}", encode(&room)),
+            Some(&dave.token),
+            Some(json!({})),
+            200,
+        )
+        .await;
+    let dave_member = member_content(&server, &alice, &room, &dave.id).await;
+    assert_eq!(dave_member["membership"], "join");
+    assert!(
+        dave_member.get("join_authorised_via_users_server").is_none(),
+        "an invite bypasses the allow condition: {dave_member}"
+    );
+
+    let knock = create_room(&server, &alice, json!({"preset": "private_chat", "name": "Knock restricted"})).await;
+    server
+        .request(
+            Method::PUT,
+            &format!("/_matrix/client/v3/rooms/{}/state/m.room.join_rules", encode(&knock)),
+            Some(&alice.token),
+            Some(json!({
+                "join_rule": "knock_restricted",
+                "allow": [{ "type": "m.room_membership", "room_id": space }]
+            })),
+            200,
+        )
+        .await;
+    server
+        .request(
+            Method::POST,
+            &format!("/_matrix/client/v3/join/{}", encode(&knock)),
+            Some(&eve.token),
+            Some(json!({})),
+            200,
+        )
+        .await;
+    let eve_member = member_content(&server, &alice, &knock, &eve.id).await;
+    assert_eq!(eve_member["membership"], "join");
+    assert_eq!(eve_member["join_authorised_via_users_server"], alice.id);
+
+    server
+        .request(
+            Method::POST,
+            &format!("/_matrix/client/v3/rooms/{}/leave", encode(&room)),
+            Some(&alice.token),
+            Some(json!({})),
+            200,
+        )
+        .await;
+    let (status, _, body) = raw(
+        &server,
+        Method::POST,
+        &format!("/_matrix/client/v3/join/{}", encode(&room)),
+        Some(&greg.token),
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(status, 403, "{body}");
+    assert_eq!(body["errcode"], "M_FORBIDDEN");
+    assert_eq!(body["error"], "No resident user can authorise this join");
+}

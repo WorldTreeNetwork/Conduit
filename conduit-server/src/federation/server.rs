@@ -371,23 +371,38 @@ pub async fn make_join(
         Err(e) => return internal(&e.to_string()),
     };
 
-    // For non-public rooms, verify the remote user has an invite.
-    if join_rule != "public" {
-        let member = state
-            .storage
-            .get_state_entry(&room_id, "m.room.member", &user_id)
-            .await;
-        let has_invite = match member {
-            Ok(Some(ev)) => ev.content
-                .get("membership")
-                .and_then(|v| v.as_str())
-                .map(|m| m == "invite")
-                .unwrap_or(false),
-            _ => false,
-        };
-        if !has_invite {
-            return forbidden("Join not permitted: no invite");
+    // Invite and an existing join skip allow conditions. A restricted join
+    // through an allow condition names a local user who can invite.
+    let membership = match state.storage.get_state_entry(&room_id, "m.room.member", &user_id).await {
+        Ok(Some(ev)) => ev.content.get("membership").and_then(|v| v.as_str()).unwrap_or("").to_owned(),
+        Ok(None) => String::new(),
+        Err(e) => return internal(&e.to_string()),
+    };
+    let mut authoriser = None;
+    let restricted = join_rule == "restricted" || join_rule == "knock_restricted";
+    if restricted && membership != "invite" && membership != "join" {
+        use crate::api::client::room_membership::{decide_restricted_join, RestrictedDecision};
+        match decide_restricted_join(state.storage.as_ref(), &state.server_name, &user_id, &room_id).await {
+            Ok(RestrictedDecision::Authorise(via)) => authoriser = Some(via),
+            Ok(RestrictedDecision::UnableToAuthorise) => {
+                return matrix_error(
+                    StatusCode::BAD_REQUEST,
+                    "M_UNABLE_TO_AUTHORISE_JOIN",
+                    "Unable to authorise the join through any allow condition",
+                );
+            }
+            Ok(RestrictedDecision::UnableToGrant) => {
+                return matrix_error(
+                    StatusCode::BAD_REQUEST,
+                    "M_UNABLE_TO_GRANT_JOIN",
+                    "This server cannot grant the join; try another resident server",
+                );
+            }
+            Ok(_) => return forbidden("Join not permitted"),
+            Err(e) => return internal(&e.to_string()),
         }
+    } else if join_rule != "public" && membership != "invite" && membership != "join" {
+        return forbidden("Join not permitted: no invite");
     }
 
     // Get latest events for prev_events.
@@ -402,13 +417,17 @@ pub async fn make_join(
     };
 
     // Build auth_events.
+    let mut join_content = json!({ "membership": "join" });
+    if let Some(via) = &authoriser {
+        join_content["join_authorised_via_users_server"] = json!(via);
+    }
     let template_for_keys = Event {
         event_id: String::new(),
         pdu: conduit::event::Pdu {
             room_id: room_id.clone(),
             sender: user_id.clone(),
             event_type: "m.room.member".to_owned(),
-            content: json!({ "membership": "join" }),
+            content: join_content.clone(),
             state_key: Some(user_id.clone()),
             origin_server_ts: 0,
             auth_events: vec![],
@@ -435,7 +454,7 @@ pub async fn make_join(
         "room_id": room_id,
         "sender": user_id,
         "type": "m.room.member",
-        "content": { "membership": "join" },
+        "content": join_content,
         "state_key": user_id,
         "auth_events": auth_events_ids,
         "prev_events": prev_events,
