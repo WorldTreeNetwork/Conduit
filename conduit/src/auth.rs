@@ -2560,6 +2560,50 @@ mod tests {
         assert!(check_auth(&join_via(dave), &v9).is_ok(), "v9 knock_restricted accepts the authoriser");
     }
 
+    /// Room version 8 accepts a restricted join that names a joined user who
+    /// can invite. Version 7 rejects that event. A bare join still needs an invite.
+    #[test]
+    fn room_version_8_accepts_a_restricted_join_from_an_authoriser() {
+        let alice = "@alice:example.com";
+        let bob = "@bob:example.com";
+        let dave = "@dave:example.com";
+        let room = "!room:example.com";
+        let room_at = |version: &str| {
+            let mut state = HashMap::new();
+            apply_state_event(&mut state, &create_with(version, alice, room, json!({ "creator": alice })));
+            apply_state_event(&mut state, &make_member_event("$aj", alice, alice, room, "join"));
+            apply_state_event(&mut state, &make_member_event("$dj", alice, dave, room, "join"));
+            apply_state_event(
+                &mut state,
+                &make_join_rules_event_with_allow(
+                    alice,
+                    room,
+                    "restricted",
+                    json!([{ "type": "m.room_membership", "room_id": "!space:example.com" }]),
+                ),
+            );
+            apply_state_event(
+                &mut state,
+                &make_power_levels_event(
+                    "$pl",
+                    alice,
+                    room,
+                    json!({ "invite": 50, "users": { alice: 100, dave: 50 } }),
+                ),
+            );
+            state
+        };
+        let mut join = make_member_event("$bj", bob, bob, room, "join");
+        join.content["join_authorised_via_users_server"] = json!(dave);
+        assert!(check_auth(&join, &room_at("8")).is_ok(), "v8 accepts the authoriser");
+        assert!(check_auth(&join, &room_at("7")).is_err(), "v7 rejects a restricted join");
+        let bare = make_member_event("$bj", bob, bob, room, "join");
+        assert!(
+            matches!(check_auth(&bare, &room_at("8")), Err(AuthError::JoinRequiresInvite { .. })),
+            "v8 still requires an invite or an authoriser"
+        );
+    }
+
     // -----------------------------------------------------------------------
     // Test 12: join restricted room with no satisfied allow condition fails
     // -----------------------------------------------------------------------

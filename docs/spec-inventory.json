@@ -106,10 +106,10 @@
     },
     "rv": {
       "requirement": {
-        "implemented+tested": 47,
+        "implemented+tested": 48,
         "implemented-untested": 0,
         "partial": 6,
-        "missing": 8,
+        "missing": 7,
         "not-applicable": 0,
         "total": 61
       }
@@ -10728,14 +10728,18 @@
       "title": "Room version 8: Authorisation rules",
       "source": "https://spec.matrix.org/v1.19/rooms/v8/#authorisation-rules",
       "role": "homeserver",
-      "status": "missing",
-      "code": [],
-      "tests": [],
-      "tests_total": 0,
-      "gap_beads": [
-        "conduit-y99.23"
+      "status": "implemented+tested",
+      "code": [
+        {
+          "loc": "conduit/src/auth.rs"
+        }
       ],
-      "notes": "Kernel implements room version 11 only."
+      "tests": [
+        "conduit/src/auth.rs::room_version_8_accepts_a_restricted_join_from_an_authoriser"
+      ],
+      "tests_total": 1,
+      "gap_beads": [],
+      "notes": "Room version 8 accepts a restricted join when join_authorised_via_users_server names a joined user who can invite. Version 7 rejects that event. A bare join still needs an invite."
     },
     {
       "id": "rv.v8.redaction",
