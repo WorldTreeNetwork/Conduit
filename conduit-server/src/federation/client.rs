@@ -390,6 +390,12 @@ impl Client {
         resp.json::<T>().await.map_err(|e| FederationError::Parse(e.to_string()))
     }
 
+    /// `POST /_matrix/policy/v1/sign`. The body is the PDU. The response is
+    /// the policy server's signature map, keyed by server name.
+    pub async fn sign_policy_event(&self, dest: &str, event: &Value) -> Result<Value, FederationError> {
+        self.signed_post(dest, "/_matrix/policy/v1/sign", event).await
+    }
+
     // ------------------------------------------------------------------
     // iroh helpers (91r.5, 91r.7)
     // ------------------------------------------------------------------

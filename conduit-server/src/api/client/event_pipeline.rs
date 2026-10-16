@@ -199,6 +199,10 @@ async fn build_sign_and_persist_inner<S: AuthState>(
         MatrixError::forbidden(format!("auth check failed: {e}"))
     })?;
 
+    // A room with an enabled policy server must have that server's
+    // signature on the event before the event is stored or sent.
+    crate::federation::policy::ensure_policy_signature(state, &mut event).await?;
+
     // ------------------------------------------------------------------
     // Step 9 — persist
     // ------------------------------------------------------------------

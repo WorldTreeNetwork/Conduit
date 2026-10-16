@@ -8425,14 +8425,22 @@
       "title": "Policy servers (client behaviour of homeserver)",
       "source": "https://spec.matrix.org/v1.19/client-server-api/#policy-servers",
       "role": "homeserver",
-      "status": "missing",
-      "code": [],
-      "tests": [],
-      "tests_total": 0,
-      "gap_beads": [
-        "conduit-y99.45"
+      "status": "implemented+tested",
+      "code": [
+        {
+          "loc": "conduit-server/src/federation/policy.rs"
+        },
+        {
+          "loc": "conduit-server/src/api/client/event_pipeline.rs"
+        }
       ],
-      "notes": ""
+      "tests": [
+        "conduit-server/tests/production_pdu.rs::policy_server_signature_is_required_before_a_client_event_is_sent",
+        "conduit-server/src/federation/policy.rs::policy_config_requires_via_and_ed25519"
+      ],
+      "tests_total": 2,
+      "gap_beads": [],
+      "notes": "Before a client event is stored, an enabled policy server (via plus ed25519, and a joined user on via) is asked to sign it. m.room.policy with an empty state key is not sent for signing. A refusal is returned with the policy server's status and error, and the event is not stored. An invalid signature is requested once more. Incoming federation soft-fail remains ss.policy-servers."
     },
     {
       "id": "cs.mod.spaces",
@@ -9307,14 +9315,20 @@
       "title": "Policy servers (homeserver obligations in rooms using one)",
       "source": "https://spec.matrix.org/v1.19/server-server-api/#policy-servers",
       "role": "homeserver",
-      "status": "missing",
-      "code": [],
-      "tests": [],
-      "tests_total": 0,
+      "status": "partial",
+      "code": [
+        {
+          "loc": "conduit-server/src/federation/policy.rs"
+        }
+      ],
+      "tests": [
+        "conduit-server/tests/production_pdu.rs::policy_server_signature_is_required_before_a_client_event_is_sent"
+      ],
+      "tests_total": 1,
       "gap_beads": [
         "conduit-y99.45"
       ],
-      "notes": ""
+      "notes": "Client-authored events ask POST /_matrix/policy/v1/sign and keep a verifying ed25519:policy_server signature. Events received over federation without a valid policy signature are not yet soft-failed."
     },
     {
       "id": "ss.signing.outgoing",

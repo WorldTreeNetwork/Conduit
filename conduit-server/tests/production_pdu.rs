@@ -10,9 +10,12 @@
 
 mod common;
 
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
-use axum::{routing::get, Json, Router};
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::IntoResponse;
+use axum::{routing::{get, post}, Json, Router};
 use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine as _};
 use common::production::Server;
 use reqwest::Method;
@@ -520,4 +523,192 @@ async fn server_acl_denies_remote_participation_until_lifted() {
     assert!(leaving["error"].as_str().unwrap_or("").contains("not in the room"), "{leaving}");
     let knock_body = fed(&server, &remote, Method::PUT, &send_knock, Some(json!({})), 400).await;
     assert_eq!(knock_body["errcode"], "M_BAD_JSON", "{knock_body}");
+}
+
+struct PolicyRemote {
+    remote: Remote,
+    calls: Arc<AtomicU32>,
+    policy_key: Arc<conduit::keys::ServerKey>,
+    base_url: String,
+}
+
+/// Signs with a key that is not the published server key. Refuses body
+/// "spam". The first request whose body is "retry-me" gets an invalid signature.
+async fn spawn_policy() -> PolicyRemote {
+    let server_key = Arc::new(generate_server_key());
+    let unsigned = json!({
+        "server_name": REMOTE,
+        "verify_keys": { server_key.key_id.clone(): { "key": STANDARD_NO_PAD.encode(public_bytes(&server_key)) } },
+        "old_verify_keys": {},
+        "valid_until_ts": chrono::Utc::now().timestamp_millis() + 3_600_000,
+    });
+    use ed25519_dalek::Signer as _;
+    let sig = server_key.signing_key.sign(&conduit::canonical_json::to_canonical_bytes(&unsigned).unwrap());
+    let mut doc = unsigned;
+    doc["signatures"] = json!({ REMOTE: { server_key.key_id.clone(): STANDARD_NO_PAD.encode(sig.to_bytes()) } });
+    let generated = generate_server_key();
+    let policy_key = Arc::new(conduit::keys::ServerKey {
+        key_id: "ed25519:policy_server".into(),
+        signing_key: generated.signing_key,
+    });
+    let calls = Arc::new(AtomicU32::new(0));
+    let retries = Arc::new(AtomicU32::new(0));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let calls_sign = Arc::clone(&calls);
+    let policy_for_sign = Arc::clone(&policy_key);
+    let app = Router::new()
+        .route("/_matrix/key/v2/server", get(move || {
+            let doc = doc.clone();
+            async move { Json(doc) }
+        }))
+        .route("/_matrix/policy/v1/sign", post(move |headers: HeaderMap, Json(body): Json<Value>| {
+            let calls = Arc::clone(&calls_sign);
+            let retries = Arc::clone(&retries);
+            let policy_key = Arc::clone(&policy_for_sign);
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                let authed = headers
+                    .get("authorization")
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or("")
+                    .contains("X-Matrix");
+                if !authed {
+                    return (StatusCode::UNAUTHORIZED, Json(json!({"errcode": "M_FORBIDDEN", "error": "missing authorization"}))).into_response();
+                }
+                if body["content"]["body"] == "spam" {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({"errcode": "M_FORBIDDEN", "error": "The message appears to contain possible spam"})),
+                    ).into_response();
+                }
+                if body["content"]["body"] == "retry-me" && retries.fetch_add(1, Ordering::SeqCst) == 0 {
+                    return (StatusCode::OK, Json(json!({ REMOTE: { "ed25519:policy_server": "not-a-real-signature" } }))).into_response();
+                }
+                let mut pdu: Pdu = serde_json::from_value(body).expect("policy request is a PDU");
+                conduit::signing::add_signature(&mut pdu, &policy_key, REMOTE).unwrap();
+                let signature = pdu.signatures[REMOTE]["ed25519:policy_server"].clone();
+                (StatusCode::OK, Json(json!({ REMOTE: { "ed25519:policy_server": signature } }))).into_response()
+            }
+        }));
+    tokio::spawn(async move { axum::serve(listener, app).await.ok() });
+    let base_url = format!("http://{addr}");
+    PolicyRemote {
+        remote: Remote { key: server_key, keys_url: base_url.clone() },
+        calls,
+        policy_key,
+        base_url,
+    }
+}
+
+#[tokio::test]
+async fn policy_server_signature_is_required_before_a_client_event_is_sent() {
+    let policy = spawn_policy().await;
+    let server = Server::with_env(&[
+        ("CONDUIT_FEDERATION", "1"),
+        ("CONDUIT_REMOTE_KEYS_OVERRIDE", &policy.remote.keys_url),
+        ("CONDUIT_FEDERATION_BASE_URL", &policy.base_url),
+    ]).await;
+    let alice = server.register("alice").await;
+    let token = alice["access_token"].as_str().unwrap();
+    let room = server
+        .request(Method::POST, "/_matrix/client/v3/createRoom", Some(token), Some(json!({"preset": "public_chat"})), 200)
+        .await["room_id"].as_str().unwrap().to_owned();
+
+    let send = |body: &'static str, status: u16| {
+        let server = &server;
+        let room = room.clone();
+        async move {
+            let path = format!("/_matrix/client/v3/rooms/{}/send/m.room.message/{body}", enc(&room));
+            server.request(Method::PUT, &path, Some(token), Some(json!({"msgtype": "m.text", "body": body})), status).await
+        }
+    };
+    send("before-policy", 200).await;
+    assert_eq!(policy.calls.load(Ordering::SeqCst), 0, "no policy server is configured");
+
+    let public_key = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(public_bytes(&policy.policy_key));
+    server.request(
+        Method::PUT,
+        &format!("/_matrix/client/v3/rooms/{}/state/m.room.policy", enc(&room)),
+        Some(token),
+        Some(json!({"via": REMOTE, "public_keys": {"ed25519": public_key}})),
+        200,
+    ).await;
+    assert_eq!(policy.calls.load(Ordering::SeqCst), 0, "m.room.policy itself is not signed");
+    send("before-join", 200).await;
+    assert_eq!(policy.calls.load(Ordering::SeqCst), 0, "via has no joined user yet");
+
+    let joiner = "@ps:remote.test";
+    let make_join = format!("/_matrix/federation/v1/make_join/{}/{}", enc(&room), enc(joiner));
+    let template = fed(&server, &policy.remote, Method::GET, &make_join, None, 200).await["event"].clone();
+    let join_pdu: Pdu = serde_json::from_value(template).unwrap();
+    let (join_id, join_body) = sign(&policy.remote, join_pdu);
+    let send_join = format!("/_matrix/federation/v2/send_join/{}/{}", enc(&room), enc(&join_id));
+    fed(&server, &policy.remote, Method::PUT, &send_join, Some(join_body), 200).await;
+    assert_eq!(policy.calls.load(Ordering::SeqCst), 0, "the join predates an enabled policy server");
+
+    let accepted = send("hello", 200).await;
+    assert!(policy.calls.load(Ordering::SeqCst) >= 1, "the policy server was asked");
+    let hello_id = accepted["event_id"].as_str().unwrap();
+    let wire = fed(
+        &server,
+        &policy.remote,
+        Method::GET,
+        &format!("/_matrix/federation/v1/event/{}", enc(hello_id)),
+        None,
+        200,
+    ).await;
+    let stored: Pdu = serde_json::from_value(wire["pdus"][0].clone()).expect("wire pdu");
+    conduit::signing::verify_event_signature(
+        &stored,
+        REMOTE,
+        "ed25519:policy_server",
+        &public_bytes(&policy.policy_key),
+    ).expect("stored event carries the policy server signature");
+
+    let calls_after_hello = policy.calls.load(Ordering::SeqCst);
+    let retried = send("retry-me", 200).await;
+    assert!(policy.calls.load(Ordering::SeqCst) >= calls_after_hello + 2, "an invalid signature is requested again");
+    let retry_id = retried["event_id"].as_str().unwrap();
+    let retry_wire = fed(
+        &server,
+        &policy.remote,
+        Method::GET,
+        &format!("/_matrix/federation/v1/event/{}", enc(retry_id)),
+        None,
+        200,
+    ).await;
+    let retry_pdu: Pdu = serde_json::from_value(retry_wire["pdus"][0].clone()).unwrap();
+    conduit::signing::verify_event_signature(
+        &retry_pdu,
+        REMOTE,
+        "ed25519:policy_server",
+        &public_bytes(&policy.policy_key),
+    ).expect("the retried signature verifies");
+
+    let calls_before_spam = policy.calls.load(Ordering::SeqCst);
+    let refused = send("spam", 400).await;
+    assert_eq!(refused["errcode"], "M_FORBIDDEN", "{refused}");
+    assert_eq!(refused["error"], "The message appears to contain possible spam", "{refused}");
+    assert!(policy.calls.load(Ordering::SeqCst) > calls_before_spam);
+    let messages = server.request(
+        Method::GET,
+        &format!("/_matrix/client/v3/rooms/{}/messages?dir=b&limit=20", enc(&room)),
+        Some(token),
+        None,
+        200,
+    ).await;
+    assert!(messages["chunk"].as_array().unwrap().iter().all(|event| event["content"]["body"] != "spam"), "{messages}");
+
+    let calls_before_disable = policy.calls.load(Ordering::SeqCst);
+    server.request(
+        Method::PUT,
+        &format!("/_matrix/client/v3/rooms/{}/state/m.room.policy", enc(&room)),
+        Some(token),
+        Some(json!({})),
+        200,
+    ).await;
+    assert_eq!(policy.calls.load(Ordering::SeqCst), calls_before_disable, "clearing m.room.policy is not signed");
+    send("after-disable", 200).await;
+    assert_eq!(policy.calls.load(Ordering::SeqCst), calls_before_disable, "a disabled policy server is not asked");
 }

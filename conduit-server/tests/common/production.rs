@@ -177,6 +177,7 @@ impl Server {
                 .env("CONDUIT_OIDC_ISSUER", "off")
                 .env("CONDUIT_FEDERATION", "0")
                 .env_remove("CONDUIT_REMOTE_KEYS_OVERRIDE")
+                .env_remove("CONDUIT_FEDERATION_BASE_URL")
                 .env(
                     "CONDUIT_AS_REGISTRATIONS_DIR",
                     self.files.path().join("app-services"),

@@ -233,6 +233,10 @@ impl MatrixError {
     pub fn too_large(msg: impl Into<String>) -> (StatusCode, Json<MatrixError>) {
         (StatusCode::PAYLOAD_TOO_LARGE, Json(Self::new("M_TOO_LARGE", msg)))
     }
+    /// An upstream Matrix error forwarded with its original status.
+    pub fn forwarded(status: StatusCode, errcode: &'static str, error: impl Into<String>) -> (StatusCode, Json<MatrixError>) {
+        (status, Json(Self::new(errcode, error)))
+    }
     pub fn new_not_found(msg: impl Into<String>) -> (StatusCode, Json<MatrixError>) {
         (StatusCode::NOT_FOUND, Json(Self::new("M_NOT_FOUND", msg)))
     }

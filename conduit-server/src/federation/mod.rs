@@ -28,6 +28,7 @@ pub mod client;
 pub mod discovery;
 pub mod middleware;
 pub mod pipeline;
+pub mod policy;
 pub mod queue;
 pub mod rate_limit;
 pub mod recent;

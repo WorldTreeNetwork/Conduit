@@ -311,6 +311,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(ep) = iroh_endpoint.as_ref() {
         federation_client = federation_client.with_iroh_endpoint(Arc::clone(ep));
     }
+    if let Ok(url) = env::var("CONDUIT_FEDERATION_BASE_URL") {
+        tracing::info!(url = %url, "federation destination override active");
+        federation_client = federation_client.with_test_base_url(url);
+    }
     let federation_client = Arc::new(federation_client);
     let federation_queue = Arc::new(federation::Queue::new(
         Arc::clone(&federation_client),

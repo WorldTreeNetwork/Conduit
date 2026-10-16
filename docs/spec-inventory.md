@@ -16,9 +16,9 @@ Statuses: **tested** = present and asserted by a named test; **untested** = pres
 | API | kind | tested | untested | partial | missing | n/a | total |
 |---|---|---:|---:|---:|---:|---:|---:|
 | Client-Server API | endpoints | 147 | 0 | 16 | 0 | 1 | 164 |
-| Client-Server API | requirements | 53 | 0 | 23 | 1 | 9 | 86 |
+| Client-Server API | requirements | 54 | 0 | 23 | 0 | 9 | 86 |
 | Server-Server API | endpoints | 20 | 3 | 8 | 4 | 1 | 36 |
-| Server-Server API | requirements | 9 | 0 | 14 | 15 | 3 | 41 |
+| Server-Server API | requirements | 9 | 0 | 15 | 14 | 3 | 41 |
 | Application Service API | endpoints | 11 | 0 | 0 | 0 | 0 | 11 |
 | Application Service API | requirements | 16 | 0 | 0 | 0 | 2 | 18 |
 | Push Gateway API (homeserver as client) | endpoints | 1 | 0 | 0 | 0 | 0 | 1 |
@@ -27,7 +27,7 @@ Statuses: **tested** = present and asserted by a named test; **untested** = pres
 | Identity Service API (homeserver as consumer) | requirements | 1 | 0 | 0 | 0 | 0 | 1 |
 | Room versions 1–12 | requirements | 28 | 0 | 6 | 27 | 0 | 61 |
 | Appendices | requirements | 9 | 0 | 4 | 4 | 4 | 21 |
-| All |  | 301 | 3 | 73 | 51 | 37 | 465 |
+| All |  | 302 | 3 | 74 | 49 | 37 | 465 |
 ## Gap beads
 
 New beads filed by this inventory (children of `conduit-y99`):
@@ -347,7 +347,7 @@ In-flight / pre-existing beads referenced (not duplicated):
 | `cs.mod.room-upgrades` | [Room upgrades](https://spec.matrix.org/v1.19/client-server-api/#room-upgrades) | tested | `conduit-server/src/api/client/room_content/upgrade.rs` | `production_rooms.rs::room_upgrade_replaces_and_tombstones`<br>`production_rooms.rs::room_upgrade_applies_requested_creators_and_copies_settings` |  | Server behaviour: permission, predecessor create, transferable state, local aliases, tombstone, lockdown. additional_creators come from the upgrade body. Per-user tags and room push rules copy when the user joins the replacement. |
 | `cs.mod.server-notices` | [Server notices](https://spec.matrix.org/v1.19/client-server-api/#server-notices) | tested | `conduit-server/src/api/client/server_notices.rs` | `production_modules.rs::server_notices_room_is_tagged_invite_only_and_reused` |  | One room per user (tag m.server_notice), invite not auto-join, msgtype m.server_notice, M_CANNOT_LEAVE_SERVER_NOTICE_ROOM on invite rejection, re-invite after leave; admin trigger POST /_matrix/conduit/admin/v1/server_notices. No usage limits exist, so usage_limit_reached notices are only sent manually. |
 | `cs.mod.policy-lists` | [Moderation policy lists](https://spec.matrix.org/v1.19/client-server-api/#moderation-policy-lists) | n/a |  |  |  | *client/bot* Spec: "Servers have no additional requirements placed on them by this module." m.policy.rule.* are ordinary state events. |
-| `cs.mod.policy-servers` | [Policy servers (client behaviour of homeserver)](https://spec.matrix.org/v1.19/client-server-api/#policy-servers) | missing |  |  | `conduit-y99.45` |  |
+| `cs.mod.policy-servers` | [Policy servers (client behaviour of homeserver)](https://spec.matrix.org/v1.19/client-server-api/#policy-servers) | tested | `conduit-server/src/federation/policy.rs` | `production_pdu.rs::policy_server_signature_is_required_before_a_client_event_is_sent`<br>`policy.rs::policy_config_requires_via_and_ed25519` |  | Client events ask the policy server before they are stored. A refusal is returned verbatim and the event is dropped. Incoming federation soft-fail is still open. |
 | `cs.mod.spaces` | [Spaces (hierarchy)](https://spec.matrix.org/v1.19/client-server-api/#spaces) | partial | `conduit-server/src/api/client/room_content/hierarchy.rs` | `production_rooms.rs::space_hierarchy_walks_children_depth_first` | `conduit-y99.19.2` | No federation fetch of unknown children. |
 | `cs.mod.event-replacements` | [Event replacements (edits) server behaviour](https://spec.matrix.org/v1.19/client-server-api/#event-replacements) | tested | `conduit-server/src/api/client/room_content/serve.rs` | `production_rooms.rs::relations_threads_and_edit_aggregation` |  | Latest valid edit bundled; original content untouched; bundle dropped/reverted on redaction. |
 | `cs.mod.annotations` | [Event annotations and reactions (M_DUPLICATE_ANNOTATION)](https://spec.matrix.org/v1.19/client-server-api/#event-annotations-and-reactions) | tested | `conduit-server/src/api/client/room_content/relations.rs` | `production_rooms.rs::relations_threads_and_edit_aggregation` |  | M_DUPLICATE_ANNOTATION; annotations not aggregated. |
@@ -440,7 +440,7 @@ In-flight / pre-existing beads referenced (not duplicated):
 | `ss.to-device` | [Send-to-device messaging (m.direct_to_device)](https://spec.matrix.org/v1.19/server-server-api/#send-to-device-messaging) | tested | `conduit-server/src/federation/server.rs:958`<br>`conduit-server/src/federation/client.rs:706` | `peers/synapse_to_device.py (live Synapse)`<br>`production_e2e.rs::production_to_device_transactions_are_durable_and_do_not_reexpand_wildcards` |  |  |
 | `ss.content-repo` | [Content repository over federation (multipart/mixed)](https://spec.matrix.org/v1.19/server-server-api/#content-repository) | partial | `conduit-server/src/api/client/media.rs` | `media.rs::remote_media_is_fetched_over_federation_cached_and_served` | `conduit-y99.21.1` |  |
 | `ss.acls` | [Server ACLs enforcement](https://spec.matrix.org/v1.19/server-server-api/#server-access-control-lists-acls) | tested | `conduit/src/server_acl.rs`<br>`conduit-server/src/federation/server.rs` | `production_pdu.rs::server_acl_denies_remote_participation_until_lifted`<br>`server_acl.rs::acl_order_globs_ports_and_ip_literals` |  | Denied origins are rejected on the MUST endpoints and per PDU on /send; lifting the deny list restores access. |
-| `ss.policy-servers` | [Policy servers (homeserver obligations in rooms using one)](https://spec.matrix.org/v1.19/server-server-api/#policy-servers) | missing |  |  | `conduit-y99.45` |  |
+| `ss.policy-servers` | [Policy servers (homeserver obligations in rooms using one)](https://spec.matrix.org/v1.19/server-server-api/#policy-servers) | partial | `conduit-server/src/federation/policy.rs` | `production_pdu.rs::policy_server_signature_is_required_before_a_client_event_is_sent` | `conduit-y99.45` | Client-authored events are signed before send. Federation receipts without a valid policy signature are not soft-failed yet. |
 | `ss.signing.outgoing` | [Adding hashes and signatures to outgoing events](https://spec.matrix.org/v1.19/server-server-api/#adding-hashes-and-signatures-to-outgoing-events) | partial | `conduit/src/hashing.rs`<br>`conduit/src/signing.rs` | `matrix_v11_crypto.rs` | `conduit-embed-pdu` | Byte-exact for typed v11 events; wire PDU model in conduit-embed-pdu. |
 | `ss.signing.validate` | [Validating hashes and signatures on received events](https://spec.matrix.org/v1.19/server-server-api/#validating-hashes-and-signatures-on-received-events) | partial | `conduit-server/src/federation/pipeline.rs` | `federation_inbound.rs::inbound_signature_verified_or_rejected` | `conduit-y99.33` `conduit-embed-pdu` | Signatures checked; content-hash mismatch handling missing. |
 | `ss.signing.reference-hash` | [Calculating the reference hash](https://spec.matrix.org/v1.19/server-server-api/#calculating-the-reference-hash-for-an-event) | tested | `conduit/src/hashing.rs` | `matrix_v11_crypto.rs` |  |  |

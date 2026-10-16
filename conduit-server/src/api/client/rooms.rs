@@ -505,12 +505,14 @@ pub async fn send_message_event<S: AuthState + conduit::room::RoomEventSender>(
                 .await
         }
         Err((code, error)) => {
-            replay
-                .finish(
-                    code,
-                    serde_json::to_value(error.0).expect("Matrix error serializes"),
-                )
-                .await
+            let body = serde_json::to_value(error.0).expect("Matrix error serializes");
+            // Transaction replay rewrites status from errcode, which would
+            // turn a policy server's 400 M_FORBIDDEN into 403. The policy
+            // server's status is the one the client is supposed to see.
+            if code != crate::replay::status(&body) {
+                return (code, Json(body)).into_response();
+            }
+            replay.finish(code, body).await
         }
     }
 }
