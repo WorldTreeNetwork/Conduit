@@ -471,6 +471,151 @@ async fn remote_invite_refusal_fails_and_drops_membership() {
 }
 
 #[tokio::test]
+async fn remote_invite_rejected_cosign_retracts() {
+    let invites = Arc::new(Mutex::new(Vec::<(String, Value)>::new()));
+    let invites_v2 = Arc::clone(&invites);
+    let invites_v1 = Arc::clone(&invites);
+    let sent = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let sent_route = Arc::clone(&sent);
+    let url = serve(
+        Arc::new(generate_server_key()),
+        Router::new()
+            .route(
+                "/_matrix/federation/v2/invite/:room_id/:event_id",
+                put(move |Json(body): Json<Value>| {
+                    let invites = Arc::clone(&invites_v2);
+                    async move {
+                        invites.lock().unwrap().push(("v2".to_owned(), body));
+                        Json(json!({ "event": { "type": "m.room.member" } }))
+                    }
+                }),
+            )
+            .route(
+                "/_matrix/federation/v1/invite/:room_id/:event_id",
+                put(move |Json(body): Json<Value>| {
+                    let invites = Arc::clone(&invites_v1);
+                    async move {
+                        invites.lock().unwrap().push(("v1".to_owned(), body));
+                        Json(json!({ "event": { "type": "m.room.member" } }))
+                    }
+                }),
+            )
+            .route(
+                "/_matrix/federation/v1/send/:txn",
+                put(move |Json(body): Json<Value>| {
+                    let sent = Arc::clone(&sent_route);
+                    async move {
+                        sent.lock().unwrap().push(body);
+                        Json(json!({ "pdus": {} }))
+                    }
+                }),
+            ),
+    )
+    .await;
+    let server = Server::with_env(&[
+        ("CONDUIT_FEDERATION", "1"),
+        ("CONDUIT_FEDERATION_BASE_URL", url.as_str()),
+        ("CONDUIT_REMOTE_KEYS_OVERRIDE", url.as_str()),
+    ])
+    .await;
+    let alice = server.register("alice").await;
+    let token = alice["access_token"].as_str().unwrap();
+    let pool = sqlx::PgPool::connect(&server.database_url).await.unwrap();
+    let storage = conduit_server::PostgresStorage::new(pool.clone());
+
+    let modern = server
+        .request(Method::POST, "/_matrix/client/v3/createRoom", Some(token), Some(json!({"preset": "private_chat"})), 200)
+        .await["room_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let joined = "@joined:peer.test";
+    let member = Event::new(
+        "$member-join-joined-peer-test",
+        Pdu::new(&modern, joined, "m.room.member", Some(joined.to_owned()), json!({"membership": "join"}), 1_700_000_000_000, vec![], vec![], 40),
+    );
+    storage.put_event(&member).await.unwrap();
+    storage.set_state_entry(&modern, "m.room.member", joined, &member.event_id).await.unwrap();
+    let modern_invitee = "@unsigned:peer.test";
+    let refused = server
+        .request(
+            Method::POST,
+            &format!("/_matrix/client/v3/rooms/{}/invite", enc(&modern)),
+            Some(token),
+            Some(json!({"user_id": modern_invitee})),
+            403,
+        )
+        .await;
+    assert_eq!(refused["errcode"], "M_FORBIDDEN", "{refused}\n{}", server.logs());
+    assert!(
+        storage.get_state_entry(&modern, "m.room.member", modern_invitee).await.unwrap().is_none(),
+        "unsigned 200 invite is still the membership"
+    );
+
+    let legacy = server
+        .request(
+            Method::POST,
+            "/_matrix/client/v3/createRoom",
+            Some(token),
+            Some(json!({"preset": "private_chat", "room_version": "2"})),
+            200,
+        )
+        .await["room_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let legacy_member = Event::new(
+        "$member-join-joined-peer-test-v2",
+        Pdu::new(&legacy, joined, "m.room.member", Some(joined.to_owned()), json!({"membership": "join"}), 1_700_000_000_000, vec![], vec![], 0),
+    );
+    storage.put_event(&legacy_member).await.unwrap();
+    storage.set_state_entry(&legacy, "m.room.member", joined, &legacy_member.event_id).await.unwrap();
+    let legacy_invitee = "@legacy:peer.test";
+    let legacy_refused = server
+        .request(
+            Method::POST,
+            &format!("/_matrix/client/v3/rooms/{}/invite", enc(&legacy)),
+            Some(token),
+            Some(json!({"user_id": legacy_invitee})),
+            403,
+        )
+        .await;
+    assert_eq!(legacy_refused["errcode"], "M_FORBIDDEN", "{legacy_refused}\n{}", server.logs());
+    assert!(
+        storage.get_state_entry(&legacy, "m.room.member", legacy_invitee).await.unwrap().is_none(),
+        "room version 2 invite is still the membership"
+    );
+
+    let captured = invites.lock().unwrap().clone();
+    let modern_body = captured.iter().find(|(version, _)| version == "v2").unwrap_or_else(|| panic!("PUT /v2/invite was not called: {captured:?}\n{}", server.logs()));
+    assert!(modern_body.1.get("event_id").is_none(), "v2 invite body is the event itself: {}", modern_body.1);
+    assert!(modern_body.1["event"].is_object(), "v2 invite has no event: {}", modern_body.1);
+    assert!(modern_body.1["event"].get("event_id").is_none(), "v2 invite event carries event_id: {}", modern_body.1);
+    assert_eq!(modern_body.1["room_version"], "12");
+    let legacy_body = captured.iter().find(|(version, _)| version == "v1").unwrap_or_else(|| panic!("PUT /v1/invite was not called: {captured:?}\n{}", server.logs()));
+    let event_id = legacy_body.1["event_id"].as_str().unwrap_or_else(|| panic!("v1 invite has no event_id: {}", legacy_body.1));
+    assert!(event_id.starts_with('$') && event_id.ends_with(":production.test"), "{event_id}");
+    assert!(legacy_body.1["auth_events"][0].is_array(), "auth_events are not tuples: {}", legacy_body.1);
+    assert!(legacy_body.1["prev_events"][0].is_array(), "prev_events are not tuples: {}", legacy_body.1);
+    assert!(captured.iter().filter(|(version, _)| version == "v1").count() == 1, "room version 12 also used v1: {captured:?}");
+
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let bodies = sent.lock().unwrap().clone();
+    assert!(
+        bodies.iter().all(|body| !body.to_string().contains(modern_invitee) && !body.to_string().contains(legacy_invitee)),
+        "rejected invite was sent: {bodies:?}"
+    );
+    for invitee in [modern_invitee, legacy_invitee] {
+        let queued: i64 = sqlx::query_scalar("SELECT count(*) FROM fed_outbound_queue WHERE payload_text LIKE $1")
+            .bind(format!("%{invitee}%"))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(queued, 0, "{invitee} is still queued");
+    }
+}
+
+#[tokio::test]
 async fn remote_v1_invite_is_legacy_and_rejected_cosign_retracts() {
     let invites = Arc::new(Mutex::new(Vec::<Value>::new()));
     let invites_route = Arc::clone(&invites);
