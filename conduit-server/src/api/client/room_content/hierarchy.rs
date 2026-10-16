@@ -85,7 +85,7 @@ async fn accessible(
 }
 
 /// Valid children of a space, ordered, honouring `suggested_only`.
-fn children(state: &StateMap<Event>, suggested_only: bool) -> Vec<Event> {
+pub(crate) fn ordered_children(state: &StateMap<Event>, suggested_only: bool) -> Vec<Event> {
     let mut children: Vec<Event> = state
         .values()
         .filter(|event| is_valid_space_child(event))
@@ -96,7 +96,7 @@ fn children(state: &StateMap<Event>, suggested_only: bool) -> Vec<Event> {
     children
 }
 
-fn summary(room_id: &str, state: &StateMap<Event>, children: &[Event]) -> Value {
+pub(crate) fn summary(room_id: &str, state: &StateMap<Event>, children: &[Event]) -> Value {
     let joined = state
         .iter()
         .filter(|((kind, _), event)| kind == "m.room.member" && event.content["membership"] == "join")
@@ -216,7 +216,7 @@ pub async fn hierarchy<S: AuthState>(
             Ok(false) => continue,
             Err(e) => return storage_error(e),
         }
-        let room_children = children(&room_state, suggested_only);
+        let room_children = ordered_children(&room_state, suggested_only);
         rooms.push(summary(&room, &room_state, &room_children));
         if depth < max_depth {
             for child in room_children.iter().rev() {

@@ -186,6 +186,11 @@ async fn insert_event(connection: &mut sqlx::PgConnection, event: &Event) -> Res
         // Not canonical JSON (e.g. a float): cannot be hashed, never served.
         Err(_) => (json_text(&serde_json::to_value(&event.pdu)?), "id_mismatch"),
     };
+    let room_id = if event.room_id.is_empty() {
+        conduit::room_version::room_id_from_event_id(&event.event_id)
+    } else {
+        event.room_id.clone()
+    };
     sqlx::query!(
         r#"
         INSERT INTO events
@@ -196,7 +201,7 @@ async fn insert_event(connection: &mut sqlx::PgConnection, event: &Event) -> Res
         ON CONFLICT (event_id) DO NOTHING
         "#,
         event.event_id,
-        event.room_id,
+        room_id,
         event.sender,
         event.event_type,
         event.state_key,

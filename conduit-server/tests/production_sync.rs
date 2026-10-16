@@ -687,6 +687,8 @@ async fn threaded_and_unthreaded_receipts_coexist() {
         assert_eq!(rejected["errcode"], "M_INVALID_PARAM", "{rejected}");
     }
     assert_eq!(receipt("m.read", &root, Some(json!([])), 400).await["errcode"], "M_BAD_JSON");
+    // m.fully_read is a read marker, not a receipt.
+    assert_eq!(receipt("m.fully_read", &root, None, 400).await["errcode"], "M_INVALID_PARAM");
     let missing = receipt("m.read", "$missing:production.test", None, 404).await;
     assert_eq!(missing["errcode"], "M_NOT_FOUND");
     let carol = server.register("carol").await;

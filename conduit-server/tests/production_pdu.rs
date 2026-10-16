@@ -331,3 +331,56 @@ async fn client_floats_replay_and_client_nul_rules() {
     let event = server.request(Method::GET, &get, Some(token), None, 200).await;
     assert_eq!(event["content"]["body"], "a\u{0}b");
 }
+
+#[tokio::test]
+async fn minted_openid_token_is_redeemed_by_federation_userinfo() {
+    let remote = spawn_remote().await;
+    let server = federated_server(&remote).await;
+    let alice = server.register("alice").await;
+    let token = alice["access_token"].as_str().unwrap();
+    let user = alice["user_id"].as_str().unwrap();
+    let bob = server.register("bob").await;
+
+    let minted = server
+        .request(
+            Method::POST,
+            &format!("/_matrix/client/v3/user/{}/openid/request_token", enc(user)),
+            Some(token),
+            Some(json!({})),
+            200,
+        )
+        .await;
+    assert_eq!(minted["token_type"], "Bearer");
+    assert_eq!(minted["matrix_server_name"], LOCAL);
+    assert_eq!(minted["expires_in"], 3600);
+    let access = minted["access_token"].as_str().unwrap();
+    assert!(!access.is_empty());
+
+    let path = format!("/_matrix/federation/v1/openid/userinfo?access_token={access}");
+    let who = fed(&server, &remote, Method::GET, &path, None, 200).await;
+    assert_eq!(who["sub"], user, "{who}");
+
+    let denied = fed(
+        &server,
+        &remote,
+        Method::GET,
+        "/_matrix/federation/v1/openid/userinfo?access_token=not-a-real-token",
+        None,
+        401,
+    )
+    .await;
+    assert_eq!(denied["errcode"], "M_UNAUTHORIZED", "{denied}");
+    let missing = fed(&server, &remote, Method::GET, "/_matrix/federation/v1/openid/userinfo", None, 400).await;
+    assert_eq!(missing["errcode"], "M_BAD_JSON", "{missing}");
+
+    let other = server
+        .request(
+            Method::POST,
+            &format!("/_matrix/client/v3/user/{}/openid/request_token", enc(user)),
+            Some(bob["access_token"].as_str().unwrap()),
+            Some(json!({})),
+            403,
+        )
+        .await;
+    assert_eq!(other["errcode"], "M_FORBIDDEN", "{other}");
+}

@@ -762,7 +762,7 @@ async fn space_hierarchy_walks_children_depth_first() {
     assert_eq!(root["join_rule"], "public");
     assert_eq!(root["world_readable"], false);
     assert_eq!(root["guest_can_join"], false);
-    assert_eq!(root["room_version"], "11");
+    assert_eq!(root["room_version"], "12");
     assert_eq!(root["room_type"], "m.space");
     assert!(full["rooms"][1].get("room_type").is_none(), "ordinary rooms have no type");
     assert_eq!(root["children_state"].as_array().unwrap().len(), 4, "invalid children are not listed");
@@ -844,4 +844,351 @@ async fn ignored_users_are_filtered_from_sync_messages_and_invites() {
     let back = text(&server, &bob, &room, "back again").await;
     let resumed = sync(&server, &alice, &format!("&since={resumed_since}")).await;
     assert!(ids(&resumed["rooms"]["join"][&room]["timeline"]["events"]).contains(&back));
+}
+
+#[tokio::test]
+async fn messages_filter_backfills_to_the_limit_and_to_is_exclusive() {
+    let server = Server::new().await;
+    let alice = user(&server, "alice").await;
+    let room = create_room(&server, &alice, json!({"preset": "public_chat"})).await;
+    text(&server, &alice, &room, "A").await;
+    state(&server, &alice, &room, "m.room.topic", "", json!({"topic": "between"})).await;
+    send(
+        &server,
+        &alice,
+        &room,
+        "m.room.message",
+        json!({"msgtype": "m.text", "body": "B", "url": "https://example.test/b"}),
+    )
+    .await;
+    state(&server, &alice, &room, "m.room.name", "", json!({"name": "between"})).await;
+    text(&server, &alice, &room, "C").await;
+
+    let filter = encode(r#"{"types":["m.room.message"]}"#);
+    let page = get(
+        &server,
+        &alice,
+        &format!("/_matrix/client/v3/rooms/{room}/messages?dir=b&limit=3&filter={filter}"),
+        200,
+    )
+    .await;
+    let bodies: Vec<_> = page["chunk"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|event| event["content"]["body"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(bodies, vec!["C".to_owned(), "B".to_owned(), "A".to_owned()], "{page}");
+    assert!(page["chunk"].as_array().unwrap().iter().all(|event| event["type"] == "m.room.message"));
+
+    let urls = encode(r#"{"contains_url":true}"#);
+    let linked = get(
+        &server,
+        &alice,
+        &format!("/_matrix/client/v3/rooms/{room}/messages?dir=b&limit=10&filter={urls}"),
+        200,
+    )
+    .await;
+    let linked_bodies: Vec<_> = linked["chunk"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|event| event["content"]["body"].as_str().unwrap_or("").to_owned())
+        .collect();
+    assert_eq!(linked_bodies, vec!["B".to_owned()], "{linked}");
+
+    let broken = get(
+        &server,
+        &alice,
+        &format!("/_matrix/client/v3/rooms/{room}/messages?dir=b&filter={}", encode("{")),
+        400,
+    )
+    .await;
+    assert_eq!(broken["errcode"], "M_BAD_JSON");
+
+    let open = get(&server, &alice, &format!("/_matrix/client/v3/rooms/{room}/messages?dir=b&limit=1"), 200).await;
+    let start = open["start"].as_str().unwrap();
+    assert!(!open["chunk"].as_array().unwrap().is_empty(), "{open}");
+    let stopped = get(
+        &server,
+        &alice,
+        &format!("/_matrix/client/v3/rooms/{room}/messages?dir=b&from={start}&to={start}"),
+        200,
+    )
+    .await;
+    assert_eq!(stopped["chunk"].as_array().unwrap().len(), 0, "to is exclusive: {stopped}");
+    assert!(stopped.get("end").is_none(), "nothing remains inside the bound: {stopped}");
+}
+
+#[tokio::test]
+async fn canonical_alias_must_point_at_the_room() {
+    let server = Server::new().await;
+    let alice = user(&server, "alice").await;
+    let room = create_room(&server, &alice, json!({"preset": "public_chat", "room_alias_name": "cheese"})).await;
+    let other = create_room(&server, &alice, json!({"preset": "public_chat", "room_alias_name": "other"})).await;
+    let path = format!("/_matrix/client/v3/rooms/{room}/state/m.room.canonical_alias");
+
+    let syntax = put(&server, &alice, &path, json!({"alias": "cheese"}), 400).await;
+    assert_eq!(syntax["errcode"], "M_INVALID_PARAM", "{syntax}");
+    let missing = put(&server, &alice, &path, json!({"alias": "#missing:production.test"}), 400).await;
+    assert_eq!(missing["errcode"], "M_BAD_ALIAS", "{missing}");
+    let elsewhere = put(&server, &alice, &path, json!({"alias": "#other:production.test"}), 400).await;
+    assert_eq!(elsewhere["errcode"], "M_BAD_ALIAS", "{elsewhere}");
+    let alt = put(
+        &server,
+        &alice,
+        &path,
+        json!({"alias": "#cheese:production.test", "alt_aliases": ["#missing:production.test"]}),
+        400,
+    )
+    .await;
+    assert_eq!(alt["errcode"], "M_BAD_ALIAS", "{alt}");
+    put(&server, &alice, &path, json!({"alias": "#cheese:production.test"}), 200).await;
+    // Clearing the alias is an event with no alias fields.
+    put(&server, &alice, &path, json!({}), 200).await;
+    let _ = other;
+}
+
+#[tokio::test]
+async fn client_events_reject_oversize_identifiers_and_pdus() {
+    let server = Server::new().await;
+    let alice = user(&server, "alice").await;
+    let room = create_room(&server, &alice, json!({"preset": "public_chat"})).await;
+    let key = "k".repeat(255);
+    state(&server, &alice, &room, "com.example.limit", &key, json!({"ok": true})).await;
+    let too_long = put(
+        &server,
+        &alice,
+        &format!("/_matrix/client/v3/rooms/{room}/state/com.example.limit/{}", "k".repeat(256)),
+        json!({"ok": false}),
+        413,
+    )
+    .await;
+    assert_eq!(too_long["errcode"], "M_TOO_LARGE", "{too_long}");
+    let huge = put(
+        &server,
+        &alice,
+        &format!("/_matrix/client/v3/rooms/{room}/send/m.room.message/huge"),
+        json!({"msgtype": "m.text", "body": "x".repeat(70_000)}),
+        413,
+    )
+    .await;
+    assert_eq!(huge["errcode"], "M_TOO_LARGE", "{huge}");
+}
+
+#[tokio::test]
+async fn room_upgrade_applies_requested_creators_and_copies_settings() {
+    let server = Server::new().await;
+    let alice = user(&server, "alice").await;
+    let bob = user(&server, "bob").await;
+    let room = create_room(
+        &server,
+        &alice,
+        json!({
+            "preset": "public_chat",
+            "creation_content": {"additional_creators": ["@carol:production.test"]}
+        }),
+    )
+    .await;
+    let old_create = get(&server, &alice, &format!("/_matrix/client/v3/rooms/{room}/state/m.room.create"), 200).await;
+    assert_eq!(old_create["additional_creators"], json!(["@carol:production.test"]));
+    join(&server, &bob, &room).await;
+    let tags = format!("/_matrix/client/v3/user/{}/rooms/{room}/tags/u.work", bob.id);
+    put(&server, &bob, &tags, json!({"order": 0.25}), 200).await;
+    put(
+        &server,
+        &bob,
+        &format!("/_matrix/client/v3/pushrules/global/room/{}", encode(&room)),
+        json!({"actions": []}),
+        200,
+    )
+    .await;
+
+    let rejected = post(
+        &server,
+        &alice,
+        &format!("/_matrix/client/v3/rooms/{room}/upgrade"),
+        json!({"new_version": "12", "additional_creators": ["bob"]}),
+        400,
+    )
+    .await;
+    assert_eq!(rejected["errcode"], "M_INVALID_PARAM", "{rejected}");
+    get(&server, &alice, &format!("/_matrix/client/v3/rooms/{room}/state/m.room.tombstone"), 404).await;
+
+    let upgraded = post(
+        &server,
+        &alice,
+        &format!("/_matrix/client/v3/rooms/{room}/upgrade"),
+        json!({"new_version": "12", "additional_creators": [bob.id]}),
+        200,
+    )
+    .await;
+    let new_room = upgraded["replacement_room"].as_str().unwrap();
+    let create = get(&server, &alice, &format!("/_matrix/client/v3/rooms/{new_room}/state/m.room.create"), 200).await;
+    assert_eq!(create["additional_creators"], json!([bob.id]), "request list replaces, it is not merged: {create}");
+    assert_eq!(create["room_version"], "12");
+
+    // The upgrader's join during upgrade copied nothing of Bob's. Bob's join does.
+    let before = get(
+        &server,
+        &bob,
+        &format!("/_matrix/client/v3/user/{}/rooms/{new_room}/tags", bob.id),
+        200,
+    )
+    .await;
+    assert!(before["tags"].get("u.work").is_none(), "{before}");
+    join(&server, &bob, new_room).await;
+    let after = get(
+        &server,
+        &bob,
+        &format!("/_matrix/client/v3/user/{}/rooms/{new_room}/tags", bob.id),
+        200,
+    )
+    .await;
+    assert_eq!(after["tags"]["u.work"]["order"], 0.25, "{after}");
+    let rule = get(
+        &server,
+        &bob,
+        &format!("/_matrix/client/v3/pushrules/global/room/{}", encode(new_room)),
+        200,
+    )
+    .await;
+    assert_eq!(rule["actions"], json!([]), "{rule}");
+
+    // Versions before 12 ignore additional_creators.
+    let legacy = create_room(&server, &alice, json!({"preset": "public_chat", "room_version": "11"})).await;
+    let legacy_new = post(
+        &server,
+        &alice,
+        &format!("/_matrix/client/v3/rooms/{legacy}/upgrade"),
+        json!({"new_version": "11", "additional_creators": [bob.id]}),
+        200,
+    )
+    .await["replacement_room"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let legacy_create = get(&server, &alice, &format!("/_matrix/client/v3/rooms/{legacy_new}/state/m.room.create"), 200).await;
+    assert!(legacy_create.get("additional_creators").is_none(), "{legacy_create}");
+}
+
+#[tokio::test]
+async fn client_events_report_age_membership_replacements_and_redactions() {
+    let server = Server::new().await;
+    let alice = user(&server, "alice").await;
+    let bob = user(&server, "bob").await;
+    let room = create_room(
+        &server,
+        &alice,
+        json!({
+            "preset": "public_chat",
+            "initial_state": [{
+                "type": "m.room.history_visibility",
+                "state_key": "",
+                "content": {"history_visibility": "joined"}
+            }]
+        }),
+    )
+    .await;
+    let secret = state(&server, &alice, &room, "m.room.topic", "", json!({"topic": "secret"})).await;
+    join(&server, &bob, &room).await;
+    let later = state(&server, &alice, &room, "m.room.topic", "", json!({"topic": "later"})).await;
+    let echo = put(
+        &server,
+        &alice,
+        &format!("/_matrix/client/v3/rooms/{room}/send/m.room.message/echo-format"),
+        json!({"msgtype": "m.text", "body": "echo"}),
+        200,
+    )
+    .await["event_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let page = get(&server, &alice, &format!("/_matrix/client/v3/rooms/{room}/messages?dir=b&limit=30"), 200).await;
+    let find = |chunk: &Value, id: &str| {
+        chunk["chunk"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|event| event["event_id"] == id)
+            .unwrap_or_else(|| panic!("{id} missing in {chunk}"))
+            .clone()
+    };
+    let topic = find(&page, &later);
+    assert_eq!(topic["unsigned"]["prev_content"]["topic"], "secret", "{topic}");
+    assert_eq!(topic["unsigned"]["replaces_state"], secret, "{topic}");
+    assert_eq!(topic["unsigned"]["membership"], "join", "{topic}");
+    assert!(topic["unsigned"]["age"].as_u64().is_some(), "{topic}");
+    let message = find(&page, &echo);
+    assert!(message["unsigned"].get("prev_content").is_none(), "{message}");
+    assert!(message["unsigned"].get("replaces_state").is_none(), "{message}");
+    assert_eq!(message["unsigned"]["transaction_id"], "echo-format", "{message}");
+    assert_eq!(message["unsigned"]["membership"], "join", "{message}");
+
+    let bob_page = get(&server, &bob, &format!("/_matrix/client/v3/rooms/{room}/messages?dir=b&limit=30"), 200).await;
+    let hidden = find(&bob_page, &later);
+    assert_eq!(hidden["unsigned"]["replaces_state"], secret, "replaces_state ignores visibility: {hidden}");
+    assert!(hidden["unsigned"].get("prev_content").is_none(), "pre-join topic stays hidden: {hidden}");
+
+    let redaction = put(
+        &server,
+        &alice,
+        &format!("/_matrix/client/v3/rooms/{room}/redact/{echo}/redact-echo"),
+        json!({"reason": "gone"}),
+        200,
+    )
+    .await["event_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let served = get(&server, &alice, &format!("/_matrix/client/v3/rooms/{room}/event/{echo}"), 200).await;
+    assert_eq!(served["content"], json!({}), "{served}");
+    assert_eq!(served["unsigned"]["redacted_because"]["event_id"], redaction, "{served}");
+    assert!(served["unsigned"]["age"].as_u64().is_some(), "{served}");
+    let again = get(&server, &alice, &format!("/_matrix/client/v3/rooms/{room}/messages?dir=b&limit=30"), 200).await;
+    let redacted = find(&again, &echo);
+    assert_eq!(redacted["content"], json!({}), "{redacted}");
+    assert_eq!(redacted["unsigned"]["redacted_because"]["event_id"], redaction, "{redacted}");
+    assert_eq!(redacted["unsigned"]["transaction_id"], "echo-format", "{redacted}");
+    let full = sync(&server, &alice, "").await;
+    let synced = full["rooms"]["join"][&room]["timeline"]["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["event_id"] == echo)
+        .expect("redacted event in sync");
+    assert_eq!(synced["unsigned"]["redacted_because"]["event_id"], redaction, "{synced}");
+    assert_eq!(synced["unsigned"]["transaction_id"], "echo-format", "{synced}");
+    assert!(synced["unsigned"]["age"].as_u64().is_some(), "{synced}");
+}
+
+#[tokio::test]
+async fn room_messages_require_msgtype_and_body() {
+    let server = Server::new().await;
+    let alice = user(&server, "alice").await;
+    let room = create_room(&server, &alice, json!({"preset": "public_chat"})).await;
+    let path = format!("/_matrix/client/v3/rooms/{room}/send/m.room.message/shape");
+    let missing = put(&server, &alice, &path, json!({"body": "no type"}), 400).await;
+    assert_eq!(missing["errcode"], "M_BAD_JSON", "{missing}");
+    let again = put(&server, &alice, &path, json!({"msgtype": "m.text", "body": "now valid"}), 400).await;
+    assert_eq!(again, missing, "the rejected transaction is replayed");
+    let sent = put(
+        &server,
+        &alice,
+        &format!("/_matrix/client/v3/rooms/{room}/send/m.room.message/shape-ok"),
+        json!({"msgtype": "m.text", "body": ""}),
+        200,
+    )
+    .await;
+    assert!(sent["event_id"].as_str().unwrap().starts_with('$'));
+    let no_body = put(
+        &server,
+        &alice,
+        &format!("/_matrix/client/v3/rooms/{room}/send/m.room.message/no-body"),
+        json!({"msgtype": "m.text"}),
+        400,
+    )
+    .await;
+    assert_eq!(no_body["errcode"], "M_BAD_JSON", "{no_body}");
 }

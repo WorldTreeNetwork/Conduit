@@ -483,6 +483,23 @@ pub fn resolve(
     state_sets: Vec<StateMap<Event>>,
     auth_chain: HashMap<String, Event>,
 ) -> Result<StateMap<Event>, StateResError> {
+    resolve_inner(state_sets, auth_chain, false)
+}
+
+/// State resolution for room version 12: iterative auth starts from an empty
+/// map, and the full conflicted set includes the conflicted-state subgraph.
+pub fn resolve_v12(
+    state_sets: Vec<StateMap<Event>>,
+    auth_chain: HashMap<String, Event>,
+) -> Result<StateMap<Event>, StateResError> {
+    resolve_inner(state_sets, auth_chain, true)
+}
+
+fn resolve_inner(
+    state_sets: Vec<StateMap<Event>>,
+    auth_chain: HashMap<String, Event>,
+    room_version_12: bool,
+) -> Result<StateMap<Event>, StateResError> {
     // --- Trivial cases -------------------------------------------------------
     if state_sets.is_empty() {
         return Ok(HashMap::new());
@@ -531,12 +548,26 @@ pub fn resolve(
         }
     }
 
+    if room_version_12 {
+        let subgraph = conflicted_state_subgraph(&all_conflicted, &auth_chain);
+        let mut have: HashSet<String> = all_conflicted.iter().map(|event| event.event_id.clone()).collect();
+        for event in subgraph {
+            if have.insert(event.event_id.clone()) {
+                all_conflicted.push(event);
+            }
+        }
+    }
+
     // --- Step 3: Resolve power events ----------------------------------------
     let (power_events, non_power_events): (Vec<Event>, Vec<Event>) =
         all_conflicted.into_iter().partition(is_power_event);
 
-    // Build working state: start from unconflicted.
-    let mut working_state: StateMap<Event> = unconflicted.clone();
+    // v2 starts from the unconflicted map. v12 starts empty.
+    let mut working_state: StateMap<Event> = if room_version_12 {
+        HashMap::new()
+    } else {
+        unconflicted.clone()
+    };
 
     // Order power events by reverse-topological power order.
     let ordered_power = reverse_topological_power_order(&power_events, &auth_chain, &working_state);
@@ -569,6 +600,50 @@ pub fn resolve(
     }
 
     Ok(working_state)
+}
+
+/// Events that lie on an `auth_events` path between two conflicted events.
+fn conflicted_state_subgraph(
+    conflicted: &[Event],
+    auth_chain: &HashMap<String, Event>,
+) -> Vec<Event> {
+    let ids: HashSet<String> = conflicted.iter().map(|event| event.event_id.clone()).collect();
+    let mut nodes: HashMap<String, Event> = HashMap::new();
+    for event in conflicted {
+        nodes.insert(event.event_id.clone(), event.clone());
+    }
+    for event in auth_chain.values() {
+        nodes.entry(event.event_id.clone()).or_insert_with(|| event.clone());
+    }
+    let mut forward: HashMap<String, Vec<String>> = HashMap::new();
+    let mut reverse: HashMap<String, Vec<String>> = HashMap::new();
+    for event in nodes.values() {
+        for parent in &event.auth_events {
+            forward.entry(parent.clone()).or_default().push(event.event_id.clone());
+            reverse.entry(event.event_id.clone()).or_default().push(parent.clone());
+        }
+    }
+    fn walk(start: &HashSet<String>, edges: &HashMap<String, Vec<String>>) -> HashSet<String> {
+        let mut seen = start.clone();
+        let mut stack: Vec<String> = start.iter().cloned().collect();
+        while let Some(id) = stack.pop() {
+            if let Some(next) = edges.get(&id) {
+                for neighbor in next {
+                    if seen.insert(neighbor.clone()) {
+                        stack.push(neighbor.clone());
+                    }
+                }
+            }
+        }
+        seen
+    }
+    let from_conflicted = walk(&ids, &forward);
+    let toward_conflicted = walk(&ids, &reverse);
+    from_conflicted
+        .intersection(&toward_conflicted)
+        .filter(|id| !ids.contains(*id))
+        .filter_map(|id| nodes.get(id).cloned())
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -1205,6 +1280,41 @@ mod tests {
             "expected MissingAuthEvent, got: {:?}",
             result
         );
+    }
+
+    #[test]
+    fn v12_iterative_auth_starts_empty_and_drops_events_v2_keeps() {
+        let create = make_create("!r:example.org", "@alice:example.org");
+        let join = make_event(
+            "$join", "m.room.member", "@alice:example.org", "!r:example.org",
+            Some("@alice:example.org"), json!({"membership": "join"}),
+            vec!["$create".into()], 2, 2_000,
+        );
+        let topic_a = make_event(
+            "$topic-a", "m.room.topic", "@alice:example.org", "!r:example.org",
+            Some(""), json!({"topic": "a"}),
+            vec!["$create".into(), "$join".into()], 3, 3_000,
+        );
+        let topic_b = make_event(
+            "$topic-b", "m.room.topic", "@alice:example.org", "!r:example.org",
+            Some(""), json!({"topic": "b"}),
+            vec!["$create".into(), "$join".into()], 3, 4_000,
+        );
+        let mut left = HashMap::new();
+        left.insert(("m.room.create".into(), String::new()), create.clone());
+        left.insert(("m.room.member".into(), "@alice:example.org".into()), join.clone());
+        left.insert(("m.room.topic".into(), String::new()), topic_a);
+        let mut right = left.clone();
+        right.insert(("m.room.topic".into(), String::new()), topic_b);
+        let chain = HashMap::new();
+        let v2 = resolve(vec![left.clone(), right.clone()], chain.clone()).unwrap();
+        let v12 = resolve_v12(vec![left, right], chain).unwrap();
+        assert!(v2.contains_key(&("m.room.topic".into(), String::new())));
+        assert!(
+            !v12.contains_key(&("m.room.topic".into(), String::new())),
+            "v12 auth starts from an empty map, so the topic fails closed"
+        );
+        assert!(v12.contains_key(&("m.room.create".into(), String::new())));
     }
 }
 

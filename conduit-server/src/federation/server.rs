@@ -90,25 +90,25 @@ fn matrix_error(status: StatusCode, errcode: &str, error: &str) -> Response {
     (status, Json(json!({ "errcode": errcode, "error": error }))).into_response()
 }
 
-fn unauthorized(msg: &str) -> Response {
+pub(crate) fn unauthorized(msg: &str) -> Response {
     matrix_error(StatusCode::UNAUTHORIZED, "M_UNAUTHORIZED", msg)
 }
 
-fn not_found(msg: &str) -> Response {
+pub(crate) fn not_found(msg: &str) -> Response {
     matrix_error(StatusCode::NOT_FOUND, "M_NOT_FOUND", msg)
 }
 
-fn bad_json(msg: &str) -> Response {
+pub(crate) fn bad_json(msg: &str) -> Response {
     matrix_error(StatusCode::BAD_REQUEST, "M_BAD_JSON", msg)
 }
 
-fn invalid_param(msg: &str) -> Response {
+pub(crate) fn invalid_param(msg: &str) -> Response {
     matrix_error(StatusCode::BAD_REQUEST, "M_INVALID_PARAM", msg)
 }
 
 /// The federation form of stored events, in order. Events whose bytes do not
 /// reproduce their ID are omitted; content-mismatched ones are redacted.
-async fn wire_pdus(storage: &Arc<dyn Storage>, events: &[Event]) -> conduit::Result<Vec<WirePdu>> {
+pub(crate) async fn wire_pdus(storage: &Arc<dyn Storage>, events: &[Event]) -> conduit::Result<Vec<WirePdu>> {
     let mut out = Vec::with_capacity(events.len());
     for event in events {
         if let Some(wire) = storage.get_wire_pdu(&event.event_id).await? {
@@ -118,11 +118,11 @@ async fn wire_pdus(storage: &Arc<dyn Storage>, events: &[Event]) -> conduit::Res
     Ok(out)
 }
 
-fn forbidden(msg: &str) -> Response {
+pub(crate) fn forbidden(msg: &str) -> Response {
     matrix_error(StatusCode::FORBIDDEN, "M_FORBIDDEN", msg)
 }
 
-fn internal(msg: &str) -> Response {
+pub(crate) fn internal(msg: &str) -> Response {
     matrix_error(StatusCode::INTERNAL_SERVER_ERROR, "M_UNKNOWN", msg)
 }
 
@@ -973,7 +973,7 @@ pub async fn query_directory(
 
 /// Collect all auth-chain events (union of auth_events reachable from
 /// the given state events, up to a reasonable depth).
-async fn build_auth_chain(storage: &Arc<dyn Storage>, state_events: &[Event]) -> Vec<Event> {
+pub(crate) async fn build_auth_chain(storage: &Arc<dyn Storage>, state_events: &[Event]) -> Vec<Event> {
     let mut chain: Vec<Event> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
     let mut queue: Vec<String> = state_events
@@ -1190,12 +1190,26 @@ pub fn federation_router() -> axum::Router<FedState> {
         .route("/get_missing_events/:roomId", post(get_missing_events))
         .route("/query/profile", get(query_profile))
         .route("/query/directory", get(query_directory))
+        .route("/event_auth/:roomId/:eventId", get(super::spec_v119::event_auth))
+        .route("/timestamp_to_event/:roomId", get(super::spec_v119::timestamp_to_event))
+        .route("/publicRooms", get(super::spec_v119::public_rooms_get).post(super::spec_v119::public_rooms_post))
+        .route("/hierarchy/:roomId", get(super::spec_v119::hierarchy))
+        .route("/openid/userinfo", get(super::spec_v119::openid_userinfo))
+        .route("/user/devices/:userId", get(super::spec_v119::user_devices))
+        .route("/user/keys/query", post(super::spec_v119::user_keys_query))
+        .route("/user/keys/claim", post(super::spec_v119::user_keys_claim))
+        .route("/make_knock/:roomId/:userId", get(super::spec_v119::make_knock))
+        .route("/send_knock/:roomId/:eventId", put(super::spec_v119::send_knock))
+        .route("/make_leave/:roomId/:userId", get(super::spec_v119::make_leave))
+        .route("/invite/:roomId/:eventId", put(invite))
+        .route("/exchange_third_party_invite/:roomId", put(super::spec_v119::exchange_third_party_invite))
         // Media (E07 h9n.8): federation download + thumbnail
         .route("/media/download/:mediaId", get(federation_download::<FedState>))
         .route("/media/thumbnail/:mediaId", get(federation_thumbnail::<FedState>));
     let v2 = axum::Router::new()
         .route("/send_join/:roomId/:eventId", put(send_join))
-        .route("/invite/:roomId/:eventId", put(invite));
+        .route("/invite/:roomId/:eventId", put(invite))
+        .route("/send_leave/:roomId/:eventId", put(super::spec_v119::send_leave));
     axum::Router::new().nest("/v1", v1).nest("/v2", v2)
         .layer(axum::extract::DefaultBodyLimit::max(16 * 1024 * 1024))
 }
@@ -1218,9 +1232,32 @@ where
         remote_keys: Arc::clone(&state.remote_keys),
         http: state.http.clone(),
     };
-    let routes = federation_router()
-        .layer(middleware::from_fn_with_state(limiter, rate_limit))
-        .layer(middleware::from_fn_with_state(auth, verify_xmatrix))
+    let authed = |router: axum::Router<FedState>| {
+        router
+            .layer(middleware::from_fn_with_state(limiter.clone(), rate_limit))
+            .layer(middleware::from_fn_with_state(auth.clone(), verify_xmatrix))
+            .with_state::<S>(state.clone())
+    };
+    let routes = authed(federation_router());
+    let key_query = authed(
+        axum::Router::new()
+            .route("/_matrix/key/v2/query", axum::routing::post(super::spec_v119::key_query))
+            .route("/_matrix/key/v2/query/:serverName", axum::routing::get(super::spec_v119::key_query_server)),
+    );
+    // `/version` is unauthenticated. Spec: GET /_matrix/federation/v1/version.
+    let version = axum::Router::new()
+        .route("/_matrix/federation/v1/version", axum::routing::get(federation_version))
         .with_state::<S>(state);
-    axum::Router::new().nest("/_matrix/federation", routes)
+    axum::Router::new().merge(version).merge(key_query).merge(axum::Router::new().nest("/_matrix/federation", routes))
+}
+
+/// `GET /_matrix/federation/v1/version`. No signature. `server.name` is this
+/// homeserver's server name; `server.version` is the crate version.
+async fn federation_version(State(state): State<FedState>) -> Json<Value> {
+    Json(json!({
+        "server": {
+            "name": state.server_name.as_ref(),
+            "version": env!("CARGO_PKG_VERSION"),
+        }
+    }))
 }

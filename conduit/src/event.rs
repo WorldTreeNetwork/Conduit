@@ -25,6 +25,9 @@ use serde_json::Value;
 /// lives on [`Event`].
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct Pdu {
+    /// Empty on a room-version-12 `m.room.create` event, which omits `room_id`.
+    /// The room id is then the event id with `!` in place of `$`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub room_id: String,
     pub sender: String,
     #[serde(rename = "type")]

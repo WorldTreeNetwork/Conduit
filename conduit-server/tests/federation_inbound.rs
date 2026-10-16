@@ -771,6 +771,321 @@ async fn query_profile_for_local_user() {
     assert_eq!(resp2.status().as_u16(), 404, "profile query for non-existent user should be 404");
 }
 
+#[tokio::test]
+async fn federation_version_is_public_and_stable() {
+    let (addr, _storage, _key) = spawn_test_server("version.test").await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("http://{addr}/_matrix/federation/v1/version"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["server"]["name"], "version.test");
+    assert_eq!(body["server"]["version"], env!("CARGO_PKG_VERSION"));
+    assert!(body["server"]["version"].as_str().unwrap().contains('.'));
+}
+
+#[tokio::test]
+async fn federation_directory_openid_and_local_key_query() {
+    let (addr, storage, key) = spawn_test_server("fed.test").await;
+    let client = reqwest::Client::new();
+    let base = format!("http://{addr}");
+
+    // The requesting server's key must be fetchable. Point the cache at
+    // this same listener by signing as fed.test itself.
+    let _: Value = client.get(format!("{base}/_matrix/key/v2/server")).send().await.unwrap().json().await.unwrap();
+
+    let room = "!pub:fed.test";
+    let create = signed_event(
+        &key,
+        "fed.test",
+        Pdu::new(
+            room,
+            "@alice:fed.test",
+            "m.room.create",
+            Some("".into()),
+            json!({ "room_version": "11", "creator": "@alice:fed.test" }),
+            1_000,
+            vec![],
+            vec![],
+            1,
+        ),
+    );
+    storage.put_event(&create).await.unwrap();
+    storage.set_state_entry(room, "m.room.create", "", &create.event_id).await.unwrap();
+    storage.set_room_published(room, true).await.unwrap();
+
+    let path = "/_matrix/federation/v1/publicRooms";
+    let auth = sign_req("GET", path, "fed.test", "fed.test", None, &key);
+    let listed: Value = client
+        .get(format!("{base}{path}"))
+        .header("Authorization", auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(listed["chunk"][0]["room_id"], room);
+    assert!(listed["total_room_count_estimate"].as_u64().unwrap() >= 1);
+
+    let token = "openid-token-value";
+    storage
+        .insert_token(
+            &conduit_server::api::client::probe::hash_bearer(token),
+            "@alice:fed.test",
+            "DEVICE",
+            None,
+        )
+        .await
+        .unwrap();
+    let userinfo = format!("/_matrix/federation/v1/openid/userinfo?access_token={token}");
+    let auth = sign_req("GET", &userinfo, "fed.test", "fed.test", None, &key);
+    let who: Value = client
+        .get(format!("{base}{userinfo}"))
+        .header("Authorization", auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(who["sub"], "@alice:fed.test");
+
+    let query_path = "/_matrix/key/v2/query";
+    let body = json!({ "server_keys": { "fed.test": {} } });
+    let auth = sign_req("POST", query_path, "fed.test", "fed.test", Some(&body), &key);
+    let keys: Value = client
+        .post(format!("{base}{query_path}"))
+        .header("Authorization", auth)
+        .json(&body)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(keys["server_keys"][0]["server_name"], "fed.test");
+    assert!(keys["server_keys"][0]["verify_keys"][&key.key_id]["key"].is_string());
+
+    let get_key = "/_matrix/key/v2/query/fed.test";
+    let auth = sign_req("GET", get_key, "fed.test", "fed.test", None, &key);
+    let by_name: Value = client
+        .get(format!("{base}{get_key}"))
+        .header("Authorization", auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(by_name["server_keys"][0]["server_name"], "fed.test");
+
+    let post_path = "/_matrix/federation/v1/publicRooms";
+    let filter = json!({ "filter": { "generic_search_term": "no-such-room" } });
+    let auth = sign_req("POST", post_path, "fed.test", "fed.test", Some(&filter), &key);
+    let filtered: Value = client
+        .post(format!("{base}{post_path}"))
+        .header("Authorization", auth)
+        .json(&filter)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(filtered["chunk"].as_array().unwrap().len(), 0, "search term must filter the directory");
+
+    let ts_path = format!("/_matrix/federation/v1/timestamp_to_event/{room}?ts=1000&dir=f");
+    let auth = sign_req("GET", &ts_path, "fed.test", "fed.test", None, &key);
+    let ts: Value = client
+        .get(format!("{base}{ts_path}"))
+        .header("Authorization", auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(ts["event_id"], create.event_id);
+    assert_eq!(ts["origin_server_ts"], 1000);
+
+    let auth_path = format!("/_matrix/federation/v1/event_auth/{room}/{}", create.event_id);
+    let auth = sign_req("GET", &auth_path, "fed.test", "fed.test", None, &key);
+    let chain: Value = client
+        .get(format!("{base}{auth_path}"))
+        .header("Authorization", auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(chain["auth_chain"].is_array(), "event_auth returns an auth chain: {chain}");
+
+    let join_rules = signed_event(
+        &key,
+        "fed.test",
+        Pdu::new(
+            room,
+            "@alice:fed.test",
+            "m.room.join_rules",
+            Some("".into()),
+            json!({ "join_rule": "knock" }),
+            2_000,
+            vec![create.event_id.clone()],
+            vec![create.event_id.clone()],
+            2,
+        ),
+    );
+    storage.put_event(&join_rules).await.unwrap();
+    storage.set_state_entry(room, "m.room.join_rules", "", &join_rules.event_id).await.unwrap();
+    let knock_path = format!("/_matrix/federation/v1/make_knock/{room}/@kate:fed.test?ver=11");
+    let auth = sign_req("GET", &knock_path, "fed.test", "fed.test", None, &key);
+    let knock: Value = client
+        .get(format!("{base}{knock_path}"))
+        .header("Authorization", auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(knock["room_version"], "11");
+    assert_eq!(knock["event"]["content"]["membership"], "knock");
+    assert_eq!(knock["event"]["sender"], "@kate:fed.test");
+
+    let old = "!old:fed.test";
+    let old_create = signed_event(
+        &key,
+        "fed.test",
+        Pdu::new(
+            old,
+            "@alice:fed.test",
+            "m.room.create",
+            Some("".into()),
+            json!({ "room_version": "6", "creator": "@alice:fed.test" }),
+            1_000,
+            vec![],
+            vec![],
+            1,
+        ),
+    );
+    storage.put_event(&old_create).await.unwrap();
+    storage.set_state_entry(old, "m.room.create", "", &old_create.event_id).await.unwrap();
+    let old_knock = format!("/_matrix/federation/v1/make_knock/{old}/@kate:fed.test");
+    let auth = sign_req("GET", &old_knock, "fed.test", "fed.test", None, &key);
+    let rejected = client
+        .get(format!("{base}{old_knock}"))
+        .header("Authorization", auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rejected.status(), 400);
+    let rejected: Value = rejected.json().await.unwrap();
+    assert_eq!(rejected["errcode"], "M_INCOMPATIBLE_ROOM_VERSION");
+
+    let member = signed_event(
+        &key,
+        "fed.test",
+        Pdu::new(
+            room,
+            "@alice:fed.test",
+            "m.room.member",
+            Some("@alice:fed.test".into()),
+            json!({ "membership": "join" }),
+            3_000,
+            vec![create.event_id.clone()],
+            vec![join_rules.event_id.clone()],
+            3,
+        ),
+    );
+    storage.put_event(&member).await.unwrap();
+    storage.set_state_entry(room, "m.room.member", "@alice:fed.test", &member.event_id).await.unwrap();
+    let leave_path = format!("/_matrix/federation/v1/make_leave/{room}/@alice:fed.test");
+    let auth = sign_req("GET", &leave_path, "fed.test", "fed.test", None, &key);
+    let leave: Value = client
+        .get(format!("{base}{leave_path}"))
+        .header("Authorization", auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(leave["event"]["content"]["membership"], "leave");
+    assert_eq!(leave["event"]["state_key"], "@alice:fed.test");
+
+    let hier_path = format!("/_matrix/federation/v1/hierarchy/{room}");
+    let auth = sign_req("GET", &hier_path, "fed.test", "fed.test", None, &key);
+    let hier: Value = client
+        .get(format!("{base}{hier_path}"))
+        .header("Authorization", auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(hier["rooms"][0]["room_id"], room);
+    assert_eq!(hier["rooms"][0]["join_rule"], "knock");
+
+    storage.create_account("@alice:fed.test", None).await.unwrap();
+    storage
+        .upsert_device("@alice:fed.test", "PHONE", Some("phone"))
+        .await
+        .unwrap();
+    let devices_path = "/_matrix/federation/v1/user/devices/%40alice%3Afed.test";
+    let auth = sign_req("GET", devices_path, "fed.test", "fed.test", None, &key);
+    let devices: Value = client
+        .get(format!("{base}{devices_path}"))
+        .header("Authorization", auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(devices["user_id"], "@alice:fed.test");
+    assert_eq!(devices["devices"][0]["device_id"], "PHONE");
+
+    let query_keys = "/_matrix/federation/v1/user/keys/query";
+    let qbody = json!({ "device_keys": { "@alice:fed.test": [] } });
+    let auth = sign_req("POST", query_keys, "fed.test", "fed.test", Some(&qbody), &key);
+    let queried: Value = client
+        .post(format!("{base}{query_keys}"))
+        .header("Authorization", auth)
+        .json(&qbody)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(queried["device_keys"]["@alice:fed.test"].is_object());
+
+    let claim = "/_matrix/federation/v1/user/keys/claim";
+    let cbody = json!({ "one_time_keys": { "@alice:fed.test": { "PHONE": "signed_curve25519" } } });
+    let auth = sign_req("POST", claim, "fed.test", "fed.test", Some(&cbody), &key);
+    let claimed: Value = client
+        .post(format!("{base}{claim}"))
+        .header("Authorization", auth)
+        .json(&cbody)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        claimed["one_time_keys"]["@alice:fed.test"],
+        json!({}),
+        "a device with no one-time key claims as an empty object: {claimed}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Helper: percent-encode a string
 // ---------------------------------------------------------------------------

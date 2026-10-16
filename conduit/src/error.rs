@@ -33,6 +33,9 @@ pub enum Error {
 
     #[error("unsupported room version: {0}")]
     UnsupportedRoomVersion(String),
+
+    #[error("too large: {0}")]
+    TooLarge(String),
 }
 
 impl Error {
@@ -42,17 +45,18 @@ impl Error {
             Error::NotFound => "M_NOT_FOUND",
             Error::Forbidden(_) => "M_FORBIDDEN",
             Error::UnsupportedRoomVersion(_) => "M_UNSUPPORTED_ROOM_VERSION",
+            Error::TooLarge(_) => "M_TOO_LARGE",
             Error::InvalidEvent(_) => "M_BAD_JSON",
             Error::Storage(_) | Error::StorageData(_) | Error::Io(_) | Error::Serde(_) => "M_UNKNOWN",
         }
     }
 }
 
-/// Room version this kernel speaks. Create and inbound reject anything else.
-pub const ROOM_VERSION: &str = "11";
+/// Room version used when a client omits `room_version` on create.
+pub const ROOM_VERSION: &str = "12";
 
 pub fn require_room_version(version: &str) -> Result<()> {
-    if version == ROOM_VERSION {
+    if crate::room_version::parse(version).is_some() {
         Ok(())
     } else {
         Err(Error::UnsupportedRoomVersion(version.to_owned()))
@@ -64,13 +68,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn v11_ok() {
-        require_room_version("11").unwrap();
+    fn versions_one_through_twelve_are_accepted() {
+        for version in ["1", "6", "10", "11", "12"] {
+            require_room_version(version).unwrap();
+        }
+        assert_eq!(ROOM_VERSION, "12");
     }
 
     #[test]
-    fn v10_rejected() {
-        let e = require_room_version("10").unwrap_err();
+    fn unknown_room_version_is_rejected() {
+        let e = require_room_version("13").unwrap_err();
         assert_eq!(e.errcode(), "M_UNSUPPORTED_ROOM_VERSION");
     }
 

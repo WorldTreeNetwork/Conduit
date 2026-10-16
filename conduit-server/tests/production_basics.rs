@@ -150,8 +150,12 @@ async fn capabilities_advertise_only_supported_room_versions() {
         .request(Method::GET, "/_matrix/client/v3/capabilities", Some(&alice.token), None, 200)
         .await;
     let versions = &caps["capabilities"]["m.room_versions"];
-    assert_eq!(versions["default"], "11");
-    assert_eq!(versions["available"], json!({"11": "stable"}));
+    assert_eq!(versions["default"], "12");
+    let available = versions["available"].as_object().unwrap();
+    for version in ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12"] {
+        assert_eq!(available[version], "stable", "{version}");
+    }
+    assert_eq!(available.len(), 12);
     // Every advertised version can actually be created.
     for version in versions["available"].as_object().unwrap().keys() {
         server
@@ -169,7 +173,7 @@ async fn capabilities_advertise_only_supported_room_versions() {
         Method::POST,
         "/_matrix/client/v3/createRoom",
         Some(&alice.token),
-        Some(json!({"room_version": "10"})),
+        Some(json!({"room_version": "13"})),
     )
     .await;
     assert_eq!(status, 400);
@@ -397,7 +401,7 @@ async fn room_summary_respects_visibility_and_reports_state() {
     assert_eq!(anon["avatar_url"], "mxc://production.test/avatar");
     assert_eq!(anon["encryption"], "m.megolm.v1.aes-sha2");
     assert_eq!(anon["room_type"], "m.space");
-    assert_eq!(anon["room_version"], "11");
+    assert_eq!(anon["room_version"], "12");
     assert_eq!(anon["join_rule"], "public");
     assert_eq!(anon["num_joined_members"], 1);
     assert_eq!(anon["world_readable"], false);

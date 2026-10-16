@@ -23,6 +23,24 @@ use sha2::{Digest, Sha256};
 
 use super::{AuthState, AuthedUser, MatrixError};
 
+/// Hash a raw bearer the way access tokens and OpenID tokens are stored.
+pub fn hash_bearer(token: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(token.as_bytes());
+    URL_SAFE_NO_PAD.encode(hasher.finalize())
+}
+
+fn room_version_capability() -> serde_json::Value {
+    let mut available = serde_json::Map::new();
+    for version in conduit::room_version::SUPPORTED {
+        available.insert((*version).to_owned(), json!("stable"));
+    }
+    json!({
+        "default": conduit::ROOM_VERSION,
+        "available": available,
+    })
+}
+
 /// `GET /_matrix/client/v3/capabilities`
 pub async fn capabilities<S: AuthState>(
     State(state): State<S>,
@@ -52,12 +70,8 @@ pub async fn capabilities<S: AuthState>(
                 "m.set_avatar_url":   { "enabled": !is_guest },
                 "m.3pid_changes":     { "enabled": false },
                 "m.get_login_token":  { "enabled": !is_guest },
-                // Only versions the kernel can actually create and
-                // validate (conduit-y99.28; more arrive with y99.23).
-                "m.room_versions": {
-                    "default": conduit::ROOM_VERSION,
-                    "available": { conduit::ROOM_VERSION: "stable" }
-                }
+                // Every room version the kernel creates and authorises.
+                "m.room_versions": room_version_capability(),
             }
         })),
     )
@@ -106,9 +120,8 @@ pub async fn openid_request_token<S: AuthState>(
 
     // Persist hash → (user, device, expiry). Reuses the access_tokens table
     // since OpenID tokens are just bearer credentials with a short TTL.
-    let mut hasher = Sha256::new();
-    hasher.update(token.as_bytes());
-    let token_hash = URL_SAFE_NO_PAD.encode(hasher.finalize());
+    // Federation `/openid/userinfo` hashes the same way.
+    let token_hash = hash_bearer(&token);
 
     let expires = Utc::now() + Duration::hours(1);
     if let Err(e) = state

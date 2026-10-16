@@ -209,8 +209,20 @@ pub async fn onbind<S: AuthState>(State(state): State<S>, Json(body): Json<Value
             warn!(room_id, "onbind invite for a different mxid ignored");
             continue;
         }
-        let room_server = room_id.split_once(':').map(|(_, s)| s);
-        if room_server != Some(server_name.as_str()) {
+        // Room version 12 ids are `!` + the create-event reference hash and
+        // carry no server name. A room this server stores is local. Older
+        // ids are local only when the domain matches.
+        let local = match room_id.split_once(':') {
+            Some((_, server)) => server == server_name,
+            None => state
+                .storage()
+                .get_state_entry(room_id, "m.room.create", "")
+                .await
+                .ok()
+                .flatten()
+                .is_some(),
+        };
+        if !local {
             // Remote room: exchange_third_party_invite (conduit-y99.22).
             warn!(room_id, "onbind for a remote room needs exchange_third_party_invite; not supported yet");
             continue;

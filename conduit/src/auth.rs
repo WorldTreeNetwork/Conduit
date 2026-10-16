@@ -45,6 +45,18 @@ pub enum AuthError {
     #[error("create event content.room_version is not a string")]
     CreateInvalidRoomVersion,
 
+    #[error("create event is missing content.creator")]
+    CreateMissingCreator,
+
+    #[error("room version 12 create event must omit room_id")]
+    CreateMustOmitRoomId,
+
+    #[error("m.room.aliases state_key must be the sender's server name")]
+    AliasStateKey,
+
+    #[error("power levels cannot name a room creator")]
+    CreatorInPowerLevels,
+
     #[error("no m.room.create event in auth state")]
     MissingCreateEvent,
 
@@ -318,10 +330,49 @@ fn get_membership(auth_state: &StateMap<Event>, user_id: &str) -> Option<Members
         .map(|mc| mc.membership)
 }
 
+fn create_event(auth_state: &StateMap<Event>) -> Option<&Event> {
+    auth_state.get(&("m.room.create".to_owned(), String::new()))
+}
+
+fn room_version_from_state(auth_state: &StateMap<Event>) -> u32 {
+    create_event(auth_state)
+        .map(crate::room_version::version_of_event)
+        .unwrap_or(11)
+}
+
+/// Creators with infinite power in room version 12, or the single creator before that.
+fn creators_of(auth_state: &StateMap<Event>) -> Vec<String> {
+    let Some(create) = create_event(auth_state) else {
+        return Vec::new();
+    };
+    let version = crate::room_version::version_of_event(create);
+    if version >= 12 {
+        let mut creators = vec![create.sender.clone()];
+        creators.extend(crate::room_version::additional_creators(&create.content));
+        return creators;
+    }
+    if version >= 11 {
+        return vec![create.sender.clone()];
+    }
+    match create.content.get("creator").and_then(serde_json::Value::as_str) {
+        Some(creator) => vec![creator.to_owned()],
+        None => vec![create.sender.clone()],
+    }
+}
+
 fn creator_id(auth_state: &StateMap<Event>) -> Option<String> {
-    auth_state
-        .get(&("m.room.create".to_owned(), String::new()))
-        .map(|ev| ev.sender.clone())
+    creators_of(auth_state).into_iter().next()
+}
+
+/// Power level used by the auth rules, including infinite room-version-12 creators.
+pub fn effective_user_level(user_id: &str, auth_state: &StateMap<Event>) -> i64 {
+    if room_version_from_state(auth_state) >= 12
+        && creators_of(auth_state).iter().any(|creator| creator == user_id)
+    {
+        return i64::MAX;
+    }
+    let pl_event = auth_state.get(&("m.room.power_levels".to_owned(), String::new()));
+    user_power_level(user_id, pl_event, creator_id(auth_state).as_deref())
 }
 
 /// Extract the local-server domain from a Matrix ID or room ID.
@@ -352,6 +403,19 @@ pub fn check_auth(event: &Event, auth_state: &StateMap<Event>) -> Result<(), Aut
     // -----------------------------------------------------------------------
     if !auth_state.contains_key(&("m.room.create".to_owned(), String::new())) {
         return Err(AuthError::MissingCreateEvent);
+    }
+
+    let version = room_version_from_state(auth_state);
+    // Room versions 1–5: m.room.aliases is allowed exactly when state_key is
+    // the sender's server name, before the membership check.
+    if version <= 5 && event.event_type == "m.room.aliases" {
+        let Some(state_key) = event.state_key.as_deref() else {
+            return Err(AuthError::AliasStateKey);
+        };
+        if domain_of(&event.sender) != state_key {
+            return Err(AuthError::AliasStateKey);
+        }
+        return Ok(());
     }
 
     // -----------------------------------------------------------------------
@@ -385,14 +449,12 @@ pub fn check_auth(event: &Event, auth_state: &StateMap<Event>) -> Result<(), Aut
     // Per-type rules
     // -----------------------------------------------------------------------
     match event.event_type.as_str() {
-        "m.room.member" => check_member(event, auth_state, &sender_membership)?,
+        "m.room.member" => check_member(event, auth_state, &sender_membership, version)?,
         "m.room.power_levels" => check_power_levels(event, auth_state)?,
         // Allowed iff the sender's power level is at least the invite level.
         "m.room.third_party_invite" => {
             let pl = get_pl_content(auth_state);
-            let pl_event = auth_state.get(&("m.room.power_levels".to_owned(), String::new()));
-            let creator = creator_id(auth_state);
-            let sender_level = user_power_level(&event.sender, pl_event, creator.as_deref());
+            let sender_level = effective_user_level(&event.sender, auth_state);
             if sender_level < pl.invite {
                 return Err(AuthError::InsufficientPowerLevel {
                     needed: pl.invite,
@@ -417,9 +479,7 @@ pub fn check_auth(event: &Event, auth_state: &StateMap<Event>) -> Result<(), Aut
     // (m.room.member and m.room.power_levels have their own internal checks.)
     if event.event_type != "m.room.member" && event.event_type != "m.room.power_levels" {
         let pl = get_pl_content(auth_state);
-        let creator = creator_id(auth_state);
-        let pl_event = auth_state.get(&("m.room.power_levels".to_owned(), String::new()));
-        let sender_level = user_power_level(&event.sender, pl_event, creator.as_deref());
+        let sender_level = effective_user_level(&event.sender, auth_state);
         let is_state = event.state_key.is_some();
         let required = level_required_for_event(&event.event_type, is_state, &pl);
         if sender_level < required {
@@ -448,16 +508,32 @@ fn check_create(event: &Event, auth_state: &StateMap<Event>) -> Result<(), AuthE
         return Err(AuthError::CreateHasPrevEvents);
     }
 
-    // Sender's server domain must match the room's server domain.
-    if domain_of(&event.sender) != domain_of(&event.room_id) {
+    let version = crate::room_version::version_of_event(event);
+    if version >= 12 {
+        if !event.room_id.is_empty() {
+            return Err(AuthError::CreateMustOmitRoomId);
+        }
+        if let Some(extra) = event.content.get("additional_creators") {
+            let ok = extra.as_array().is_some_and(|items| {
+                items.iter().all(|item| item.as_str().is_some_and(crate::room_version::valid_user_id))
+            });
+            if !ok {
+                return Err(AuthError::ContentParseError(
+                    "additional_creators must be an array of user ids".into(),
+                ));
+            }
+        }
+    } else if domain_of(&event.sender) != domain_of(&event.room_id) {
         return Err(AuthError::CreateSenderDomainMismatch);
     }
 
     // room_version in content must be a string (if present).
     let content = parse_create(&event.content)
         .map_err(|e| AuthError::ContentParseError(e.to_string()))?;
-    // room_version has a serde default so it's always a String after parse.
-    let _ = content.room_version; // already validated by serde
+    if version < 11 && content.creator.as_deref().unwrap_or("").is_empty() {
+        return Err(AuthError::CreateMissingCreator);
+    }
+    let _ = content.room_version;
 
     Ok(())
 }
@@ -561,6 +637,7 @@ fn check_member(
     event: &Event,
     auth_state: &StateMap<Event>,
     sender_membership: &Option<Membership>,
+    version: u32,
 ) -> Result<(), AuthError> {
     let state_key = event
         .state_key
@@ -574,12 +651,11 @@ fn check_member(
     let target_membership = get_membership(auth_state, state_key);
     let join_rule = get_join_rule(auth_state);
 
-    let pl_event = auth_state.get(&("m.room.power_levels".to_owned(), String::new()));
     let creator = creator_id(auth_state);
     let pl = get_pl_content(auth_state);
 
-    let sender_level = user_power_level(&event.sender, pl_event, creator.as_deref());
-    let target_level = user_power_level(state_key, pl_event, creator.as_deref());
+    let sender_level = effective_user_level(&event.sender, auth_state);
+    let target_level = effective_user_level(state_key, auth_state);
 
     match new_membership {
         // -------------------------------------------------------------------
@@ -611,7 +687,7 @@ fn check_member(
             } else {
                 match &join_rule {
                     JoinRule::Public => {} // anyone can join
-                    JoinRule::Invite | JoinRule::Knock => {
+                    JoinRule::Invite | JoinRule::Knock if version >= 7 || matches!(join_rule, JoinRule::Invite) => {
                         // Must have a prior invite (or already joined).
                         match &target_membership {
                             Some(Membership::Invite) | Some(Membership::Join) => {}
@@ -622,7 +698,10 @@ fn check_member(
                             }
                         }
                     }
-                    JoinRule::Restricted | JoinRule::KnockRestricted => {
+                    JoinRule::Restricted | JoinRule::KnockRestricted
+                        if (matches!(join_rule, JoinRule::Restricted) && version >= 8)
+                            || (matches!(join_rule, JoinRule::KnockRestricted) && version >= 9) =>
+                    {
                         // First check allow conditions (e.g. membership in a space).
                         // If they pass, the join is allowed regardless of invite status.
                         if check_allow_conditions(event, auth_state) {
@@ -640,6 +719,11 @@ fn check_member(
                         }
                     }
                     JoinRule::Private => {
+                        return Err(AuthError::JoinRequiresInvite {
+                            join_rule: join_rule.clone(),
+                        });
+                    }
+                    _ => {
                         return Err(AuthError::JoinRequiresInvite {
                             join_rule: join_rule.clone(),
                         });
@@ -750,6 +834,12 @@ fn check_member(
         // Knock
         // -------------------------------------------------------------------
         Membership::Knock => {
+            if version < 7 || (join_rule == JoinRule::KnockRestricted && version < 9) {
+                return Err(AuthError::InvalidMemberTransition {
+                    from: target_membership,
+                    to: Membership::Knock,
+                });
+            }
             // Target must be the sender.
             if state_key != event.sender {
                 return Err(AuthError::InvalidMemberTransition {
@@ -793,10 +883,9 @@ fn check_power_levels(event: &Event, auth_state: &StateMap<Event>) -> Result<(),
         return Err(AuthError::SenderNotJoined);
     }
 
-    let pl_event = auth_state.get(&("m.room.power_levels".to_owned(), String::new()));
-    let creator = creator_id(auth_state);
     let current_pl = get_pl_content(auth_state);
-    let sender_level = user_power_level(&event.sender, pl_event, creator.as_deref());
+    let sender_level = effective_user_level(&event.sender, auth_state);
+    let version = room_version_from_state(auth_state);
 
     // Sender needs enough level to send a power_levels state event.
     let required = level_required_for_event("m.room.power_levels", true, &current_pl);
@@ -807,9 +896,21 @@ fn check_power_levels(event: &Event, auth_state: &StateMap<Event>) -> Result<(),
         });
     }
 
-    // Parse the proposed new power_levels content.
-    let new_pl = parse_power_levels(&event.content)
+    // Parse the proposed new power_levels content. Versions 1–5 coerce
+    // strings and truncated floats; version 6+ rejects anything but integers.
+    let content = if version < 6 {
+        crate::room_version::coerce_power_level_values(&event.content)
+    } else {
+        event.content.clone()
+    };
+    let new_pl = parse_power_levels(&content)
         .map_err(|e| AuthError::ContentParseError(e.to_string()))?;
+    if version >= 12 {
+        let creators = creators_of(auth_state);
+        if new_pl.users.keys().any(|user| creators.iter().any(|creator| creator == user)) {
+            return Err(AuthError::CreatorInPowerLevels);
+        }
+    }
 
     // Sender cannot grant anyone (including themselves) a level above their own.
     for (user, &level) in &new_pl.users {
@@ -1330,6 +1431,117 @@ mod tests {
         let create = make_create_event("@alice:example.com", "!room:example.com");
         let state: StateMap<Event> = HashMap::new();
         assert!(check_auth(&create, &state).is_ok());
+    }
+
+    fn create_with(version: &str, sender: &str, room_id: &str, extra: serde_json::Value) -> Event {
+        let mut content = json!({ "room_version": version });
+        if let Some(map) = extra.as_object() {
+            for (key, value) in map {
+                content[key] = value.clone();
+            }
+        }
+        make_event("$create", "m.room.create", sender, room_id, Some(""), content, vec![])
+    }
+
+    /// Room-version auth differences from v1.19: aliases, power-level
+    /// integers, knock gates, creator field, and v12 creators.
+    #[test]
+    fn room_version_auth_rules_follow_the_spec() {
+        let alice = "@alice:example.com";
+        let room = "!room:example.com";
+
+        let v1 = create_with("1", alice, room, json!({ "creator": alice }));
+        assert!(check_auth(&v1, &HashMap::new()).is_ok(), "v1 create with creator");
+        let v1_missing = create_with("1", alice, room, json!({}));
+        assert!(
+            matches!(check_auth(&v1_missing, &HashMap::new()), Err(AuthError::CreateMissingCreator)),
+            "v1 create requires content.creator"
+        );
+        let v11 = create_with("11", alice, room, json!({}));
+        assert!(check_auth(&v11, &HashMap::new()).is_ok(), "v11 create omits content.creator");
+
+        let mut v12 = create_with("12", alice, "", json!({ "additional_creators": ["@bob:example.com"] }));
+        v12.room_id.clear();
+        assert!(check_auth(&v12, &HashMap::new()).is_ok(), "v12 create omits room_id");
+        let mut v12_with_room = v12.clone();
+        v12_with_room.room_id = room.to_owned();
+        assert!(
+            matches!(check_auth(&v12_with_room, &HashMap::new()), Err(AuthError::CreateMustOmitRoomId)),
+            "v12 create must omit room_id"
+        );
+
+        let mut v5_state = HashMap::new();
+        apply_state_event(&mut v5_state, &create_with("5", alice, room, json!({ "creator": alice })));
+        let alias = make_event(
+            "$aliases",
+            "m.room.aliases",
+            alice,
+            room,
+            Some("example.com"),
+            json!({ "aliases": ["#a:example.com"] }),
+            vec![],
+        );
+        assert!(check_auth(&alias, &v5_state).is_ok(), "v5 alias state_key is the sender domain");
+        let mut v6_state = HashMap::new();
+        apply_state_event(&mut v6_state, &create_with("6", alice, room, json!({ "creator": alice })));
+        assert!(
+            matches!(check_auth(&alias, &v6_state), Err(AuthError::SenderNotJoined)),
+            "v6 drops the aliases special case"
+        );
+
+        let mut joined = v6_state.clone();
+        apply_state_event(&mut joined, &make_member_event("$join", alice, alice, room, "join"));
+        let string_levels = make_power_levels_event(
+            "$pl",
+            alice,
+            room,
+            json!({ "users": { alice: 100 }, "events_default": "0", "state_default": 50 }),
+        );
+        assert!(
+            check_auth(&string_levels, &v5_state_with_join(alice, room)).is_ok(),
+            "v5 coerces string power levels"
+        );
+        assert!(
+            check_auth(&string_levels, &joined).is_err(),
+            "v6 rejects a non-integer power level"
+        );
+
+        let knock = make_member_event("$knock", "@kate:example.com", "@kate:example.com", room, "knock");
+        let mut knockable = HashMap::new();
+        apply_state_event(&mut knockable, &create_with("7", alice, room, json!({ "creator": alice })));
+        apply_state_event(&mut knockable, &make_member_event("$join", alice, alice, room, "join"));
+        apply_state_event(&mut knockable, &make_join_rules_event(alice, room, "knock"));
+        assert!(check_auth(&knock, &knockable).is_ok(), "v7 room accepts a knock");
+        let mut too_old = HashMap::new();
+        apply_state_event(&mut too_old, &create_with("6", alice, room, json!({ "creator": alice })));
+        apply_state_event(&mut too_old, &make_member_event("$join", alice, alice, room, "join"));
+        apply_state_event(&mut too_old, &make_join_rules_event(alice, room, "knock"));
+        assert!(check_auth(&knock, &too_old).is_err(), "v6 rejects knock membership");
+
+        let mut creators = HashMap::new();
+        let mut create = create_with(
+            "12",
+            alice,
+            "",
+            json!({ "additional_creators": ["@bob:example.com"] }),
+        );
+        create.room_id.clear();
+        apply_state_event(&mut creators, &create);
+        apply_state_event(&mut creators, &make_member_event("$join", alice, alice, "", "join"));
+        let listed = make_power_levels_event("$pl12", alice, "", json!({ "users": { alice: 100 } }));
+        assert!(
+            matches!(check_auth(&listed, &creators), Err(AuthError::CreatorInPowerLevels)),
+            "v12 creators must not appear in power level users"
+        );
+        let clear = make_power_levels_event("$pl12b", alice, "", json!({ "users": {} }));
+        assert!(check_auth(&clear, &creators).is_ok(), "v12 creator power is infinite without a users entry");
+    }
+
+    fn v5_state_with_join(alice: &str, room: &str) -> StateMap<Event> {
+        let mut state = HashMap::new();
+        apply_state_event(&mut state, &create_with("5", alice, room, json!({ "creator": alice })));
+        apply_state_event(&mut state, &make_member_event("$join", alice, alice, room, "join"));
+        state
     }
 
     // -----------------------------------------------------------------------

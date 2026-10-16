@@ -180,7 +180,7 @@ pub fn instance_id(appservice_id: &str, network_id: &str) -> String {
     format!("{appservice_id}|{network_id}")
 }
 
-async fn list_local<S: AuthState>(state: &S, body: PublicRoomsBody) -> Response {
+pub(crate) async fn list_local(storage: &dyn Storage, body: PublicRoomsBody) -> Response {
     let scope = match (body.include_all_networks.unwrap_or(false), body.third_party_instance_id) {
         (true, Some(_)) => {
             return invalid_param(
@@ -206,7 +206,6 @@ async fn list_local<S: AuthState>(state: &S, body: PublicRoomsBody) -> Response 
     };
     let limit = body.limit.filter(|l| *l > 0).map(|l| l as usize);
 
-    let storage: &dyn Storage = state.storage().as_ref();
     let room_ids = match storage.published_rooms(&scope).await {
         Ok(ids) => ids,
         Err(e) => return MatrixError::unknown(e.to_string()).into_response(),
@@ -334,7 +333,7 @@ async fn list_remote<S: AuthState>(state: &S, server: &str, body: PublicRoomsBod
 async fn list<S: AuthState>(state: &S, server: Option<String>, body: PublicRoomsBody) -> Response {
     match server {
         Some(server) if server != state.server_name() => list_remote(state, &server, body).await,
-        _ => list_local(state, body).await,
+        _ => list_local(state.storage().as_ref(), body).await,
     }
 }
 

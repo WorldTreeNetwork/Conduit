@@ -16,7 +16,7 @@
 //!   GET    /_matrix/client/v3/rooms/:roomId/joined_members
 //!   GET    /_matrix/client/v3/rooms/:roomId/messages
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use axum::{
     extract::{Path, Query, State},
@@ -27,6 +27,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use conduit::filter::RoomEventFilter;
 use conduit::room::{CreateRoomInitialState, CreateRoomParams, Room};
 use conduit::state_events::{Membership, parse_member};
 
@@ -101,8 +102,12 @@ pub async fn create_room<S: AuthState>(
     let sender = &authed.user_id;
     let server_name = state.server_name().to_owned();
 
-    let room_id = generate_room_id(&server_name);
-    let room_version = body.room_version.clone().unwrap_or_else(|| "11".to_owned());
+    let room_version = body.room_version.clone().unwrap_or_else(|| conduit::ROOM_VERSION.to_owned());
+    let room_id = if conduit::room_version::parse(&room_version).is_some_and(|version| version >= 12) {
+        String::new()
+    } else {
+        generate_room_id(&server_name)
+    };
 
     // Determine join_rule and history_visibility from preset / visibility.
     let (join_rule, history_visibility) = resolve_preset(&body);
@@ -150,12 +155,13 @@ pub async fn create_room<S: AuthState>(
     };
 
     // Delegate room creation to the Room struct.
-    if let Err(e) = Room::create(
+    let room_id = match Room::create(
         sender, &room_id, &room_version, join_rule, history_visibility, &params,
         &RoomEventSenderWrapper(&state),
     ).await {
-        return MatrixError::from_conduit(e).into_response();
-    }
+        Ok(room) => room.room_id,
+        Err(e) => return MatrixError::from_conduit(e).into_response(),
+    };
 
     // Invite blocking (v1.18): refuse before anything is created.
     for invitee in &body.invite {
@@ -261,7 +267,20 @@ pub async fn join_room<S: AuthState>(
 
     let room = Room::new(&room_id);
     match room.join_with_reason(sender, body.reason.as_deref(), &RoomEventSenderWrapper(&state)).await {
-        Ok(_) => (StatusCode::OK, Json(json!({ "room_id": room_id }))).into_response(),
+        Ok(_) => {
+            if let Ok(Some(create)) = state.storage().get_state_entry(&room_id, "m.room.create", "").await {
+                if let Some(old_room) = create.content.get("predecessor").and_then(|p| p.get("room_id")).and_then(Value::as_str) {
+                    super::room_content::upgrade::copy_personal_settings(
+                        state.storage().as_ref(),
+                        sender,
+                        old_room,
+                        &room_id,
+                    )
+                    .await;
+                }
+            }
+            (StatusCode::OK, Json(json!({ "room_id": room_id }))).into_response()
+        }
         Err(e) => MatrixError::from_conduit(e).into_response(),
     }
 }
@@ -446,6 +465,19 @@ pub async fn send_message_event<S: AuthState + conduit::room::RoomEventSender>(
         }
         return replay.finish(code, body).await;
     }
+    // Spec: homeservers SHOULD reject m.room.message without msgtype and body.
+    if event_type == "m.room.message" {
+        let msgtype = content.get("msgtype").and_then(Value::as_str).filter(|value| !value.is_empty());
+        let body = content.get("body").and_then(Value::as_str);
+        if msgtype.is_none() || body.is_none() {
+            return replay
+                .finish(
+                    StatusCode::BAD_REQUEST,
+                    json!({"errcode": "M_BAD_JSON", "error": "m.room.message requires msgtype and body"}),
+                )
+                .await;
+        }
+    }
     match super::event_pipeline::build_sign_and_persist_transaction(
         &state,
         &authed.user_id,
@@ -511,6 +543,9 @@ async fn send_state_event_inner<S: AuthState + conduit::room::RoomEventSender>(
         if let Err(blocked) = super::room_membership::check_invite_allowed(state, state_key).await {
             return blocked;
         }
+    }
+    if let Some(rejected) = reject_bad_canonical_alias(state, room_id, event_type, &content).await {
+        return rejected;
     }
     let room = Room::new(room_id);
     match room.send_state_event(sender, event_type, state_key, content, &RoomEventSenderWrapper(state)).await {
@@ -651,8 +686,96 @@ pub struct MessagesQuery {
     pub dir: Option<String>,
     /// Start token (stream_position as string).
     pub from: Option<String>,
+    /// Exclusive stop token in the direction of pagination.
+    pub to: Option<String>,
     /// Maximum number of events to return (default 10).
     pub limit: Option<i64>,
+    /// JSON [`RoomEventFilter`]. Events that do not match are skipped, and
+    /// the server keeps paging until `limit` matches or the timeline ends.
+    pub filter: Option<String>,
+}
+
+fn parse_stream_token(token: &str) -> Option<i64> {
+    token
+        .strip_prefix('s')
+        .unwrap_or(token)
+        .split('_')
+        .next()
+        .unwrap_or("")
+        .parse::<i64>()
+        .ok()
+        .filter(|position| *position >= 0)
+}
+
+/// `#localpart:server` with a non-empty localpart and server name.
+fn valid_room_alias(alias: &str) -> bool {
+    let Some(rest) = alias.strip_prefix('#') else {
+        return false;
+    };
+    let Some((local, server)) = rest.split_once(':') else {
+        return false;
+    };
+    !local.is_empty()
+        && !server.is_empty()
+        && !local.contains(':')
+        && !local.chars().any(char::is_whitespace)
+        && !server.chars().any(char::is_whitespace)
+}
+
+/// Spec: every alias in `m.room.canonical_alias` must be syntactically valid
+/// (`400 M_INVALID_PARAM`) and must already point at this room
+/// (`400 M_BAD_ALIAS`). An event with no aliases (clearing the state) is fine.
+async fn reject_bad_canonical_alias<S: AuthState>(
+    state: &S,
+    room_id: &str,
+    event_type: &str,
+    content: &Value,
+) -> Option<Response> {
+    if event_type != "m.room.canonical_alias" {
+        return None;
+    }
+    let mut aliases = Vec::new();
+    match content.get("alias") {
+        None | Some(Value::Null) => {}
+        Some(Value::String(alias)) => aliases.push(alias.clone()),
+        Some(_) => {
+            return Some(MatrixError::invalid_param("alias must be a string").into_response());
+        }
+    }
+    match content.get("alt_aliases") {
+        None | Some(Value::Null) => {}
+        Some(Value::Array(items)) => {
+            for item in items {
+                match item.as_str() {
+                    Some(alias) => aliases.push(alias.to_owned()),
+                    None => {
+                        return Some(
+                            MatrixError::invalid_param("alt_aliases entries must be strings").into_response(),
+                        );
+                    }
+                }
+            }
+        }
+        Some(_) => {
+            return Some(MatrixError::invalid_param("alt_aliases must be an array").into_response());
+        }
+    }
+    let storage = state.storage();
+    for alias in aliases {
+        if !valid_room_alias(&alias) {
+            return Some(MatrixError::invalid_param(format!("invalid alias: {alias}")).into_response());
+        }
+        match storage.get_room_for_alias(&alias).await {
+            Ok(Some(target)) if target == room_id => {}
+            Ok(_) => {
+                return Some(
+                    MatrixError::bad_alias(format!("The alias '{alias}' does not point to this room.")).into_response(),
+                );
+            }
+            Err(error) => return Some(MatrixError::unknown(error.to_string()).into_response()),
+        }
+    }
+    None
 }
 
 pub async fn get_messages<S: AuthState>(
@@ -671,12 +794,40 @@ pub async fn get_messages<S: AuthState>(
     let dir = query.dir.as_deref().unwrap_or("b");
     let dir_char = if dir == "f" { 'f' } else { 'b' };
     let limit = query.limit.unwrap_or(10).max(1).min(100);
+    let room_filter: Option<RoomEventFilter> = match query.filter.as_deref() {
+        None => None,
+        Some(raw) => match serde_json::from_str(raw) {
+            Ok(filter) => Some(filter),
+            Err(error) => {
+                return MatrixError::bad_json(format!("invalid filter: {error}")).into_response();
+            }
+        },
+    };
+    let to = match query.to.as_deref() {
+        None => None,
+        Some(token) => match parse_stream_token(token) {
+            Some(position) => Some(position),
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"errcode": "M_INVALID_PARAM", "error": "invalid pagination token"})),
+                )
+                    .into_response();
+            }
+        },
+    };
 
     // Determine start position.
     let from: i64 = if let Some(token) = &query.from {
-        match token.strip_prefix('s').unwrap_or(token).split('_').next().unwrap_or("").parse::<i64>() {
-            Ok(position) if position >= 0 => position,
-            _ => return (StatusCode::BAD_REQUEST, Json(json!({"errcode": "M_INVALID_PARAM", "error": "invalid pagination token"}))).into_response(),
+        match parse_stream_token(token) {
+            Some(position) => position,
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"errcode": "M_INVALID_PARAM", "error": "invalid pagination token"})),
+                )
+                    .into_response();
+            }
         }
     } else {
         match dir_char {
@@ -695,46 +846,144 @@ pub async fn get_messages<S: AuthState>(
         }
     };
 
-    match storage.room_events_paginated(&room_id, dir_char, from, limit).await {
-        Ok((events, next_pos)) => {
-            // History visibility: the page is filtered against where
-            // this user stood at each event, not merely whether they
-            // are in the room now.
-            let events = match conduit::auth::filter_visible_for_user(
+    // A RoomEventFilter or a `to` token must not shorten the page: keep
+    // reading until `limit` visible matches, the exclusive `to` bound, or
+    // the end of the timeline.
+    let selective = room_filter.is_some() || to.is_some();
+    let page = if selective {
+        let mut cursor = from;
+        let mut kept = Vec::new();
+        let mut last_included: Option<i64> = None;
+        let mut exhausted = false;
+        let mut hit_to = false;
+        while (kept.len() as i64) < limit && !hit_to {
+            let batch = (limit - kept.len() as i64).max(20);
+            let (events, next) = match storage.room_events_paginated(&room_id, dir_char, cursor, batch).await {
+                Ok(page) => page,
+                Err(e) => return MatrixError::from_conduit(e).into_response(),
+            };
+            if events.is_empty() {
+                exhausted = true;
+                break;
+            }
+            let ids: Vec<String> = events.iter().map(|event| event.event_id.clone()).collect();
+            let positions = match storage.event_stream_positions(&ids).await {
+                Ok(positions) => positions,
+                Err(e) => return MatrixError::from_conduit(e).into_response(),
+            };
+            let visible = match conduit::auth::filter_visible_for_user(
                 storage.as_ref(),
                 &room_id,
                 &authed.user_id,
-                events,
+                events.clone(),
             )
             .await
             {
-                Ok(evs) => evs,
+                Ok(events) => events,
                 Err(e) => return MatrixError::from_conduit(e).into_response(),
             };
-
-            // Ignored senders, redactions and bundled aggregations
-            // (conduit-y99.19).
-            let viewer = match super::room_content::serve::Viewer::load(storage.as_ref(), &authed.user_id).await {
-                Ok(viewer) => viewer,
-                Err(e) => return MatrixError::from_conduit(e).into_response(),
-            };
-            let mut chunk: Vec<Value> = viewer
-                .without_ignored(events)
-                .into_iter()
-                .map(|e| serde_json::to_value(e).unwrap_or(Value::Null))
-                .collect();
-            if let Err(e) = viewer.decorate_values(&mut chunk, true).await {
-                return MatrixError::from_conduit(e).into_response();
+            let visible_ids: HashSet<String> = visible.into_iter().map(|event| event.event_id).collect();
+            for event in events {
+                if (kept.len() as i64) >= limit {
+                    break;
+                }
+                if let Some(position) = positions.get(&event.event_id) {
+                    let past = match (dir_char, to) {
+                        ('b', Some(bound)) => *position <= bound,
+                        ('f', Some(bound)) => *position >= bound,
+                        _ => false,
+                    };
+                    if past {
+                        hit_to = true;
+                        break;
+                    }
+                    if visible_ids.contains(&event.event_id)
+                        && room_filter.as_ref().is_none_or(|filter| {
+                            filter.matches(&room_id, &serde_json::to_value(&event).unwrap_or(Value::Null))
+                        })
+                    {
+                        last_included = Some(*position);
+                        kept.push(event);
+                    }
+                }
             }
-            // `end` is omitted when there are no more events in this
-            // direction (spec: "If no further events are available ... the
-            // end property is omitted").
-            let mut body = json!({"chunk": chunk, "start": from.to_string()});
-            if let Some(next) = next_pos {
-                body["end"] = json!(next.to_string());
+            match next {
+                Some(next) if !hit_to && (kept.len() as i64) < limit => cursor = next,
+                Some(_) => break,
+                None => {
+                    exhausted = true;
+                    break;
+                }
             }
-            (StatusCode::OK, Json(body)).into_response()
         }
-        Err(e) => MatrixError::from_conduit(e).into_response(),
+        let next_pos = if exhausted || hit_to {
+            None
+        } else {
+            last_included.map(|position| if dir_char == 'b' { position - 1 } else { position + 1 })
+        };
+        (kept, next_pos)
+    } else {
+        match storage.room_events_paginated(&room_id, dir_char, from, limit).await {
+            Ok((events, next_pos)) => {
+                let events = match conduit::auth::filter_visible_for_user(
+                    storage.as_ref(),
+                    &room_id,
+                    &authed.user_id,
+                    events,
+                )
+                .await
+                {
+                    Ok(events) => events,
+                    Err(e) => return MatrixError::from_conduit(e).into_response(),
+                };
+                (events, next_pos)
+            }
+            Err(e) => return MatrixError::from_conduit(e).into_response(),
+        }
+    };
+
+    let (events, next_pos) = page;
+    // Ignored senders, redactions and bundled aggregations
+    // (conduit-y99.19).
+    let viewer = match super::room_content::serve::Viewer::load(storage.as_ref(), &authed.user_id).await {
+        Ok(viewer) => viewer,
+        Err(e) => return MatrixError::from_conduit(e).into_response(),
+    };
+    let mut chunk: Vec<Value> = viewer
+        .without_ignored(events)
+        .into_iter()
+        .map(|e| serde_json::to_value(e).unwrap_or(Value::Null))
+        .collect();
+    if let Err(e) = viewer.decorate_values(&mut chunk, true).await {
+        return MatrixError::from_conduit(e).into_response();
     }
+    let own: Vec<String> = chunk
+        .iter()
+        .filter(|event| event["sender"] == authed.user_id)
+        .filter_map(|event| event["event_id"].as_str().map(str::to_owned))
+        .collect();
+    if !own.is_empty() {
+        match storage.client_transaction_ids(&authed.user_id, &authed.device_id, &own).await {
+            Ok(transactions) => {
+                for event in &mut chunk {
+                    let Some(txn) = event["event_id"].as_str().and_then(|id| transactions.get(id)) else {
+                        continue;
+                    };
+                    if !event["unsigned"].is_object() {
+                        event["unsigned"] = json!({});
+                    }
+                    event["unsigned"]["transaction_id"] = json!(txn);
+                }
+            }
+            Err(error) => return MatrixError::from_conduit(error).into_response(),
+        }
+    }
+    // `end` is omitted when there are no more events in this
+    // direction (spec: "If no further events are available ... the
+    // end property is omitted").
+    let mut body = json!({"chunk": chunk, "start": from.to_string()});
+    if let Some(next) = next_pos {
+        body["end"] = json!(next.to_string());
+    }
+    (StatusCode::OK, Json(body)).into_response()
 }

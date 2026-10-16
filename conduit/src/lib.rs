@@ -30,6 +30,7 @@ pub mod hashing;
 pub mod identity;
 pub mod keys;
 pub mod redaction;
+pub mod room_version;
 pub mod room;
 pub mod room_content;
 pub mod signing;

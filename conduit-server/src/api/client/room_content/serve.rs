@@ -147,7 +147,7 @@ impl<'a> Viewer<'a> {
         };
         let erased = self.erased_for_viewer(events).await?;
         let now = now_ms();
-        Ok(events
+        let mut values: Vec<Value> = events
             .iter()
             .map(|event| {
                 let mut value = match redactions.get(&event.event_id) {
@@ -166,7 +166,9 @@ impl<'a> Viewer<'a> {
                 }
                 value
             })
-            .collect())
+            .collect();
+        self.annotate_unsigned(&mut values).await?;
+        Ok(values)
     }
 
     pub async fn serve_one(&self, event: &Event, bundle: bool) -> conduit::Result<Value> {
@@ -216,6 +218,107 @@ impl<'a> Viewer<'a> {
             }
             if let Some(relations) = relations {
                 value["unsigned"]["m.relations"] = relations.clone();
+            }
+        }
+        self.annotate_unsigned(values).await?;
+        Ok(())
+    }
+
+    /// Client-server `unsigned` fields the store does not keep:
+    /// `age`, the viewer's `membership` at the event, and for state events
+    /// `replaces_state` plus `prev_content` when that previous event is
+    /// visible (v1.19 room event format).
+    async fn annotate_unsigned(&self, values: &mut [Value]) -> conduit::Result<()> {
+        let mut by_room: HashMap<String, Vec<usize>> = HashMap::new();
+        for (index, value) in values.iter().enumerate() {
+            if value.get("event_id").and_then(Value::as_str).is_some()
+                && value.get("room_id").and_then(Value::as_str).is_some()
+            {
+                by_room
+                    .entry(value["room_id"].as_str().unwrap().to_owned())
+                    .or_default()
+                    .push(index);
+            }
+        }
+        let now = now_ms();
+        for (room_id, indexes) in by_room {
+            let rows = self.storage.room_events_with_positions(&room_id).await?;
+            let positions: HashMap<String, i64> = rows
+                .iter()
+                .map(|(position, event)| (event.event_id.clone(), *position))
+                .collect();
+            let mut chains: HashMap<(String, String), Vec<(i64, Event)>> = HashMap::new();
+            let mut memberships: Vec<(i64, String)> = Vec::new();
+            for (position, event) in &rows {
+                let Some(key) = event.state_key.clone() else { continue };
+                if event.event_type == "m.room.member" && key == self.user_id {
+                    if let Some(membership) = event.content.get("membership").and_then(Value::as_str) {
+                        memberships.push((*position, membership.to_owned()));
+                    }
+                }
+                chains
+                    .entry((event.event_type.clone(), key))
+                    .or_default()
+                    .push((*position, event.clone()));
+            }
+            let mut previous: Vec<Event> = Vec::new();
+            let mut seen_prev = HashSet::new();
+            for index in &indexes {
+                let Some(prev) = previous_state(&values[*index], &positions, &chains) else { continue };
+                if seen_prev.insert(prev.event_id.clone()) {
+                    previous.push(prev.clone());
+                }
+            }
+            let visible: HashSet<String> = if previous.is_empty() {
+                HashSet::new()
+            } else {
+                conduit::auth::filter_visible_for_user(
+                    self.storage,
+                    &room_id,
+                    self.user_id,
+                    previous.clone(),
+                )
+                .await?
+                .into_iter()
+                .map(|event| event.event_id)
+                .collect()
+            };
+            let redactions = if previous.is_empty() {
+                HashMap::new()
+            } else {
+                self.redactions(&previous).await?
+            };
+            for index in indexes {
+                let value = &mut values[index];
+                let Some(event_id) = value.get("event_id").and_then(Value::as_str).map(str::to_owned) else {
+                    continue;
+                };
+                if !value.get("unsigned").is_some_and(Value::is_object) {
+                    value["unsigned"] = json!({});
+                }
+                if let Some(origin) = value.get("origin_server_ts").and_then(Value::as_u64) {
+                    value["unsigned"]["age"] = json!(now.saturating_sub(origin));
+                }
+                if let Some(position) = positions.get(&event_id).copied() {
+                    let membership = memberships
+                        .iter()
+                        .rev()
+                        .find(|(at, _)| *at <= position)
+                        .map(|(_, membership)| membership.as_str())
+                        .unwrap_or("leave");
+                    value["unsigned"]["membership"] = json!(membership);
+                }
+                let Some(prev) = previous_state(value, &positions, &chains) else { continue };
+                value["unsigned"]["replaces_state"] = json!(prev.event_id);
+                if !visible.contains(&prev.event_id) {
+                    continue;
+                }
+                let content = if redactions.contains_key(&prev.event_id) {
+                    conduit::redaction::redact_event(&prev).pdu.content
+                } else {
+                    prev.content.clone()
+                };
+                value["unsigned"]["prev_content"] = content;
             }
         }
         Ok(())
@@ -348,6 +451,25 @@ impl<'a> Viewer<'a> {
     }
 }
 
+/// The state event this one replaced, if the value is a state event we
+/// can place on the room stream.
+fn previous_state<'a>(
+    value: &Value,
+    positions: &HashMap<String, i64>,
+    chains: &'a HashMap<(String, String), Vec<(i64, Event)>>,
+) -> Option<&'a Event> {
+    let event_id = value.get("event_id")?.as_str()?;
+    let kind = value.get("type")?.as_str()?;
+    let state_key = value.get("state_key")?.as_str()?;
+    let position = positions.get(event_id).copied()?;
+    chains
+        .get(&(kind.to_owned(), state_key.to_owned()))?
+        .iter()
+        .rev()
+        .find(|(at, _)| *at < position)
+        .map(|(_, event)| event)
+}
+
 /// The power levels and creator a redaction was authorized against, from
 /// its `auth_events`.
 async fn authorizing_power(
@@ -432,6 +554,27 @@ mod tests {
         viewer.decorate_values(&mut values, false).await.unwrap();
         assert_eq!(values[0]["content"], json!({}));
         assert!(values[0].get("hashes").is_some(), "decorate keeps PDU fields");
+        assert_eq!(values[0]["unsigned"]["membership"], "join");
+        assert!(values[0]["unsigned"]["age"].as_u64().is_some());
+    }
+
+    #[tokio::test]
+    async fn state_replacements_expose_prev_content_and_replaces_state() {
+        let storage = MemoryStorage::default();
+        let mut first = event("$t1", "@a:a.test", "m.room.topic", json!({"topic": "one"}));
+        first.state_key = Some(String::new());
+        let mut second = event("$t2", "@a:a.test", "m.room.topic", json!({"topic": "two"}));
+        second.state_key = Some(String::new());
+        room(&storage, &[first.clone(), second.clone()]).await;
+        let viewer = Viewer::load(&storage, "@a:a.test").await.unwrap();
+        let served = viewer.serve_one(&second, false).await.unwrap();
+        assert_eq!(served["unsigned"]["prev_content"]["topic"], "one");
+        assert_eq!(served["unsigned"]["replaces_state"], "$t1");
+        assert_eq!(served["unsigned"]["membership"], "join");
+        assert!(served["unsigned"]["age"].as_u64().is_some());
+        let original = viewer.serve_one(&first, false).await.unwrap();
+        assert!(original["unsigned"].get("prev_content").is_none(), "{original}");
+        assert!(original["unsigned"].get("replaces_state").is_none(), "{original}");
     }
 
     #[tokio::test]

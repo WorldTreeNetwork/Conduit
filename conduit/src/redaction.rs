@@ -15,10 +15,7 @@ use serde_json::Value;
 /// Return the v11 redaction of `pdu`: typed fields kept, content pruned,
 /// extensions cleared. `hashes` and `signatures` are preserved.
 pub fn redact(pdu: &Pdu) -> Pdu {
-    let mut redacted = pdu.clone();
-    redacted.content = redact_content(&pdu.event_type, &pdu.content);
-    redacted.extensions.clear();
-    redacted
+    crate::room_version::redact_pdu(pdu, 11)
 }
 
 /// Redact an event's PDU and drop all of its unsigned data, keeping its ID.

@@ -55,9 +55,12 @@ impl<S: AuthState + Send + Sync> RoomEventSender for RoomEventSenderWrapper<'_, 
             .await
             .map_err(|(status, json_err)| {
                 // Preserve auth rejections (403) so handlers can surface a real
-                // M_FORBIDDEN instead of a generic 500 (conduit-29w).
+                // M_FORBIDDEN instead of a generic 500 (conduit-29w). Size
+                // rejections stay M_TOO_LARGE for the same reason.
                 if status == StatusCode::FORBIDDEN {
                     conduit::Error::Forbidden(json_err.0.error.clone())
+                } else if status == StatusCode::PAYLOAD_TOO_LARGE {
+                    conduit::Error::TooLarge(json_err.0.error.clone())
                 } else {
                     conduit::Error::Storage(json_err.0.error.clone())
                 }
@@ -211,8 +214,13 @@ async fn build_sign_and_persist_inner<S: AuthState>(
     // Step 10 — update current state if this is a state event
     // ------------------------------------------------------------------
     if let Some(sk) = state_key {
+        let state_room = if room_id.is_empty() {
+            conduit::room_version::room_id_from_event_id(&eid)
+        } else {
+            room_id.to_owned()
+        };
         storage
-            .set_state_entry(room_id, type_, sk, &eid)
+            .set_state_entry(&state_room, type_, sk, &eid)
             .await
             .map_err(|e| MatrixError::unknown(format!("state update error: {e}")))?;
     }

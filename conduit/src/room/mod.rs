@@ -90,8 +90,20 @@ impl Room {
             _ => json!({}),
         };
         content["room_version"] = json!(room_version);
-        content["creator"] = json!(sender);
-        sender_.send_event(sender, room_id, "m.room.create", Some(""), content).await?;
+        let version_num = crate::room_version::parse(room_version).unwrap_or(11);
+        if version_num < 11 {
+            content["creator"] = json!(sender);
+        }
+        let create_room_id = if version_num >= 12 { "" } else { room_id };
+        let create_event_id = sender_
+            .send_event(sender, create_room_id, "m.room.create", Some(""), content)
+            .await?;
+        let room_id_owned = if version_num >= 12 {
+            crate::room_version::room_id_from_event_id(&create_event_id)
+        } else {
+            room_id.to_owned()
+        };
+        let room_id = room_id_owned.as_str();
 
         // 2. m.room.member — creator joins
         let content = json!({ "membership": "join" });
@@ -99,7 +111,9 @@ impl Room {
 
         // 3. m.room.power_levels
         let mut users = serde_json::Map::new();
-        users.insert(sender.to_owned(), json!(100));
+        if version_num < 12 {
+            users.insert(sender.to_owned(), json!(100));
+        }
 
         let default_pl = json!({
             "ban": 50,
@@ -396,6 +410,11 @@ mod tests {
             let mut count = self.count.write().await;
             *count += 1;
             let event_id = format!("${}_{}", event_type, count);
+            let stored_room = if room_id.is_empty() {
+                crate::room_version::room_id_from_event_id(&event_id)
+            } else {
+                room_id.to_owned()
+            };
             let ev = Event {
                 event_id: event_id.clone(),
                 pdu: crate::event::Pdu {
@@ -419,7 +438,7 @@ mod tests {
 
             // Update current state if it's a state event.
             if let Some(sk) = state_key {
-                self.storage.set_state_entry(room_id, event_type, sk, &event_id).await?;
+                self.storage.set_state_entry(&stored_room, event_type, sk, &event_id).await?;
             }
 
             self.events.write().await.push(event_id.clone());
@@ -464,7 +483,7 @@ mod tests {
             .expect("get create")
             .expect("create event should exist");
         assert_eq!(create_ev.event_type, "m.room.create");
-        assert_eq!(create_ev.content["creator"], "@alice:localhost");
+        assert!(create_ev.content.get("creator").is_none(), "v11 create has no creator field");
 
         let member_ev = storage
             .get_state_entry(room_id, "m.room.member", "@alice:localhost")
@@ -485,21 +504,40 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_create_room_rejects_non_v11() {
+    async fn test_create_room_rejects_unknown_version() {
         let storage = test_storage();
-        let sender = TestSender::new(storage);
+        let sender = TestSender::new(storage.clone());
         let err = Room::create(
             "@alice:localhost",
             "!old:localhost",
-            "10",
+            "13",
             "public",
             "shared",
             &CreateRoomParams::default(),
             &sender,
         )
         .await
-        .expect_err("v10 must fail");
+        .expect_err("v13 must fail");
         assert!(matches!(err, crate::Error::UnsupportedRoomVersion(_)));
+
+        let room = Room::create(
+            "@alice:localhost",
+            "!v1:localhost",
+            "1",
+            "public",
+            "shared",
+            &CreateRoomParams::default(),
+            &sender,
+        )
+        .await
+        .expect("v1 is supported");
+        let create_ev = storage
+            .get_state_entry(&room.room_id, "m.room.create", "")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(create_ev.content["creator"], "@alice:localhost");
+        assert_eq!(create_ev.content["room_version"], "1");
     }
 
     #[tokio::test]

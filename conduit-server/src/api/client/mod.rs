@@ -227,6 +227,9 @@ impl MatrixError {
     pub fn invalid_param(msg: impl Into<String>) -> (StatusCode, Json<MatrixError>) {
         (StatusCode::BAD_REQUEST, Json(Self::new("M_INVALID_PARAM", msg)))
     }
+    pub fn bad_alias(msg: impl Into<String>) -> (StatusCode, Json<MatrixError>) {
+        (StatusCode::BAD_REQUEST, Json(Self::new("M_BAD_ALIAS", msg)))
+    }
     pub fn too_large(msg: impl Into<String>) -> (StatusCode, Json<MatrixError>) {
         (StatusCode::PAYLOAD_TOO_LARGE, Json(Self::new("M_TOO_LARGE", msg)))
     }
@@ -247,6 +250,7 @@ impl MatrixError {
                     format!("unsupported room version: {v}"),
                 )),
             ),
+            conduit::Error::TooLarge(msg) => Self::too_large(msg),
             other => Self::unknown(other.to_string()),
         }
     }

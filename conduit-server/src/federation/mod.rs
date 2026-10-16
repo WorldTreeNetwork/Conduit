@@ -32,6 +32,7 @@ pub mod queue;
 pub mod rate_limit;
 pub mod recent;
 pub mod server;
+pub mod spec_v119;
 #[cfg(feature = "iroh")]
 pub mod iroh_client;
 #[cfg(feature = "iroh")]

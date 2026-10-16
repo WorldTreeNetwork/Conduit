@@ -339,7 +339,10 @@ async fn create_room_returns_room_id() {
     assert_eq!(status, StatusCode::OK, "createRoom failed: {body}");
     let room_id = body["room_id"].as_str().unwrap();
     assert!(room_id.starts_with('!'), "room_id should start with '!', got: {room_id}");
-    assert!(room_id.contains(':'), "room_id should contain ':' separator");
+    // Default room version 12: the id is `!` plus the create event's
+    // reference hash and does not include a server name.
+    assert!(!room_id.contains(':'), "v12 room id omits the domain, got: {room_id}");
+    assert!(room_id.len() > 8, "v12 room id is a reference hash, got: {room_id}");
 }
 
 // ---------------------------------------------------------------------------
