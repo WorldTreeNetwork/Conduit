@@ -675,6 +675,10 @@ async fn spawn_is() -> MockIs {
             if path.ends_with("/3pid/unbind") {
                 return reply(200, json!({}));
             }
+            // onbind checks key_validity_url before it stores the member invite.
+            if path.ends_with("/pubkey/isvalid") {
+                return reply(200, json!({"valid": true}));
+            }
             match bearer {
                 Some(IS_TOKEN) => {}
                 Some("unsigned-terms") => {
@@ -847,6 +851,260 @@ async fn third_party_invites_lookup_store_invite_and_onbind() {
             200,
         )
         .await;
+}
+
+fn sign_third_party(mxid: &str, sender: &str, token: &str, key: &ed25519_dalek::SigningKey) -> Value {
+    use base64::Engine as _;
+    use ed25519_dalek::Signer as _;
+    let unsigned = json!({"mxid": mxid, "sender": sender, "token": token});
+    let bytes = conduit::canonical_json::to_canonical_bytes(&unsigned).unwrap();
+    let signature = base64::engine::general_purpose::STANDARD_NO_PAD.encode(key.sign(&bytes).to_bytes());
+    json!({
+        "mxid": mxid,
+        "sender": sender,
+        "token": token,
+        "signatures": {"id.test": {"ed25519:0": signature}},
+    })
+}
+
+fn public_key_of(key: &ed25519_dalek::SigningKey) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD_NO_PAD.encode(key.verifying_key().to_bytes())
+}
+
+/// Join with `third_party_signed` fetches the signing key's own
+/// `key_validity_url` and refuses the join when that key is not valid.
+/// A `public_keys` entry with no URL is accepted without a fetch.
+#[tokio::test]
+async fn join_checks_third_party_key_validity_url() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let long_term = Arc::new(AtomicBool::new(false));
+    let ephemeral = Arc::new(AtomicBool::new(false));
+    let hits: Arc<Mutex<Vec<(String, String)>>> = Arc::default();
+    let (long_flag, ephemeral_flag, log) = (long_term.clone(), ephemeral.clone(), hits.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let long_url = format!("{base}/_matrix/identity/v2/pubkey/isvalid");
+    let ephemeral_url = format!("{base}/_matrix/identity/v2/pubkey/ephemeral/isvalid");
+    let app = axum::Router::new().fallback(move |req: axum::extract::Request| {
+        let (long_flag, ephemeral_flag, log) = (long_flag.clone(), ephemeral_flag.clone(), log.clone());
+        async move {
+            let path = req.uri().path().to_owned();
+            let query = req.uri().query().unwrap_or("");
+            let public_key = url::form_urlencoded::parse(query.as_bytes())
+                .find(|(name, _)| name == "public_key")
+                .map(|(_, value)| value.into_owned())
+                .unwrap_or_default();
+            log.lock().unwrap().push((path.clone(), public_key));
+            let valid = if path.ends_with("/pubkey/ephemeral/isvalid") {
+                ephemeral_flag.load(Ordering::SeqCst)
+            } else if path.ends_with("/pubkey/isvalid") {
+                long_flag.load(Ordering::SeqCst)
+            } else {
+                return (axum::http::StatusCode::NOT_FOUND, axum::Json(json!({"errcode": "M_UNRECOGNIZED"})));
+            };
+            (axum::http::StatusCode::OK, axum::Json(json!({"valid": valid})))
+        }
+    });
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    let server = Server::with_env(&[("CONDUIT_IS_INSECURE_HTTP", "1"), ("CONDUIT_IS_ALLOW_CIDRS", "127.0.0.0/8")]).await;
+    let alice = server.register("alice").await;
+    let carol = server.register("carol").await;
+    let dave = server.register("dave").await;
+    let eve = server.register("eve").await;
+    let frank = server.register("frank").await;
+    let room = create_room(&server, token(&alice), json!({"preset": "private_chat"})).await;
+    let alice_id = format!("@alice:{HS}");
+    let carol_id = format!("@carol:{HS}");
+    let dave_id = format!("@dave:{HS}");
+    let eve_id = format!("@eve:{HS}");
+    let frank_id = format!("@frank:{HS}");
+    let long_key = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+    let ephemeral_key = ed25519_dalek::SigningKey::from_bytes(&[8u8; 32]);
+    let open_key = ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]);
+    let dead_key = ed25519_dalek::SigningKey::from_bytes(&[10u8; 32]);
+    let long_public = public_key_of(&long_key);
+    let ephemeral_public = public_key_of(&ephemeral_key);
+    let open_public = public_key_of(&open_key);
+    let dead_public = public_key_of(&dead_key);
+
+    let put_invite = |state_key: &str, content: Value| {
+        let server = &server;
+        let room = room.clone();
+        let alice_token = token(&alice).to_owned();
+        let state_key = state_key.to_owned();
+        async move {
+            server
+                .request(
+                    Method::PUT,
+                    &format!("/_matrix/client/v3/rooms/{room}/state/m.room.third_party_invite/{state_key}"),
+                    Some(&alice_token),
+                    Some(content),
+                    200,
+                )
+                .await
+        }
+    };
+    put_invite(
+        "long",
+        json!({
+            "display_name": "Carol",
+            "public_key": "not-the-signing-key",
+            "key_validity_url": long_url,
+            "public_keys": [{"public_key": long_public, "key_validity_url": long_url}],
+        }),
+    )
+    .await;
+    put_invite(
+        "eph",
+        json!({
+            "display_name": "Dave",
+            "public_key": long_public,
+            "key_validity_url": long_url,
+            "public_keys": [{"public_key": ephemeral_public, "key_validity_url": ephemeral_url}],
+        }),
+    )
+    .await;
+    put_invite(
+        "open",
+        json!({
+            "display_name": "Eve",
+            "public_key": long_public,
+            "key_validity_url": long_url,
+            "public_keys": [{"public_key": open_public}],
+        }),
+    )
+    .await;
+    put_invite(
+        "dead",
+        json!({
+            "display_name": "Frank",
+            "public_key": "not-the-signing-key",
+            "key_validity_url": "http://127.0.0.1:1/never",
+            "public_keys": [{"public_key": dead_public, "key_validity_url": "http://127.0.0.1:1/never"}],
+        }),
+    )
+    .await;
+
+    let refused = server
+        .request(Method::POST, &format!("/_matrix/client/v3/join/{room}"), Some(token(&carol)), Some(json!({})), 403)
+        .await;
+    assert_eq!(refused["errcode"], "M_FORBIDDEN", "{refused}");
+    assert!(hits.lock().unwrap().is_empty(), "an ordinary join does not fetch a key");
+
+    let carol_signed = sign_third_party(&carol_id, &alice_id, "long", &long_key);
+    let revoked = server
+        .request(
+            Method::POST,
+            &format!("/_matrix/client/v3/join/{room}"),
+            Some(token(&carol)),
+            Some(json!({"third_party_signed": carol_signed.clone()})),
+            403,
+        )
+        .await;
+    assert_eq!(revoked["errcode"], "M_FORBIDDEN", "{revoked}");
+    assert!(member(&server, token(&alice), &room, &carol_id).await.is_none(), "a revoked key stores no membership");
+    let seen = hits.lock().unwrap().clone();
+    assert_eq!(seen, vec![(long_url_path(), long_public.clone())], "only the matching long-term key is fetched: {seen:?}");
+
+    let forger = ed25519_dalek::SigningKey::from_bytes(&[1u8; 32]);
+    let forged = server
+        .request(
+            Method::POST,
+            &format!("/_matrix/client/v3/join/{room}"),
+            Some(token(&carol)),
+            Some(json!({"third_party_signed": sign_third_party(&carol_id, &alice_id, "long", &forger)})),
+            403,
+        )
+        .await;
+    assert_eq!(forged["errcode"], "M_FORBIDDEN", "{forged}");
+    assert_eq!(hits.lock().unwrap().len(), 1, "a signature that matches no invite key is not fetched");
+
+    long_term.store(true, Ordering::SeqCst);
+    let joined = server
+        .request(
+            Method::POST,
+            &format!("/_matrix/client/v3/join/{room}"),
+            Some(token(&carol)),
+            Some(json!({"reason": "Looking for support", "third_party_signed": carol_signed})),
+            200,
+        )
+        .await;
+    assert_eq!(joined["room_id"], room);
+    let carol_member = member(&server, token(&alice), &room, &carol_id).await.expect("joined");
+    assert_eq!(carol_member["membership"], "join");
+    assert_eq!(carol_member["reason"], "Looking for support");
+    assert!(hits.lock().unwrap().len() > 1, "a valid key is fetched before the join is stored");
+    assert!(hits.lock().unwrap().iter().skip(1).all(|(path, key)| path == "/_matrix/identity/v2/pubkey/isvalid" && key == &long_public));
+
+    let dave_signed = sign_third_party(&dave_id, &alice_id, "eph", &ephemeral_key);
+    let dave_revoked = server
+        .request(
+            Method::POST,
+            &format!("/_matrix/client/v3/rooms/{room}/join"),
+            Some(token(&dave)),
+            Some(json!({"third_party_signed": dave_signed.clone()})),
+            403,
+        )
+        .await;
+    assert_eq!(dave_revoked["errcode"], "M_FORBIDDEN", "{dave_revoked}");
+    assert!(member(&server, token(&alice), &room, &dave_id).await.is_none());
+    assert!(
+        hits.lock().unwrap().iter().any(|(path, key)| path == "/_matrix/identity/v2/pubkey/ephemeral/isvalid" && key == &ephemeral_public),
+        "ephemeral key_validity_url is fetched as stored: {:?}",
+        hits.lock().unwrap()
+    );
+    assert!(
+        !hits.lock().unwrap().iter().any(|(path, key)| path == "/_matrix/identity/v2/pubkey/isvalid" && key == &ephemeral_public),
+        "the ephemeral key is not checked at the long-term URL"
+    );
+
+    ephemeral.store(true, Ordering::SeqCst);
+    server
+        .request(
+            Method::POST,
+            &format!("/_matrix/client/v3/rooms/{room}/join"),
+            Some(token(&dave)),
+            Some(json!({"third_party_signed": dave_signed})),
+            200,
+        )
+        .await;
+    assert_eq!(member(&server, token(&alice), &room, &dave_id).await.unwrap()["membership"], "join");
+
+    long_term.store(false, Ordering::SeqCst);
+    let before_eve = hits.lock().unwrap().len();
+    server
+        .request(
+            Method::POST,
+            &format!("/_matrix/client/v3/rooms/{room}/join"),
+            Some(token(&eve)),
+            Some(json!({"third_party_signed": sign_third_party(&eve_id, &alice_id, "open", &open_key)})),
+            200,
+        )
+        .await;
+    assert_eq!(member(&server, token(&alice), &room, &eve_id).await.unwrap()["membership"], "join");
+    assert_eq!(hits.lock().unwrap().len(), before_eve, "a public_keys entry with no URL is valid indefinitely");
+
+    let dead = server
+        .request(
+            Method::POST,
+            &format!("/_matrix/client/v3/join/{room}"),
+            Some(token(&frank)),
+            Some(json!({"third_party_signed": sign_third_party(&frank_id, &alice_id, "dead", &dead_key)})),
+            403,
+        )
+        .await;
+    assert_eq!(dead["errcode"], "M_FORBIDDEN", "{dead}");
+    assert!(member(&server, token(&alice), &room, &frank_id).await.is_none(), "an unreachable key_validity_url rejects the join");
+    assert_eq!(hits.lock().unwrap().len(), before_eve);
+}
+
+fn long_url_path() -> String {
+    "/_matrix/identity/v2/pubkey/isvalid".to_owned()
 }
 
 /// Verify the X-Matrix signature the homeserver put on an unbind request.

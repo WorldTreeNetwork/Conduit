@@ -31,6 +31,7 @@ use axum::{
 use serde_json::{json, Value};
 use tracing::{info, warn};
 
+use conduit::auth::third_party_signed_matches;
 use conduit::room::Room;
 use conduit::signing::server_of_user_id;
 
@@ -272,7 +273,8 @@ async fn exchange_remote<S: AuthState>(state: &S, room_id: &str, sender: &str, m
 
 /// Turn a signed third-party invite into an `m.room.member` invite in a
 /// local room.  The auth rules verify `signed` against the room's
-/// `m.room.third_party_invite` keys.
+/// `m.room.third_party_invite` keys. The resident server also checks
+/// `key_validity_url` before that invite is stored.
 pub async fn exchange_local<S: AuthState>(
     state: &S,
     room_id: &str,
@@ -287,16 +289,144 @@ pub async fn exchange_local<S: AuthState>(
         .await
         .map_err(|e| e.to_string())?
         .ok_or("no m.room.third_party_invite for the token")?;
+    if !key_validity_allows(signed, &tpi.content).await {
+        return Err("third-party invite key is not valid".to_owned());
+    }
+    issue_third_party_member_invite(state, room_id, sender, mxid, signed, &tpi.content).await
+}
+
+/// A local join presented `third_party_signed`. Verify it against the
+/// pending `m.room.third_party_invite` and, when that event names a
+/// `key_validity_url` for the signing key, require the identity server to
+/// report the key valid. A `public_keys` entry with no URL is valid
+/// indefinitely and is not fetched. The check is deliberately outside
+/// `check_auth`: another homeserver must not reject the resulting
+/// membership because this URL failed.
+pub async fn accept_third_party_join<S: AuthState>(
+    state: &S,
+    user_id: &str,
+    room_id: &str,
+    signed: &Value,
+) -> Result<(), Response> {
+    let mxid = signed_str(signed, "mxid")?;
+    let sender = signed_str(signed, "sender")?;
+    let token = signed_str(signed, "token")?;
+    if !signed["signatures"].is_object() {
+        return Err(error(StatusCode::BAD_REQUEST, "M_BAD_JSON", "signatures is required"));
+    }
+    if mxid != user_id {
+        return Err(error(
+            StatusCode::FORBIDDEN,
+            "M_FORBIDDEN",
+            "third_party_signed mxid does not match the joining user",
+        ));
+    }
+    let tpi = state
+        .storage()
+        .get_state_entry(room_id, "m.room.third_party_invite", token)
+        .await
+        .map_err(|e| MatrixError::unknown(e.to_string()).into_response())?
+        .ok_or_else(|| error(StatusCode::FORBIDDEN, "M_FORBIDDEN", "No third-party invite for that token"))?;
+    if tpi.sender != sender {
+        return Err(error(
+            StatusCode::FORBIDDEN,
+            "M_FORBIDDEN",
+            "sender does not match the third-party invite",
+        ));
+    }
+    if !key_validity_allows(signed, &tpi.content).await {
+        return Err(error(
+            StatusCode::FORBIDDEN,
+            "M_FORBIDDEN",
+            "third-party invite key is not valid",
+        ));
+    }
+    let membership = state
+        .storage()
+        .get_state_entry(room_id, "m.room.member", user_id)
+        .await
+        .map_err(|e| MatrixError::unknown(e.to_string()).into_response())?
+        .and_then(|event| event.content["membership"].as_str().map(str::to_owned));
+    if !matches!(membership.as_deref(), Some("invite") | Some("join")) {
+        issue_third_party_member_invite(state, room_id, sender, user_id, signed, &tpi.content)
+            .await
+            .map_err(|message| error(StatusCode::FORBIDDEN, "M_FORBIDDEN", message))?;
+    }
+    Ok(())
+}
+
+fn signed_str<'a>(signed: &'a Value, field: &str) -> Result<&'a str, Response> {
+    match signed.get(field) {
+        Some(Value::String(value)) if !value.is_empty() => Ok(value),
+        Some(Value::String(_)) | None | Some(Value::Null) => Err(error(
+            StatusCode::BAD_REQUEST,
+            "M_MISSING_PARAM",
+            format!("{field} is required"),
+        )),
+        Some(_) => Err(error(
+            StatusCode::BAD_REQUEST,
+            "M_BAD_JSON",
+            format!("{field} must be a string"),
+        )),
+    }
+}
+
+async fn issue_third_party_member_invite<S: AuthState>(
+    state: &S,
+    room_id: &str,
+    sender: &str,
+    mxid: &str,
+    signed: &Value,
+    invite_content: &Value,
+) -> Result<String, String> {
     let content = json!({
         "membership": "invite",
         "third_party_invite": {
-            "display_name": tpi.content["display_name"],
+            "display_name": invite_content["display_name"],
             "signed": signed,
         },
     });
     build_sign_and_persist(state, sender, room_id, "m.room.member", Some(mxid), content)
         .await
         .map_err(|(_, body)| body.0.error.clone())
+}
+
+/// A signature-matching key allows the join when its URL reports `valid`,
+/// or when that key publishes no `key_validity_url`. A `public_keys` entry
+/// does not inherit the top-level URL: an absent entry URL is valid
+/// indefinitely.
+async fn key_validity_allows(signed: &Value, content: &Value) -> bool {
+    let identity = IdentityClient::shared();
+    if let Some(key) = content["public_key"].as_str() {
+        if third_party_signed_matches(signed, key) {
+            match content["key_validity_url"].as_str() {
+                Some(url) => {
+                    if identity.key_is_valid(url, key).await.unwrap_or(false) {
+                        return true;
+                    }
+                }
+                None => return true,
+            }
+        }
+    }
+    let Some(list) = content["public_keys"].as_array() else {
+        return false;
+    };
+    for entry in list {
+        let Some(key) = entry["public_key"].as_str() else { continue };
+        if !third_party_signed_matches(signed, key) {
+            continue;
+        }
+        match entry["key_validity_url"].as_str() {
+            None => return true,
+            Some(url) => {
+                if identity.key_is_valid(url, key).await.unwrap_or(false) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 // ---------------------------------------------------------------------------

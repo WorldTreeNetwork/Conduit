@@ -213,6 +213,10 @@ fn resolve_preset(body: &CreateRoomRequest) -> conduit::room::RoomPreset {
 #[derive(Debug, Deserialize, Default)]
 pub struct JoinRequest {
     pub reason: Option<String>,
+    /// Identity-server signature of a pending `m.room.third_party_invite`.
+    /// Kept as raw JSON so the signed bytes stay intact.
+    #[serde(default)]
+    pub third_party_signed: Option<Value>,
 }
 
 pub async fn join_room<S: AuthState>(
@@ -238,6 +242,15 @@ pub async fn join_room<S: AuthState>(
     } else {
         room_id_or_alias
     };
+
+    // Key validity is not an auth-rule check: other servers must still accept
+    // the membership. Only the resident server, and only when this join is
+    // authorised by `third_party_signed`, fetches `key_validity_url`.
+    if let Some(signed) = body.third_party_signed.as_ref() {
+        if let Err(response) = super::third_party::accept_third_party_join(&state, sender, &room_id, signed).await {
+            return response;
+        }
+    }
 
     let room = Room::new(&room_id);
     match room.join_with_reason(sender, body.reason.as_deref(), &RoomEventSenderWrapper(&state)).await {

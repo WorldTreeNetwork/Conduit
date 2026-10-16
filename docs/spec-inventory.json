@@ -1908,6 +1908,7 @@
         }
       ],
       "tests": [
+        "conduit-server/tests/production_appservice.rs::join_checks_third_party_key_validity_url",
         "conduit-server/tests/production_basics.rs::restricted_room_join_requires_space_membership",
         "conduit-server/src/api/client/session.rs::guest_allowlist_matches_spec_endpoints",
         "conduit-server/src/api/client/session.rs::join_targets_are_decoded",
@@ -1922,9 +1923,9 @@
         "conduit-server/tests/production_directory.rs::appservice_ping_thirdparty_and_network_directory",
         "conduit-server/tests/production_directory.rs::directory_visibility_changes_are_authorized"
       ],
-      "tests_total": 55,
+      "tests_total": 56,
       "gap_beads": [],
-      "notes": "Restricted and knock_restricted joins require membership of an allowed room and record join_authorised_via_users_server."
+      "notes": "Restricted and knock_restricted joins require membership of an allowed room and record join_authorised_via_users_server. third_party_signed checks key_validity_url before the join is stored."
     },
     {
       "id": "cs.ep.post_matrixclientv3roomsroomidjoin",
@@ -1947,11 +1948,12 @@
         }
       ],
       "tests": [
+        "conduit-server/tests/production_appservice.rs::join_checks_third_party_key_validity_url",
         "conduit-server/tests/production_basics.rs::join_by_room_id_and_membership_reasons_reach_member_events"
       ],
-      "tests_total": 1,
+      "tests_total": 2,
       "gap_beads": [],
-      "notes": "Room ID only (alias is 400 M_INVALID_PARAM); reason recorded on the member event; same join path as /join. third_party_signed belongs to conduit-y99.36."
+      "notes": "Room ID only (alias is 400 M_INVALID_PARAM); reason recorded on the member event; same join path as /join. third_party_signed checks key_validity_url before the join is stored."
     },
     {
       "id": "cs.ep.post_matrixclientv3knockroomidoralias",
@@ -6379,7 +6381,7 @@
       "rate_limited": "No",
       "deprecated": false,
       "role": "homeserver as client",
-      "status": "partial",
+      "status": "implemented+tested",
       "code": [
         {
           "loc": "conduit-server/src/identity_service.rs:238",
@@ -6388,13 +6390,12 @@
         }
       ],
       "tests": [
+        "conduit-server/tests/production_appservice.rs::join_checks_third_party_key_validity_url",
         "conduit-server/src/identity_service.rs::key_validity_url_is_queried_as_provided"
       ],
-      "tests_total": 1,
-      "gap_beads": [
-        "conduit-y99.22.6"
-      ],
-      "notes": "Same helper (URL comes from public_keys[].key_validity_url); used by exchange_third_party_invite (conduit-y99.22.6)."
+      "tests_total": 2,
+      "gap_beads": [],
+      "notes": "A third-party join fetches the public_keys entry's key_validity_url with public_key. valid false rejects the join; valid true allows it."
     },
     {
       "id": "is.ep.get_matrixidentityv2pubkeyisvalid",
@@ -6408,7 +6409,7 @@
       "rate_limited": "No",
       "deprecated": false,
       "role": "homeserver as client",
-      "status": "partial",
+      "status": "implemented+tested",
       "code": [
         {
           "loc": "conduit-server/src/identity_service.rs:238",
@@ -6417,13 +6418,12 @@
         }
       ],
       "tests": [
+        "conduit-server/tests/production_appservice.rs::join_checks_third_party_key_validity_url",
         "conduit-server/src/identity_service.rs::key_validity_url_is_queried_as_provided"
       ],
-      "tests_total": 1,
-      "gap_beads": [
-        "conduit-y99.22.6"
-      ],
-      "notes": "Client helper queries key_validity_url as provided; it is wired in when exchange_third_party_invite lands (conduit-y99.22.6)."
+      "tests_total": 2,
+      "gap_beads": [],
+      "notes": "A third-party join fetches the stored key_validity_url with public_key. valid false rejects the join; valid true allows it. An unreachable URL rejects the join."
     },
     {
       "id": "is.ep.get_matrixidentityv2pubkeykeyid",
@@ -8048,16 +8048,15 @@
         }
       ],
       "tests": [
+        "conduit-server/tests/production_appservice.rs::join_checks_third_party_key_validity_url",
         "conduit-server/tests/production_appservice.rs::third_party_invites_lookup_store_invite_and_onbind",
         "conduit/tests/third_party_invite_auth.rs::signed_member_invite_rejections",
         "conduit/tests/third_party_invite_auth.rs::signed_member_invite_is_accepted_with_either_base64_alphabet",
         "conduit/tests/third_party_invite_auth.rs::third_party_invite_event_needs_invite_power"
       ],
-      "tests_total": 4,
-      "gap_beads": [
-        "conduit-y99.22.6"
-      ],
-      "notes": "Local rooms end to end (invite, store-invite, onbind exchange, signature-verified membership, join). Remote-room exchange and key_validity_url checks on join are federation (conduit-y99.22.6)."
+      "tests_total": 5,
+      "gap_beads": [],
+      "notes": "Local rooms end to end (invite, store-invite, onbind exchange, signature-verified membership, join). A join that supplies third_party_signed checks key_validity_url and refuses a revoked or unreachable key. A public_keys entry with no URL joins without a fetch."
     },
     {
       "id": "cs.mod.search",
@@ -9185,7 +9184,7 @@
       "title": "Third-party invites (onbind, exchange_third_party_invite, verification)",
       "source": "https://spec.matrix.org/v1.19/server-server-api/#third-party-invites",
       "role": "homeserver",
-      "status": "partial",
+      "status": "implemented+tested",
       "code": [
         {
           "loc": "conduit/src/auth.rs:490"
@@ -9194,20 +9193,22 @@
           "loc": "conduit-server/src/api/client/third_party.rs:230"
         },
         {
+          "loc": "conduit-server/src/api/client/rooms.rs"
+        },
+        {
           "loc": "conduit-server/src/federation/spec_v119.rs"
         }
       ],
       "tests": [
+        "conduit-server/tests/production_appservice.rs::join_checks_third_party_key_validity_url",
         "conduit/tests/third_party_invite_auth.rs::signed_member_invite_rejections",
         "conduit-server/tests/production_appservice.rs::third_party_invites_lookup_store_invite_and_onbind",
         "conduit-server/tests/production_pdu.rs::ss_membership_exchange_third_party_invite_issues_invite",
         "conduit-server/tests/production_pdu.rs::onbind_exchanges_a_remote_room_with_the_inviting_server"
       ],
-      "tests_total": 4,
-      "gap_beads": [
-        "conduit-y99.22.6"
-      ],
-      "notes": "exchange_third_party_invite verifies the signature and key_validity_url, then issues the outbound invite. Remote onbind asks the inviting server to exchange the invite. Join-time key_validity_url checks remain (conduit-y99.22.6)."
+      "tests_total": 5,
+      "gap_beads": [],
+      "notes": "exchange_third_party_invite verifies the signature and key_validity_url, then issues the outbound invite. Remote onbind asks the inviting server to exchange the invite. A client join that supplies third_party_signed checks that key's key_validity_url and refuses the join when the key is revoked or unreachable. A public_keys entry with no URL is valid indefinitely. Local onbind checks the same URL before storing the member invite."
     },
     {
       "id": "ss.public-rooms",
