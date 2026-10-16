@@ -1177,16 +1177,21 @@
         "conduit-server/tests/production_sync.rs::state_after_covers_timeline_and_filtered_state_changes",
         "conduit-server/tests/production_sync.rs::state_after_is_required_when_empty_and_departure_state_is_frozen",
         "conduit-server/tests/production_sync.rs::state_after_reports_redaction_of_unchanged_state_event_ids",
-        "conduit-server/tests/production_sync.rs::state_after_lazy_members_survive_timeline_dedup_and_owned_filters"
+        "conduit-server/tests/production_sync.rs::state_after_lazy_members_survive_timeline_dedup_and_owned_filters",
+        "conduit-server/tests/production_sync.rs::sync_state_follows_resolution_not_arrival_order",
+        "conduit-server/tests/production_sync.rs::sync_never_skips_events_committed_out_of_order",
+        "conduit-server/tests/production_sync.rs::sync_never_skips_non_room_streams_committed_out_of_order",
+        "conduit-server/tests/production_sync.rs::only_the_sending_device_sees_its_transaction_id",
+        "conduit-server/tests/production_sync.rs::device_lists_report_only_shared_users_and_departures",
+        "conduit/src/room/state_res.rs::a_later_arrival_with_an_earlier_timestamp_does_not_win",
+        "conduit/src/room/state_res.rs::v12_snapshot_keeps_the_room_when_one_key_forks",
+        "conduit/src/room/state_res.rs::self_leave_replaces_the_earlier_join"
       ],
-      "tests_total": 46,
+      "tests_total": 53,
       "gap_beads": [
-        "conduit-y99.13",
-        "conduit-y99.14",
-        "conduit-y99.16",
-        "conduit-y99.27"
+        "conduit-y99.13"
       ],
-      "notes": "Initial/new-join visibility-gap state, use_state_after initial/incremental/full_state/departure sections, filtered state, redactions and lazy/owned filter combinations are regression-tested. Complete resolved-DAG snapshots and remaining sync combinations remain under conduit-y99.13."
+      "notes": "Sync state is the resolved room state: a later arrival with an earlier origin_server_ts does not replace the winner, and a state event that never won is omitted from the timeline. use_state_after, filters, redactions, lazy members, commit-ordered cursors, device lists and the sending device's transaction_id are tested. Atomic event/current-state publication remains conduit-y99.13.7."
     },
     {
       "id": "cs.ep.get_matrixclientv3events",
@@ -7325,6 +7330,9 @@
       "code": [
         {
           "loc": "conduit-server/src/api/client/sync.rs"
+        },
+        {
+          "loc": "conduit/src/room/state_res.rs"
         }
       ],
       "tests": [
@@ -7334,16 +7342,18 @@
         "conduit-server/tests/production_sync.rs::state_after_covers_timeline_and_filtered_state_changes",
         "conduit-server/tests/production_sync.rs::state_after_is_required_when_empty_and_departure_state_is_frozen",
         "conduit-server/tests/production_sync.rs::state_after_reports_redaction_of_unchanged_state_event_ids",
-        "conduit-server/tests/production_sync.rs::state_after_lazy_members_survive_timeline_dedup_and_owned_filters"
+        "conduit-server/tests/production_sync.rs::state_after_lazy_members_survive_timeline_dedup_and_owned_filters",
+        "conduit-server/tests/production_sync.rs::sync_state_follows_resolution_not_arrival_order",
+        "conduit-server/tests/production_sync.rs::sync_never_skips_events_committed_out_of_order",
+        "conduit-server/tests/production_sync.rs::only_the_sending_device_sees_its_transaction_id",
+        "conduit/src/room/state_res.rs::v12_snapshot_keeps_the_room_when_one_key_forks",
+        "conduit/src/room/state_res.rs::self_leave_replaces_the_earlier_join"
       ],
-      "tests_total": 7,
+      "tests_total": 12,
       "gap_beads": [
-        "conduit-y99.13",
-        "conduit-y99.16",
-        "conduit-y99.14",
-        "conduit-y99.27"
+        "conduit-y99.13"
       ],
-      "notes": "Initial/new-join visibility-gap state, use_state_after initial/incremental/full_state/departure sections, filtered state, redactions and lazy/owned filter combinations are regression-tested. Complete resolved-DAG snapshots and remaining sync combinations remain under conduit-y99.13."
+      "notes": "Sync state is the resolved room state: a later arrival with an earlier origin_server_ts does not replace the winner, and a state event that never won is omitted from the timeline. use_state_after, filters, redactions, lazy members, commit-ordered cursors and the sending device's transaction_id are tested. Atomic event/current-state publication remains conduit-y99.13.7."
     },
     {
       "id": "cs.events.get",

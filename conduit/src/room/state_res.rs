@@ -211,7 +211,12 @@ fn is_power_event(ev: &Event) -> bool {
     match ev.event_type.as_str() {
         "m.room.create" | "m.room.power_levels" | "m.room.join_rules" => true,
         "m.room.member" => {
-            // Only leave and ban need power.
+            // A kick or ban. A self-leave is not a power event: the sender
+            // still had power when they left, and it sorts with ordinary state.
+            let Some(state_key) = ev.state_key.as_deref() else { return false };
+            if state_key == ev.sender {
+                return false;
+            }
             match parse_member(&ev.content) {
                 Ok(mc) => matches!(mc.membership, Membership::Leave | Membership::Ban),
                 Err(_) => false,
@@ -413,7 +418,7 @@ fn compute_mainline(
 /// Per the spec: for each event, walk its auth_events to find the
 /// m.room.power_levels event, then find that event's position in the mainline.
 /// If the event (or its pl auth_event) does not appear in the mainline, return
-/// `usize::MAX` (place it last).
+/// `usize::MAX` (spec position infinity: it is ordered before mainline events).
 fn mainline_depth(
     ev: &Event,
     mainline: &[String],
@@ -436,19 +441,21 @@ fn mainline_depth(
     }
 }
 
-/// Order non-power conflicted events by mainline ordering:
-/// 1. mainline_depth ascending
-/// 2. origin_server_ts ascending
-/// 3. event_id ascending (lexicographic)
+/// Order non-power conflicted events by mainline ordering.
+///
+/// An event whose power-level auth event is not on the mainline sorts first
+/// (spec position ∞). Events on the mainline then sort from the oldest power
+/// level toward the newest, and a later `origin_server_ts` wins a tie.
 fn mainline_order(
     events: &[Event],
     mainline: &[String],
     auth_chain: &HashMap<String, Event>,
 ) -> Vec<Event> {
+    let rank = |depth: usize| if depth == usize::MAX { (0, 0) } else { (1, depth) };
     let mut sorted = events.to_vec();
     sorted.sort_by(|a, b| {
-        let da = mainline_depth(a, mainline, auth_chain);
-        let db = mainline_depth(b, mainline, auth_chain);
+        let da = rank(mainline_depth(a, mainline, auth_chain));
+        let db = rank(mainline_depth(b, mainline, auth_chain));
         da.cmp(&db)
             .then_with(|| a.origin_server_ts.cmp(&b.origin_server_ts))
             .then_with(|| a.event_id.cmp(&b.event_id))
@@ -574,7 +581,7 @@ fn resolve_inner(
 
     // Iteratively apply each power event that passes auth.
     for ev in &ordered_power {
-        let auth_state = build_auth_state_for_event(ev, &working_state)?;
+        let auth_state = build_auth_state_for_event(ev, &working_state, &auth_chain)?;
         if check_auth(ev, &auth_state).is_ok() {
             apply_state_event(&mut working_state, ev);
         }
@@ -586,7 +593,7 @@ fn resolve_inner(
 
     // Iteratively apply each non-power event that passes auth.
     for ev in &ordered_non_power {
-        let auth_state = build_auth_state_for_event(ev, &working_state)?;
+        let auth_state = build_auth_state_for_event(ev, &working_state, &auth_chain)?;
         if check_auth(ev, &auth_state).is_ok() {
             apply_state_event(&mut working_state, ev);
         }
@@ -652,22 +659,136 @@ fn conflicted_state_subgraph(
 
 /// Build the auth state slice needed to check `event` using `auth_event_keys`.
 ///
-/// This looks up the required state keys from `current_state`.  It does NOT
-/// verify that the keys are in the event's own `auth_events` list — that is
-/// the caller's responsibility for stricter implementations.  For state
-/// resolution purposes, using the current working state is correct per spec.
+/// Keys present in the partial state win. A key the partial state lacks is
+/// taken from this event's `auth_events` (the iterative-auth fallback). Room
+/// version 12 omits `m.room.create` from `auth_events`; that event is the
+/// room id with `$` in place of `!`, or the only create event in the chain.
 fn build_auth_state_for_event(
     event: &Event,
     current_state: &StateMap<Event>,
+    auth_chain: &HashMap<String, Event>,
 ) -> Result<StateMap<Event>, StateResError> {
+    let mut from_auth: StateMap<Event> = HashMap::new();
+    for id in &event.auth_events {
+        if let Some(auth_event) = auth_chain.get(id) {
+            if let Some(state_key) = &auth_event.state_key {
+                from_auth.insert((auth_event.event_type.clone(), state_key.clone()), auth_event.clone());
+            }
+        }
+    }
     let keys = auth_event_keys(event);
     let mut auth_state: StateMap<Event> = HashMap::new();
     for key in keys {
         if let Some(ev) = current_state.get(&key) {
             auth_state.insert(key, ev.clone());
+        } else if let Some(ev) = from_auth.get(&key) {
+            auth_state.insert(key.clone(), ev.clone());
+        }
+    }
+    let create_key = ("m.room.create".to_owned(), String::new());
+    if event.event_type != "m.room.create" && !auth_state.contains_key(&create_key) {
+        if let Some(create) = create_event_for_room(&event.room_id, auth_chain) {
+            auth_state.insert(create_key, create);
         }
     }
     Ok(auth_state)
+}
+
+/// The `m.room.create` event for `room_id`, when the chain contains it.
+fn create_event_for_room(room_id: &str, auth_chain: &HashMap<String, Event>) -> Option<Event> {
+    if let Some(rest) = room_id.strip_prefix('!') {
+        let id = format!("${rest}");
+        if let Some(event) = auth_chain.get(&id).filter(|event| event.event_type == "m.room.create") {
+            return Some(event.clone());
+        }
+    }
+    let same_room: Vec<Event> = auth_chain
+        .values()
+        .filter(|event| event.event_type == "m.room.create" && event.room_id == room_id)
+        .cloned()
+        .collect();
+    if same_room.len() == 1 {
+        return same_room.into_iter().next();
+    }
+    let creates: Vec<Event> = auth_chain
+        .values()
+        .filter(|event| event.event_type == "m.room.create")
+        .cloned()
+        .collect();
+    if creates.len() == 1 { creates.into_iter().next() } else { None }
+}
+
+/// Room state after applying `events_in_stream_order` one arrival at a time.
+///
+/// A key that is set only once keeps that event. A key that forks is resolved
+/// with the room's state-resolution algorithm, so a later arrival with an
+/// earlier `origin_server_ts` does not replace the winner. `won` is every
+/// state event that was the resolved value of its key at the moment it arrived.
+///
+/// A missing `m.room.create` `room_version` uses the same default as auth (`11`).
+pub fn snapshot_from_arrival(events_in_stream_order: &[Event]) -> (StateMap<Event>, HashSet<String>) {
+    let mut counts: HashMap<(String, String), usize> = HashMap::new();
+    let mut conflicted = false;
+    for event in events_in_stream_order {
+        let Some(state_key) = &event.state_key else { continue };
+        let key = (event.event_type.clone(), state_key.clone());
+        let count = counts.entry(key).or_insert(0);
+        *count += 1;
+        if *count > 1 {
+            conflicted = true;
+        }
+    }
+    if !conflicted {
+        let mut state = StateMap::new();
+        let mut won = HashSet::new();
+        for event in events_in_stream_order {
+            let Some(state_key) = &event.state_key else { continue };
+            state.insert((event.event_type.clone(), state_key.clone()), event.clone());
+            won.insert(event.event_id.clone());
+        }
+        return (state, won);
+    }
+
+    let version12 = events_in_stream_order
+        .iter()
+        .find(|event| event.event_type == "m.room.create")
+        .is_some_and(|event| crate::room_version::version_of_content(&event.content) >= 12);
+    let mut state = StateMap::new();
+    let mut won = HashSet::new();
+    let mut chain: HashMap<String, Event> = HashMap::new();
+    for event in events_in_stream_order {
+        chain.insert(event.event_id.clone(), event.clone());
+        let Some(state_key) = &event.state_key else { continue };
+        let key = (event.event_type.clone(), state_key.clone());
+        let mut incoming = state.clone();
+        incoming.insert(key.clone(), event.clone());
+        let sets = if state.is_empty() {
+            vec![incoming]
+        } else {
+            vec![state.clone(), incoming]
+        };
+        let resolved = if version12 {
+            resolve_v12(sets, chain.clone())
+        } else {
+            resolve(sets, chain.clone())
+        };
+        match resolved {
+            Ok(next) => {
+                let incoming_wins = next.get(&key).is_some_and(|winner| winner.event_id == event.event_id);
+                if incoming_wins {
+                    won.insert(event.event_id.clone());
+                    state = next;
+                } else if next.contains_key(&key) || !state.contains_key(&key) {
+                    // A real conflict resolved to the earlier event, or this
+                    // key was new and rejected. Keep every other resolved key.
+                    state = next;
+                }
+                // A resolution that dropped a key we already held is discarded.
+            }
+            Err(_) => {}
+        }
+    }
+    (state, won)
 }
 
 // ---------------------------------------------------------------------------
@@ -1048,6 +1169,150 @@ mod tests {
             .expect("power_levels must be in result");
         // The one with higher timestamp (pl_b) is applied later and wins.
         assert_eq!(pl_result.event_id, "$pl_b");
+    }
+
+    #[test]
+    fn a_later_arrival_with_an_earlier_timestamp_does_not_win() {
+        let room = "!r:example.com";
+        let alice = "@alice:example.com";
+        let (create, alice_join, _) = bootstrap_room(room, alice);
+        let pl = make_pl(
+            "$pl",
+            alice,
+            room,
+            json!({
+                "users": { "@alice:example.com": 100 },
+                "users_default": 0,
+                "state_default": 50
+            }),
+            vec!["$create".to_owned(), "$creator_join".to_owned()],
+            3,
+            1500,
+        );
+        let later_ts = make_event(
+            "$name-later-ts",
+            "m.room.name",
+            alice,
+            room,
+            Some(""),
+            json!({"name": "Resolved"}),
+            vec!["$create".to_owned(), "$creator_join".to_owned(), "$pl".to_owned()],
+            4,
+            3000,
+        );
+        let earlier_ts = make_event(
+            "$name-earlier-ts",
+            "m.room.name",
+            alice,
+            room,
+            Some(""),
+            json!({"name": "Arrived later"}),
+            vec!["$create".to_owned(), "$creator_join".to_owned(), "$pl".to_owned()],
+            4,
+            2000,
+        );
+        // Stream order is the reverse of the timestamp order.
+        let (state, won) = snapshot_from_arrival(&[create, alice_join, pl, later_ts.clone(), earlier_ts.clone()]);
+        let name = state.get(&("m.room.name".to_owned(), String::new())).expect("name");
+        assert_eq!(name.event_id, later_ts.event_id);
+        assert_eq!(name.content["name"], "Resolved");
+        assert!(won.contains(&later_ts.event_id));
+        assert!(!won.contains(&earlier_ts.event_id), "the earlier timestamp never became state");
+    }
+
+    #[test]
+    fn v12_snapshot_keeps_the_room_when_one_key_forks() {
+        let alice = "@alice:example.com";
+        let mut create = make_create("", alice);
+        create.room_id.clear();
+        create.content = json!({"room_version": "12"});
+        create.event_id = "$createV12".to_owned();
+        let room = "!createV12";
+        let join = make_member(
+            "$creator_join",
+            alice,
+            alice,
+            room,
+            "join",
+            vec!["$createV12".to_owned()],
+            2,
+            1001,
+        );
+        let pl = make_pl(
+            "$pl",
+            alice,
+            room,
+            json!({"users_default": 0, "state_default": 50}),
+            vec!["$createV12".to_owned(), "$creator_join".to_owned()],
+            3,
+            1500,
+        );
+        let later_ts = make_event(
+            "$name-later-ts",
+            "m.room.name",
+            alice,
+            room,
+            Some(""),
+            json!({"name": "Resolved"}),
+            vec!["$createV12".to_owned(), "$creator_join".to_owned(), "$pl".to_owned()],
+            4,
+            3000,
+        );
+        let earlier_ts = make_event(
+            "$name-earlier-ts",
+            "m.room.name",
+            alice,
+            room,
+            Some(""),
+            json!({"name": "Arrived later"}),
+            vec!["$createV12".to_owned(), "$creator_join".to_owned(), "$pl".to_owned()],
+            4,
+            2000,
+        );
+        let (state, won) = snapshot_from_arrival(&[
+            create.clone(),
+            join.clone(),
+            pl.clone(),
+            later_ts.clone(),
+            earlier_ts.clone(),
+        ]);
+        let name = state.get(&("m.room.name".to_owned(), String::new())).expect("name");
+        assert_eq!(name.event_id, later_ts.event_id);
+        assert_eq!(name.content["name"], "Resolved");
+        assert!(won.contains(&later_ts.event_id));
+        assert!(!won.contains(&earlier_ts.event_id));
+        assert!(won.contains(&create.event_id));
+        assert!(won.contains(&join.event_id));
+        assert!(won.contains(&pl.event_id));
+        assert!(state.contains_key(&("m.room.create".into(), String::new())));
+        assert!(state.contains_key(&("m.room.member".into(), alice.to_owned())));
+    }
+
+    #[test]
+    fn self_leave_replaces_the_earlier_join() {
+        let alice = "@alice:example.com";
+        let mut create = make_create("", alice);
+        create.room_id.clear();
+        create.content = json!({"room_version": "12"});
+        create.event_id = "$createV12".to_owned();
+        let room = "!createV12";
+        let join = make_member(
+            "$creator_join", alice, alice, room, "join",
+            vec!["$createV12".into()], 2, 1001,
+        );
+        let pl = make_pl(
+            "$pl", alice, room, json!({"users_default": 0, "state_default": 50}),
+            vec!["$createV12".into(), "$creator_join".into()], 3, 1500,
+        );
+        let leave = make_member(
+            "$leave", alice, alice, room, "leave",
+            vec!["$createV12".into(), "$creator_join".into(), "$pl".into()], 4, 4000,
+        );
+        let (state, won) = snapshot_from_arrival(&[create, join, pl, leave.clone()]);
+        let member = state.get(&("m.room.member".into(), alice.to_owned())).expect("member");
+        assert_eq!(member.event_id, leave.event_id);
+        assert_eq!(member.content["membership"], "leave");
+        assert!(won.contains(&leave.event_id));
     }
 
     // -----------------------------------------------------------------------

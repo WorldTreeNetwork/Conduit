@@ -1126,6 +1126,7 @@ async fn departed_room_block(
     }
     visible.sort_by_key(|event| positions.get(&event.event_id).copied().unwrap_or(0));
     let mut events = apply_type_filter(visible, filter);
+    events = without_losing_state(storage, &membership.room_id, boundary.until, events).await?;
     let limited = events.len() > filter.timeline_limit as usize;
     if limited {
         events = events.split_off(events.len() - filter.timeline_limit as usize);
@@ -1189,12 +1190,13 @@ async fn build_initial_room_block<S: AuthState>(
     // Starting after the gap lets state_before carry those changes without
     // exposing them as timeline events. Older visible history remains pageable.
     let last_hidden = events.iter().rposition(|event| !visible_ids.contains(&event.event_id));
-    let mut events = apply_type_filter(
+    let events = apply_type_filter(
         if boundary.state_after { visible } else {
             events.into_iter().skip(last_hidden.map_or(0, |index| index + 1)).collect()
         },
         filter,
     );
+    let mut events = without_losing_state(storage.as_ref(), room_id, boundary.until, events).await?;
     let over_limit = events.len() > filter.timeline_limit as usize;
     let limited = last_hidden.is_some() || over_limit;
     if over_limit {
@@ -1280,17 +1282,44 @@ async fn positioned_room_events(
     Ok(events)
 }
 
+/// Drop state events that never won resolution. Timeline order stays the
+/// arrival order of events that did become the room state.
+async fn without_losing_state(
+    storage: &dyn conduit::storage::Storage,
+    room_id: &str,
+    until: i64,
+    events: Vec<conduit::event::Event>,
+) -> Result<Vec<conduit::event::Event>, Response> {
+    if events.iter().all(|event| event.state_key.is_none()) {
+        return Ok(events);
+    }
+    let (_, won) = resolved_through(storage, room_id, until).await?;
+    Ok(events
+        .into_iter()
+        .filter(|event| event.state_key.is_none() || won.contains(&event.event_id))
+        .collect())
+}
+
+async fn resolved_through(
+    storage: &dyn conduit::storage::Storage,
+    room_id: &str,
+    until_inclusive: i64,
+) -> Result<(HashMap<(String, String), conduit::event::Event>, std::collections::HashSet<String>), Response> {
+    let events = positioned_room_events(storage, room_id).await?;
+    let events: Vec<_> = events
+        .into_iter()
+        .filter(|(position, _)| *position <= until_inclusive)
+        .map(|(_, event)| event)
+        .collect();
+    Ok(conduit::room::state_res::snapshot_from_arrival(&events))
+}
+
 async fn state_before(
     storage: &dyn conduit::storage::Storage,
     room_id: &str,
     before: i64,
 ) -> Result<HashMap<(String, String), conduit::event::Event>, Response> {
-    let mut state = HashMap::new();
-    for (_, event) in positioned_room_events(storage, room_id).await?.into_iter().take_while(|(position, _)| *position < before) {
-        if let Some(key) = &event.state_key {
-            state.insert((event.event_type.clone(), key.clone()), event);
-        }
-    }
+    let (state, _) = resolved_through(storage, room_id, before.saturating_sub(1)).await?;
     Ok(state)
 }
 
@@ -1304,25 +1333,34 @@ async fn state_for_sync(
     timeline: &[conduit::event::Event],
     boundary: RoomSyncBoundary,
 ) -> Result<StateBlock, Response> {
-    let mut before = HashMap::new();
-    let mut end = HashMap::new();
-    let mut previous = HashMap::new();
+    let rows = positioned_room_events(storage, room).await?;
     let mut redacted = std::collections::HashSet::new();
-    for (position, event) in positioned_room_events(storage, room).await?.into_iter().take_while(|(position, _)| *position <= boundary.until) {
-        if let Some(key) = &event.state_key {
-            let key = (event.event_type.clone(), key.clone());
-            if !boundary.state_after && position < first { before.insert(key.clone(), event.clone()); }
-            if !boundary.full_state && boundary.since.is_some_and(|since| position <= since) {
-                previous.insert(key.clone(), event.clone());
-            }
-            end.insert(key, event.clone());
-        }
-        if boundary.since.is_none_or(|since| position > since) && event.event_type == "m.room.redaction" {
-            if let Some(target) = conduit::room_content::redaction_target(&event) {
+    for (position, event) in rows.iter().take_while(|(position, _)| *position <= boundary.until) {
+        if boundary.since.is_none_or(|since| *position > since) && event.event_type == "m.room.redaction" {
+            if let Some(target) = conduit::room_content::redaction_target(event) {
                 redacted.insert(target.to_owned());
             }
         }
     }
+    let snapshot = |limit: i64| -> HashMap<(String, String), conduit::event::Event> {
+        let events: Vec<_> = rows
+            .iter()
+            .filter(|(position, _)| *position <= limit)
+            .map(|(_, event)| event.clone())
+            .collect();
+        conduit::room::state_res::snapshot_from_arrival(&events).0
+    };
+    let end = snapshot(boundary.until);
+    let before = if boundary.state_after {
+        HashMap::new()
+    } else {
+        snapshot(first.saturating_sub(1))
+    };
+    let previous = if boundary.full_state || boundary.since.is_none() {
+        HashMap::new()
+    } else {
+        snapshot(boundary.since.unwrap_or(0))
+    };
     let timeline_state: std::collections::HashSet<_> = timeline.iter().filter_map(|event| {
         event.state_key.as_ref().map(|key| (event.event_type.clone(), key.clone()))
     }).collect();
@@ -1379,6 +1417,7 @@ async fn build_incremental_room_block<S: AuthState>(
     )
     .await
     .map_err(|e| MatrixError::from_conduit(e).into_response())?;
+    room_events = without_losing_state(state.storage().as_ref(), room_id, boundary.until, room_events).await?;
 
     // Cap to timeline_limit (take most-recent).
     let limited = room_events.len() > filter.timeline_limit as usize;

@@ -1392,6 +1392,74 @@ async fn sync_event_format_selects_client_or_federation_pdu() {
 }
 
 #[tokio::test]
+async fn sync_state_follows_resolution_not_arrival_order() {
+    let server = Server::new().await;
+    let alice = server.register("alice").await;
+    let room = server
+        .request(
+            Method::POST,
+            "/_matrix/client/v3/createRoom",
+            Some(token(&alice)),
+            Some(json!({"preset": "private_chat", "name": "Resolved"})),
+            200,
+        )
+        .await["room_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    // A second name arrives after the resolved one but carries an earlier
+    // timestamp, so state resolution keeps "Resolved".
+    let pool = sqlx::PgPool::connect(&server.database_url).await.unwrap();
+    sqlx::query(
+        "INSERT INTO events (event_id, room_id, sender, type, state_key, content, auth_events, prev_events,
+             signatures, hashes, origin_server_ts, depth)
+         SELECT $1, room_id, sender, type, state_key, '{\"name\":\"Arrived later\"}'::jsonb,
+             auth_events, prev_events, '{}'::jsonb, '{}'::jsonb, 1, depth
+         FROM events WHERE room_id = $2 AND type = 'm.room.name' AND state_key = ''",
+    )
+    .bind("$arrived-later:production.test")
+    .bind(&room)
+    .execute(&pool)
+    .await
+    .unwrap();
+    pool.close().await;
+
+    let names = |response: &Value, section: &str| -> Vec<String> {
+        let mut found = Vec::new();
+        for event in timeline(response, &room) {
+            if event["type"] == "m.room.name" {
+                found.push(event["content"]["name"].as_str().unwrap_or("").to_owned());
+            }
+        }
+        if let Some(events) = response["rooms"]["join"][&room][section].as_array() {
+            for event in events {
+                if event["type"] == "m.room.name" {
+                    found.push(event["content"]["name"].as_str().unwrap_or("").to_owned());
+                }
+            }
+        }
+        found
+    };
+    let initial = sync_with(&server, &alice, json!({"room": {"timeline": {"limit": 50}}}), None).await;
+    let shown = names(&initial, "state");
+    assert!(shown.contains(&"Resolved".to_owned()), "{initial}");
+    assert!(!shown.iter().any(|name| name == "Arrived later"), "{initial}");
+
+    let at_end = server
+        .request(
+            Method::GET,
+            "/_matrix/client/v3/sync?use_state_after=true&timeout=0",
+            Some(token(&alice)),
+            None,
+            200,
+        )
+        .await;
+    let ended = names(&at_end, "state_after");
+    assert!(ended.contains(&"Resolved".to_owned()), "{at_end}");
+    assert!(!ended.iter().any(|name| name == "Arrived later"), "{at_end}");
+}
+
+#[tokio::test]
 async fn key_inventory_fields_are_always_present() {
     let server = Server::new().await;
     let alice = server.register("alice").await;
