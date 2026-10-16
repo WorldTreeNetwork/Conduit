@@ -23,7 +23,6 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine as _};
 use ed25519_dalek::{Signature, VerifyingKey};
 use serde_json::json;
 
@@ -222,7 +221,7 @@ pub async fn verify_xmatrix(
     };
 
     // --- 6. Decode sig + pubkey, verify -------------------------------------
-    let sig_bytes = match STANDARD_NO_PAD.decode(&auth.sig_b64) {
+    let sig_bytes = match conduit::hashing::decode_unpadded_base64(&auth.sig_b64) {
         Ok(b) => b,
         Err(_) => return unauthorized("Cannot base64-decode signature"),
     };

@@ -61,7 +61,7 @@ pub fn signed_bytes(object: &Value) -> Option<Vec<u8>> {
 
 /// Decode an unpadded-base64 Ed25519 public key.
 pub fn decode_ed25519_public(key: &str) -> Option<ed25519_dalek::VerifyingKey> {
-    let bytes = STANDARD_NO_PAD.decode(key).ok()?;
+    let bytes = conduit::hashing::decode_unpadded_base64(key).ok()?;
     let array: [u8; 32] = bytes.as_slice().try_into().ok()?;
     ed25519_dalek::VerifyingKey::from_bytes(&array).ok()
 }
@@ -74,8 +74,7 @@ pub fn verify_signature(object: &Value, user_id: &str, key_id: &str, public_key:
     let (Some(verifying), Some(bytes)) = (decode_ed25519_public(public_key), signed_bytes(object)) else {
         return false;
     };
-    let Some(signature) = STANDARD_NO_PAD
-        .decode(signature)
+    let Some(signature) = conduit::hashing::decode_unpadded_base64(signature)
         .ok()
         .and_then(|bytes| <[u8; 64]>::try_from(bytes.as_slice()).ok())
     else {
@@ -264,6 +263,25 @@ mod tests {
         let bytes = signed_bytes(object).unwrap();
         let signature = STANDARD_NO_PAD.encode(key.sign(&bytes).to_bytes());
         object["signatures"][user][key_id] = json!(signature);
+    }
+
+    #[test]
+    fn padded_device_key_and_signature_verify() {
+        let key = key();
+        let user = "@a:example.org";
+        let mut object = json!({ "user_id": user });
+        sign(&mut object, user, "ed25519:DEV", &key);
+        let mut padded_sig = object["signatures"][user]["ed25519:DEV"].as_str().unwrap().to_owned();
+        let mut padded_key = public(&key);
+        assert!(!padded_sig.contains('=') && !padded_key.contains('='));
+        while padded_sig.len() % 4 != 0 {
+            padded_sig.push('=');
+        }
+        while padded_key.len() % 4 != 0 {
+            padded_key.push('=');
+        }
+        object["signatures"][user]["ed25519:DEV"] = json!(padded_sig);
+        assert!(verify_signature(&object, user, "ed25519:DEV", &padded_key));
     }
 
     fn device_keys(user: &str, device: &str, key: &SigningKey) -> Value {

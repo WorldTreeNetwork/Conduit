@@ -116,9 +116,9 @@
     },
     "app": {
       "requirement": {
-        "implemented+tested": 9,
+        "implemented+tested": 10,
         "implemented-untested": 0,
-        "partial": 4,
+        "partial": 3,
         "missing": 4,
         "not-applicable": 4,
         "total": 21
@@ -11149,23 +11149,33 @@
       "title": "Unpadded Base64 (encode unpadded, accept padded)",
       "source": "https://spec.matrix.org/v1.19/appendices/#unpadded-base64",
       "role": "homeserver",
-      "status": "partial",
+      "status": "implemented+tested",
       "code": [
+        {
+          "loc": "conduit/src/hashing.rs"
+        },
         {
           "loc": "conduit/src/signing.rs"
         },
         {
-          "loc": "conduit/src/hashing.rs"
+          "loc": "conduit-server/src/federation/middleware.rs"
+        },
+        {
+          "loc": "conduit-server/src/remote_keys.rs"
+        },
+        {
+          "loc": "conduit-server/src/api/client/key_identity.rs"
         }
       ],
       "tests": [
-        "conduit/tests/matrix_v11_crypto.rs"
+        "conduit/src/hashing.rs::padded_content_hash_is_accepted",
+        "conduit/src/signing.rs::padded_signature_still_verifies",
+        "conduit-server/src/api/client/key_identity.rs::padded_device_key_and_signature_verify",
+        "conduit-server/tests/federation_inbound.rs::padded_xmatrix_signature_is_accepted"
       ],
-      "tests_total": 1,
-      "gap_beads": [
-        "conduit-y99.40"
-      ],
-      "notes": "Padded input acceptance unverified."
+      "tests_total": 4,
+      "gap_beads": [],
+      "notes": "Encodings omit padding. Content hashes, event signatures, X-Matrix signatures, server-key documents, and device-key signatures accept padded standard base64."
     },
     {
       "id": "app.base64-urlsafe",

@@ -1332,6 +1332,36 @@ async fn federation_hierarchy_lists_peekable_descendants_and_inaccessible_childr
     assert_eq!(denied["errcode"], "M_NOT_FOUND");
 }
 
+/// Unpadded Base64 encodings omit `=`, and decoders accept it when present.
+/// A padded `X-Matrix` signature is still authenticated.
+#[tokio::test]
+async fn padded_xmatrix_signature_is_accepted() {
+    let (addr, _storage, key, _typing, _presence) = spawn_test_server("pad.test").await;
+    let path = "/_matrix/federation/v1/publicRooms";
+    let header = sign_req("GET", path, "pad.test", "pad.test", None, &key);
+    let marker = "sig=\"";
+    let start = header.find(marker).unwrap() + marker.len();
+    let end = start + header[start..].find('"').unwrap();
+    let mut sig = header[start..end].to_owned();
+    assert!(!sig.contains('='));
+    while sig.len() % 4 != 0 {
+        sig.push('=');
+    }
+    assert!(sig.ends_with('='));
+    let header = format!("{}{sig}{}", &header[..start], &header[end..]);
+    let client = reqwest::Client::new();
+    let response = client
+        .get(format!("http://{addr}{path}"))
+        .header("Authorization", header)
+        .send()
+        .await
+        .unwrap();
+    let status = response.status();
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(status, 200, "padded signature must authenticate: {body}");
+    assert!(body["chunk"].is_array());
+}
+
 /// Inbound `m.typing` is applied only for a joined user of the sending server,
 /// and a denied server's EDU is ignored.
 #[tokio::test]

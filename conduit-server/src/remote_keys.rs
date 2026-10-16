@@ -25,8 +25,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD_NO_PAD;
 use ed25519_dalek::{Signature, VerifyingKey};
 use serde::Deserialize;
 use tokio::sync::RwLock;
@@ -321,7 +319,7 @@ impl RemoteKeyCache {
 
         // 4. Store all keys into the cache.
         let decode = |kid: &str, key: &str| {
-            STANDARD_NO_PAD.decode(key).map_err(|e| FetchError::InvalidSignature {
+            conduit::hashing::decode_unpadded_base64(key).map_err(|e| FetchError::InvalidSignature {
                 server_name: server_name.to_owned(),
                 reason: format!("base64 decode of verify_key '{kid}': {e}"),
             })
@@ -372,8 +370,8 @@ impl RemoteKeyCache {
             let Some(vk_entry) = response.verify_keys.get(kid) else {
                 continue;
             };
-            let Ok(pub_bytes) = STANDARD_NO_PAD.decode(&vk_entry.key) else { continue };
-            let Ok(sig_bytes) = STANDARD_NO_PAD.decode(sig_b64) else { continue };
+            let Ok(pub_bytes) = conduit::hashing::decode_unpadded_base64(&vk_entry.key) else { continue };
+            let Ok(sig_bytes) = conduit::hashing::decode_unpadded_base64(sig_b64) else { continue };
             let Ok(pub_array): Result<[u8; 32], _> = pub_bytes.try_into() else {
                 continue;
             };

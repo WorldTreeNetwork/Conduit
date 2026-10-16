@@ -15,6 +15,7 @@
 //! Both operate on [`Pdu`] only: a local event ID can never affect them.
 
 use base64::engine::general_purpose::{STANDARD_NO_PAD, URL_SAFE_NO_PAD};
+use base64::engine::{DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig};
 use base64::Engine as _;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -59,20 +60,24 @@ pub fn content_hash(pdu: &Pdu) -> Result<String, HashingError> {
     Ok(STANDARD_NO_PAD.encode(digest))
 }
 
-/// Check the transmitted content hash. A mismatch indicates that the received
-/// event must be redacted after its signature is verified, rather than rejected.
-/// Compare decoded bytes, accepting both padded and unpadded base64.
-pub fn content_hash_matches(pdu: &Pdu) -> Result<bool, HashingError> {
-    use base64::engine::{DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig};
-
-    let Some(expected) = pdu.hashes.get("sha256").and_then(serde_json::Value::as_str) else {
-        return Ok(false);
-    };
+/// Standard Base64, padding optional. Encoding in this crate stays unpadded.
+/// <https://spec.matrix.org/v1.19/appendices/#unpadded-base64>
+pub fn decode_unpadded_base64(input: impl AsRef<[u8]>) -> Result<Vec<u8>, base64::DecodeError> {
     let decoder = GeneralPurpose::new(
         &base64::alphabet::STANDARD,
         GeneralPurposeConfig::new().with_decode_padding_mode(DecodePaddingMode::Indifferent),
     );
-    let Ok(expected) = decoder.decode(expected) else {
+    decoder.decode(input)
+}
+
+/// Check the transmitted content hash. A mismatch indicates that the received
+/// event must be redacted after its signature is verified, rather than rejected.
+/// Compare decoded bytes, accepting both padded and unpadded base64.
+pub fn content_hash_matches(pdu: &Pdu) -> Result<bool, HashingError> {
+    let Some(expected) = pdu.hashes.get("sha256").and_then(serde_json::Value::as_str) else {
+        return Ok(false);
+    };
+    let Ok(expected) = decode_unpadded_base64(expected) else {
         return Ok(false);
     };
     let actual = STANDARD_NO_PAD
@@ -180,6 +185,22 @@ mod tests {
     fn content_hash_is_standard_base64() {
         let hash = content_hash(&make_event()).unwrap();
         assert!(!hash.contains('_') && !hash.contains('-'));
+        assert!(!hash.contains('='));
+    }
+
+    #[test]
+    fn padded_content_hash_is_accepted() {
+        let mut event = make_event_no_extras();
+        let hash = content_hash(&event).unwrap();
+        let mut padded = hash.clone();
+        while padded.len() % 4 != 0 {
+            padded.push('=');
+        }
+        assert!(padded.ends_with('='));
+        event.hashes = json!({ "sha256": padded });
+        assert!(content_hash_matches(&event).unwrap());
+        event.hashes = json!({ "sha256": hash });
+        assert!(content_hash_matches(&event).unwrap());
     }
 
     #[test]

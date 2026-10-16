@@ -26,8 +26,8 @@ Statuses: **tested** = present and asserted by a named test; **untested** = pres
 | Identity Service API (homeserver as consumer) | endpoints | 5 | 0 | 2 | 0 | 16 | 23 |
 | Identity Service API (homeserver as consumer) | requirements | 1 | 0 | 0 | 0 | 0 | 1 |
 | Room versions 1–12 | requirements | 30 | 0 | 6 | 25 | 0 | 61 |
-| Appendices | requirements | 9 | 0 | 4 | 4 | 4 | 21 |
-| All |  | 326 | 3 | 57 | 42 | 37 | 465 |
+| Appendices | requirements | 10 | 0 | 3 | 4 | 4 | 21 |
+| All |  | 327 | 3 | 56 | 42 | 37 | 465 |
 ## Gap beads
 
 New beads filed by this inventory (children of `conduit-y99`):
@@ -44,7 +44,7 @@ New beads filed by this inventory (children of `conduit-y99`):
 - `conduit-y99.37` - CLOSED as superseded by conduit-y99.19 landing (de3d1b9/97dbe71); no rows reference it (0 row(s))
 - `conduit-y99.38` - Extended profile fields (keyName GET/PUT/DELETE, m.tz), lookup visibility, presence propagation (0 row(s))
 - `conduit-y99.39` - Server-side key backup completeness (missing DELETEs, etag/count, M_WRONG_ROOM_KEYS_VERSION) (0 row(s))
-- `conduit-y99.40` - Event, identifier and appendix grammar validation (size limits, server name/alias/opaque id grammar, test vectors, M_BAD_ALIAS) (10 row(s))
+- `conduit-y99.40` - Event, identifier and appendix grammar validation (size limits, server name/alias/opaque id grammar, test vectors, M_BAD_ALIAS) (6 row(s))
 - `conduit-y99.41` - Server notices module (0 row(s))
 - `conduit-y99.42` - Deprecated legacy client endpoints (/events, /events/{id}, /initialSync, rooms initialSync) (0 row(s))
 - `conduit-y99.43` - Account locking and suspension admin endpoints and enforcement (0 row(s))
@@ -613,7 +613,7 @@ In-flight / pre-existing beads referenced (not duplicated):
 
 | ID | Requirement | Status | Code | Tests | Gap | Notes |
 |---|---|---|---|---|---|---|
-| `app.base64` | [Unpadded Base64 (encode unpadded, accept padded)](https://spec.matrix.org/v1.19/appendices/#unpadded-base64) | partial | `conduit/src/signing.rs`<br>`conduit/src/hashing.rs` | `matrix_v11_crypto.rs` | `conduit-y99.40` | Padded input acceptance unverified. |
+| `app.base64` | [Unpadded Base64 (encode unpadded, accept padded)](https://spec.matrix.org/v1.19/appendices/#unpadded-base64) | tested | `conduit/src/hashing.rs`<br>`conduit/src/signing.rs`<br>`conduit-server/src/federation/middleware.rs`<br>`conduit-server/src/remote_keys.rs`<br>`conduit-server/src/api/client/key_identity.rs` | `hashing.rs::padded_content_hash_is_accepted`<br>`signing.rs::padded_signature_still_verifies`<br>`key_identity.rs::padded_device_key_and_signature_verify`<br>`federation_inbound.rs::padded_xmatrix_signature_is_accepted` | | Encodings omit padding. Content hashes, event signatures, X-Matrix signatures, server-key documents, and device-key signatures accept padded standard base64. |
 | `app.base64-urlsafe` | [URL-safe unpadded Base64 (event IDs v4+)](https://spec.matrix.org/v1.19/appendices/#url-safe-unpadded-base64) | tested | `conduit/src/hashing.rs` | `matrix_v11_crypto.rs` |  |  |
 | `app.binary-data` | [Binary data](https://spec.matrix.org/v1.19/appendices/#binary-data) | n/a |  |  |  | *informative* Informative. |
 | `app.canonical-json` | [Canonical JSON](https://spec.matrix.org/v1.19/appendices/#canonical-json) | tested | `conduit/src/canonical_json.rs` | `conduit/src/canonical_json.rs::spec_example`<br>`conduit/src/canonical_json.rs::out_of_range_integer` |  |  |

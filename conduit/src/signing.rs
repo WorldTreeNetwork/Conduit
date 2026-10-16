@@ -338,7 +338,7 @@ fn verify_with_bytes(bytes: &[u8], sig_val: &serde_json::Value, pub_bytes: &[u8]
         server_name: String::new(),
         key_id: String::new(),
     })?;
-    let sig_bytes = STANDARD_NO_PAD.decode(sig_b64)?;
+    let sig_bytes = crate::hashing::decode_unpadded_base64(sig_b64)?;
     let sig_array: [u8; 64] = sig_bytes
         .as_slice()
         .try_into()
@@ -395,6 +395,22 @@ mod tests {
         sign_authored(&mut pdu, &key, "example.org").unwrap();
         pdu.content = json!({"membership": "ban"});
         assert!(verify_event_signature(&pdu, "example.org", &key.key_id, &public_bytes(&key)).is_err());
+    }
+
+    #[test]
+    fn padded_signature_still_verifies() {
+        let key = generate_server_key();
+        let mut pdu = make_pdu();
+        sign_authored(&mut pdu, &key, "example.org").unwrap();
+        let sig = pdu.signatures["example.org"][&key.key_id].as_str().unwrap().to_owned();
+        assert!(!sig.contains('='));
+        let mut padded = sig.clone();
+        while padded.len() % 4 != 0 {
+            padded.push('=');
+        }
+        assert!(padded.ends_with('='));
+        pdu.signatures["example.org"][&key.key_id] = json!(padded);
+        verify_event_signature(&pdu, "example.org", &key.key_id, &public_bytes(&key)).unwrap();
     }
 
     #[test]
