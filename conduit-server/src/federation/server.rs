@@ -122,6 +122,16 @@ pub(crate) fn forbidden(msg: &str) -> Response {
     matrix_error(StatusCode::FORBIDDEN, "M_FORBIDDEN", msg)
 }
 
+/// `Some` when the origin must not touch this room (403) or the ACL
+/// lookup failed. Absent ACL allows the server.
+pub(crate) async fn ensure_server_acl(state: &FedState, origin: &str, room_id: &str) -> Option<Response> {
+    match conduit::server_acl::server_allowed_by_room(state.storage.as_ref(), room_id, origin).await {
+        Ok(true) => None,
+        Ok(false) => Some(forbidden("Server is denied access to this room by the server ACL")),
+        Err(error) => Some(internal(&error.to_string())),
+    }
+}
+
 pub(crate) fn internal(msg: &str) -> Response {
     matrix_error(StatusCode::INTERNAL_SERVER_ERROR, "M_UNKNOWN", msg)
 }
@@ -222,6 +232,14 @@ pub async fn send_transaction(
             }
         };
         let eid = conduit::hashing::event_id(&decoded.pdu).unwrap_or_default();
+        match conduit::server_acl::server_allowed_by_room(state.storage.as_ref(), &decoded.pdu.room_id, &origin).await {
+            Ok(false) => {
+                pdu_results.insert(eid, json!({ "error": "server ACL denies this server" }));
+                continue;
+            }
+            Ok(true) => {}
+            Err(error) => return internal(&error.to_string()),
+        }
         match process_incoming_pdu(
             &state.storage,
             &state.remote_keys,
@@ -265,10 +283,13 @@ pub async fn make_join(
     Path((room_id, user_id)): Path<(String, String)>,
     Query(_query): Query<HashMap<String, String>>,
 ) -> Response {
-    let _origin = match origin_ext {
+    let origin = match origin_ext {
         Some(axum::extract::Extension(o)) => o.server_name,
         None => return unauthorized("Not authenticated"),
     };
+    if let Some(response) = ensure_server_acl(&state, &origin, &room_id).await {
+        return response;
+    }
 
     // Check the room exists (has a create event).
     let create_ev = match state
@@ -410,6 +431,9 @@ pub async fn send_join(
         Some(axum::extract::Extension(o)) => o.server_name,
         None => return unauthorized("Not authenticated"),
     };
+    if let Some(response) = ensure_server_acl(&state, &origin, &room_id).await {
+        return response;
+    }
 
     let decoded = match decode_pdu(pdu_val, crate::federation::now_ms()) {
         Ok(decoded) => decoded,
@@ -530,6 +554,9 @@ pub async fn invite(
         Some(axum::extract::Extension(o)) => o.server_name,
         None => return unauthorized("Not authenticated"),
     };
+    if let Some(response) = ensure_server_acl(&state, &origin, &room_id).await {
+        return response;
+    }
 
     let decoded = match decode_pdu(body.event, crate::federation::now_ms()) {
         Ok(decoded) => decoded,
@@ -608,8 +635,12 @@ pub async fn state(
     Path(room_id): Path<String>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
-    if origin_ext.is_none() {
-        return unauthorized("Not authenticated");
+    let origin = match origin_ext {
+        Some(axum::extract::Extension(o)) => o.server_name,
+        None => return unauthorized("Not authenticated"),
+    };
+    if let Some(response) = ensure_server_acl(&state, &origin, &room_id).await {
+        return response;
     }
 
     let _event_id = params.get("event_id").cloned().unwrap_or_default();
@@ -646,8 +677,12 @@ pub async fn state_ids(
     Path(room_id): Path<String>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
-    if origin_ext.is_none() {
-        return unauthorized("Not authenticated");
+    let origin = match origin_ext {
+        Some(axum::extract::Extension(o)) => o.server_name,
+        None => return unauthorized("Not authenticated"),
+    };
+    if let Some(response) = ensure_server_acl(&state, &origin, &room_id).await {
+        return response;
     }
 
     let _event_id = params.get("event_id").cloned().unwrap_or_default();
@@ -688,6 +723,9 @@ pub async fn backfill(
         Some(axum::extract::Extension(o)) => o.server_name,
         None => return unauthorized("Not authenticated"),
     };
+    if let Some(response) = ensure_server_acl(&state, &origin, &room_id).await {
+        return response;
+    }
 
     let limit: usize = params
         .get("limit")
@@ -789,6 +827,9 @@ pub async fn get_missing_events(
         Some(axum::extract::Extension(o)) => o.server_name.clone(),
         None => return unauthorized("Not authenticated"),
     };
+    if let Some(response) = ensure_server_acl(&state, &origin, &room_id).await {
+        return response;
+    }
 
     let limit = body.limit.min(20);
     let earliest: HashSet<String> = body.earliest_events.into_iter().collect();
@@ -1067,6 +1108,13 @@ pub(crate) async fn handle_edu(
     edu: &serde_json::Value,
 ) -> conduit::Result<()> {
     let edu_type = edu.get("edu_type").and_then(|v| v.as_str()).unwrap_or("");
+    if edu_type == "m.typing" || edu_type == "m.receipt" {
+        if let Some(room_id) = edu.get("content").and_then(|content| content.get("room_id")).and_then(|id| id.as_str()) {
+            if !conduit::server_acl::server_allowed_by_room(state.storage.as_ref(), room_id, origin).await? {
+                return Ok(());
+            }
+        }
+    }
     if edu_type == "m.direct_to_device" {
         #[derive(Deserialize)]
         struct DirectToDevice {

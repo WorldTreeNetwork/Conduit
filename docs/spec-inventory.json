@@ -5108,13 +5108,12 @@
         }
       ],
       "tests": [
-        "conduit-server/tests/federation_inbound.rs::backfill_returns_history_visibility_filtered_events"
+        "conduit-server/tests/federation_inbound.rs::backfill_returns_history_visibility_filtered_events",
+        "conduit-server/tests/production_pdu.rs::server_acl_denies_remote_participation_until_lifted"
       ],
-      "tests_total": 1,
-      "gap_beads": [
-        "conduit-y99.22"
-      ],
-      "notes": "ACL protection open (y99.22)."
+      "tests_total": 2,
+      "gap_beads": [],
+      "notes": "History visibility filtering plus server ACL denial."
     },
     {
       "id": "ss.ep.post_matrixfederationv1get_missing_eventsroomid",
@@ -8320,14 +8319,28 @@
       "title": "Server ACLs for rooms",
       "source": "https://spec.matrix.org/v1.19/client-server-api/#server-access-control-lists-acls-for-rooms",
       "role": "homeserver",
-      "status": "missing",
-      "code": [],
-      "tests": [],
-      "tests_total": 0,
-      "gap_beads": [
-        "conduit-y99.22"
+      "status": "implemented+tested",
+      "code": [
+        {
+          "loc": "conduit/src/server_acl.rs"
+        },
+        {
+          "loc": "conduit-server/src/federation/server.rs (ensure_server_acl)"
+        },
+        {
+          "loc": "conduit-server/src/federation/spec_v119.rs"
+        },
+        {
+          "loc": "conduit-server/src/api/client/rooms.rs (invite_user)"
+        }
       ],
-      "notes": ".m.rule.room.server_acl suppression done (y99.30); ACL enforcement is y99.22."
+      "tests": [
+        "conduit-server/tests/production_pdu.rs::server_acl_denies_remote_participation_until_lifted",
+        "conduit/src/server_acl.rs::acl_order_globs_ports_and_ip_literals"
+      ],
+      "tests_total": 2,
+      "gap_beads": [],
+      "notes": "A denied origin receives 403 on the federation participation endpoints and a per-PDU error on /send; its typing and receipt EDUs are ignored. Inviting a user on a denied server is 403 before any outbound request. Replacing the deny list restores access. Globs, ports, and allow_ip_literals follow the v1.19 order."
     },
     {
       "id": "cs.mod.mentions",
@@ -9267,14 +9280,25 @@
       "title": "Server ACLs enforcement",
       "source": "https://spec.matrix.org/v1.19/server-server-api/#server-access-control-lists-acls",
       "role": "homeserver",
-      "status": "missing",
-      "code": [],
-      "tests": [],
-      "tests_total": 0,
-      "gap_beads": [
-        "conduit-y99.22"
+      "status": "implemented+tested",
+      "code": [
+        {
+          "loc": "conduit/src/server_acl.rs"
+        },
+        {
+          "loc": "conduit-server/src/federation/server.rs (ensure_server_acl)"
+        },
+        {
+          "loc": "conduit-server/src/federation/spec_v119.rs"
+        }
       ],
-      "notes": ""
+      "tests": [
+        "conduit-server/tests/production_pdu.rs::server_acl_denies_remote_participation_until_lifted",
+        "conduit/src/server_acl.rs::acl_order_globs_ports_and_ip_literals"
+      ],
+      "tests_total": 2,
+      "gap_beads": [],
+      "notes": "Denied origins are rejected on the MUST endpoints (state, state_ids, backfill, get_missing_events, event_auth, make_join, send_join, make_leave, send_leave, make_knock, send_knock, invite) and on /send per PDU. Typing and receipt EDUs from a denied origin are dropped. Lifting the deny list restores the previously allowed requests."
     },
     {
       "id": "ss.policy-servers",
@@ -11326,22 +11350,24 @@
       "title": "Glob-style matching (push rules, server ACLs)",
       "source": "https://spec.matrix.org/v1.19/appendices/#glob-style-matching",
       "role": "homeserver",
-      "status": "partial",
+      "status": "implemented+tested",
       "code": [
         {
           "loc": "conduit-server/src/api/client/push/rules.rs"
+        },
+        {
+          "loc": "conduit/src/server_acl.rs"
         }
       ],
       "tests": [
         "conduit-server/tests/push.rs::push_rules_crud",
         "conduit-server/src/api/client/push/rules.rs::globs_match_whole_values_case_insensitively",
-        "conduit-server/src/api/client/push/rules.rs::body_globs_match_at_word_boundaries"
+        "conduit-server/src/api/client/push/rules.rs::body_globs_match_at_word_boundaries",
+        "conduit/src/server_acl.rs::acl_order_globs_ports_and_ip_literals"
       ],
-      "tests_total": 3,
-      "gap_beads": [
-        "conduit-y99.22"
-      ],
-      "notes": "Push rule globs done (y99.30); server ACL globs are y99.22."
+      "tests_total": 4,
+      "gap_beads": [],
+      "notes": "* matches zero or more characters and ? matches exactly one, for both push-rule globs and server ACL globs."
     },
     {
       "id": "app.dot-paths",

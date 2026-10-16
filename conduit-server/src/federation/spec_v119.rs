@@ -122,8 +122,12 @@ pub async fn event_auth(
     origin_ext: Option<axum::extract::Extension<FederationOrigin>>,
     Path((room_id, event_id)): Path<(String, String)>,
 ) -> Response {
-    if origin_of(origin_ext).is_err() {
-        return unauthorized("Not authenticated");
+    let origin = match origin_of(origin_ext) {
+        Ok(origin) => origin,
+        Err(response) => return response,
+    };
+    if let Some(response) = super::server::ensure_server_acl(&state, &origin, &room_id).await {
+        return response;
     }
     let event = match state.storage.get_event(&event_id).await {
         Ok(Some(event)) if event.room_id == room_id => event,
@@ -514,6 +518,9 @@ pub async fn make_knock(
         Ok(origin) => origin,
         Err(response) => return response,
     };
+    if let Some(response) = super::server::ensure_server_acl(&state, &origin, &room_id).await {
+        return response;
+    }
     if server_of_user_id(&user_id) != Some(origin.as_str()) {
         return invalid_param("user is not on the requesting server");
     }
@@ -559,6 +566,9 @@ pub async fn make_leave(
         Ok(origin) => origin,
         Err(response) => return response,
     };
+    if let Some(response) = super::server::ensure_server_acl(&state, &origin, &room_id).await {
+        return response;
+    }
     if server_of_user_id(&user_id) != Some(origin.as_str()) {
         return invalid_param("user is not on the requesting server");
     }
@@ -646,6 +656,9 @@ pub async fn send_knock(
         Ok(origin) => origin,
         Err(response) => return response,
     };
+    if let Some(response) = super::server::ensure_server_acl(&state, &origin, &room_id).await {
+        return response;
+    }
     let version = match room_version(&state, &room_id).await {
         Ok(version) => version,
         Err(response) => return response,
@@ -673,6 +686,9 @@ pub async fn send_leave(
         Ok(origin) => origin,
         Err(response) => return response,
     };
+    if let Some(response) = super::server::ensure_server_acl(&state, &origin, &room_id).await {
+        return response;
+    }
     match accept_membership(&state, &origin, &room_id, &event_id, body, "leave").await {
         Ok(_) => (StatusCode::OK, Json(json!({}))).into_response(),
         Err(response) => response,

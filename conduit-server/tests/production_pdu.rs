@@ -384,3 +384,140 @@ async fn minted_openid_token_is_redeemed_by_federation_userinfo() {
         .await;
     assert_eq!(other["errcode"], "M_FORBIDDEN", "{other}");
 }
+
+#[tokio::test]
+async fn server_acl_denies_remote_participation_until_lifted() {
+    let remote = spawn_remote().await;
+    let server = federated_server(&remote).await;
+    let alice = server.register("alice").await;
+    let token = alice["access_token"].as_str().unwrap();
+    let carol = server.register("carol").await;
+    let room = server
+        .request(Method::POST, "/_matrix/client/v3/createRoom", Some(token), Some(json!({"preset": "public_chat"})), 200)
+        .await["room_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let marker = server
+        .request(
+            Method::PUT,
+            &format!("/_matrix/client/v3/rooms/{}/send/m.room.message/acl-marker", enc(&room)),
+            Some(token),
+            Some(json!({"msgtype": "m.text", "body": "marker"})),
+            200,
+        )
+        .await;
+    let marker_id = marker["event_id"].as_str().unwrap().to_owned();
+
+    let state_path = format!("/_matrix/federation/v1/state/{}", enc(&room));
+    let ids_path = format!("/_matrix/federation/v1/state_ids/{}", enc(&room));
+    let join_path = format!("/_matrix/federation/v1/make_join/{}/{}", enc(&room), enc("@r:remote.test"));
+    let backfill_path = format!("/_matrix/federation/v1/backfill/{}?limit=1", enc(&room));
+    let auth_path = format!("/_matrix/federation/v1/event_auth/{}/{}", enc(&room), enc(&marker_id));
+    let missing_path = format!("/_matrix/federation/v1/get_missing_events/{}", enc(&room));
+    let knock_path = format!("/_matrix/federation/v1/make_knock/{}/{}", enc(&room), enc("@r:remote.test"));
+    let leave_path = format!("/_matrix/federation/v1/make_leave/{}/{}", enc(&room), enc("@r:remote.test"));
+    let send_knock = format!("/_matrix/federation/v1/send_knock/{}/$unused", enc(&room));
+    let send_leave = format!("/_matrix/federation/v2/send_leave/{}/$unused", enc(&room));
+
+    let open_state = fed(&server, &remote, Method::GET, &state_path, None, 200).await;
+    assert!(open_state["pdus"].as_array().unwrap().len() > 1, "{open_state}");
+    assert!(fed(&server, &remote, Method::GET, &ids_path, None, 200).await["pdu_ids"].as_array().unwrap().len() > 1);
+    assert!(fed(&server, &remote, Method::GET, &join_path, None, 200).await["event"].is_object());
+    assert!(fed(&server, &remote, Method::GET, &backfill_path, None, 200).await["pdus"].is_array());
+    assert!(fed(&server, &remote, Method::GET, &auth_path, None, 200).await["auth_chain"].is_array());
+    assert!(fed(&server, &remote, Method::POST, &missing_path, Some(json!({"limit": 1})), 200).await["events"].is_array());
+
+    let acl = format!("/_matrix/client/v3/rooms/{}/state/m.room.server_acl", enc(&room));
+    server
+        .request(
+            Method::PUT,
+            &acl,
+            Some(token),
+            Some(json!({"allow": ["*"], "deny": ["remote.test"], "allow_ip_literals": false})),
+            200,
+        )
+        .await;
+
+    let denied = |path: String, method: Method, body: Option<Value>| {
+        let server = &server;
+        let remote = &remote;
+        async move {
+            let response = fed(server, remote, method, &path, body, 403).await;
+            assert_eq!(response["errcode"], "M_FORBIDDEN", "{path}: {response}");
+            assert!(
+                response["error"].as_str().unwrap_or("").contains("server ACL"),
+                "{path}: {response}"
+            );
+        }
+    };
+    denied(state_path.clone(), Method::GET, None).await;
+    denied(ids_path.clone(), Method::GET, None).await;
+    denied(join_path.clone(), Method::GET, None).await;
+    denied(backfill_path.clone(), Method::GET, None).await;
+    denied(auth_path.clone(), Method::GET, None).await;
+    denied(missing_path.clone(), Method::POST, Some(json!({"limit": 1}))).await;
+    denied(knock_path.clone(), Method::GET, None).await;
+    denied(leave_path.clone(), Method::GET, None).await;
+    denied(send_knock.clone(), Method::PUT, Some(json!({}))).await;
+    denied(send_leave.clone(), Method::PUT, Some(json!({}))).await;
+
+    let (event_id, pdu) = sign(
+        &remote,
+        Pdu::new(
+            &room,
+            "@r:remote.test",
+            "m.room.message",
+            None,
+            json!({"msgtype": "m.text", "body": "from a denied server"}),
+            1_700_000_000_000,
+            vec![],
+            vec![],
+            3,
+        ),
+    );
+    let sent = fed(
+        &server,
+        &remote,
+        Method::PUT,
+        "/_matrix/federation/v1/send/acl-deny-1",
+        Some(txn(vec![pdu], vec![])),
+        200,
+    )
+    .await;
+    assert_eq!(sent["pdus"][&event_id]["error"], "server ACL denies this server", "{sent}");
+    server
+        .request(
+            Method::GET,
+            &format!("/_matrix/client/v3/rooms/{}/event/{}", enc(&room), enc(&event_id)),
+            Some(token),
+            None,
+            404,
+        )
+        .await;
+
+    let invite = format!("/_matrix/client/v3/rooms/{}/invite", enc(&room));
+    let blocked = server
+        .request(Method::POST, &invite, Some(token), Some(json!({"user_id": "@bob:remote.test"})), 403)
+        .await;
+    assert_eq!(blocked["errcode"], "M_FORBIDDEN", "{blocked}");
+    server
+        .request(Method::POST, &invite, Some(token), Some(json!({"user_id": carol["user_id"]})), 200)
+        .await;
+
+    server
+        .request(Method::PUT, &acl, Some(token), Some(json!({"allow": ["*"], "deny": []})), 200)
+        .await;
+    assert!(fed(&server, &remote, Method::GET, &state_path, None, 200).await["pdus"].as_array().unwrap().len() > 1);
+    assert!(fed(&server, &remote, Method::GET, &ids_path, None, 200).await["pdu_ids"].is_array());
+    assert!(fed(&server, &remote, Method::GET, &join_path, None, 200).await["event"].is_object());
+    assert!(fed(&server, &remote, Method::GET, &backfill_path, None, 200).await["pdus"].is_array());
+    assert!(fed(&server, &remote, Method::GET, &auth_path, None, 200).await["auth_chain"].is_array());
+    let knocking = fed(&server, &remote, Method::GET, &knock_path, None, 403).await;
+    assert_eq!(knocking["errcode"], "M_FORBIDDEN", "{knocking}");
+    assert!(!knocking["error"].as_str().unwrap_or("").contains("server ACL"), "{knocking}");
+    let leaving = fed(&server, &remote, Method::GET, &leave_path, None, 403).await;
+    assert!(leaving["error"].as_str().unwrap_or("").contains("not in the room"), "{leaving}");
+    let knock_body = fed(&server, &remote, Method::PUT, &send_knock, Some(json!({})), 400).await;
+    assert_eq!(knock_body["errcode"], "M_BAD_JSON", "{knock_body}");
+}

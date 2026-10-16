@@ -411,6 +411,17 @@ pub async fn invite_user<S: AuthState>(
     if let Err(blocked) = super::room_membership::check_invite_allowed(&state, &body.user_id).await {
         return blocked;
     }
+    // A server denied by m.room.server_acl cannot be invited into the room.
+    // The check is local so it fails before any outbound federation.
+    if let Some(server_name) = conduit::signing::server_of_user_id(&body.user_id) {
+        match conduit::server_acl::server_allowed_by_room(state.storage().as_ref(), &room_id, server_name).await {
+            Ok(false) => {
+                return MatrixError::forbidden("Server is denied access to this room by the server ACL").into_response();
+            }
+            Ok(true) => {}
+            Err(error) => return MatrixError::from_conduit(error).into_response(),
+        }
+    }
     let room = Room::new(&room_id);
     match room.invite_with_reason(sender, &body.user_id, false, body.reason.as_deref(), &RoomEventSenderWrapper(&state)).await {
         Ok(_) => (StatusCode::OK, Json(json!({}))).into_response(),
