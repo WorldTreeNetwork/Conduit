@@ -189,7 +189,7 @@ async fn build_sign_and_persist_inner<S: AuthState>(
 
 /// Key under which a room-version-1 or 2 event keeps the JSON that was signed.
 /// Client responses omit extensions, so this stays off the client wire.
-pub(crate) const LEGACY_WIRE: &str = "io.conduit.v1_event";
+pub(crate) const LEGACY_WIRE: &str = conduit::event::LEGACY_EVENT_DOCUMENT;
 
 /// An event signed for one room version.
 pub(crate) struct SignedDocument {

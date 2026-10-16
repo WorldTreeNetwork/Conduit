@@ -327,6 +327,16 @@ async fn send_transaction(
     let mut verdicts = serde_json::Map::new();
     let mut withheld = 0usize;
     for value in values {
+        if value.get("event_id").and_then(Value::as_str).is_some_and(|id| id.contains(':')) {
+            // Room versions 1 and 2. The id is `$opaque:server` and the
+            // references are tuples. A v3+ id has no colon, so an old
+            // Event snapshot still takes the branch below.
+            match WirePdu::from_legacy_document(value) {
+                Some(wire) => pdus.push(wire),
+                None => withheld += 1,
+            }
+            continue;
+        }
         if value.get("event_id").is_some() {
             // Legacy flattened Event snapshot (written before add-pdu-wire). A
             // v3+ wire PDU never carries event_id, so the key is the local ID.

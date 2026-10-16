@@ -2220,6 +2220,9 @@ impl Storage for MemoryStorage {
             .unwrap_or(11);
         let class = crate::event::classify(&event.event_id, &event.pdu);
         let mut wire = WirePdu::checked(&event.event_id, event.pdu.clone());
+        if wire.is_none() && version < 3 {
+            wire = WirePdu::stored_legacy(&event.event_id, event.pdu.clone());
+        }
         if wire.is_none() && (3..11).contains(&version) {
             if let Some(candidate) = WirePdu::checked_for_version(version, event.pdu.clone()) {
                 if candidate.event_id() == event.event_id {

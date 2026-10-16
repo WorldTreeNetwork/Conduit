@@ -182,29 +182,61 @@ pub fn classify(saved_event_id: &str, pdu: &Pdu) -> IntegrityClass {
     }
 }
 
+/// Extension that holds the signed room-version-1 or 2 JSON.
+///
+/// The PDU projection cannot represent tuple `auth_events`. Client responses
+/// omit extensions, so the document stays off the client wire.
+pub const LEGACY_EVENT_DOCUMENT: &str = "io.conduit.v1_event";
+
 /// A PDU that may be put on the federation wire.
 ///
 /// [`WirePdu::checked`] accepts a v11 reference hash. [`WirePdu::checked_for_version`]
 /// accepts the id [`crate::room_version::event_id_for`] derives, which is
 /// standard base64 in room version 3. A content-hash mismatch yields the v11
-/// redaction; an ID mismatch yields nothing. The stored id is what emitters
-/// put in the request path. Serialization is the PDU alone: room versions 3
-/// and later do not carry `event_id` on the wire.
+/// redaction; an ID mismatch yields nothing. Room versions 1 and 2 have no
+/// derived id; [`WirePdu::stored_legacy`] serves the signed document, which
+/// still carries `event_id` and tuple `auth_events`. Versions 3 and later
+/// serialize the PDU alone.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WirePdu {
     pdu: Pdu,
     event_id: String,
+    /// Present for room versions 1 and 2. Serialization emits this document.
+    legacy: Option<Value>,
 }
 
 impl Serialize for WirePdu {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        self.pdu.serialize(serializer)
+        match &self.legacy {
+            Some(document) => document.serialize(serializer),
+            None => self.pdu.serialize(serializer),
+        }
     }
 }
 
 impl WirePdu {
     fn bundle(event_id: impl Into<String>, pdu: Pdu) -> WirePdu {
-        WirePdu { pdu, event_id: event_id.into() }
+        WirePdu { pdu, event_id: event_id.into(), legacy: None }
+    }
+
+    /// A room-version-1 or 2 document. `event_id` is `$opaque:server`, and
+    /// `auth_events` / `prev_events` are tuples. Serialization is `document`.
+    pub fn from_legacy_document(document: Value) -> Option<WirePdu> {
+        let expected = document.get("event_id").and_then(Value::as_str)?.to_owned();
+        let decoded = crate::wire::decode_v1_pdu(document.clone(), 0).ok()?;
+        let event_id = decoded.explicit_event_id?;
+        if event_id != expected {
+            return None;
+        }
+        Some(WirePdu { pdu: decoded.pdu, event_id, legacy: Some(document) })
+    }
+
+    /// The signed document stored beside a room-version-1 or 2 PDU.
+    pub fn stored_legacy(event_id: &str, pdu: Pdu) -> Option<WirePdu> {
+        let raw = pdu.extensions.get(LEGACY_EVENT_DOCUMENT).and_then(Value::as_str)?;
+        let document: Value = serde_json::from_str(raw).ok()?;
+        let wire = Self::from_legacy_document(document)?;
+        (wire.event_id() == event_id).then_some(wire)
     }
 
     pub fn checked(expected_event_id: &str, pdu: Pdu) -> Option<WirePdu> {
@@ -348,5 +380,33 @@ mod tests {
         let wire = WirePdu::retained_for_version(5, &id, pruned).expect("version 5 id");
         assert_eq!(wire.event_id(), id);
         assert_eq!(wire.pdu().content["aliases"], json!(["#kept:example.org"]));
+    }
+
+    #[test]
+    fn legacy_wire_keeps_event_id_and_tuple_references() {
+        let document = json!({
+            "auth_events": [],
+            "content": {"body": "hi"},
+            "depth": 1,
+            "event_id": "$abc:example.org",
+            "hashes": {"sha256": "aaaa"},
+            "origin": "example.org",
+            "origin_server_ts": 1,
+            "prev_events": [["$prev:example.org", {"sha256": "bbbb"}]],
+            "room_id": "!r:example.org",
+            "sender": "@a:example.org",
+            "signatures": {"example.org": {"ed25519:0": "cccc"}},
+            "type": "m.room.message"
+        });
+        let wire = WirePdu::from_legacy_document(document.clone()).expect("v1 document");
+        let sent = serde_json::to_value(&wire).unwrap();
+        assert_eq!(sent["event_id"], "$abc:example.org");
+        assert!(sent["prev_events"][0].is_array());
+        assert!(sent.get(LEGACY_EVENT_DOCUMENT).is_none());
+        let mut stored = wire.pdu().clone();
+        stored.extensions.insert(LEGACY_EVENT_DOCUMENT.into(), json!(document.to_string()));
+        let again = WirePdu::stored_legacy("$abc:example.org", stored.clone()).expect("stored document");
+        assert_eq!(serde_json::to_value(&again).unwrap()["event_id"], "$abc:example.org");
+        assert!(WirePdu::stored_legacy("$other:example.org", stored).is_none());
     }
 }

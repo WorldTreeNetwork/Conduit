@@ -250,6 +250,9 @@ fn event_from_row(row: EventRow) -> Event {
 /// missing create event uses 11, which matches an absent create.
 /// `Some` when `version` is 3–10 and `event` reproduces that version's id.
 fn versioned_pdu(version: u32, event: &Event) -> Option<WirePdu> {
+    if version < 3 {
+        return WirePdu::stored_legacy(&event.event_id, event.pdu.clone());
+    }
     if !(3..11).contains(&version) {
         return None;
     }

@@ -146,6 +146,84 @@ async fn authored_room_events_are_sent_to_joined_servers() {
     );
 }
 
+#[tokio::test]
+async fn remote_v1_and_v2_messages_are_sent_as_legacy_pdus() {
+    let bodies = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let bodies_route = Arc::clone(&bodies);
+    let url = serve(
+        Arc::new(generate_server_key()),
+        Router::new().route(
+            "/_matrix/federation/v1/send/:txn",
+            put(move |Json(body): Json<Value>| {
+                let bodies = Arc::clone(&bodies_route);
+                async move {
+                    bodies.lock().unwrap().push(body);
+                    Json(json!({ "pdus": {} }))
+                }
+            }),
+        ),
+    )
+    .await;
+    let server = Server::with_env(&[
+        ("CONDUIT_FEDERATION", "1"),
+        ("CONDUIT_FEDERATION_BASE_URL", url.as_str()),
+    ])
+    .await;
+    let alice = server.register("alice").await;
+    let token = alice["access_token"].as_str().unwrap();
+    let pool = sqlx::PgPool::connect(&server.database_url).await.unwrap();
+    let storage = conduit_server::PostgresStorage::new(pool);
+    for (version, body_text) in [("1", "legacy one"), ("2", "legacy two")] {
+        let room = server
+            .request(
+                Method::POST,
+                "/_matrix/client/v3/createRoom",
+                Some(token),
+                Some(json!({"preset": "private_chat", "room_version": version})),
+                200,
+            )
+            .await["room_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let member = "@erin:peer.test";
+        let event = Event::new(
+            &format!("$member-join-{version}"),
+            Pdu::new(&room, member, "m.room.member", Some(member.to_owned()), json!({"membership": "join"}), 1_700_000_000_000, vec![], vec![], 0),
+        );
+        storage.put_event(&event).await.unwrap();
+        storage.set_state_entry(&room, "m.room.member", member, &event.event_id).await.unwrap();
+        server
+            .request(
+                Method::PUT,
+                &format!("/_matrix/client/v3/rooms/{}/send/m.room.message/txn-legacy-{version}", enc(&room)),
+                Some(token),
+                Some(json!({"msgtype": "m.text", "body": body_text})),
+                200,
+            )
+            .await;
+        let sent = tokio::time::timeout(Duration::from_secs(8), async {
+            loop {
+                if let Some(found) = bodies.lock().unwrap().iter().find_map(|body| {
+                    body["pdus"].as_array().and_then(|pdus| {
+                        pdus.iter().find(|pdu| pdu["type"] == "m.room.message" && pdu["content"]["body"] == body_text).cloned()
+                    })
+                }) {
+                    return found;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("room version {version} message was not sent\n{}", server.logs()));
+        let event_id = sent["event_id"].as_str().unwrap_or_else(|| panic!("no event_id: {sent}"));
+        assert!(event_id.starts_with('$') && event_id.ends_with(":production.test"), "{event_id}");
+        assert!(sent["prev_events"][0].is_array(), "prev_events are not tuples: {sent}");
+        assert!(sent["auth_events"].as_array().is_some_and(|events| events.iter().all(Value::is_array)), "auth_events are not tuples: {sent}");
+        assert!(sent.get("io.conduit.v1_event").is_none(), "{sent}");
+    }
+}
+
 fn signed_create(key: &ServerKey, room_id: &str) -> (String, Value) {
     let mut create = Pdu::new(
         room_id,
@@ -813,16 +891,27 @@ async fn remote_v1_invite_stores_the_cosignature() {
         stored.signatures,
         server.logs()
     );
-    let peer_key = &key.key_id;
-    tokio::time::sleep(Duration::from_millis(400)).await;
-    let bodies = sent.lock().unwrap().clone();
-    assert!(
-        bodies.iter().all(|sent_body| {
-            let text = sent_body.to_string();
-            !text.contains(invitee) || text.contains(peer_key)
-        }),
-        "invite was sent without the co-signature: {bodies:?}"
-    );
+    let sent_pdu = tokio::time::timeout(Duration::from_secs(8), async {
+        loop {
+            if let Some(found) = sent.lock().unwrap().iter().find_map(|body| {
+                body["pdus"].as_array().and_then(|pdus| {
+                    pdus.iter()
+                        .find(|pdu| pdu["type"] == "m.room.member" && pdu["state_key"] == invitee && pdu["content"]["membership"] == "invite")
+                        .cloned()
+                })
+            }) {
+                return found;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("invite was not fanned out\n{}", server.logs()));
+    assert_eq!(sent_pdu["event_id"], event_id, "{sent_pdu}");
+    assert!(sent_pdu["auth_events"][0].is_array(), "auth_events are not tuples: {sent_pdu}");
+    assert!(sent_pdu["prev_events"][0].is_array(), "prev_events are not tuples: {sent_pdu}");
+    assert!(sent_pdu["signatures"][PEER][&key.key_id].is_string(), "fan-out dropped the co-signature: {sent_pdu}");
+    assert!(sent_pdu.get("io.conduit.v1_event").is_none(), "{sent_pdu}");
 }
 
 fn percent_decode(input: &str) -> String {
