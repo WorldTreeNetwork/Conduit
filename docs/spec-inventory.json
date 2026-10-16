@@ -42,9 +42,9 @@
         "total": 36
       },
       "requirement": {
-        "implemented+tested": 14,
+        "implemented+tested": 15,
         "implemented-untested": 0,
-        "partial": 15,
+        "partial": 14,
         "missing": 9,
         "not-applicable": 3,
         "total": 41
@@ -5819,11 +5819,12 @@
         }
       ],
       "tests": [
-        "conduit-server/tests/media.rs::federation_media_download_and_thumbnail_are_multipart_mixed"
+        "conduit-server/tests/media.rs::federation_media_download_and_thumbnail_are_multipart_mixed",
+        "conduit-server/tests/media.rs::federation_pending_media_waits_for_timeout_ms"
       ],
-      "tests_total": 1,
+      "tests_total": 2,
       "gap_beads": [],
-      "notes": "200 is multipart/mixed: an application/json {} part, then the bytes with Content-Type and Content-Disposition. Pending local media uses timeout_ms."
+      "notes": "200 is multipart/mixed: an application/json {} part, then the bytes with Content-Type and Content-Disposition. Pending local media waits timeout_ms, then 504 M_NOT_YET_UPLOADED."
     },
     {
       "id": "ss.ep.get_matrixfederationv1mediathumbnailmediaid",
@@ -5846,11 +5847,12 @@
         }
       ],
       "tests": [
-        "conduit-server/tests/media.rs::federation_media_download_and_thumbnail_are_multipart_mixed"
+        "conduit-server/tests/media.rs::federation_media_download_and_thumbnail_are_multipart_mixed",
+        "conduit-server/tests/media.rs::federation_pending_media_waits_for_timeout_ms"
       ],
-      "tests_total": 1,
+      "tests_total": 2,
       "gap_beads": [],
-      "notes": "200 is multipart/mixed: an application/json {} part, then the thumbnail bytes with an inline Content-Disposition."
+      "notes": "200 is multipart/mixed: an application/json {} part, then the thumbnail bytes with an inline Content-Disposition. Pending local media waits timeout_ms, then 504 M_NOT_YET_UPLOADED."
     },
     {
       "id": "ss.ep.post_matrixpolicyv1sign",
@@ -7826,11 +7828,10 @@
       ],
       "tests_total": 1,
       "gap_beads": [
-        "conduit-y99.21.1",
         "conduit-y99.21.2",
         "conduit-y99.21.3"
       ],
-      "notes": ""
+      "notes": "Animated thumbnails and blob hygiene remain (conduit-y99.21.2, conduit-y99.21.3)."
     },
     {
       "id": "cs.mod.send-to-device",
@@ -9344,20 +9345,20 @@
       "title": "Content repository over federation (multipart/mixed)",
       "source": "https://spec.matrix.org/v1.19/server-server-api/#content-repository",
       "role": "homeserver",
-      "status": "partial",
+      "status": "implemented+tested",
       "code": [
         {
           "loc": "conduit-server/src/api/client/media.rs"
         }
       ],
       "tests": [
-        "conduit-server/tests/media.rs::remote_media_is_fetched_over_federation_cached_and_served"
+        "conduit-server/tests/media.rs::remote_media_is_fetched_over_federation_cached_and_served",
+        "conduit-server/tests/media.rs::federation_media_download_and_thumbnail_are_multipart_mixed",
+        "conduit-server/tests/media.rs::federation_pending_media_waits_for_timeout_ms"
       ],
-      "tests_total": 1,
-      "gap_beads": [
-        "conduit-y99.21.1"
-      ],
-      "notes": ""
+      "tests_total": 3,
+      "gap_beads": [],
+      "notes": "Download and thumbnail answer multipart/mixed. Pending local media waits timeout_ms, then 504 M_NOT_YET_UPLOADED. Outbound fetch parses multipart and tolerates a raw body."
     },
     {
       "id": "ss.acls",

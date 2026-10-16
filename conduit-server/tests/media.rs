@@ -357,6 +357,61 @@ async fn federation_media_download_and_thumbnail_are_multipart_mixed() {
     assert!(!parts[1].body.is_empty());
 }
 
+#[tokio::test]
+async fn federation_pending_media_waits_for_timeout_ms() {
+    let db = TempDb::new().await;
+    let tmp = TempDir::new().unwrap();
+    let state = make_test_state(&db, &tmp).await;
+    let now = chrono::Utc::now();
+    let pending = conduit::storage::PendingMedia {
+        media_id: "pendingMedia1".into(),
+        origin_server: "localhost".into(),
+        creator: "@alice:localhost".into(),
+        created_at: now,
+        expires_at: now + chrono::Duration::hours(1),
+    };
+    assert_eq!(
+        state.storage.create_pending_media(&pending, 10).await.unwrap(),
+        conduit::storage::PendingMediaCreate::Created
+    );
+
+    let started = std::time::Instant::now();
+    let download = media_api::federation_download(
+        State(state.clone()),
+        Path(pending.media_id.clone()),
+        Query(HashMap::from([("timeout_ms".into(), "200".into())])),
+    )
+    .await;
+    assert_eq!(download.status(), StatusCode::GATEWAY_TIMEOUT);
+    assert!(
+        started.elapsed() >= std::time::Duration::from_millis(200),
+        "federation download must wait timeout_ms, elapsed {:?}",
+        started.elapsed()
+    );
+    let body = json_body(download).await;
+    assert_eq!(body["errcode"], "M_NOT_YET_UPLOADED");
+
+    let started = std::time::Instant::now();
+    let thumbnail = media_api::federation_thumbnail(
+        State(state),
+        Path(pending.media_id),
+        Query(HashMap::from([
+            ("width".into(), "8".into()),
+            ("height".into(), "8".into()),
+            ("method".into(), "scale".into()),
+            ("timeout_ms".into(), "0".into()),
+        ])),
+    )
+    .await;
+    assert_eq!(thumbnail.status(), StatusCode::GATEWAY_TIMEOUT);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(2),
+        "timeout_ms=0 must not wait the default"
+    );
+    let body = json_body(thumbnail).await;
+    assert_eq!(body["errcode"], "M_NOT_YET_UPLOADED");
+}
+
 // ---------------------------------------------------------------------------
 // Test 3: download_with_filename_includes_disposition
 // ---------------------------------------------------------------------------
