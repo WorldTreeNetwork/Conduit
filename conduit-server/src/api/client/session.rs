@@ -106,6 +106,11 @@ pub async fn issue_session<S: AuthState>(
     // A locked account gets no new tokens (spec account locking).
     super::moderation::refuse_if_locked(state, user_id).await?;
     let storage = state.storage();
+    if let Some(requested) = opts.device_id.as_deref().filter(|id| !id.is_empty()) {
+        if !conduit::identifiers::valid_opaque_identifier(requested) {
+            return Err(MatrixError::invalid_param("device_id must be an opaque identifier").into_response());
+        }
+    }
     let device_id = opts
         .device_id
         .clone()

@@ -1101,3 +1101,145 @@ async fn remote_public_rooms_come_from_the_named_server() {
         .await;
     assert_eq!(down["errcode"], "M_UNKNOWN", "{down}");
 }
+
+fn enc(value: &str) -> String {
+    url::form_urlencoded::byte_serialize(value.as_bytes()).collect()
+}
+
+/// Alias, room id, event id, txn id, device id, and event type grammars on the
+/// client paths that mint or accept them.
+#[tokio::test]
+async fn identifier_grammars_reject_illegal_ids_and_accept_spec_forms() {
+    let server = Server::new().await;
+    let alice = server.register("alice").await;
+    let token = alice["access_token"].as_str().unwrap();
+    assert!(conduit::identifiers::valid_opaque_identifier(alice["device_id"].as_str().unwrap()));
+
+    let bad_device = server
+        .request(
+            Method::POST,
+            "/_matrix/client/v3/login",
+            None,
+            Some(json!({
+                "type": "m.login.password",
+                "identifier": {"type": "m.id.user", "user": "alice"},
+                "password": "test-password",
+                "device_id": "bad id"
+            })),
+            400,
+        )
+        .await;
+    assert_eq!(bad_device["errcode"], "M_INVALID_PARAM", "{bad_device}");
+    let phone = server
+        .request(
+            Method::POST,
+            "/_matrix/client/v3/login",
+            None,
+            Some(json!({
+                "type": "m.login.password",
+                "identifier": {"type": "m.id.user", "user": "alice"},
+                "password": "test-password",
+                "device_id": "Phone_1"
+            })),
+            200,
+        )
+        .await;
+    assert_eq!(phone["device_id"], "Phone_1");
+
+    let nul_alias = server
+        .request(
+            Method::POST,
+            "/_matrix/client/v3/createRoom",
+            Some(token),
+            Some(json!({"room_alias_name": "a\u{0}b"})),
+            400,
+        )
+        .await;
+    assert_eq!(nul_alias["errcode"], "M_INVALID_PARAM", "{nul_alias}");
+    let long_alias = server
+        .request(
+            Method::POST,
+            "/_matrix/client/v3/createRoom",
+            Some(token),
+            Some(json!({"room_alias_name": "a".repeat(250)})),
+            400,
+        )
+        .await;
+    assert_eq!(long_alias["errcode"], "M_INVALID_PARAM", "{long_alias}");
+
+    let v11 = server
+        .request(
+            Method::POST,
+            "/_matrix/client/v3/createRoom",
+            Some(token),
+            Some(json!({"preset": "public_chat", "room_version": "11", "room_alias_name": "grammar"})),
+            200,
+        )
+        .await["room_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(conduit::identifiers::valid_room_id(&v11), "{v11}");
+    assert!(v11.ends_with(":production.test"), "{v11}");
+    let alias = server
+        .request(Method::GET, "/_matrix/client/v3/directory/room/%23grammar%3Aproduction.test", Some(token), None, 200)
+        .await;
+    assert_eq!(alias["room_id"], v11);
+    let bad_server = server
+        .request(
+            Method::PUT,
+            "/_matrix/client/v3/directory/room/%23room%3A999.1.1.1",
+            Some(token),
+            Some(json!({"room_id": v11})),
+            400,
+        )
+        .await;
+    assert_eq!(bad_server["errcode"], "M_INVALID_PARAM", "{bad_server}");
+
+    let v12 = server
+        .request(
+            Method::POST,
+            "/_matrix/client/v3/createRoom",
+            Some(token),
+            Some(json!({"preset": "public_chat", "room_version": "12"})),
+            200,
+        )
+        .await["room_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(conduit::identifiers::valid_room_id(&v12), "{v12}");
+    assert!(!v12.contains(':'), "{v12}");
+
+    let bad_type = server
+        .request(
+            Method::PUT,
+            &format!("/_matrix/client/v3/rooms/{}/send/Bad/ok", enc(&v11)),
+            Some(token),
+            Some(json!({"msgtype": "m.text", "body": "no"})),
+            400,
+        )
+        .await;
+    assert_eq!(bad_type["errcode"], "M_INVALID_PARAM", "{bad_type}");
+    let bad_txn = server
+        .request(
+            Method::PUT,
+            &format!("/_matrix/client/v3/rooms/{}/send/m.room.message/bad%20id", enc(&v11)),
+            Some(token),
+            Some(json!({"msgtype": "m.text", "body": "no"})),
+            400,
+        )
+        .await;
+    assert_eq!(bad_txn["errcode"], "M_INVALID_PARAM", "{bad_txn}");
+    let sent = server
+        .request(
+            Method::PUT,
+            &format!("/_matrix/client/v3/rooms/{}/send/m.room.message/ok~id", enc(&v11)),
+            Some(token),
+            Some(json!({"msgtype": "m.text", "body": "yes"})),
+            200,
+        )
+        .await;
+    let event_id = sent["event_id"].as_str().unwrap();
+    assert!(conduit::identifiers::valid_event_id(event_id), "{event_id}");
+}

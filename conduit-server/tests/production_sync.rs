@@ -362,7 +362,7 @@ async fn cross_signing_keys_are_validated_and_replacement_requires_uia() {
 async fn cross_signing_key_ids_may_not_collide_with_device_ids() {
     let server = Server::new().await;
     let alice = server.register("alice").await;
-    let cross = CrossSigning::new(user(&alice));
+    let cross = CrossSigning::with_opaque_master(user(&alice));
     // A device whose ID is the master public key.
     server
         .request(
@@ -396,7 +396,7 @@ async fn cross_signing_key_ids_may_not_collide_with_device_ids() {
 async fn login_refuses_a_device_id_equal_to_a_cross_signing_key() {
     let server = Server::new().await;
     let alice = server.register("alice").await;
-    let cross = CrossSigning::new(user(&alice));
+    let cross = CrossSigning::with_opaque_master(user(&alice));
     server
         .request(
             Method::POST,

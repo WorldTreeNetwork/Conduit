@@ -14,7 +14,6 @@ use conduit_server::api::client::rate_limit::{cs_rate_limit, CsRateLimiter};
 use axum::{extract::State, middleware, routing::{get, post, put}, Json, Router};
 use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine as _};
 use chrono::Utc;
-use ed25519_dalek::Signer as _;
 use serde_json::{Value, json};
 use sqlx::postgres::PgPoolOptions;
 use tokio::sync::{RwLock, broadcast};
@@ -960,23 +959,15 @@ async fn server_keys(State(state): State<AppState>) -> Json<serde_json::Value> {
         "valid_until_ts": valid_until_ts
     });
 
-    // Sign the canonical JSON of the unsigned object.
-    let canonical_bytes = conduit::canonical_json::to_canonical_bytes(&unsigned)
+    let response = conduit::signing::sign_json(unsigned, &state.server_key, server_name)
         .expect("server key response must be canonical-JSON serializable");
-    let signature = state.server_key.signing_key.sign(&canonical_bytes);
-    let sig_b64 = STANDARD_NO_PAD.encode(signature.to_bytes());
-
-    // Splice signatures into the final response.
-    let mut response = unsigned;
-    response["signatures"] = json!({
-        server_name: {
-            key_id: sig_b64
-        }
-    });
 
     // Advertise the iroh node ID in a non-standard extension field (91r.4).
     // Only peers that also have the `iroh` feature compiled in will use this.
-    // This field is NOT part of the Matrix spec.
+    // This field is NOT part of the Matrix spec. The binding is mutable only
+    // when that field is written after the signature.
+    #[cfg(feature = "iroh")]
+    let mut response = response;
     #[cfg(feature = "iroh")]
     if let Some(ep) = state.iroh_endpoint.as_ref() {
         let node_id = ep.id();

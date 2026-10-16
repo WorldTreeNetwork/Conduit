@@ -104,6 +104,17 @@ impl CrossSigning {
         Self { master, self_signing, user_signing, master_key, self_signing_key, user_signing_key }
     }
 
+    /// A cross-signing identity whose master public key is an opaque identifier,
+    /// so it can also be used as a device id.
+    pub fn with_opaque_master(user: &str) -> Self {
+        loop {
+            let cross = Self::new(user);
+            if conduit::identifiers::valid_opaque_identifier(&public(&cross.master)) {
+                return cross;
+            }
+        }
+    }
+
     pub fn upload_body(&self) -> Value {
         json!({
             "master_key": self.master_key,

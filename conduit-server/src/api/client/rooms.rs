@@ -116,7 +116,8 @@ pub async fn create_room<S: AuthState>(
     // (`400 M_ROOM_IN_USE`), per the createRoom spec.
     let alias = match body.room_alias_name.as_deref() {
         None => None,
-        Some(name) if name.is_empty() || name.contains(':') || name.chars().any(char::is_whitespace) => {
+        Some(name) if !conduit::identifiers::valid_alias_localpart(name)
+            || format!("#{name}:{server_name}").len() > 255 => {
             return (StatusCode::BAD_REQUEST, Json(json!({
                 "errcode": "M_INVALID_PARAM",
                 "error": "room_alias_name must be a non-empty localpart",
@@ -436,6 +437,12 @@ pub async fn send_message_event<S: AuthState + conduit::room::RoomEventSender>(
     Path((room_id, event_type, txn_id)): Path<(String, String, String)>,
     request: axum::extract::Request,
 ) -> Response {
+    if !conduit::identifiers::valid_namespaced_identifier(&event_type) {
+        return MatrixError::invalid_param("event type must be a namespaced identifier").into_response();
+    }
+    if !conduit::identifiers::valid_opaque_identifier(&txn_id) {
+        return MatrixError::invalid_param("txn id must be an opaque identifier").into_response();
+    }
     let key = conduit::storage::TransactionKey::client(
         &authed.user_id,
         &authed.device_id,
@@ -548,6 +555,9 @@ async fn send_state_event_inner<S: AuthState + conduit::room::RoomEventSender>(
     // stand-in could merge two state keys; refuse before building the event.
     if event_type.contains('\0') || state_key.contains('\0') {
         return MatrixError::invalid_param("event type and state key must not contain U+0000").into_response();
+    }
+    if !conduit::identifiers::valid_namespaced_identifier(event_type) {
+        return MatrixError::invalid_param("event type must be a namespaced identifier").into_response();
     }
     if event_type == "m.room.member" && content.get("membership").and_then(Value::as_str) == Some("invite") {
         if let Err(blocked) = super::room_membership::check_invite_allowed(state, state_key).await {
@@ -717,19 +727,9 @@ fn parse_stream_token(token: &str) -> Option<i64> {
         .filter(|position| *position >= 0)
 }
 
-/// `#localpart:server` with a non-empty localpart and server name.
+/// `#localpart:server` within 255 bytes, with a spec server name.
 fn valid_room_alias(alias: &str) -> bool {
-    let Some(rest) = alias.strip_prefix('#') else {
-        return false;
-    };
-    let Some((local, server)) = rest.split_once(':') else {
-        return false;
-    };
-    !local.is_empty()
-        && !server.is_empty()
-        && !local.contains(':')
-        && !local.chars().any(char::is_whitespace)
-        && !server.chars().any(char::is_whitespace)
+    conduit::identifiers::valid_room_alias(alias)
 }
 
 /// Spec: every alias in `m.room.canonical_alias` must be syntactically valid

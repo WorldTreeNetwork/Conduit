@@ -26,8 +26,8 @@ Statuses: **tested** = present and asserted by a named test; **untested** = pres
 | Identity Service API (homeserver as consumer) | endpoints | 7 | 0 | 0 | 0 | 16 | 23 |
 | Identity Service API (homeserver as consumer) | requirements | 1 | 0 | 0 | 0 | 0 | 1 |
 | Room versions 1–12 | requirements | 61 | 0 | 0 | 0 | 0 | 61 |
-| Appendices | requirements | 10 | 0 | 3 | 4 | 4 | 21 |
-| All |  | 420 | 0 | 4 | 4 | 37 | 465 |
+| Appendices | requirements | 17 | 0 | 0 | 0 | 4 | 21 |
+| All |  | 427 | 0 | 1 | 0 | 37 | 465 |
 ## Gap beads
 
 New beads filed by this inventory (children of `conduit-y99`):
@@ -44,7 +44,7 @@ New beads filed by this inventory (children of `conduit-y99`):
 - `conduit-y99.37` - CLOSED as superseded by conduit-y99.19 landing (de3d1b9/97dbe71); no rows reference it (0 row(s))
 - `conduit-y99.38` - Extended profile fields (keyName GET/PUT/DELETE, m.tz), lookup visibility, presence propagation (0 row(s))
 - `conduit-y99.39` - Server-side key backup completeness (missing DELETEs, etag/count, M_WRONG_ROOM_KEYS_VERSION) (0 row(s))
-- `conduit-y99.40` - Event, identifier and appendix grammar validation (size limits, server name/alias/opaque id grammar, test vectors, M_BAD_ALIAS) (6 row(s))
+- `conduit-y99.40` - Event, identifier and appendix grammar validation (size limits, server name/alias/opaque id grammar, test vectors, M_BAD_ALIAS) (0 row(s))
 - `conduit-y99.41` - Server notices module (0 row(s))
 - `conduit-y99.42` - Deprecated legacy client endpoints (/events, /events/{id}, /initialSync, rooms initialSync) (0 row(s))
 - `conduit-y99.43` - Account locking and suspension admin endpoints and enforcement (0 row(s))
@@ -89,7 +89,7 @@ In-flight / pre-existing beads referenced (not duplicated):
 - `conduit-y99.22.3` - event_auth endpoint (1 row(s))
 - `conduit-y99.22.4` - EDU U+0000 / per-EDU error isolation (0 row(s))
 - `conduit-y99.22.5` - transactions/outbox retention (0 row(s))
-- `conduit-y99.23` - room versions 1-12 (5 row(s))
+- `conduit-y99.23` - room versions 1-12 (3 row(s))
 - `conduit-y99.24` - sync unread_notifications hard-coded to zero (3 row(s))
 - `conduit-y99.25` - profile changes not propagated to member events (0 row(s))
 - `conduit-y99.26` - /messages hides create/initial join (2 row(s))
@@ -619,20 +619,20 @@ In-flight / pre-existing beads referenced (not duplicated):
 | `app.canonical-json` | [Canonical JSON](https://spec.matrix.org/v1.19/appendices/#canonical-json) | tested | `conduit/src/canonical_json.rs` | `conduit/src/canonical_json.rs::spec_example`<br>`conduit/src/canonical_json.rs::out_of_range_integer` |  |  |
 | `app.signing-json` | [Signing JSON](https://spec.matrix.org/v1.19/appendices/#signing-details) | tested | `conduit/src/signing.rs` | `matrix_v11_crypto.rs` |  |  |
 | `app.checking-signature` | [Checking for a signature](https://spec.matrix.org/v1.19/appendices/#checking-for-a-signature) | tested | `conduit/src/signing.rs` | `federation_inbound.rs::inbound_signature_verified_or_rejected` |  |  |
-| `app.id.namespaced` | [Common namespaced identifier grammar](https://spec.matrix.org/v1.19/appendices/#common-namespaced-identifier-grammar) | missing |  |  | `conduit-y99.40` |  |
-| `app.id.server-name` | [Server name grammar](https://spec.matrix.org/v1.19/appendices/#server-name) | missing |  |  | `conduit-y99.40` |  |
+| `app.id.namespaced` | [Common namespaced identifier grammar](https://spec.matrix.org/v1.19/appendices/#common-namespaced-identifier-grammar) | tested | `conduit/src/identifiers.rs`<br>`conduit-server/src/api/client/rooms.rs`<br>`conduit-server/src/api/client/keys.rs` | `identifiers.rs::namespaced_identifiers_are_lowercase_and_bounded`<br>`production_directory.rs::identifier_grammars_reject_illegal_ids_and_accept_spec_forms` |  | Send and to-device event types must match the grammar. `Bad` is 400 M_INVALID_PARAM. |
+| `app.id.server-name` | [Server name grammar](https://spec.matrix.org/v1.19/appendices/#server-name) | tested | `conduit/src/identifiers.rs`<br>`conduit-server/src/api/client/directory.rs` | `identifiers.rs::server_names_match_the_spec_examples`<br>`production_directory.rs::identifier_grammars_reject_illegal_ids_and_accept_spec_forms` |  | DNS, IPv4, and bracketed IPv6, with an optional port of 1–5 digits. `#room:999.1.1.1` is 400 M_INVALID_PARAM. |
 | `app.id.user` | [User identifiers (+ historical user IDs)](https://spec.matrix.org/v1.19/appendices/#user-identifiers) | tested | `conduit-server/src/api/client/registration.rs (validate_localpart)` | `production_account.rs::production_registration_validates_usernames_before_uia` |  | Localpart grammar enforced on registration; historical user IDs accepted for remote users is unverified (y99.40). |
-| `app.id.room` | [Room IDs](https://spec.matrix.org/v1.19/appendices/#room-ids) | partial | `conduit/src/room/mod.rs` |  | `conduit-y99.40` `conduit-y99.23` |  |
-| `app.id.alias` | [Room aliases](https://spec.matrix.org/v1.19/appendices/#room-aliases) | partial | `conduit-server/src/api/client/directory.rs` |  | `conduit-y99.40` |  |
-| `app.id.event` | [Event IDs](https://spec.matrix.org/v1.19/appendices/#event-ids) | partial | `conduit/src/hashing.rs` | `matrix_v11_crypto.rs` | `conduit-y99.23` | v4+ format only. |
+| `app.id.room` | [Room IDs](https://spec.matrix.org/v1.19/appendices/#room-ids) | tested | `conduit/src/identifiers.rs`<br>`conduit/src/room/mod.rs` | `identifiers.rs::room_alias_room_id_and_event_id_grammars`<br>`production_directory.rs::identifier_grammars_reject_illegal_ids_and_accept_spec_forms` |  | `!localpart:server` or a domain-less unpadded base64 id, at most 255 bytes. A created v11 id ends with the server name. A created v12 id has no colon. |
+| `app.id.alias` | [Room aliases](https://spec.matrix.org/v1.19/appendices/#room-aliases) | tested | `conduit/src/identifiers.rs`<br>`conduit-server/src/api/client/directory.rs`<br>`conduit-server/src/api/client/rooms.rs` | `identifiers.rs::room_alias_room_id_and_event_id_grammars`<br>`production_directory.rs::identifier_grammars_reject_illegal_ids_and_accept_spec_forms` |  | Localpart is non-empty, may include whitespace, and excludes `:` and U+0000. The whole alias is at most 255 bytes. A NUL localpart and a 250-character localpart are 400 M_INVALID_PARAM. |
+| `app.id.event` | [Event IDs](https://spec.matrix.org/v1.19/appendices/#event-ids) | tested | `conduit/src/identifiers.rs`<br>`conduit/src/hashing.rs`<br>`conduit/src/room_version.rs` | `room_version.rs::event_ids_follow_the_version_encoding`<br>`room_version.rs::v3_and_v4_diverge_when_redaction_matches` (+2) |  | `$localpart:server` or a domain-less unpadded base64 id, at most 255 bytes. v3 uses standard base64. v4 and later use url-safe base64. A sent event id matches the grammar. |
 | `app.uris` | [Matrix URI scheme and matrix.to](https://spec.matrix.org/v1.19/appendices/#uris) | n/a |  |  |  | *client-only* Client-side navigation. |
-| `app.id.opaque` | [Opaque identifiers (txnId, device IDs, ...)](https://spec.matrix.org/v1.19/appendices/#opaque-identifiers) | missing |  |  | `conduit-y99.40` |  |
+| `app.id.opaque` | [Opaque identifiers (txnId, device IDs, ...)](https://spec.matrix.org/v1.19/appendices/#opaque-identifiers) | tested | `conduit/src/identifiers.rs`<br>`conduit-server/src/api/client/session.rs`<br>`conduit-server/src/api/client/rooms.rs`<br>`conduit-server/src/api/client/keys.rs`<br>`conduit-server/src/api/client/room_content/redact.rs` | `identifiers.rs::opaque_identifiers_use_the_unreserved_set`<br>`production_directory.rs::identifier_grammars_reject_illegal_ids_and_accept_spec_forms` (+2) |  | Transaction ids and client device ids are 1–255 characters from `[0-9A-Za-z._~-]`. A space is 400 M_INVALID_PARAM. `Phone_1` and `ok~id` are accepted. |
 | `app.keys` | [Cryptographic key representation](https://spec.matrix.org/v1.19/appendices/#cryptographic-key-representation) | tested | `conduit/src/keys.rs` | `matrix_v11_crypto.rs` |  |  |
 | `app.3pid-types` | [3PID types (email normalisation, E.164 msisdn)](https://spec.matrix.org/v1.19/appendices/#3pid-types) | tested | `conduit-server/src/identity_service.rs:264` | `conduit-server/src/identity_service.rs::three_pid_canonical_forms`<br>`production_appservice.rs::third_party_invites_lookup_store_invite_and_onbind` |  | email: case-folded (lowercase plus the common full foldings such as ß->ss; not the complete Unicode CaseFolding table); msisdn: E.164 digits without '+'. |
 | `app.glob` | [Glob-style matching (push rules, server ACLs)](https://spec.matrix.org/v1.19/appendices/#glob-style-matching) | tested | `conduit-server/src/api/client/push/rules.rs`<br>`conduit/src/server_acl.rs` | `push.rs::push_rules_crud`<br>`server_acl.rs::acl_order_globs_ports_and_ip_literals` (+2) |  | `*` matches zero or more characters and `?` matches exactly one, for push rules and server ACLs. |
 | `app.dot-paths` | [Dot-separated property paths (escaping)](https://spec.matrix.org/v1.19/appendices/#dot-separated-property-paths) | tested | `conduit-server/src/api/client/push/rules.rs` | `conduit-server/src/api/client/push/rules.rs::dot_paths_honour_escapes`<br>`production_push.rs::unread_counts_follow_rules_and_receipts` |  | \. and \\ escapes; other backslash sequences literal. |
 | `app.threat-model` | [Security threat model](https://spec.matrix.org/v1.19/appendices/#security-threat-model) | n/a |  |  |  | *informative* Informative. |
-| `app.test-vectors` | [Cryptographic test vectors (signing key, JSON signing, event signing)](https://spec.matrix.org/v1.19/appendices/#cryptographic-test-vectors) | missing |  |  | `conduit-y99.40` | An independent OpenSSL vector exists; the spec appendix vectors are not asserted. |
+| `app.test-vectors` | [Cryptographic test vectors (signing key, JSON signing, event signing)](https://spec.matrix.org/v1.19/appendices/#cryptographic-test-vectors) | tested | `conduit/src/signing.rs`<br>`conduit-server/src/federation/spec_v119.rs`<br>`conduit-server/src/main.rs` | `signing.rs::appendix_json_signing_vectors`<br>`spec_v119.rs::appendix_event_signing_vectors` |  | The appendix seed signs `{}` and `{"one":1,"two":"Two"}`. The event vectors match the v1 content hash and v1 signature. The message body and `$0:domain` stay on the event. |
 | `app.conventions` | [Conventions for Matrix APIs (naming, pagination)](https://spec.matrix.org/v1.19/appendices/#conventions-for-matrix-apis) | n/a |  |  |  | *informative* Guidance for spec/API authors. |
 
 ## Maintaining this inventory

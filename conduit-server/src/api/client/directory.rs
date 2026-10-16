@@ -47,12 +47,9 @@ fn alias_not_found(alias: &str) -> Response {
     MatrixError::new_not_found(format!("Room alias {alias} not found")).into_response()
 }
 
-/// `#localpart:server` with a non-empty localpart and server name.
+/// `#localpart:server` within 255 bytes, with a spec server name.
 pub fn alias_is_valid(alias: &str) -> bool {
-    alias
-        .strip_prefix('#')
-        .and_then(|rest| rest.split_once(':'))
-        .is_some_and(|(local, server)| !local.is_empty() && !server.is_empty())
+    conduit::identifiers::valid_room_alias(alias)
 }
 
 /// `PUT /_matrix/client/v3/directory/room/:alias`

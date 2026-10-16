@@ -27,6 +27,7 @@ pub mod error;
 pub mod event;
 pub mod filter;
 pub mod hashing;
+pub mod identifiers;
 pub mod identity;
 pub mod keys;
 pub mod redaction;

@@ -19,6 +19,8 @@ use base64::Engine as _;
 use ed25519_dalek::{Signature, Signer as _, VerifyingKey};
 use thiserror::Error;
 
+use serde_json::Value;
+
 use crate::canonical_json::{to_canonical_bytes, CanonicalJsonError};
 use crate::event::{Pdu, SignedBy};
 use crate::hashing::{content_hash, content_hash_matches, HashingError};
@@ -160,6 +162,43 @@ fn insert_signature(pdu: &mut Pdu, server_key: &ServerKey, server_name: &str) ->
 /// Sets `hashes.sha256` to the content hash, then signs the redacted bytes,
 /// preserving any pre-existing signatures. Refuses a PDU whose signed
 /// canonical size exceeds [`MAX_AUTHORED_PDU_BYTES`].
+/// Sign a JSON object: canonical bytes without `signatures` or `unsigned`,
+/// then put both back with this key's signature added.
+///
+/// <https://spec.matrix.org/v1.19/appendices/#signing-details>
+pub fn sign_json(mut object: Value, server_key: &ServerKey, name: &str) -> Result<Value, SigningError> {
+    let mut unsigned = None;
+    let mut signatures = serde_json::json!({});
+    if let Some(map) = object.as_object_mut() {
+        if let Some(existing) = map.remove("signatures") {
+            signatures = existing;
+        }
+        unsigned = map.remove("unsigned");
+    }
+    let bytes = to_canonical_bytes(&object)?;
+    let signature = server_key.signing_key.sign(&bytes);
+    if !signatures.is_object() {
+        signatures = serde_json::json!({});
+    }
+    let entry = signatures
+        .as_object_mut()
+        .expect("object")
+        .entry(name.to_owned())
+        .or_insert_with(|| serde_json::json!({}));
+    if !entry.is_object() {
+        *entry = serde_json::json!({});
+    }
+    entry.as_object_mut().expect("object").insert(
+        server_key.key_id.clone(),
+        serde_json::Value::String(STANDARD_NO_PAD.encode(signature.to_bytes())),
+    );
+    object["signatures"] = signatures;
+    if let Some(unsigned) = unsigned {
+        object["unsigned"] = unsigned;
+    }
+    Ok(object)
+}
+
 pub fn sign_authored(pdu: &mut Pdu, server_key: &ServerKey, server_name: &str) -> Result<(), SigningError> {
     pdu.hashes = serde_json::json!({ "sha256": content_hash(pdu)? });
     insert_signature(pdu, server_key, server_name)?;
@@ -586,5 +625,46 @@ mod tests {
         assert_eq!(redacted.pdu.content, json!({}));
         assert_eq!(redacted.pdu.hashes, pdu.hashes);
         assert_eq!(redacted.pdu.signatures, pdu.signatures);
+    }
+
+    /// Appendix cryptographic test vectors for JSON signing.
+    /// <https://spec.matrix.org/v1.19/appendices/#json-signing>
+    #[test]
+    fn appendix_json_signing_vectors() {
+        let seed = decode_spec_seed("YJDBA9Xnr2sVqXD9Vj7XVUnmFZcZrlw8Md7kMW+3XA1");
+        let key = crate::keys::server_key_from_bytes("ed25519:1", &seed).unwrap();
+        let empty = sign_json(json!({}), &key, "domain").unwrap();
+        assert_eq!(
+            empty["signatures"]["domain"]["ed25519:1"],
+            "K8280/U9SSy9IVtjBuVeLr+HpOB4BQFWbg+UZaADMtTdGYI7Geitb76LTrr5QV/7Xg4ahLwYGYZzuHGZKM5ZAQ"
+        );
+        let data = sign_json(json!({"one": 1, "two": "Two"}), &key, "domain").unwrap();
+        assert_eq!(data["one"], 1);
+        assert_eq!(data["two"], "Two");
+        assert_eq!(
+            data["signatures"]["domain"]["ed25519:1"],
+            "KqmLSbO39/Bzb0QIYE82zqLwsA+PDzYIpIRA2sRQ4sL53+sN6/fpNSoqE7BP7vBZhG6kYdD13EIMJpvhJI+6Bw"
+        );
+    }
+
+    /// The appendix seed's last character has non-zero discarded bits. RFC 4648
+    /// decoders may reject that; the published 32 bytes are the ones Python and
+    /// the spec vectors sign.
+    fn decode_spec_seed(input: &str) -> Vec<u8> {
+        const ALPHA: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut bits = 0u32;
+        let mut nbits = 0;
+        let mut out = Vec::new();
+        for byte in input.bytes() {
+            let value = ALPHA.iter().position(|char| *char == byte).expect("base64") as u32;
+            bits = (bits << 6) | value;
+            nbits += 6;
+            if nbits >= 8 {
+                nbits -= 8;
+                out.push((bits >> nbits) as u8);
+                bits &= (1 << nbits) - 1;
+            }
+        }
+        out
     }
 }

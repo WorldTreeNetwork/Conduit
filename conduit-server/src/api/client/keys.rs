@@ -1017,6 +1017,12 @@ pub async fn send_to_device<S: AuthState>(
     request: axum::extract::Request,
 ) -> Response {
     use conduit::storage::{OutboundDelivery, ToDeviceDelivery, TransactionKey};
+    if !conduit::identifiers::valid_namespaced_identifier(&event_type) {
+        return MatrixError::invalid_param("event type must be a namespaced identifier").into_response();
+    }
+    if !conduit::identifiers::valid_opaque_identifier(&txn_id) {
+        return MatrixError::invalid_param("txn id must be an opaque identifier").into_response();
+    }
     let storage = state.storage();
     let key = TransactionKey::client(
         &authed.user_id,

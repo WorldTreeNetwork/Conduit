@@ -8,14 +8,14 @@
 use axum::{
     extract::{Path, State},
     http::StatusCode,
-    response::Response,
+    response::{IntoResponse, Response},
 };
 use serde_json::{json, Value};
 
 use conduit::auth::StateMap;
 use conduit::event::Event;
 
-use crate::api::client::{AuthState, AuthedUser};
+use crate::api::client::{AuthState, AuthedUser, MatrixError};
 
 /// May `user_id` redact `target_id` in `room_id`?
 ///
@@ -81,6 +81,9 @@ pub async fn redact_event<S: AuthState>(
     Path((room_id, event_id, txn_id)): Path<(String, String, String)>,
     request: axum::extract::Request,
 ) -> Response {
+    if !conduit::identifiers::valid_opaque_identifier(&txn_id) {
+        return MatrixError::invalid_param("txn id must be an opaque identifier").into_response();
+    }
     let key = conduit::storage::TransactionKey::client(
         &authed.user_id,
         &authed.device_id,

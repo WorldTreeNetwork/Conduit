@@ -58,33 +58,15 @@ fn local_server_keys(state: &FedState) -> Value {
         "old_verify_keys": {},
         "valid_until_ts": valid_until_ts,
     });
-    let canonical = conduit::canonical_json::to_canonical_bytes(&unsigned)
-        .expect("server key document is canonical JSON");
-    let signature = state.server_key.signing_key.sign(&canonical);
-    let mut response = unsigned;
-    response["signatures"] = json!({
-        server_name: { key_id: STANDARD_NO_PAD.encode(signature.to_bytes()) }
-    });
-    response
+    conduit::signing::sign_json(unsigned, &state.server_key, server_name)
+        .expect("server key document is canonical JSON")
 }
 
 /// Sign `document` with this server's key, leaving every other signature in
 /// place. The signed bytes are the document with `signatures` and `unsigned`
 /// removed, which is the same payload the origin signed.
-fn notarize(state: &FedState, mut document: Value) -> Option<Value> {
-    let mut unsigned = document.clone();
-    let obj = unsigned.as_object_mut()?;
-    obj.remove("signatures");
-    obj.remove("unsigned");
-    let bytes = conduit::canonical_json::to_canonical_bytes(&unsigned).ok()?;
-    let signature = state.server_key.signing_key.sign(&bytes);
-    let signatures = document.as_object_mut()?.entry("signatures").or_insert_with(|| json!({}));
-    let ours = signatures.as_object_mut()?.entry(state.server_name.to_string()).or_insert_with(|| json!({}));
-    ours.as_object_mut()?.insert(
-        state.server_key.key_id.clone(),
-        json!(STANDARD_NO_PAD.encode(signature.to_bytes())),
-    );
-    Some(document)
+fn notarize(state: &FedState, document: Value) -> Option<Value> {
+    conduit::signing::sign_json(document, &state.server_key, &state.server_name).ok()
 }
 
 fn now_ms() -> i64 {
@@ -1270,4 +1252,78 @@ fn verify_ed25519(bytes: &[u8], signature: &Value, public: &[u8]) -> Result<(), 
     let public: [u8; 32] = public.try_into().map_err(|_| ())?;
     let key = ed25519_dalek::VerifyingKey::from_bytes(&public).map_err(|_| ())?;
     key.verify_strict(bytes, &signature).map_err(|_| ())
+}
+
+/// Appendix event-signing vectors, through the room-version-1 hash and signature path.
+/// <https://spec.matrix.org/v1.19/appendices/#event-signing>
+#[cfg(test)]
+mod appendix_vectors {
+    use super::*;
+
+    fn vector_key() -> conduit::keys::ServerKey {
+        const ALPHA: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut bits = 0u32;
+        let mut nbits = 0;
+        let mut seed = Vec::new();
+        for byte in b"YJDBA9Xnr2sVqXD9Vj7XVUnmFZcZrlw8Md7kMW+3XA1" {
+            let value = ALPHA.iter().position(|char| char == byte).unwrap() as u32;
+            bits = (bits << 6) | value;
+            nbits += 6;
+            if nbits >= 8 {
+                nbits -= 8;
+                seed.push((bits >> nbits) as u8);
+                bits &= (1 << nbits) - 1;
+            }
+        }
+        conduit::keys::server_key_from_bytes("ed25519:1", &seed).unwrap()
+    }
+
+    fn hash_and_sign(mut event: Value) -> Value {
+        let digest = v1_content_digest(&event).unwrap();
+        event["hashes"] = json!({"sha256": STANDARD_NO_PAD.encode(digest)});
+        insert_v1_signature(&mut event, &vector_key(), "domain").unwrap();
+        event
+    }
+
+    #[test]
+    fn appendix_event_signing_vectors() {
+        let minimal = hash_and_sign(json!({
+            "room_id": "!x:domain",
+            "sender": "@a:domain",
+            "origin": "domain",
+            "origin_server_ts": 1000000,
+            "signatures": {},
+            "hashes": {},
+            "type": "X",
+            "content": {},
+            "prev_events": [],
+            "auth_events": [],
+            "depth": 3,
+            "unsigned": {"age_ts": 1000000}
+        }));
+        assert_eq!(minimal["hashes"]["sha256"], "5jM4wQpv6lnBo7CLIghJuHdW+s2CMBJPUOGOC89ncos");
+        assert_eq!(
+            minimal["signatures"]["domain"]["ed25519:1"],
+            "KxwGjPSDEtvnFgU00fwFz+l6d2pJM6XBIaMEn81SXPTRl16AqLAYqfIReFGZlHi5KLjAWbOoMszkwsQma+lYAg"
+        );
+        assert_eq!(minimal["unsigned"]["age_ts"], 1000000);
+
+        let message = hash_and_sign(json!({
+            "content": {"body": "Here is the message content"},
+            "event_id": "$0:domain",
+            "origin": "domain",
+            "origin_server_ts": 1000000,
+            "type": "m.room.message",
+            "room_id": "!r:domain",
+            "sender": "@u:domain",
+            "signatures": {},
+            "unsigned": {"age_ts": 1000000}
+        }));
+        assert_eq!(message["hashes"]["sha256"], "onLKD1bGljeBWQhWZ1kaP9SorVmRQNdN5aM2JYU2n/g");
+        assert_eq!(message["content"]["body"], "Here is the message content");
+        assert_eq!(
+            message["signatures"]["domain"]["ed25519:1"],
+            "Wm+VzmOUOz08Ds+0NTWb1d4CZrVsJSikkeRxh6aCcUwu6pNC78FunoD7KNWzqFn241eYHYMGCA5McEiVPdhzBA"
+        );
+    }
 }

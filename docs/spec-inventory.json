@@ -116,10 +116,10 @@
     },
     "app": {
       "requirement": {
-        "implemented+tested": 10,
+        "implemented+tested": 17,
         "implemented-untested": 0,
-        "partial": 3,
-        "missing": 4,
+        "partial": 0,
+        "missing": 0,
         "not-applicable": 4,
         "total": 21
       }
@@ -11520,14 +11520,25 @@
       "title": "Common namespaced identifier grammar",
       "source": "https://spec.matrix.org/v1.19/appendices/#common-namespaced-identifier-grammar",
       "role": "homeserver",
-      "status": "missing",
-      "code": [],
-      "tests": [],
-      "tests_total": 0,
-      "gap_beads": [
-        "conduit-y99.40"
+      "status": "implemented+tested",
+      "code": [
+        {
+          "loc": "conduit/src/identifiers.rs"
+        },
+        {
+          "loc": "conduit-server/src/api/client/rooms.rs"
+        },
+        {
+          "loc": "conduit-server/src/api/client/keys.rs"
+        }
       ],
-      "notes": ""
+      "tests": [
+        "conduit/src/identifiers.rs::namespaced_identifiers_are_lowercase_and_bounded",
+        "conduit-server/tests/production_directory.rs::identifier_grammars_reject_illegal_ids_and_accept_spec_forms"
+      ],
+      "tests_total": 2,
+      "gap_beads": [],
+      "notes": "Send and to-device event types must match the grammar. Bad is 400 M_INVALID_PARAM."
     },
     {
       "id": "app.id.server-name",
@@ -11536,14 +11547,22 @@
       "title": "Server name grammar",
       "source": "https://spec.matrix.org/v1.19/appendices/#server-name",
       "role": "homeserver",
-      "status": "missing",
-      "code": [],
-      "tests": [],
-      "tests_total": 0,
-      "gap_beads": [
-        "conduit-y99.40"
+      "status": "implemented+tested",
+      "code": [
+        {
+          "loc": "conduit/src/identifiers.rs"
+        },
+        {
+          "loc": "conduit-server/src/api/client/directory.rs"
+        }
       ],
-      "notes": ""
+      "tests": [
+        "conduit/src/identifiers.rs::server_names_match_the_spec_examples",
+        "conduit-server/tests/production_directory.rs::identifier_grammars_reject_illegal_ids_and_accept_spec_forms"
+      ],
+      "tests_total": 2,
+      "gap_beads": [],
+      "notes": "DNS, IPv4, and bracketed IPv6, with an optional port of 1-5 digits. #room:999.1.1.1 is 400 M_INVALID_PARAM."
     },
     {
       "id": "app.id.user",
@@ -11572,19 +11591,22 @@
       "title": "Room IDs",
       "source": "https://spec.matrix.org/v1.19/appendices/#room-ids",
       "role": "homeserver",
-      "status": "partial",
+      "status": "implemented+tested",
       "code": [
+        {
+          "loc": "conduit/src/identifiers.rs"
+        },
         {
           "loc": "conduit/src/room/mod.rs"
         }
       ],
-      "tests": [],
-      "tests_total": 0,
-      "gap_beads": [
-        "conduit-y99.40",
-        "conduit-y99.23"
+      "tests": [
+        "conduit/src/identifiers.rs::room_alias_room_id_and_event_id_grammars",
+        "conduit-server/tests/production_directory.rs::identifier_grammars_reject_illegal_ids_and_accept_spec_forms"
       ],
-      "notes": ""
+      "tests_total": 2,
+      "gap_beads": [],
+      "notes": "!localpart:server or a domain-less unpadded base64 id, at most 255 bytes. A created v11 id ends with the server name. A created v12 id has no colon."
     },
     {
       "id": "app.id.alias",
@@ -11593,18 +11615,25 @@
       "title": "Room aliases",
       "source": "https://spec.matrix.org/v1.19/appendices/#room-aliases",
       "role": "homeserver",
-      "status": "partial",
+      "status": "implemented+tested",
       "code": [
         {
+          "loc": "conduit/src/identifiers.rs"
+        },
+        {
           "loc": "conduit-server/src/api/client/directory.rs"
+        },
+        {
+          "loc": "conduit-server/src/api/client/rooms.rs"
         }
       ],
-      "tests": [],
-      "tests_total": 0,
-      "gap_beads": [
-        "conduit-y99.40"
+      "tests": [
+        "conduit/src/identifiers.rs::room_alias_room_id_and_event_id_grammars",
+        "conduit-server/tests/production_directory.rs::identifier_grammars_reject_illegal_ids_and_accept_spec_forms"
       ],
-      "notes": ""
+      "tests_total": 2,
+      "gap_beads": [],
+      "notes": "Localpart is non-empty, may include whitespace, and excludes ':' and U+0000. The whole alias is at most 255 bytes. A NUL localpart and a 250-character localpart are 400 M_INVALID_PARAM."
     },
     {
       "id": "app.id.event",
@@ -11613,20 +11642,27 @@
       "title": "Event IDs",
       "source": "https://spec.matrix.org/v1.19/appendices/#event-ids",
       "role": "homeserver",
-      "status": "partial",
+      "status": "implemented+tested",
       "code": [
         {
+          "loc": "conduit/src/identifiers.rs"
+        },
+        {
           "loc": "conduit/src/hashing.rs"
+        },
+        {
+          "loc": "conduit/src/room_version.rs"
         }
       ],
       "tests": [
-        "conduit/tests/matrix_v11_crypto.rs"
+        "conduit/src/room_version.rs::event_ids_follow_the_version_encoding",
+        "conduit/src/room_version.rs::v3_and_v4_diverge_when_redaction_matches",
+        "conduit/src/identifiers.rs::room_alias_room_id_and_event_id_grammars",
+        "conduit-server/tests/production_directory.rs::identifier_grammars_reject_illegal_ids_and_accept_spec_forms"
       ],
-      "tests_total": 1,
-      "gap_beads": [
-        "conduit-y99.23"
-      ],
-      "notes": "v4+ format only."
+      "tests_total": 4,
+      "gap_beads": [],
+      "notes": "$localpart:server or a domain-less unpadded base64 id, at most 255 bytes. v3 uses standard base64. v4 and later use url-safe base64. A sent event id matches the grammar."
     },
     {
       "id": "app.uris",
@@ -11649,14 +11685,33 @@
       "title": "Opaque identifiers (txnId, device IDs, ...)",
       "source": "https://spec.matrix.org/v1.19/appendices/#opaque-identifiers",
       "role": "homeserver",
-      "status": "missing",
-      "code": [],
-      "tests": [],
-      "tests_total": 0,
-      "gap_beads": [
-        "conduit-y99.40"
+      "status": "implemented+tested",
+      "code": [
+        {
+          "loc": "conduit/src/identifiers.rs"
+        },
+        {
+          "loc": "conduit-server/src/api/client/session.rs"
+        },
+        {
+          "loc": "conduit-server/src/api/client/rooms.rs"
+        },
+        {
+          "loc": "conduit-server/src/api/client/keys.rs"
+        },
+        {
+          "loc": "conduit-server/src/api/client/room_content/redact.rs"
+        }
       ],
-      "notes": ""
+      "tests": [
+        "conduit/src/identifiers.rs::opaque_identifiers_use_the_unreserved_set",
+        "conduit-server/tests/production_directory.rs::identifier_grammars_reject_illegal_ids_and_accept_spec_forms",
+        "conduit-server/tests/production_sync.rs::cross_signing_key_ids_may_not_collide_with_device_ids",
+        "conduit-server/tests/production_sync.rs::login_refuses_a_device_id_equal_to_a_cross_signing_key"
+      ],
+      "tests_total": 4,
+      "gap_beads": [],
+      "notes": "Transaction ids and client device ids are 1-255 characters from [0-9A-Za-z._~-]. A space is 400 M_INVALID_PARAM. Phone_1 and ok~id are accepted."
     },
     {
       "id": "app.keys",
@@ -11767,14 +11822,25 @@
       "title": "Cryptographic test vectors (signing key, JSON signing, event signing)",
       "source": "https://spec.matrix.org/v1.19/appendices/#cryptographic-test-vectors",
       "role": "homeserver",
-      "status": "missing",
-      "code": [],
-      "tests": [],
-      "tests_total": 0,
-      "gap_beads": [
-        "conduit-y99.40"
+      "status": "implemented+tested",
+      "code": [
+        {
+          "loc": "conduit/src/signing.rs"
+        },
+        {
+          "loc": "conduit-server/src/federation/spec_v119.rs"
+        },
+        {
+          "loc": "conduit-server/src/main.rs"
+        }
       ],
-      "notes": "An independent OpenSSL vector exists; the spec appendix vectors are not asserted."
+      "tests": [
+        "conduit/src/signing.rs::appendix_json_signing_vectors",
+        "conduit-server/src/federation/spec_v119.rs::appendix_event_signing_vectors"
+      ],
+      "tests_total": 2,
+      "gap_beads": [],
+      "notes": "The appendix seed signs {} and {\"one\":1,\"two\":\"Two\"}. The event vectors match the v1 content hash and v1 signature. The message body and $0:domain stay on the event."
     },
     {
       "id": "app.conventions",
