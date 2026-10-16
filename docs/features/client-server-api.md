@@ -122,8 +122,9 @@ criteria are applied on their own streams. Limited account-data and presence
 responses retain cursors before omitted updates so the next request delivers the
 remainder. Lazy state selects the syncing user and timeline senders, preserving
 historical membership events with different event IDs. Redundant sender memberships
-may still be resent, as permitted by the specification. Further federation-format
-and state/ephemeral limit edge auditing remains under `conduit-y99.13.4`.
+may still be resent, as permitted by the specification. `event_format: federation` returns the raw PDU (signatures and hashes,
+no `unsigned`, no v3+ `event_id`); the default `client` format strips
+those PDU fields. `event_fields` is applied after that choice.
 
 ### Summaries, unread counts and lazy-loading redundancy (conduit-y99.13.4)
 

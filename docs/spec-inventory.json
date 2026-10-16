@@ -24,9 +24,9 @@
         "total": 164
       },
       "requirement": {
-        "implemented+tested": 58,
+        "implemented+tested": 59,
         "implemented-untested": 0,
-        "partial": 19,
+        "partial": 18,
         "missing": 0,
         "not-applicable": 9,
         "total": 86
@@ -1182,7 +1182,6 @@
       "tests_total": 46,
       "gap_beads": [
         "conduit-y99.13",
-        "conduit-y99.13.4",
         "conduit-y99.14",
         "conduit-y99.16",
         "conduit-y99.27"
@@ -7205,23 +7204,27 @@
       "title": "Filtering (stored and inline filters)",
       "source": "https://spec.matrix.org/v1.19/client-server-api/#filtering",
       "role": "homeserver",
-      "status": "partial",
+      "status": "implemented+tested",
       "code": [
         {
           "loc": "conduit/src/filter.rs"
         },
         {
           "loc": "conduit-server/src/api/client/filters.rs"
+        },
+        {
+          "loc": "conduit-server/src/api/client/sync.rs"
         }
       ],
       "tests": [
-        "conduit-server/tests/production_e2e.rs::production_filters_are_owned_durable_and_shared_by_inline_and_stored_sync"
+        "conduit-server/tests/production_e2e.rs::production_filters_are_owned_durable_and_shared_by_inline_and_stored_sync",
+        "conduit-server/tests/production_sync.rs::limited_ephemeral_and_state_windows_make_progress",
+        "conduit-server/tests/production_sync.rs::sync_event_format_selects_client_or_federation_pdu",
+        "conduit/src/filter.rs::event_format_keeps_client_fields_and_the_federation_pdu"
       ],
-      "tests_total": 1,
-      "gap_beads": [
-        "conduit-y99.13.4"
-      ],
-      "notes": ""
+      "tests_total": 4,
+      "gap_beads": [],
+      "notes": "Stored and inline filters share one model. Default and event_format client strip hashes, signatures, auth_events, prev_events and depth and keep unsigned.age. event_format federation returns the raw PDU: signatures and hashes kept, unsigned omitted, v3+ event_id omitted, and a v1-v2 event id (containing ':') kept. event_fields applies after that choice, so a client filter cannot select signatures. State and ephemeral limits advance the sync cursor instead of dropping the remainder."
     },
     {
       "id": "cs.filtering.lazy-load",

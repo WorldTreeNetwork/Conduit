@@ -1299,6 +1299,99 @@ async fn limited_ephemeral_and_state_windows_make_progress() {
 }
 
 #[tokio::test]
+async fn sync_event_format_selects_client_or_federation_pdu() {
+    let server = Server::new().await;
+    let (alice, _bob, room, _) = server.chat_pair().await;
+    let event_id = send_text(
+        &server,
+        &alice,
+        &room,
+        "fmt",
+        json!({"msgtype": "m.text", "body": "formatted"}),
+    )
+    .await;
+    let message = |response: &Value| -> Value {
+        timeline(response, &room)
+            .into_iter()
+            .find(|event| {
+                event["event_id"] == event_id
+                    || (event.get("event_id").is_none()
+                        && event["type"] == "m.room.message"
+                        && event["content"]["body"] == "formatted")
+            })
+            .cloned()
+            .unwrap_or_else(|| panic!("message missing: {response}"))
+    };
+    let pdu_fields = ["hashes", "signatures", "auth_events", "prev_events", "depth"];
+
+    let plain = sync(&server, &alice, None).await;
+    let plain_message = message(&plain);
+    assert_eq!(plain_message["event_id"], event_id.as_str());
+    assert!(plain_message["unsigned"]["age"].is_u64(), "{plain_message}");
+    assert_eq!(plain_message["unsigned"]["transaction_id"], "fmt");
+    for field in pdu_fields {
+        assert!(plain_message.get(field).is_none(), "default format exposes {field}: {plain_message}");
+    }
+    let room_events = |response: &Value| -> Vec<Value> {
+        timeline(response, &room)
+            .into_iter()
+            .cloned()
+            .chain(
+                response["rooms"]["join"][&room]["state"]["events"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .cloned(),
+            )
+            .collect()
+    };
+    let create = room_events(&plain).into_iter().find(|event| event["type"] == "m.room.create").unwrap();
+    assert!(create.get("event_id").is_some() && create.get("hashes").is_none(), "{create}");
+
+    let federation = sync_with(
+        &server,
+        &alice,
+        json!({"event_format": "federation", "room": {"timeline": {"limit": 30}}}),
+        None,
+    )
+    .await;
+    let raw = message(&federation);
+    assert!(raw.get("event_id").is_none(), "v3+ federation PDUs omit event_id: {raw}");
+    assert!(raw.get("unsigned").is_none(), "federation format is the raw PDU: {raw}");
+    assert!(raw["hashes"]["sha256"].as_str().is_some_and(|hash| !hash.is_empty()), "{raw}");
+    assert!(raw["signatures"].as_object().is_some_and(|sigs| !sigs.is_empty()), "{raw}");
+    assert!(raw["auth_events"].as_array().is_some_and(|ids| !ids.is_empty()), "{raw}");
+    assert!(raw["prev_events"].is_array() && raw["depth"].is_number(), "{raw}");
+    assert_eq!(raw["sender"], user(&alice));
+    assert_eq!(raw["room_id"], room.as_str());
+    let fed_create = room_events(&federation).into_iter().find(|event| event["type"] == "m.room.create").unwrap();
+    assert!(fed_create.get("event_id").is_none() && fed_create["signatures"].is_object(), "{fed_create}");
+
+    let projected = sync_with(
+        &server,
+        &alice,
+        json!({"event_format": "federation", "event_fields": ["type", "content.body", "hashes.sha256"], "room": {"timeline": {"limit": 30}}}),
+        None,
+    )
+    .await;
+    let selected = message(&projected);
+    assert_eq!(selected["content"], json!({"body": "formatted"}));
+    assert!(selected["hashes"]["sha256"].is_string(), "projection follows federation format: {selected}");
+    assert!(selected.get("signatures").is_none() && selected.get("unsigned").is_none(), "{selected}");
+
+    let client_fields = sync_with(
+        &server,
+        &alice,
+        json!({"event_format": "client", "event_fields": ["type", "event_id", "signatures"], "room": {"timeline": {"limit": 30}}}),
+        None,
+    )
+    .await;
+    let client = message(&client_fields);
+    assert_eq!(client["event_id"], event_id.as_str());
+    assert!(client.get("signatures").is_none(), "client format drops signatures before projection: {client}");
+}
+
+#[tokio::test]
 async fn key_inventory_fields_are_always_present() {
     let server = Server::new().await;
     let alice = server.register("alice").await;

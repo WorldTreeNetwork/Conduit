@@ -1632,7 +1632,9 @@ async fn add_transaction_ids(
     Ok(())
 }
 
-/// Apply `event_fields` projection, after every filter that reads fields.
+/// Apply `event_format`, then `event_fields`. Format runs after every
+/// filter that reads `unsigned` or PDU fields, and before projection so a
+/// client filter cannot select `signatures` the client format removed.
 fn project_room_block(block: &mut JoinedRoomBlock, filter: &SyncFilter) {
     for events in [
         &mut block.timeline.events,
@@ -1641,6 +1643,7 @@ fn project_room_block(block: &mut JoinedRoomBlock, filter: &SyncFilter) {
         &mut block.account_data.events,
     ] {
         for event in events {
+            filter.definition.apply_format(event);
             *event = filter.definition.project(std::mem::take(event));
         }
     }
