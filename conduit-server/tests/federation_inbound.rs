@@ -1224,6 +1224,159 @@ async fn inbound_typing_edu_reaches_local_typers_and_rejects_spoofs() {
     );
 }
 
+/// Inbound `m.receipt` updates only the listed public read receipts.
+#[tokio::test]
+async fn inbound_receipt_edu_updates_only_listed_public_reads() {
+    let (addr, storage, key, _typing) = spawn_test_server("server-a.test").await;
+    let base = format!("http://{addr}");
+    let room = "!receipts:server-a.test";
+    let other = "!other:server-a.test";
+    let john = "@john:server-a.test";
+    let kept = "@kept:server-a.test";
+    for (room_id, user) in [(room, john), (room, kept), (other, john)] {
+        let member = signed_event(
+            &key,
+            "server-a.test",
+            Pdu::new(
+                room_id,
+                user,
+                "m.room.member",
+                Some(user.into()),
+                json!({"membership": "join"}),
+                1_000,
+                vec![],
+                vec![],
+                1,
+            ),
+        );
+        storage.put_event(&member).await.unwrap();
+        storage
+            .set_state_entry(room_id, "m.room.member", user, &member.event_id)
+            .await
+            .unwrap();
+    }
+    storage
+        .set_threaded_receipt(room, kept, "m.read", None, "$kept", 11)
+        .await
+        .unwrap();
+    storage
+        .set_threaded_receipt(room, john, "m.read", Some("$thread"), "$old-thread", 12)
+        .await
+        .unwrap();
+
+    let client = reqwest::Client::new();
+    let send = |txn: String, edu: Value| {
+        let base = base.clone();
+        let key = Arc::clone(&key);
+        let client = client.clone();
+        async move {
+            let body = json!({
+                "origin": "server-a.test",
+                "origin_server_ts": 1_700_000_000_000u64,
+                "pdus": [],
+                "edus": [edu],
+            });
+            let path = format!("/_matrix/federation/v1/send/{txn}");
+            let auth = sign_req("PUT", &path, "server-a.test", "server-a.test", Some(&body), &key);
+            let response = client
+                .put(format!("{base}{path}"))
+                .header("Authorization", auth)
+                .json(&body)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), 200, "{}", response.text().await.unwrap_or_default());
+        }
+    };
+
+    send(
+        "receipts".into(),
+        json!({
+            "edu_type": "m.receipt",
+            "content": {
+                room: {
+                    "m.read": {
+                        john: {
+                            "event_ids": ["$read"],
+                            "data": { "ts": 1533358089009i64, "thread_id": "main" }
+                        },
+                        "@eve:other.test": {
+                            "event_ids": ["$spoof"],
+                            "data": { "ts": 1 }
+                        }
+                    },
+                    "m.read.private": {
+                        john: {
+                            "event_ids": ["$private"],
+                            "data": { "ts": 2 }
+                        }
+                    }
+                },
+                other: {
+                    "m.read": {
+                        "@stranger:server-a.test": {
+                            "event_ids": ["$absent"],
+                            "data": { "ts": 3 }
+                        }
+                    }
+                }
+            }
+        }),
+    )
+    .await;
+
+    let john_receipts = storage.user_receipts_in_room(room, john).await.unwrap();
+    let main = john_receipts.iter().find(|row| row.thread_id.as_deref() == Some("main")).unwrap();
+    assert_eq!(main.event_id, "$read");
+    assert_eq!(main.ts, 1533358089009);
+    assert_eq!(main.receipt_type, "m.read");
+    assert!(
+        john_receipts.iter().any(|row| row.thread_id.as_deref() == Some("$thread") && row.event_id == "$old-thread"),
+        "a receipt the EDU does not mention must stay: {john_receipts:?}"
+    );
+    assert!(john_receipts.iter().all(|row| row.receipt_type != "m.read.private"));
+    let kept_receipts = storage.user_receipts_in_room(room, kept).await.unwrap();
+    assert_eq!(kept_receipts.len(), 1);
+    assert_eq!(kept_receipts[0].event_id, "$kept");
+    assert!(storage.user_receipts_in_room(room, "@eve:other.test").await.unwrap().is_empty());
+    assert!(storage.user_receipts_in_room(other, "@stranger:server-a.test").await.unwrap().is_empty());
+
+    let acl = signed_event(
+        &key,
+        "server-a.test",
+        Pdu::new(
+            room,
+            john,
+            "m.room.server_acl",
+            Some(String::new()),
+            json!({"allow": ["*"], "deny": ["server-a.test"], "allow_ip_literals": false}),
+            2_000,
+            vec![],
+            vec![],
+            2,
+        ),
+    );
+    storage.put_event(&acl).await.unwrap();
+    storage.set_state_entry(room, "m.room.server_acl", "", &acl.event_id).await.unwrap();
+    send(
+        "receipts-denied".into(),
+        json!({
+            "edu_type": "m.receipt",
+            "content": {
+                room: {
+                    "m.read": {
+                        john: { "event_ids": ["$denied"], "data": { "ts": 99, "thread_id": "main" } }
+                    }
+                }
+            }
+        }),
+    )
+    .await;
+    let after = storage.user_receipts_in_room(room, john).await.unwrap();
+    let main = after.iter().find(|row| row.thread_id.as_deref() == Some("main")).unwrap();
+    assert_eq!(main.event_id, "$read", "a denied server's receipt must not replace the stored one");
+}
+
 // ---------------------------------------------------------------------------
 // Helper: percent-encode a string
 // ---------------------------------------------------------------------------

@@ -24,9 +24,9 @@
         "total": 164
       },
       "requirement": {
-        "implemented+tested": 62,
+        "implemented+tested": 63,
         "implemented-untested": 0,
-        "partial": 15,
+        "partial": 14,
         "missing": 0,
         "not-applicable": 9,
         "total": 86
@@ -42,10 +42,10 @@
         "total": 36
       },
       "requirement": {
-        "implemented+tested": 11,
+        "implemented+tested": 12,
         "implemented-untested": 0,
         "partial": 15,
-        "missing": 12,
+        "missing": 11,
         "not-applicable": 3,
         "total": 41
       }
@@ -7744,21 +7744,24 @@
       "title": "Receipts (m.read, m.read.private, threaded)",
       "source": "https://spec.matrix.org/v1.19/client-server-api/#receipts",
       "role": "homeserver",
-      "status": "partial",
+      "status": "implemented+tested",
       "code": [
         {
           "loc": "conduit-server/src/api/client/receipts.rs"
+        },
+        {
+          "loc": "conduit-server/src/federation/server.rs"
         }
       ],
       "tests": [
-        "conduit-server/tests/production_e2e.rs::production_receipt_overwrites_and_presence_respect_privacy"
+        "conduit-server/tests/production_sync.rs::threaded_and_unthreaded_receipts_coexist",
+        "conduit-server/tests/production_e2e.rs::production_receipt_overwrites_and_presence_respect_privacy",
+        "conduit-server/tests/federation_inbound.rs::inbound_receipt_edu_updates_only_listed_public_reads",
+        "conduit-server/tests/presence.rs::local_public_receipt_is_federated_and_private_is_not"
       ],
-      "tests_total": 1,
-      "gap_beads": [
-        "conduit-y99.15",
-        "conduit-y99.32"
-      ],
-      "notes": ""
+      "tests_total": 4,
+      "gap_beads": [],
+      "notes": "Unthreaded, main, and thread-root receipts coexist, and m.read.private stays on this server. A public m.read is federated as an m.receipt EDU. A version-12 create event with an empty room_id still belongs to its room."
     },
     {
       "id": "cs.mod.read-markers",
@@ -9196,14 +9199,22 @@
       "title": "Receipts (m.receipt EDU)",
       "source": "https://spec.matrix.org/v1.19/server-server-api/#receipts",
       "role": "homeserver",
-      "status": "missing",
-      "code": [],
-      "tests": [],
-      "tests_total": 0,
-      "gap_beads": [
-        "conduit-y99.32"
+      "status": "implemented+tested",
+      "code": [
+        {
+          "loc": "conduit-server/src/api/client/receipts.rs"
+        },
+        {
+          "loc": "conduit-server/src/federation/server.rs"
+        }
       ],
-      "notes": ""
+      "tests": [
+        "conduit-server/tests/federation_inbound.rs::inbound_receipt_edu_updates_only_listed_public_reads",
+        "conduit-server/tests/presence.rs::local_public_receipt_is_federated_and_private_is_not"
+      ],
+      "tests_total": 2,
+      "gap_beads": [],
+      "notes": "An m.receipt EDU updates only the listed m.read entries. Private receipts, spoofed users, and users who are not joined are ignored. A room the ACL denies is skipped while other rooms in the same EDU still apply. Outbound public receipts go to joined remote servers with event_ids and data.ts, plus thread_id when set."
     },
     {
       "id": "ss.query",

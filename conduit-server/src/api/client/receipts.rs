@@ -31,6 +31,15 @@ fn invalid_param(message: impl Into<String>) -> Response {
 /// (the spec recommends three).
 const THREAD_HOPS: usize = 3;
 
+/// A version-12 create PDU omits `room_id`; the room id is that event id
+/// with the `$` sigil replaced by `!`. Every other event carries `room_id`.
+fn event_belongs_to_room(event: &conduit::event::Event, room_id: &str) -> bool {
+    if event.room_id == room_id {
+        return true;
+    }
+    event.room_id.is_empty() && conduit::room_version::room_id_from_event_id(&event.event_id) == room_id
+}
+
 /// The thread an event belongs to: `None` for the main timeline, or the
 /// thread root's event ID.
 pub(crate) async fn thread_of(
@@ -97,7 +106,7 @@ pub async fn post_receipt<S: AuthState>(
         return MatrixError::forbidden("you are not joined to this room").into_response();
     }
     let event = match storage.get_event(&event_id).await {
-        Ok(Some(event)) if event.room_id == room_id => event,
+        Ok(Some(event)) if event_belongs_to_room(&event, &room_id) => event,
         Ok(_) => return MatrixError::new_not_found("event not found in this room").into_response(),
         Err(e) => return MatrixError::unknown(e.to_string()).into_response(),
     };
@@ -127,6 +136,129 @@ pub async fn post_receipt<S: AuthState>(
         return MatrixError::unknown(e.to_string()).into_response();
     }
 
+    // Public read receipts are deltas for the other servers in the room.
+    // `m.read.private` stays on this homeserver.
+    if let Some(queue) = state.federation_queue() {
+        fanout_receipt(
+            storage,
+            queue,
+            state.server_name(),
+            &room_id,
+            &authed.user_id,
+            &receipt_type,
+            thread_id.as_deref(),
+            &event_id,
+            ts,
+        )
+        .await;
+    }
+
     state.sync_notify().notify_waiters();
     (StatusCode::OK, Json(json!({}))).into_response()
+}
+
+/// Apply an inbound `m.receipt` EDU. Only listed `m.read` entries change;
+/// anything not in the EDU, including private receipts, is left alone. A
+/// room the ACL denies is skipped. The user must belong to `origin` and be
+/// joined.
+pub(crate) async fn apply_inbound_receipt(
+    storage: &dyn conduit::storage::Storage,
+    origin: &str,
+    edu: &Value,
+) -> conduit::Result<()> {
+    let Some(content) = edu.get("content").and_then(Value::as_object) else {
+        return Ok(());
+    };
+    for (room_id, room_receipts) in content {
+        if !conduit::server_acl::server_allowed_by_room(storage, room_id, origin).await? {
+            continue;
+        }
+        let Some(room_receipts) = room_receipts.as_object() else { continue };
+        for (receipt_type, users) in room_receipts {
+            if receipt_type != "m.read" {
+                continue;
+            }
+            let Some(users) = users.as_object() else { continue };
+            for (user_id, body) in users {
+                if conduit::signing::server_of_user_id(user_id) != Some(origin) {
+                    continue;
+                }
+                let joined = storage
+                    .get_state_entry(room_id, "m.room.member", user_id)
+                    .await?
+                    .is_some_and(|event| event.content.get("membership").and_then(Value::as_str) == Some("join"));
+                if !joined {
+                    continue;
+                }
+                let Some(event_id) = body
+                    .get("event_ids")
+                    .and_then(Value::as_array)
+                    .and_then(|ids| ids.iter().find_map(Value::as_str))
+                else {
+                    continue;
+                };
+                let data = body.get("data");
+                let thread_id = match data.and_then(|data| data.get("thread_id")) {
+                    None | Some(Value::Null) => None,
+                    Some(Value::String(thread)) if !thread.is_empty() => Some(thread.as_str()),
+                    Some(_) => continue,
+                };
+                let ts = data
+                    .and_then(|data| data.get("ts"))
+                    .and_then(Value::as_i64)
+                    .unwrap_or_else(|| Utc::now().timestamp_millis());
+                storage
+                    .set_threaded_receipt(room_id, user_id, "m.read", thread_id, event_id, ts)
+                    .await?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Send one public read-receipt delta to every other server with a joined member.
+pub(crate) async fn fanout_receipt(
+    storage: &std::sync::Arc<dyn conduit::storage::Storage>,
+    queue: &crate::federation::Queue,
+    server_name: &str,
+    room_id: &str,
+    user_id: &str,
+    receipt_type: &str,
+    thread_id: Option<&str>,
+    event_id: &str,
+    ts: i64,
+) {
+    if receipt_type != "m.read" {
+        return;
+    }
+    let servers = match storage.joined_remote_servers(room_id, server_name).await {
+        Ok(servers) => servers,
+        Err(error) => {
+            tracing::warn!(%error, "receipt federation fanout skipped");
+            return;
+        }
+    };
+    if servers.is_empty() {
+        return;
+    }
+    let mut data = json!({ "ts": ts });
+    if let Some(thread) = thread_id {
+        data["thread_id"] = json!(thread);
+    }
+    let edu = json!({
+        "edu_type": "m.receipt",
+        "content": {
+            room_id: {
+                "m.read": {
+                    user_id: {
+                        "event_ids": [event_id],
+                        "data": data,
+                    }
+                }
+            }
+        }
+    });
+    for dest in servers {
+        queue.enqueue(&dest, vec![], vec![edu.clone()]).await;
+    }
 }

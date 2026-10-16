@@ -762,6 +762,161 @@ async fn local_typing_is_federated_to_joined_remote_servers() {
     assert!(stopped.is_ok(), "stopping typing must be federated");
 }
 
+/// A public read receipt is federated as an `m.receipt` delta. A private
+/// receipt is not, and a server whose member has left is not a destination.
+#[tokio::test]
+async fn local_public_receipt_is_federated_and_private_is_not() {
+    use std::sync::Mutex;
+    use axum::extract::Json;
+    use axum::routing::put;
+    use conduit::event::{Event, Pdu};
+    use conduit_server::federation::{Client, Queue};
+    use conduit_server::RemoteKeyCache;
+    use hickory_resolver::TokioAsyncResolver;
+
+    let captured = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let captured_route = Arc::clone(&captured);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        let app = Router::new().route(
+            "/_matrix/federation/v1/send/:txn_id",
+            put(move |Json(body): Json<Value>| {
+                let captured = Arc::clone(&captured_route);
+                async move {
+                    captured.lock().unwrap().push(body);
+                    Json(json!({ "pdus": {} }))
+                }
+            }),
+        );
+        axum::serve(listener, app).await.ok();
+    });
+
+    let db = TempDb::new().await;
+    let storage = db.storage();
+    let server_key = Arc::new(conduit::keys::generate_server_key());
+    let resolver = TokioAsyncResolver::tokio_from_system_conf().unwrap();
+    let fed = Client::new(
+        reqwest::Client::new(),
+        resolver,
+        Arc::new(RemoteKeyCache::new()),
+        Arc::clone(&server_key),
+        Arc::from("localhost"),
+    )
+    .with_test_base_url(base_url);
+    let queue = Arc::new(Queue::new(Arc::new(fed), Arc::clone(&storage)));
+    let mut state = TestState::new(Arc::clone(&storage));
+    state.server_key = Arc::clone(&server_key);
+    state.federation_queue = Some(queue);
+    let app = build_router(state);
+
+    let reg = do_register(&app, "alice_read", "pass").await;
+    let token = reg["access_token"].as_str().unwrap();
+    let user = reg["user_id"].as_str().unwrap().to_owned();
+    let room_id = do_create_room(&app, token).await;
+    let event_id = storage
+        .room_events(&room_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|event| event.event_type == "m.room.create")
+        .unwrap()
+        .event_id;
+
+    let bob = Event::new(
+        "$bob-read:localhost",
+        Pdu::new(
+            &room_id,
+            "@bob:remote.test",
+            "m.room.member",
+            Some("@bob:remote.test".into()),
+            json!({"membership": "join"}),
+            1_700_000_000_000,
+            vec![],
+            vec![],
+            2,
+        ),
+    );
+    let cara = Event::new(
+        "$cara-read:localhost",
+        Pdu::new(
+            &room_id,
+            "@cara:left.test",
+            "m.room.member",
+            Some("@cara:left.test".into()),
+            json!({"membership": "leave"}),
+            1_700_000_000_001,
+            vec![],
+            vec![],
+            3,
+        ),
+    );
+    storage.put_event(&bob).await.unwrap();
+    storage.put_event(&cara).await.unwrap();
+    storage
+        .set_state_entry(&room_id, "m.room.member", "@bob:remote.test", &bob.event_id)
+        .await
+        .unwrap();
+    storage
+        .set_state_entry(&room_id, "m.room.member", "@cara:left.test", &cara.event_id)
+        .await
+        .unwrap();
+
+    let post = |receipt_type: &'static str, body: Value| {
+        let app = app.clone();
+        let token = token.to_owned();
+        let room_id = room_id.clone();
+        let event_id = event_id.clone();
+        async move {
+            let req = Request::builder()
+                .method("POST")
+                .uri(format!("/_matrix/client/v3/rooms/{room_id}/receipt/{receipt_type}/{event_id}"))
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap();
+            let resp = app.oneshot(req).await.unwrap();
+            let status = resp.status();
+            let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+            assert_eq!(status, StatusCode::OK, "{receipt_type} {event_id} {}", String::from_utf8_lossy(&body));
+        }
+    };
+    post("m.read", json!({"thread_id": "main"})).await;
+
+    let edu = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(body) = captured.lock().unwrap().iter().find(|body| {
+                body["edus"].as_array().is_some_and(|edus| edus.iter().any(|edu| edu["edu_type"] == "m.receipt"))
+            }) {
+                return body.clone();
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("remote server never received the receipt EDU");
+    let receipt = edu["edus"].as_array().unwrap().iter().find(|edu| edu["edu_type"] == "m.receipt").unwrap();
+    let entry = &receipt["content"][&room_id]["m.read"][&user];
+    assert_eq!(entry["event_ids"], json!([event_id]));
+    assert_eq!(entry["data"]["thread_id"], "main");
+    assert!(entry["data"]["ts"].as_i64().is_some());
+    assert!(receipt["content"][&room_id].get("m.read.private").is_none());
+    assert_eq!(
+        captured.lock().unwrap().len(),
+        1,
+        "a left member's server is not a receipt destination"
+    );
+
+    post("m.read.private", json!({})).await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let private = captured.lock().unwrap().iter().any(|body| {
+        body["edus"].as_array().is_some_and(|edus| {
+            edus.iter().any(|edu| edu.to_string().contains("m.read.private"))
+        })
+    });
+    assert!(!private, "m.read.private must not be federated");
+}
+
 // ---------------------------------------------------------------------------
 // 1mo.5: Typing expires after TTL
 // ---------------------------------------------------------------------------

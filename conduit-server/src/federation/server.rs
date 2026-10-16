@@ -1201,6 +1201,9 @@ pub(crate) async fn handle_edu(
         )
         .await?;
     }
+    if edu_type == "m.receipt" {
+        crate::api::client::receipts::apply_inbound_receipt(state.storage.as_ref(), origin, edu).await?;
+    }
     if edu_type == "m.direct_to_device" {
         #[derive(Deserialize)]
         struct DirectToDevice {
