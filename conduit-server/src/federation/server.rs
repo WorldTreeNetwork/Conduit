@@ -16,7 +16,7 @@
 //! - `GET  /query/profile`
 //! - `GET  /query/directory`
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use axum::{
@@ -1068,6 +1068,7 @@ pub async fn get_missing_events(
     }
 
     let limit = body.limit.min(20);
+    let min_depth = body.min_depth.unwrap_or(0);
     let earliest: HashSet<String> = body.earliest_events.into_iter().collect();
     let latest: HashSet<String> = body.latest_events.into_iter().collect();
 
@@ -1077,31 +1078,36 @@ pub async fn get_missing_events(
         Err(e) => return internal(&e.to_string()),
     };
 
-    // BFS backwards from latest_events until we hit earliest_events.
-    // Return events that are "between" the two sets.
-    let event_map: HashMap<String, &Event> =
-        all_events.iter().map(|e| (e.event_id.clone(), e)).collect();
+    // Breadth-first walk of the prev_events of latest_events. The named
+    // latest events are the ones the caller already has, so they are not
+    // returned. earliest_events stop the walk.
+    let event_map: HashMap<String, &Event> = all_events.iter().map(|e| (e.event_id.clone(), e)).collect();
 
     let mut found: Vec<Event> = Vec::new();
-    let mut visited: HashSet<String> = HashSet::new();
-    let mut queue: Vec<String> = latest.iter().cloned().collect();
+    let mut visited: HashSet<String> = earliest.union(&latest).cloned().collect();
+    let mut queue: VecDeque<String> = VecDeque::new();
+    for latest_id in &latest {
+        if let Some(event) = event_map.get(latest_id) {
+            for prev in &event.prev_events {
+                if !visited.contains(prev) {
+                    queue.push_back(prev.clone());
+                }
+            }
+        }
+    }
 
-    while let Some(eid) = queue.pop() {
-        if visited.contains(&eid) || earliest.contains(&eid) {
+    while let Some(eid) = queue.pop_front() {
+        if !visited.insert(eid.clone()) || found.len() >= limit {
             continue;
         }
-        visited.insert(eid.clone());
-
-        if let Some(ev) = event_map.get(&eid) {
-            found.push((*ev).clone());
-            if found.len() >= limit {
-                break;
-            }
-            // Walk backwards via prev_events.
-            for prev in &ev.prev_events {
-                if !visited.contains(prev) && !earliest.contains(prev) {
-                    queue.push(prev.clone());
-                }
+        let Some(event) = event_map.get(&eid) else { continue };
+        if event.depth < min_depth {
+            continue;
+        }
+        found.push((*event).clone());
+        for prev in &event.prev_events {
+            if !visited.contains(prev) {
+                queue.push_back(prev.clone());
             }
         }
     }

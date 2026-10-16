@@ -34,8 +34,8 @@
     },
     "ss": {
       "endpoint": {
-        "implemented+tested": 24,
-        "implemented-untested": 1,
+        "implemented+tested": 25,
+        "implemented-untested": 0,
         "partial": 6,
         "missing": 4,
         "not-applicable": 1,
@@ -5124,7 +5124,7 @@
       "rate_limited": "No",
       "deprecated": false,
       "role": "homeserver",
-      "status": "implemented-untested",
+      "status": "implemented+tested",
       "code": [
         {
           "loc": "conduit-server/src/federation/server.rs:1078",
@@ -5132,12 +5132,15 @@
           "kind": "exact"
         }
       ],
-      "tests": [],
-      "tests_total": 0,
+      "tests": [
+        "conduit-server/tests/production_pdu.rs::get_missing_events_returns_prev_events_between_the_bounds",
+        "conduit-server/tests/production_pdu.rs::server_acl_denies_remote_participation_until_lifted"
+      ],
+      "tests_total": 2,
       "gap_beads": [
         "conduit-y99.22"
       ],
-      "notes": "No test; ACL protection open."
+      "notes": "Walks prev_events of latest_events breadth-first, skips earliest_events and the latest events themselves, and honors limit and min_depth. Limit is capped at 20. A denied server is 403."
     },
     {
       "id": "ss.ep.get_matrixfederationv1eventeventid",
@@ -8980,13 +8983,14 @@
         }
       ],
       "tests": [
-        "conduit-server/tests/federation_inbound.rs::backfill_returns_history_visibility_filtered_events"
+        "conduit-server/tests/federation_inbound.rs::backfill_returns_history_visibility_filtered_events",
+        "conduit-server/tests/production_pdu.rs::get_missing_events_returns_prev_events_between_the_bounds"
       ],
-      "tests_total": 1,
+      "tests_total": 2,
       "gap_beads": [
         "conduit-y99.22"
       ],
-      "notes": "get_missing_events untested."
+      "notes": "get_missing_events walks prev_events of latest_events and stops at earliest_events. Backfill still ignores v and returns a depth-ordered page."
     },
     {
       "id": "ss.retrieving-events",
@@ -9005,7 +9009,7 @@
         "conduit-y99.22",
         "conduit-embed-pdu"
       ],
-      "notes": "state and state_ids return the resolved state before the requested event. get_missing_events and timestamp_to_event remain open."
+      "notes": "state and state_ids return the resolved state before the requested event. timestamp_to_event remains open."
     },
     {
       "id": "ss.joining",

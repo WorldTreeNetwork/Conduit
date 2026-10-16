@@ -1268,6 +1268,81 @@ async fn spawn_key_server(docs: Vec<Value>) -> String {
     format!("http://{addr}")
 }
 
+#[tokio::test]
+async fn get_missing_events_returns_prev_events_between_the_bounds() {
+    let remote = spawn_remote().await;
+    let server = federated_server(&remote).await;
+    let alice = server.register("alice").await;
+    let token = alice["access_token"].as_str().unwrap();
+    let room = server
+        .request(Method::POST, "/_matrix/client/v3/createRoom", Some(token), Some(json!({"preset": "public_chat"})), 200)
+        .await["room_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    federation_join(&server, &remote, REMOTE, &room, "@r:remote.test").await;
+    let send = |txn: &str, body: &str| {
+        let server = &server;
+        let room = room.clone();
+        let txn = txn.to_owned();
+        let body = body.to_owned();
+        async move {
+            server
+                .request(
+                    Method::PUT,
+                    &format!("/_matrix/client/v3/rooms/{}/send/m.room.message/{txn}", enc(&room)),
+                    Some(token),
+                    Some(json!({"msgtype": "m.text", "body": body})),
+                    200,
+                )
+                .await["event_id"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        }
+    };
+    let first = send("one", "one").await;
+    let second = send("two", "two").await;
+    let third = send("three", "three").await;
+    let path = format!("/_matrix/federation/v1/get_missing_events/{}", enc(&room));
+    let bodies = |payload: Value| {
+        let server = &server;
+        let remote = &remote;
+        let path = path.clone();
+        async move {
+            let response = fed(server, remote, Method::POST, &path, Some(payload), 200).await;
+            response["events"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|pdu| pdu["content"]["body"].as_str().map(str::to_owned))
+                .collect::<Vec<_>>()
+        }
+    };
+    let between = bodies(json!({"earliest_events": [first], "latest_events": [third], "limit": 10})).await;
+    assert_eq!(between, vec!["two"], "only the event strictly between the bounds: {between:?}");
+    let limited = bodies(json!({"earliest_events": [], "latest_events": [third], "limit": 1})).await;
+    assert_eq!(limited, vec!["two"], "the walk starts at prev_events and stops at the limit: {limited:?}");
+    let second_pdu = fed(
+        &server,
+        &remote,
+        Method::GET,
+        &format!("/_matrix/federation/v1/event/{}", enc(&second)),
+        None,
+        200,
+    )
+    .await;
+    let depth = second_pdu["pdus"][0]["depth"].as_i64().unwrap();
+    let too_deep = bodies(json!({
+        "earliest_events": [first],
+        "latest_events": [third],
+        "limit": 10,
+        "min_depth": depth + 1,
+    }))
+    .await;
+    assert!(too_deep.is_empty(), "min_depth drops the shallower predecessor: {too_deep:?}");
+}
+
 async fn federation_join(server: &Server, remote: &Remote, origin: &str, room: &str, user: &str) {
     let make = format!("/_matrix/federation/v1/make_join/{}/{}", enc(room), enc(user));
     let template = fed_as(server, remote, origin, Method::GET, &make, None, 200).await["event"].clone();
@@ -1316,6 +1391,18 @@ async fn later_joining_servers_get_redacted_federation_events() {
             &format!("/_matrix/client/v3/rooms/{}/send/m.room.message/secret", enc(&room)),
             Some(token),
             Some(json!({"msgtype": "m.text", "body": "my secret"})),
+            200,
+        )
+        .await["event_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let successor = server
+        .request(
+            Method::PUT,
+            &format!("/_matrix/client/v3/rooms/{}/send/m.room.message/after-secret", enc(&room)),
+            Some(token),
+            Some(json!({"msgtype": "m.text", "body": "later"})),
             200,
         )
         .await["event_id"]
@@ -1373,7 +1460,7 @@ async fn later_joining_servers_get_redacted_federation_events() {
     assert!(late_back["pdus"].as_array().unwrap().iter().all(|pdu| pdu["type"] != "m.room.redaction"));
 
     let missing = format!("/_matrix/federation/v1/get_missing_events/{}", enc(&room));
-    let body = json!({"earliest_events": [], "latest_events": [secret], "limit": 10});
+    let body = json!({"earliest_events": [], "latest_events": [successor], "limit": 10});
     let early_missing = fed_as(&server, &early, REMOTE, Method::POST, &missing, Some(body.clone()), 200).await;
     assert_eq!(pdu_with_hash(early_missing["events"].as_array().unwrap(), &hash)["content"]["body"], "my secret");
     let late_missing = fed_as(&server, &late, "late.test", Method::POST, &missing, Some(body), 200).await;
