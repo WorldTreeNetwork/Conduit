@@ -201,6 +201,72 @@ async fn require_cosigner(
     Ok(admitted)
 }
 
+/// Admit a room-version-1 or 2 `/invite` response.
+///
+/// The body is the event itself. The invitee may add its signature and must
+/// leave every other field, including `event_id`, `hashes`, and the tuple
+/// `auth_events` / `prev_events`, as this server sent them. `cosigner` must
+/// have a signature over the v1 redacted bytes.
+pub async fn admit_legacy_cosign(
+    remote_keys: &RemoteKeyCache,
+    http: &reqwest::Client,
+    returned: Value,
+    sent: &Value,
+    cosigner: &str,
+) -> Result<Value, FetchError> {
+    if without_signatures(sent) != without_signatures(&returned) || !signatures_preserved(sent, &returned) {
+        return Err(FetchError::HashesChanged);
+    }
+    let requested = sent.get("event_id").and_then(Value::as_str).unwrap_or("").to_owned();
+    let derived = returned.get("event_id").and_then(Value::as_str).unwrap_or("").to_owned();
+    if requested.is_empty() || requested != derived {
+        return Err(FetchError::IdMismatch { requested, derived });
+    }
+    let timestamp = returned.get("origin_server_ts").and_then(Value::as_u64).unwrap_or(0);
+    let Some(keys) = returned.get("signatures").and_then(|value| value.get(cosigner)).and_then(Value::as_object) else {
+        return Err(FetchError::MissingCoSignature(cosigner.to_owned()));
+    };
+    if keys.is_empty() {
+        return Err(FetchError::MissingCoSignature(cosigner.to_owned()));
+    }
+    let mut eligible = 0;
+    for (key_id, signature) in keys {
+        let Some(public) = remote_keys.eligible_key(http, cosigner, key_id, timestamp).await else { continue };
+        eligible += 1;
+        if !super::spec_v119::v1_signature_verifies(&returned, signature, &public) {
+            return Err(FetchError::MissingCoSignature(cosigner.to_owned()));
+        }
+    }
+    if eligible == 0 {
+        return Err(FetchError::MissingCoSignature(cosigner.to_owned()));
+    }
+    Ok(returned)
+}
+
+fn without_signatures(value: &Value) -> Value {
+    let mut copy = value.clone();
+    if let Some(object) = copy.as_object_mut() {
+        object.remove("signatures");
+    }
+    copy
+}
+
+/// Every signature this server sent is still present with the same value.
+fn signatures_preserved(sent: &Value, returned: &Value) -> bool {
+    let Some(sent_map) = sent.get("signatures").and_then(Value::as_object) else { return false };
+    let Some(got_map) = returned.get("signatures").and_then(Value::as_object) else { return false };
+    for (server, keys) in sent_map {
+        let Some(got_keys) = got_map.get(server).and_then(Value::as_object) else { return false };
+        let Some(keys) = keys.as_object() else { return false };
+        for (key_id, signature) in keys {
+            if got_keys.get(key_id) != Some(signature) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 fn require_room_state(admitted: &Admitted, room_id: &str) -> Result<(), FetchError> {
     if admitted.pdu().state_key.is_none() || admitted.pdu().room_id != room_id {
         return Err(FetchError::NotRoomState);

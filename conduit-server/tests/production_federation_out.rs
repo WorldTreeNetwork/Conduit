@@ -572,6 +572,114 @@ async fn remote_v1_invite_is_legacy_and_rejected_cosign_retracts() {
     assert_eq!(queued, 0, "rejected invite is still queued");
 }
 
+fn cosign_v1(key: &ServerKey, mut event: Value) -> Value {
+    let bytes = conduit_server::federation::spec_v119::v1_signing_bytes(&event).expect("v1 signing bytes");
+    let signature = key.signing_key.sign(&bytes);
+    event["signatures"][PEER][&key.key_id] = json!(STANDARD_NO_PAD.encode(signature.to_bytes()));
+    event
+}
+
+#[tokio::test]
+async fn remote_v1_invite_stores_the_cosignature() {
+    let key = Arc::new(generate_server_key());
+    let invites = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let invites_route = Arc::clone(&invites);
+    let route_key = Arc::clone(&key);
+    let sent = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let sent_route = Arc::clone(&sent);
+    let url = serve(
+        Arc::clone(&key),
+        Router::new()
+            .route(
+                "/_matrix/federation/v1/invite/:room_id/:event_id",
+                put(move |Json(body): Json<Value>| {
+                    let invites = Arc::clone(&invites_route);
+                    let key = Arc::clone(&route_key);
+                    async move {
+                        invites.lock().unwrap().push(body.clone());
+                        Json(json!({ "event": cosign_v1(&key, body) }))
+                    }
+                }),
+            )
+            .route(
+                "/_matrix/federation/v1/send/:txn",
+                put(move |Json(body): Json<Value>| {
+                    let sent = Arc::clone(&sent_route);
+                    async move {
+                        sent.lock().unwrap().push(body);
+                        Json(json!({ "pdus": {} }))
+                    }
+                }),
+            ),
+    )
+    .await;
+    let server = Server::with_env(&[
+        ("CONDUIT_FEDERATION", "1"),
+        ("CONDUIT_FEDERATION_BASE_URL", url.as_str()),
+        ("CONDUIT_REMOTE_KEYS_OVERRIDE", url.as_str()),
+    ])
+    .await;
+    let alice = server.register("alice").await;
+    let token = alice["access_token"].as_str().unwrap();
+    let room = server
+        .request(
+            Method::POST,
+            "/_matrix/client/v3/createRoom",
+            Some(token),
+            Some(json!({"preset": "private_chat", "room_version": "1"})),
+            200,
+        )
+        .await["room_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let pool = sqlx::PgPool::connect(&server.database_url).await.unwrap();
+    let storage = conduit_server::PostgresStorage::new(pool.clone());
+    let joined = "@joined:peer.test";
+    let member = Event::new(
+        "$member-join-joined-peer-test",
+        Pdu::new(&room, joined, "m.room.member", Some(joined.to_owned()), json!({"membership": "join"}), 1_700_000_000_000, vec![], vec![], 0),
+    );
+    storage.put_event(&member).await.unwrap();
+    storage.set_state_entry(&room, "m.room.member", joined, &member.event_id).await.unwrap();
+
+    let invitee = "@erin:peer.test";
+    server
+        .request(
+            Method::POST,
+            &format!("/_matrix/client/v3/rooms/{}/invite", enc(&room)),
+            Some(token),
+            Some(json!({"user_id": invitee})),
+            200,
+        )
+        .await;
+    let captured = invites.lock().unwrap().clone();
+    let body = captured.first().unwrap_or_else(|| panic!("PUT /v1/invite was not called\n{}", server.logs()));
+    let event_id = body["event_id"].as_str().unwrap_or_else(|| panic!("invite has no event_id: {body}"));
+    assert!(event_id.starts_with('$') && event_id.ends_with(":production.test"), "{event_id}");
+    assert!(body["auth_events"][0].is_array(), "auth_events are not tuples: {body}");
+    assert!(body["prev_events"][0].is_array(), "prev_events are not tuples: {body}");
+    let member = storage.get_state_entry(&room, "m.room.member", invitee).await.unwrap().expect("invite missing");
+    assert_eq!(member.content["membership"], "invite");
+    let stored = storage.get_event(&member.event_id).await.unwrap().expect("invite event missing");
+    assert!(
+        stored.signatures.get(PEER).and_then(Value::as_object).is_some_and(|keys| !keys.is_empty()),
+        "stored invite has no {PEER} signature: {}\n{}",
+        stored.signatures,
+        server.logs()
+    );
+    let peer_key = &key.key_id;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let bodies = sent.lock().unwrap().clone();
+    assert!(
+        bodies.iter().all(|sent_body| {
+            let text = sent_body.to_string();
+            !text.contains(invitee) || text.contains(peer_key)
+        }),
+        "invite was sent without the co-signature: {bodies:?}"
+    );
+}
+
 fn percent_decode(input: &str) -> String {
     let bytes = input.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());

@@ -1181,7 +1181,7 @@ fn v1_redact_content(event_type: &str, content: &Value) -> Value {
     Value::Object(redacted)
 }
 
-fn v1_signing_bytes(event: &Value) -> Result<Vec<u8>, ()> {
+pub fn v1_signing_bytes(event: &Value) -> Result<Vec<u8>, ()> {
     let map = event.as_object().ok_or(())?;
     let mut kept = Map::new();
     for key in V1_SIGN_FIELDS {
@@ -1273,6 +1273,11 @@ fn insert_v1_signature(event: &mut Value, server_key: &conduit::keys::ServerKey,
     }
     server_sigs.as_object_mut().ok_or(())?.insert(server_key.key_id.clone(), Value::String(encoded));
     Ok(())
+}
+
+pub(crate) fn v1_signature_verifies(event: &Value, signature: &Value, public: &[u8]) -> bool {
+    let Ok(bytes) = v1_signing_bytes(event) else { return false };
+    verify_ed25519(&bytes, signature, public).is_ok()
 }
 
 fn verify_ed25519(bytes: &[u8], signature: &Value, public: &[u8]) -> Result<(), ()> {

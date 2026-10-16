@@ -1882,6 +1882,7 @@
         "conduit-server/tests/production_federation_out.rs::remote_invite_refusal_fails_and_drops_membership",
         "conduit-server/tests/production_federation_out.rs::remote_invite_is_delivered_and_stores_the_cosignature",
         "conduit-server/tests/production_federation_out.rs::remote_v1_invite_is_legacy_and_rejected_cosign_retracts",
+        "conduit-server/tests/production_federation_out.rs::remote_v1_invite_stores_the_cosignature",
         "conduit-server/tests/production_directory.rs::knock_accept_deny_and_rescind",
         "conduit-server/tests/production_e2e.rs::production_invite_accept_and_kick_are_visible_in_sync",
         "conduit-server/tests/production_rooms.rs::ignored_users_are_filtered_from_sync_messages_and_invites",
@@ -1889,9 +1890,9 @@
         "conduit-server/tests/production_basics.rs::invite_blocking_rejects_invites_and_hides_pending_ones",
         "conduit-server/tests/production_basics.rs::join_by_room_id_and_membership_reasons_reach_member_events"
       ],
-      "tests_total": 9,
+      "tests_total": 10,
       "gap_beads": [],
-      "notes": "Invite by user_id with reason; 403 M_INVITE_BLOCKED for local users blocking invites. A remote invitee is offered over federation, and the stored event keeps that server's co-signature. A remote HTTP refusal, including 403, fails the client request, retracts the membership, and is not sent to other servers. A room-version-1 invite is the legacy event ($opaque:server, tuple auth and prev events). A 200 that fails co-signature admission retracts the membership and fails the client request."
+      "notes": "Invite by user_id with reason; 403 M_INVITE_BLOCKED for local users blocking invites. A remote invitee is offered over federation, and the stored event keeps that server's co-signature. A remote HTTP refusal, including 403, fails the client request, retracts the membership, and is not sent to other servers. A room-version-1 invite is the legacy event ($opaque:server, tuple auth and prev events). A 200 that fails co-signature admission retracts the membership and fails the client request. A co-signed room-version-1 response is stored with the invitee's signature."
     },
     {
       "id": "cs.ep.post_matrixclientv3joinroomidoralias",
@@ -9209,14 +9210,15 @@
         "conduit-server/tests/production_federation_out.rs::remote_invite_refusal_fails_and_drops_membership",
         "conduit-server/tests/production_federation_out.rs::remote_invite_is_delivered_and_stores_the_cosignature",
         "conduit-server/tests/production_federation_out.rs::remote_v1_invite_is_legacy_and_rejected_cosign_retracts",
+        "conduit-server/tests/production_federation_out.rs::remote_v1_invite_stores_the_cosignature",
         "conduit-server/tests/production_e2e.rs::production_chat_survives_restart",
         "conduit-server/tests/production_pdu.rs::ss_membership_v1_invite_keeps_v1_bytes",
         "conduit-server/tests/production_pdu.rs::ss_membership_v2_invite_keeps_every_field_but_the_resident_signature",
         "conduit-server/tests/production_pdu.rs::ss_membership_v2_invite_amends_the_original_event_and_checks_room_state"
       ],
-      "tests_total": 7,
+      "tests_total": 8,
       "gap_beads": [],
-      "notes": "v1 and v2 invites co-sign by inserting this server's signature into the received event object. Removing that signature restores the received JSON bytes, including key order. Room versions other than 1-11 reject invite_room_state that lacks m.room.create, is ill-formatted, or names another room, with 400 M_INVALID_PARAM. Versions 1-11 still accept that state. An outbound invite of a remote user is delivered, and the stored event keeps the co-signature. An HTTP refusal from the invitee's server fails the inviting client and does not leave the invite as membership. An outbound room-version-1 invite carries $opaque:server and tuple auth and prev events. A 200 that fails co-signature admission retracts the membership and fails the inviting client."
+      "notes": "v1 and v2 invites co-sign by inserting this server's signature into the received event object. Removing that signature restores the received JSON bytes, including key order. Room versions other than 1-11 reject invite_room_state that lacks m.room.create, is ill-formatted, or names another room, with 400 M_INVALID_PARAM. Versions 1-11 still accept that state. An outbound invite of a remote user is delivered, and the stored event keeps the co-signature. An HTTP refusal from the invitee's server fails the inviting client and does not leave the invite as membership. An outbound room-version-1 invite carries $opaque:server and tuple auth and prev events. A 200 that fails co-signature admission retracts the membership and fails the inviting client. A co-signed room-version-1 response is stored with the invitee's signature."
     },
     {
       "id": "ss.leaving",

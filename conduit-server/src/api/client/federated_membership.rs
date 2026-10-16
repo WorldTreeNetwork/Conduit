@@ -452,9 +452,9 @@ pub(crate) async fn deliver_remote_invite<S: AuthState>(state: &S, room_id: &str
             MatrixError::unknown("invite PDU does not match its room version").into_response()
         })?)
     };
-    let sent = if parsed <= 2 {
-        let document = legacy_invite_document(&event)?;
-        attempt_invite(client.invite_v1(&dest, room_id, &document)).await
+    let legacy = if parsed <= 2 { Some(legacy_invite_document(&event)?) } else { None };
+    let sent = if let Some(document) = &legacy {
+        attempt_invite(client.invite_v1(&dest, room_id, document)).await
     } else {
         let wire = modern.as_ref().expect("modern invite");
         attempt_invite(client.invite(&dest, room_id, &version, stripped, wire)).await
@@ -487,9 +487,54 @@ pub(crate) async fn deliver_remote_invite<S: AuthState>(state: &S, room_id: &str
                 }
                 Err(_) => InviteAnswer::AdmitRejected,
             },
-            // Room versions 1 and 2 are not v3 PDUs, so `admit_cosigned_as`
-            // cannot take them. A 200 is not a co-signature of this invite.
-            None => InviteAnswer::AdmitRejected,
+            None => {
+                let sent_document = legacy.as_ref().expect("legacy invite");
+                match crate::federation::admit::admit_legacy_cosign(
+                    &client._keys,
+                    &client.http,
+                    returned,
+                    sent_document,
+                    &dest,
+                )
+                .await
+                {
+                    Ok(accepted) => {
+                        let decoded = conduit::wire::decode_pdu_for_version(accepted.clone(), parsed.max(1), crate::federation::now_ms());
+                        let stored = decoded.ok().and_then(|decoded| {
+                            let accepted_id = decoded.explicit_event_id?;
+                            if accepted_id != event_id {
+                                return None;
+                            }
+                            let mut pdu = decoded.pdu;
+                            pdu.extensions.insert(
+                                super::event_pipeline::LEGACY_WIRE.to_owned(),
+                                serde_json::json!(accepted.to_string()),
+                            );
+                            Some(Event { event_id: accepted_id, pdu, unsigned: decoded.unsigned })
+                        });
+                        if let Some(stored) = stored {
+                            match state.storage().replace_cosigned_pdu(&stored).await {
+                                Ok(true) => InviteAnswer::Admitted,
+                                Ok(false) => {
+                                    tracing::warn!(event_id, "co-signed invite did not replace the stored PDU");
+                                    InviteAnswer::AdmitRejected
+                                }
+                                Err(error) => {
+                                    tracing::warn!(%error, "co-signed invite was not stored");
+                                    InviteAnswer::AdmitRejected
+                                }
+                            }
+                        } else {
+                            tracing::debug!("co-signed room version 1 invite does not decode");
+                            InviteAnswer::AdmitRejected
+                        }
+                    }
+                    Err(error) => {
+                        tracing::debug!(%error, "room version 1 invite co-signature was rejected");
+                        InviteAnswer::AdmitRejected
+                    }
+                }
+            }
         },
     };
     match invite_disposition(answer) {
