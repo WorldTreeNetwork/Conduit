@@ -644,8 +644,9 @@ pub async fn make_join(
 ///    on this server, and we co-sign with `add_signature` before verifying.
 /// 4. Signature stage + derived ID == path ID: `400 M_INVALID_PARAM`.
 /// 5. Auth: `403 M_FORBIDDEN`.
-/// 6. Respond with the join (incl. our co-signature), state and auth chain
-///    as `WirePdu`s. `state` is still current state (conduit-y99.22.1).
+/// 6. Respond with the join (incl. our co-signature), the resolved room
+///    state from before that join, and the auth chains of that state and
+///    of the join, as `WirePdu`s.
 pub async fn send_join(
     State(state): State<FedState>,
     origin_ext: Option<axum::extract::Extension<FederationOrigin>>,
@@ -722,11 +723,16 @@ pub async fn send_join(
         Err(e) => return internal(&e.to_string()),
     }
 
-    let state_events = match state.storage.get_current_state(&room_id).await {
-        Ok(evs) => evs,
-        Err(e) => return internal(&e.to_string()),
+    // Spec: `state` is the resolved room state prior to the join, so the
+    // membership just accepted is absent. The auth chain still starts from
+    // that join as well as from the returned state.
+    let state_events = match state_before_event(&state.storage, &room_id, Some(received.event_id.as_str())).await {
+        Ok(events) => events,
+        Err(response) => return response,
     };
-    let auth_chain = build_auth_chain(&state.storage, &state_events).await;
+    let mut chain_roots = state_events.clone();
+    chain_roots.push(Event::new(received.event_id.clone(), pdu.clone()));
+    let auth_chain = build_auth_chain(&state.storage, &chain_roots).await;
     let (state_pdus, chain_pdus) = match (
         wire_pdus(&state.storage, &origin, &state_events).await,
         wire_pdus(&state.storage, &origin, &auth_chain).await,

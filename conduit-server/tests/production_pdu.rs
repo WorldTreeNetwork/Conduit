@@ -1757,6 +1757,103 @@ async fn backfill_returns_the_named_events_and_their_predecessors() {
     assert_eq!(missing["errcode"], "M_MISSING_PARAM", "{missing}");
 }
 
+/// `send_join` `state` is the resolved room state from before the join.
+/// The accepted membership is stored, and it is absent from that snapshot.
+/// An overwritten room name keeps only the winner from before the join.
+#[tokio::test]
+async fn send_join_returns_state_from_before_the_join() {
+    let remote = spawn_remote().await;
+    let server = federated_server(&remote).await;
+    let alice = server.register("alice").await;
+    let token = alice["access_token"].as_str().unwrap();
+    let alice_id = alice["user_id"].as_str().unwrap();
+    let room = server
+        .request(Method::POST, "/_matrix/client/v3/createRoom", Some(token), Some(json!({"preset": "public_chat"})), 200)
+        .await["room_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let name = |body: &str| {
+        let body = body.to_owned();
+        let server = &server;
+        let room = room.clone();
+        async move {
+            server
+                .request(
+                    Method::PUT,
+                    &format!("/_matrix/client/v3/rooms/{}/state/m.room.name", enc(&room)),
+                    Some(token),
+                    Some(json!({"name": body})),
+                    200,
+                )
+                .await
+        }
+    };
+    name("before").await;
+    name("after").await;
+
+    let joiner = "@r:remote.test";
+    let make = format!("/_matrix/federation/v1/make_join/{}/{}?{}", enc(&room), enc(joiner), supported_ver_query());
+    let template = fed(&server, &remote, Method::GET, &make, None, 200).await["event"].clone();
+    let pdu: Pdu = serde_json::from_value(template).unwrap();
+    let (id, body) = sign(&remote, pdu);
+    let response = fed(
+        &server,
+        &remote,
+        Method::PUT,
+        &format!("/_matrix/federation/v2/send_join/{}/{}", enc(&room), enc(&id)),
+        Some(body),
+        200,
+    )
+    .await;
+
+    let state = response["state"].as_array().expect("state");
+    assert!(state.iter().any(|event| event["type"] == "m.room.create"), "create is prior state: {response}");
+    assert!(
+        state.iter().any(|event| event["type"] == "m.room.name" && event["content"]["name"] == "after"),
+        "the name that won before the join is included: {response}"
+    );
+    assert!(
+        state.iter().all(|event| event["content"]["name"] != "before"),
+        "the overwritten name is not current prior state: {response}"
+    );
+    assert!(
+        state.iter().all(|event| !(event["type"] == "m.room.member" && event["state_key"] == joiner)),
+        "the join itself is not part of the state from before it: {response}"
+    );
+    assert!(
+        state.iter().any(|event| {
+            event["type"] == "m.room.member" && event["state_key"] == alice_id && event["content"]["membership"] == "join"
+        }),
+        "members who joined earlier stay in the snapshot: {response}"
+    );
+    let returned: Pdu = serde_json::from_value(response["event"].clone()).unwrap();
+    assert_eq!(conduit::hashing::event_id(&returned).unwrap(), id);
+    let chain_ids: Vec<String> = response["auth_chain"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|event| {
+            let pdu: Pdu = serde_json::from_value(event.clone()).unwrap();
+            conduit::hashing::event_id(&pdu).unwrap()
+        })
+        .collect();
+    for auth_id in &returned.auth_events {
+        assert!(
+            chain_ids.iter().any(|chain_id| chain_id == auth_id),
+            "auth chain is missing {auth_id}, which the join cites; chain={chain_ids:?}"
+        );
+    }
+
+    let current = server
+        .request(Method::GET, &format!("/_matrix/client/v3/rooms/{}/state", enc(&room)), Some(token), None, 200)
+        .await;
+    assert!(
+        current.as_array().unwrap().iter().any(|event| event["type"] == "m.room.member" && event["state_key"] == joiner),
+        "the accepted join is current state after the response: {current}"
+    );
+}
+
 async fn federation_join(server: &Server, remote: &Remote, origin: &str, room: &str, user: &str) {
     let make = format!("/_matrix/federation/v1/make_join/{}/{}?{}", enc(room), enc(user), supported_ver_query());
     let template = fed_as(server, remote, origin, Method::GET, &make, None, 200).await["event"].clone();

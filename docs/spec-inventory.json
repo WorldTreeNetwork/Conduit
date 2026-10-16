@@ -34,17 +34,17 @@
     },
     "ss": {
       "endpoint": {
-        "implemented+tested": 31,
+        "implemented+tested": 32,
         "implemented-untested": 0,
-        "partial": 4,
+        "partial": 3,
         "missing": 0,
         "not-applicable": 1,
         "total": 36
       },
       "requirement": {
-        "implemented+tested": 25,
+        "implemented+tested": 26,
         "implemented-untested": 0,
-        "partial": 13,
+        "partial": 12,
         "missing": 0,
         "not-applicable": 3,
         "total": 41
@@ -5300,26 +5300,25 @@
       "rate_limited": "No",
       "deprecated": false,
       "role": "homeserver",
-      "status": "partial",
+      "status": "implemented+tested",
       "code": [
         {
-          "loc": "conduit-server/src/federation/server.rs:1085",
+          "loc": "conduit-server/src/federation/server.rs:650",
           "handler": "send_join",
           "kind": "exact"
         }
       ],
       "tests": [
+        "conduit-server/tests/production_pdu.rs::send_join_returns_state_from_before_the_join",
         "conduit-server/tests/federation_inbound.rs::make_send_join_roundtrip",
         "conduit-server/tests/federation_inbound.rs::standard_v2_routes_require_authentication",
         "conduit-server/tests/federation_inbound.rs::standard_v2_routes_verify_the_full_signed_uri",
         "conduit-server/tests/federation_roundtrip.rs::rt3_join_room_on_a",
         "conduit-server/tests/production_e2e.rs::production_chat_survives_restart"
       ],
-      "tests_total": 5,
-      "gap_beads": [
-        "conduit-y99.22.1"
-      ],
-      "notes": ""
+      "tests_total": 6,
+      "gap_beads": [],
+      "notes": "state is the resolved room state before the join. The accepted membership is stored and is absent from that snapshot. An overwritten room name keeps only the winner. The auth chain includes every event the join cites."
     },
     {
       "id": "ss.ep.get_matrixfederationv1make_knockroomiduserid",
@@ -9065,7 +9064,7 @@
       "title": "Joining rooms (make_join/send_join, room version negotiation)",
       "source": "https://spec.matrix.org/v1.19/server-server-api/#joining-rooms",
       "role": "homeserver",
-      "status": "partial",
+      "status": "implemented+tested",
       "code": [
         {
           "loc": "conduit-server/src/federation/server.rs"
@@ -9075,15 +9074,14 @@
         }
       ],
       "tests": [
+        "conduit-server/tests/production_pdu.rs::send_join_returns_state_from_before_the_join",
+        "conduit-server/tests/production_pdu.rs::make_join_rejects_room_versions_missing_from_ver",
         "conduit-server/tests/federation_roundtrip.rs::rt3_join_room_on_a",
-        "conduit-server/tests/federation_inbound.rs::make_send_join_roundtrip",
-        "conduit-server/tests/production_pdu.rs::make_join_rejects_room_versions_missing_from_ver"
+        "conduit-server/tests/federation_inbound.rs::make_send_join_roundtrip"
       ],
-      "tests_total": 3,
-      "gap_beads": [
-        "conduit-y99.22.1"
-      ],
-      "notes": "make_join negotiates ver and returns M_INCOMPATIBLE_ROOM_VERSION with room_version. Outbound make_join advertises versions 1-12. send_join state is still the current state, not the state before the join."
+      "tests_total": 4,
+      "gap_beads": [],
+      "notes": "make_join negotiates ver and returns M_INCOMPATIBLE_ROOM_VERSION with room_version. Outbound make_join advertises versions 1-12. send_join state is the resolved room state before the join, and the accepted membership is stored."
     },
     {
       "id": "ss.joining.restricted",
