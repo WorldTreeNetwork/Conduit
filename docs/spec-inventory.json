@@ -106,9 +106,9 @@
     },
     "rv": {
       "requirement": {
-        "implemented+tested": 56,
+        "implemented+tested": 61,
         "implemented-untested": 0,
-        "partial": 5,
+        "partial": 0,
         "missing": 0,
         "not-applicable": 0,
         "total": 61
@@ -10685,18 +10685,18 @@
       "title": "Room version 7: Canonical JSON / integer rules",
       "source": "https://spec.matrix.org/v1.19/rooms/v7/#canonical-json",
       "role": "homeserver",
-      "status": "partial",
+      "status": "implemented+tested",
       "code": [
         {
-          "loc": "conduit/src/canonical_json.rs"
+          "loc": "conduit/src/wire.rs"
         }
       ],
-      "tests": [],
-      "tests_total": 0,
-      "gap_beads": [
-        "conduit-y99.23"
+      "tests": [
+        "conduit/src/wire.rs::room_version_7_rejects_noncanonical_numbers"
       ],
-      "notes": "Version-independent canonical JSON implemented; v6+ integer-range enforcement shared with v11."
+      "tests_total": 1,
+      "gap_beads": [],
+      "notes": "Room version 7 must strictly enforce canonical JSON. decode_pdu_for_version rejects a fraction and 2^53, and accepts 2^53-1."
     },
     {
       "id": "rv.v8.event-format",
@@ -10788,18 +10788,18 @@
       "title": "Room version 8: Canonical JSON / integer rules",
       "source": "https://spec.matrix.org/v1.19/rooms/v8/#canonical-json",
       "role": "homeserver",
-      "status": "partial",
+      "status": "implemented+tested",
       "code": [
         {
-          "loc": "conduit/src/canonical_json.rs"
+          "loc": "conduit/src/wire.rs"
         }
       ],
-      "tests": [],
-      "tests_total": 0,
-      "gap_beads": [
-        "conduit-y99.23"
+      "tests": [
+        "conduit/src/wire.rs::room_version_8_rejects_noncanonical_numbers"
       ],
-      "notes": "Version-independent canonical JSON implemented; v6+ integer-range enforcement shared with v11."
+      "tests_total": 1,
+      "gap_beads": [],
+      "notes": "Room version 8 must strictly enforce canonical JSON. decode_pdu_for_version rejects a fraction and 2^53, and accepts 2^53-1."
     },
     {
       "id": "rv.v9.event-format",
@@ -10891,18 +10891,18 @@
       "title": "Room version 9: Canonical JSON / integer rules",
       "source": "https://spec.matrix.org/v1.19/rooms/v9/#canonical-json",
       "role": "homeserver",
-      "status": "partial",
+      "status": "implemented+tested",
       "code": [
         {
-          "loc": "conduit/src/canonical_json.rs"
+          "loc": "conduit/src/wire.rs"
         }
       ],
-      "tests": [],
-      "tests_total": 0,
-      "gap_beads": [
-        "conduit-y99.23"
+      "tests": [
+        "conduit/src/wire.rs::room_version_9_rejects_noncanonical_numbers"
       ],
-      "notes": "Version-independent canonical JSON implemented; v6+ integer-range enforcement shared with v11."
+      "tests_total": 1,
+      "gap_beads": [],
+      "notes": "Room version 9 must strictly enforce canonical JSON. decode_pdu_for_version rejects a fraction and 2^53, and accepts 2^53-1."
     },
     {
       "id": "rv.v10.event-format",
@@ -10996,18 +10996,18 @@
       "title": "Room version 10: Canonical JSON / integer rules",
       "source": "https://spec.matrix.org/v1.19/rooms/v10/#canonical-json",
       "role": "homeserver",
-      "status": "partial",
+      "status": "implemented+tested",
       "code": [
         {
-          "loc": "conduit/src/canonical_json.rs"
+          "loc": "conduit/src/wire.rs"
         }
       ],
-      "tests": [],
-      "tests_total": 0,
-      "gap_beads": [
-        "conduit-y99.23"
+      "tests": [
+        "conduit/src/wire.rs::room_version_10_rejects_noncanonical_numbers"
       ],
-      "notes": "Version-independent canonical JSON implemented; v6+ integer-range enforcement shared with v11."
+      "tests_total": 1,
+      "gap_beads": [],
+      "notes": "Room version 10 must strictly enforce canonical JSON. decode_pdu_for_version rejects a fraction and 2^53, and accepts 2^53-1."
     },
     {
       "id": "rv.v11.event-format",
@@ -11210,18 +11210,18 @@
       "title": "Room version 12: Canonical JSON / integer rules",
       "source": "https://spec.matrix.org/v1.19/rooms/v12/#canonical-json",
       "role": "homeserver",
-      "status": "partial",
+      "status": "implemented+tested",
       "code": [
         {
-          "loc": "conduit/src/canonical_json.rs"
+          "loc": "conduit/src/wire.rs"
         }
       ],
-      "tests": [],
-      "tests_total": 0,
-      "gap_beads": [
-        "conduit-y99.23"
+      "tests": [
+        "conduit/src/wire.rs::room_version_12_rejects_noncanonical_numbers"
       ],
-      "notes": "Version-independent canonical JSON implemented; v6+ integer-range enforcement shared with v11."
+      "tests_total": 1,
+      "gap_beads": [],
+      "notes": "Room version 12 must strictly enforce canonical JSON. decode_pdu_for_version rejects a fraction and 2^53, and accepts 2^53-1."
     },
     {
       "id": "rv.grammar",

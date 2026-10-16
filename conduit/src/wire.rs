@@ -552,4 +552,58 @@ mod tests {
         assert!(decode_pdu_for_version(v1_event(), 2, 0).is_ok());
         assert!(decode_pdu_for_version(v1_event(), 11, 0).is_err());
     }
+
+    /// v6+ admission goes through `decode_pdu_for_version`. A safe integer is
+    /// kept. A fraction or an integer outside [-(2^53-1), 2^53-1] is
+    /// `NonCanonical`. Routing that version through the v1/v2 decoder fails
+    /// this, because that decoder does not reject those numbers.
+    fn version_enforces_canonical_json(version: u32) {
+        let mut safe = base();
+        safe["content"] = json!({"n": 9_007_199_254_740_991u64});
+        assert!(
+            decode_pdu_for_version(safe, version, 0).is_ok(),
+            "version {version} must accept 2^53-1"
+        );
+
+        let mut fraction = base();
+        fraction["content"] = json!({"n": 1.5});
+        assert_eq!(
+            decode_pdu_for_version(fraction, version, 0).unwrap_err(),
+            PduDecodeError::NonCanonical,
+            "version {version} must reject a fraction"
+        );
+
+        let mut huge = base();
+        huge["content"] = json!({"n": 9_007_199_254_740_992u64});
+        assert_eq!(
+            decode_pdu_for_version(huge, version, 0).unwrap_err(),
+            PduDecodeError::NonCanonical,
+            "version {version} must reject 2^53"
+        );
+    }
+
+    #[test]
+    fn room_version_7_rejects_noncanonical_numbers() {
+        version_enforces_canonical_json(7);
+    }
+
+    #[test]
+    fn room_version_8_rejects_noncanonical_numbers() {
+        version_enforces_canonical_json(8);
+    }
+
+    #[test]
+    fn room_version_9_rejects_noncanonical_numbers() {
+        version_enforces_canonical_json(9);
+    }
+
+    #[test]
+    fn room_version_10_rejects_noncanonical_numbers() {
+        version_enforces_canonical_json(10);
+    }
+
+    #[test]
+    fn room_version_12_rejects_noncanonical_numbers() {
+        version_enforces_canonical_json(12);
+    }
 }
