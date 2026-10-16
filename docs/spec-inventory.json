@@ -8889,15 +8889,16 @@
       ],
       "tests": [
         "conduit-server/tests/federation_inbound.rs::inbound_signature_verified_or_rejected",
-        "conduit-server/tests/production_pdu.rs::send_applies_acl_per_pdu_and_inbound_edus"
+        "conduit-server/tests/production_pdu.rs::send_applies_acl_per_pdu_and_inbound_edus",
+        "conduit-server/tests/production_pdu.rs::fetched_auth_chain_that_fails_auth_is_not_stored"
       ],
-      "tests_total": 2,
+      "tests_total": 3,
       "gap_beads": [
         "conduit-y99.33",
         "conduit-g12",
         "conduit-embed-pdu"
       ],
-      "notes": "Hash-mismatch redaction, rejection, soft failure, and the size limit are asserted on PUT /send. Recursive auth-event verification and byte-exact wire remain."
+      "notes": "Hash-mismatch redaction, rejection, soft failure, and the size limit are asserted on PUT /send. A missing auth event is fetched with the events it cites. A fetched event that fails the auth rules is not stored, and the PDU is rejected. Byte-exact wire remains."
     },
     {
       "id": "ss.pdu.auth-events-selection",

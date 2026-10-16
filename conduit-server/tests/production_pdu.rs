@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
-use axum::extract::Query;
+use axum::extract::{Path, Query};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::{routing::{get, post, put}, Json, Router};
@@ -3339,6 +3339,122 @@ async fn auth_event_selection_rejects_and_current_state_soft_fails() {
         prevs.iter().all(|id| id != &json!(soft_id) && id != &json!(bad_id)),
         "rejected and soft-failed events are not prev_events: {after_pdu}"
     );
+}
+
+/// A PDU whose auth event is not stored is fetched together with the events
+/// that auth event cites. An event in that chain which fails the auth rules
+/// is not stored, and the PDU is rejected.
+#[tokio::test]
+async fn fetched_auth_chain_that_fails_auth_is_not_stored() {
+    let remote = spawn_remote().await;
+    let events = Arc::new(std::sync::Mutex::new(HashMap::<String, Value>::new()));
+    let seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let events_route = Arc::clone(&events);
+    let seen_route = Arc::clone(&seen);
+    let app = Router::new().route("/_matrix/federation/v1/event/:event_id", get(move |Path(event_id): Path<String>| {
+        let events_route = Arc::clone(&events_route);
+        let seen_route = Arc::clone(&seen_route);
+        async move {
+            seen_route.lock().unwrap().push(event_id.clone());
+            match events_route.lock().unwrap().get(&event_id).cloned() {
+                Some(pdu) => Json(json!({"pdus": [pdu]})).into_response(),
+                None => (StatusCode::NOT_FOUND, Json(json!({"errcode": "M_NOT_FOUND", "error": "Event not found"}))).into_response(),
+            }
+        }
+    }));
+    tokio::spawn(async move { axum::serve(listener, app).await.ok() });
+    let base_url = format!("http://{addr}");
+    let server = Server::with_env(&[
+        ("CONDUIT_FEDERATION", "1"),
+        ("CONDUIT_REMOTE_KEYS_OVERRIDE", &remote.keys_url),
+        ("CONDUIT_FEDERATION_BASE_URL", &base_url),
+    ])
+    .await;
+    let alice = server.register("alice").await;
+    let token = alice["access_token"].as_str().unwrap();
+    let room = server
+        .request(Method::POST, "/_matrix/client/v3/createRoom", Some(token), Some(json!({"preset": "public_chat", "room_version": "12"})), 200)
+        .await["room_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let state = server
+        .request(Method::GET, &format!("/_matrix/client/v3/rooms/{}/state", enc(&room)), Some(token), None, 200)
+        .await;
+    let mut create_id = String::new();
+    let mut power_id = String::new();
+    for event in state.as_array().unwrap() {
+        match event["type"].as_str() {
+            Some("m.room.create") => create_id = event["event_id"].as_str().unwrap().to_owned(),
+            Some("m.room.power_levels") => power_id = event["event_id"].as_str().unwrap().to_owned(),
+            _ => {}
+        }
+    }
+    assert!(!create_id.is_empty() && !power_id.is_empty(), "{state}");
+
+    let (member_id, member) = sign(
+        &remote,
+        Pdu::new(
+            &room,
+            "@evil:remote.test",
+            "m.room.member",
+            Some("@evil:remote.test".into()),
+            json!({"membership": "join"}),
+            1_700_000_004_000,
+            vec![create_id, power_id],
+            vec![],
+            30,
+        ),
+    );
+    let (power_bad_id, power_bad) = sign(
+        &remote,
+        Pdu::new(
+            &room,
+            "@evil:remote.test",
+            "m.room.power_levels",
+            Some(String::new()),
+            json!({"users": {"@evil:remote.test": 100}}),
+            1_700_000_004_100,
+            vec![member_id.clone()],
+            vec![],
+            31,
+        ),
+    );
+    events.lock().unwrap().insert(member_id.clone(), member);
+    events.lock().unwrap().insert(power_bad_id.clone(), power_bad);
+    let (message_id, message) = sign(
+        &remote,
+        Pdu::new(
+            &room,
+            "@evil:remote.test",
+            "m.room.message",
+            None,
+            json!({"msgtype": "m.text", "body": "via a bad auth chain"}),
+            1_700_000_004_200,
+            vec![power_bad_id.clone()],
+            vec![],
+            32,
+        ),
+    );
+    let result = fed(
+        &server,
+        &remote,
+        Method::PUT,
+        "/_matrix/federation/v1/send/auth-chain-1",
+        Some(txn(vec![message], vec![])),
+        200,
+    )
+    .await;
+    assert_eq!(result["pdus"][&message_id]["error"], "auth check failed", "{result}");
+    let fetched = seen.lock().unwrap().clone();
+    assert!(fetched.iter().any(|id| id == &power_bad_id), "the cited auth event was fetched: {fetched:?}");
+    assert!(fetched.iter().any(|id| id == &member_id), "the auth event of that auth event was fetched: {fetched:?}");
+    for id in [&member_id, &power_bad_id, &message_id] {
+        let missing = fed(&server, &remote, Method::GET, &format!("/_matrix/federation/v1/event/{}", enc(id)), None, 404).await;
+        assert_eq!(missing["errcode"], "M_NOT_FOUND", "{id}: {missing}");
+    }
 }
 
 fn event_texts(value: &Value, field: &str) -> Vec<String> {

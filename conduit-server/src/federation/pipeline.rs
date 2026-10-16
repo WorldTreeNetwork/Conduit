@@ -19,7 +19,7 @@
 //! 7. **Persist** `Event { event_id, pdu, unsigned }` and update state.
 //! 8. **Fanout** — notify local `/sync`.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use serde_json::Value;
@@ -226,7 +226,14 @@ pub async fn process_received(
     }
 
     // --- Resolve auth events (immediate) -----------------------------------
-    fetch_missing_auth_events(storage, remote_keys, http, fed_client, &pdu, origin).await?;
+    // A fetched auth event that fails the auth rules rejects this PDU. A
+    // fetch failure does not: the origin can retry the transaction.
+    if let Err(error) = fetch_missing_auth_events(storage, remote_keys, http, fed_client, &pdu, origin).await {
+        if matches!(error, PipelineError::AuthFailed(_)) {
+            persist_held(storage, &pdu, "rejected").await?;
+        }
+        return Err(error);
+    }
 
     // --- Full state resolution ---------------------------------------------
     let current_state_events = storage
@@ -554,10 +561,27 @@ async fn build_auth_chain(
     Ok(chain)
 }
 
-/// Ensure all auth_events for `pdu` are in storage, fetching missing ones
-/// from the origin. Each fetched event passes decode, the signature stage
-/// and `derived == requested` before it is stored; a substituted answer is
-/// discarded. Deep recursive auth of fetched events stays with conduit-g12.
+/// The state map formed by the events `event` cites in `auth_events`.
+async fn cited_auth_state(storage: &dyn Storage, event: &Event) -> Result<StateMap<Event>, PipelineError> {
+    let mut map = StateMap::new();
+    for auth_id in &event.auth_events {
+        let auth = match storage.get_event(auth_id).await {
+            Ok(Some(auth)) => auth,
+            Ok(None) => return Err(PipelineError::AuthFailed(format!("auth event {auth_id} is not authorised"))),
+            Err(error) => return Err(PipelineError::Storage(error.to_string())),
+        };
+        if let Some(state_key) = auth.state_key.clone() {
+            map.insert((auth.event_type.clone(), state_key), auth);
+        }
+    }
+    Ok(map)
+}
+
+/// Fetch the missing auth-event closure and store an event only after it
+/// passes the auth rules against the events it cites. Already-stored events
+/// are left as they are. A signature or transport failure leaves that id
+/// missing so the later checks reject the PDU. An event that was fetched
+/// but is not authorised rejects the PDU that needed it.
 async fn fetch_missing_auth_events(
     storage: &Arc<dyn Storage>,
     remote_keys: &Arc<RemoteKeyCache>,
@@ -566,36 +590,59 @@ async fn fetch_missing_auth_events(
     pdu: &Event,
     origin: &str,
 ) -> Result<(), PipelineError> {
-    for auth_eid in &pdu.auth_events {
-        match storage.get_event(auth_eid).await {
-            Ok(Some(_)) => continue,
-            Ok(None) => {
-                let Some(client) = fed_client else { continue };
-                let fetched = match client.event(origin, auth_eid).await {
-                    Ok(value) => value,
-                    Err(e) => {
-                        tracing::warn!(event_id = %pdu.event_id, auth_event_id = %auth_eid, error = %e,
-                            "could not fetch missing auth event");
-                        continue;
-                    }
-                };
-                match super::admit::admit_fetched(remote_keys, http, fetched, super::admit::Expect::Exactly(auth_eid)).await {
-                    Ok(admitted) => {
-                        storage
-                            .put_event(&admitted.into_event())
-                            .await
-                            .map_err(|e| PipelineError::AuthEventFetch(e.to_string()))?;
-                    }
-                    Err(e) => {
-                        tracing::warn!(event_id = %pdu.event_id, auth_event_id = %auth_eid, error = %e,
-                            "refused fetched auth event");
-                    }
-                }
-            }
-            Err(e) => {
-                return Err(PipelineError::Storage(e.to_string()));
-            }
+    let mut queue: VecDeque<String> = pdu.auth_events.iter().cloned().collect();
+    let mut seen = HashSet::new();
+    let mut fetched = Vec::new();
+    while let Some(auth_id) = queue.pop_front() {
+        if !seen.insert(auth_id.clone()) {
+            continue;
         }
+        match storage.get_event(&auth_id).await {
+            Ok(Some(_)) => continue,
+            Ok(None) => {}
+            Err(error) => return Err(PipelineError::Storage(error.to_string())),
+        }
+        // A transport failure, or an answer that is not the requested event,
+        // leaves the id missing. Selection and the auth-chain walk then
+        // reject the PDU. A returned event is still checked below.
+        let Some(client) = fed_client else { continue };
+        let value = match client.event(origin, &auth_id).await {
+            Ok(value) => value,
+            Err(error) => {
+                tracing::warn!(event_id = %pdu.event_id, auth_event_id = %auth_id, %error, "could not fetch missing auth event");
+                continue;
+            }
+        };
+        let admitted = match super::admit::admit_fetched(remote_keys, http, value, super::admit::Expect::Exactly(&auth_id)).await {
+            Ok(admitted) => admitted,
+            Err(error) => {
+                tracing::warn!(event_id = %pdu.event_id, auth_event_id = %auth_id, %error, "refused fetched auth event");
+                continue;
+            }
+        };
+        let event = admitted.into_event();
+        if !event.room_id.is_empty() && event.room_id != pdu.room_id {
+            return Err(PipelineError::AuthFailed(format!("auth event {auth_id} is for a different room")));
+        }
+        for parent in &event.auth_events {
+            queue.push_back(parent.clone());
+        }
+        fetched.push(event);
+    }
+
+    let mut pending: HashMap<String, Event> = fetched.into_iter().map(|event| (event.event_id.clone(), event)).collect();
+    while !pending.is_empty() {
+        let ready = pending
+            .iter()
+            .find(|(_, event)| event.auth_events.iter().all(|id| !pending.contains_key(id)))
+            .map(|(id, _)| id.clone());
+        let Some(id) = ready else {
+            return Err(PipelineError::AuthFailed("auth event cycle".into()));
+        };
+        let event = pending.remove(&id).expect("id was just found in pending");
+        let state = cited_auth_state(storage.as_ref(), &event).await?;
+        check_auth(&event, &state).map_err(|error| PipelineError::AuthFailed(error.to_string()))?;
+        storage.put_event(&event).await.map_err(|error| PipelineError::Storage(error.to_string()))?;
     }
     Ok(())
 }
