@@ -106,10 +106,10 @@
     },
     "rv": {
       "requirement": {
-        "implemented+tested": 40,
+        "implemented+tested": 41,
         "implemented-untested": 0,
         "partial": 6,
-        "missing": 15,
+        "missing": 14,
         "not-applicable": 0,
         "total": 61
       }
@@ -10303,14 +10303,18 @@
       "title": "Room version 4: Authorisation rules",
       "source": "https://spec.matrix.org/v1.19/rooms/v4/#authorisation-rules",
       "role": "homeserver",
-      "status": "missing",
-      "code": [],
-      "tests": [],
-      "tests_total": 0,
-      "gap_beads": [
-        "conduit-y99.23"
+      "status": "implemented+tested",
+      "code": [
+        {
+          "loc": "conduit/src/auth.rs"
+        }
       ],
-      "notes": "Kernel implements room version 11 only."
+      "tests": [
+        "conduit/src/auth.rs::room_version_4_redaction_auth_ignores_the_redact_level"
+      ],
+      "tests_total": 1,
+      "gap_beads": [],
+      "notes": "Room version 4 keeps the version 3 authorisation rules. The redact level is not an auth check. An events power level still rejects a redaction. Version 2 rejects the same cross-domain redaction."
     },
     {
       "id": "rv.v4.redaction",
