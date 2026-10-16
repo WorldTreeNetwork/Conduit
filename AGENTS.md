@@ -162,6 +162,14 @@ Production journeys share one harness: `conduit-server/tests/common/production.r
 (`Server::new()`, `register`, `request`, `chat_pair`). New feature areas get
 their own `production_<area>.rs` file with `mod common;`.
 
+## License and contributions
+
+`conduit/` is Apache-2.0. `conduit-server/` and `web/` are the AGPL
+product. A contribution to either of those two trees needs the licensing
+CLA in `CLA.md` (not an assignment; the contributor keeps copyright).
+Do not ask for that CLA on a change that touches only `conduit/` or
+`third_party/`. Signatures go in `contributors/individual.md`.
+
 ## Intention
 
 Work loop: intend → steer → change → advise → act → fold.

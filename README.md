@@ -158,7 +158,23 @@ primarily from the spec.
 
 ## License
 
-Apache-2.0 (placeholder — choose deliberately before publishing).
+Two tiers:
+
+- `conduit/`, the library, is Apache-2.0. Contributions there stay
+  Apache-2.0. The Contributor License Agreement does not apply.
+- `conduit-server/` and `web/` are the network product, under
+  AGPL-3.0-or-later. Contributions there require the
+  [Contributor License Agreement](CLA.md). You keep your copyright.
+  The agreement lets World Tree Network Foundation ship those
+  contributions under the AGPL and, later, under a commercial license.
+  It is not an assignment. No commercial license is offered today.
+
+`third_party/identikey-oidc-client` stays under its own license
+(`Apache-2.0 OR BSD-2-Clause-Patent`).
+
+The workspace `license` field is still the placeholder `Apache-2.0`.
+Per-tree `LICENSE` files are not in the tree yet, so that field is not
+the public grant.
 
 The separate room-PDU contract regression is
 `python conduit-server/tests/peers/synapse_pdu_wire.py`, run from the pinned peer
