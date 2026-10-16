@@ -24,9 +24,9 @@
         "total": 164
       },
       "requirement": {
-        "implemented+tested": 68,
+        "implemented+tested": 69,
         "implemented-untested": 0,
-        "partial": 9,
+        "partial": 8,
         "missing": 0,
         "not-applicable": 9,
         "total": 86
@@ -7945,7 +7945,7 @@
       "title": "Room history visibility",
       "source": "https://spec.matrix.org/v1.19/client-server-api/#room-history-visibility",
       "role": "homeserver",
-      "status": "partial",
+      "status": "implemented+tested",
       "code": [
         {
           "loc": "conduit/src/auth.rs (filter_visible_for_user)"
@@ -7953,14 +7953,13 @@
       ],
       "tests": [
         "conduit-server/tests/rooms.rs::non_member_cannot_read_room",
-        "conduit-server/tests/federation_inbound.rs::backfill_returns_history_visibility_filtered_events"
+        "conduit-server/tests/federation_inbound.rs::backfill_returns_history_visibility_filtered_events",
+        "conduit-server/tests/production_sync.rs::joining_preserves_state_across_a_history_visibility_gap",
+        "conduit-server/tests/production_sync.rs::history_visibility_is_the_value_at_each_event"
       ],
-      "tests_total": 2,
-      "gap_beads": [
-        "conduit-embed-auth",
-        "conduit-s6m"
-      ],
-      "notes": ""
+      "tests_total": 4,
+      "gap_beads": [],
+      "notes": "Visibility is the value in force when the event was sent. shared/invited/joined follow membership at that event on /messages and /sync. Non-members are rejected on state, messages, and joined_members unless the room is world_readable, and world_readable does not reveal events sent under joined. Federation backfill uses the same per-event rule."
     },
     {
       "id": "cs.mod.push",

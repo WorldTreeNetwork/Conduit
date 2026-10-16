@@ -16,7 +16,7 @@ Statuses: **tested** = present and asserted by a named test; **untested** = pres
 | API | kind | tested | untested | partial | missing | n/a | total |
 |---|---|---:|---:|---:|---:|---:|---:|
 | Client-Server API | endpoints | 154 | 0 | 9 | 0 | 1 | 164 |
-| Client-Server API | requirements | 68 | 0 | 9 | 0 | 9 | 86 |
+| Client-Server API | requirements | 69 | 0 | 8 | 0 | 9 | 86 |
 | Server-Server API | endpoints | 22 | 3 | 6 | 4 | 1 | 36 |
 | Server-Server API | requirements | 14 | 0 | 15 | 9 | 3 | 41 |
 | Application Service API | endpoints | 11 | 0 | 0 | 0 | 0 | 11 |
@@ -27,7 +27,7 @@ Statuses: **tested** = present and asserted by a named test; **untested** = pres
 | Identity Service API (homeserver as consumer) | requirements | 1 | 0 | 0 | 0 | 0 | 1 |
 | Room versions 1–12 | requirements | 61 | 0 | 0 | 0 | 0 | 61 |
 | Appendices | requirements | 10 | 0 | 3 | 4 | 4 | 21 |
-| All |  | 364 | 3 | 44 | 17 | 37 | 465 |
+| All |  | 365 | 3 | 43 | 17 | 37 | 465 |
 ## Gap beads
 
 New beads filed by this inventory (children of `conduit-y99`):
@@ -58,13 +58,13 @@ In-flight / pre-existing beads referenced (not duplicated):
 - `conduit-4w1` - notary key fetch (3 row(s))
 - `conduit-7pk` - outbound presence EDU (0 row(s))
 - `conduit-c3u` - AS query negative-result cache (1 row(s))
-- `conduit-embed-auth` - membership/visibility on reads (kernel) (2 row(s))
+- `conduit-embed-auth` - membership/visibility on reads (kernel) (1 row(s))
 - `conduit-embed-pdu` - PDU wire model (in flight) (9 row(s))
 - `conduit-g12` - recursive auth-event verification (1 row(s))
 - `conduit-jt5` - restricted join rule evaluation (2 row(s))
 - `conduit-kqy` - federation knock (rv7+) (2 row(s))
 - `conduit-nq5` - keys/query merges cross-signing signatures (2 row(s))
-- `conduit-s6m` - state res v2 strictness + per-event visibility (2 row(s))
+- `conduit-s6m` - state res v2 strictness + per-event visibility (1 row(s))
 - `conduit-vfm` - distributed UIA session store (1 row(s))
 - `conduit-y99.13` - sync membership/state/pagination semantics (4 row(s))
 - `conduit-y99.13.4` - structured filters across sync streams (3 row(s))
@@ -324,7 +324,7 @@ In-flight / pre-existing beads referenced (not duplicated):
 | `cs.mod.device-management` | [Device management](https://spec.matrix.org/v1.19/client-server-api/#device-management) | tested | `conduit-server/src/api/client/devices.rs` | `production_account.rs::production_device_lifecycle_with_uia_keys_and_device_lists`<br>`production_appservice.rs::identity_assertion_devices_registration_and_login` |  | Includes AS device creation (PUT 201) and UIA-free deletion. |
 | `cs.mod.e2ee` | [End-to-End Encryption (key upload/query/claim/changes, cross-signing, device lists, backups)](https://spec.matrix.org/v1.19/client-server-api/#end-to-end-encryption) | partial | `conduit-server/src/api/client/keys.rs` | `e2ee.rs::keys_claim_concurrent_no_double_spend`<br>`production_e2e.rs::production_key_inventory_wakes_sync_and_quiets_after_acknowledgement` (+1) | `conduit-y99.14` `conduit-y99.22` `conduit-y99.32` `conduit-nq5` |  |
 | `cs.mod.secrets` | [Secrets (storage in account data, sharing over to-device)](https://spec.matrix.org/v1.19/client-server-api/#secrets) | tested | `conduit-server/src/api/client/account_data.rs`<br>`conduit-server/src/api/client/keys.rs` | `presence.rs::account_data_global_round_trip`<br>`e2ee.rs::send_to_device_delivered_via_sync` |  | No secret-specific server behaviour; generic account data and to-device carry m.secret_storage.* and m.secret.*. |
-| `cs.mod.history-visibility` | [Room history visibility](https://spec.matrix.org/v1.19/client-server-api/#room-history-visibility) | partial | `conduit/src/auth.rs (filter_visible_for_user)` | `rooms.rs::non_member_cannot_read_room`<br>`federation_inbound.rs::backfill_returns_history_visibility_filtered_events` | `conduit-embed-auth` `conduit-s6m` |  |
+| `cs.mod.history-visibility` | [Room history visibility](https://spec.matrix.org/v1.19/client-server-api/#room-history-visibility) | tested | `conduit/src/auth.rs (filter_visible_for_user)` | `production_sync.rs::history_visibility_is_the_value_at_each_event`<br>`production_sync.rs::joining_preserves_state_across_a_history_visibility_gap` (+2) |  | Visibility is the value when the event was sent. Non-members are rejected unless the room is world_readable, and that change does not reveal earlier joined-era events. |
 | `cs.mod.push` | [Push notifications (rules, evaluation, pushers, notifications, counts)](https://spec.matrix.org/v1.19/client-server-api/#push-notifications) | tested | `conduit-server/src/api/client/push.rs`<br>`conduit-server/src/api/client/push/rules.rs` (+3) | `push.rs::push_rules_crud`<br>`push.rs::pusher_set_and_list` (+4) |  | Rules, evaluation once per event, counts in the same /sync response, receipts and own events clear, thread partitioning, /notifications, pushers and gateway delivery. |
 | `cs.mod.3pid-invites` | [Third-party invites](https://spec.matrix.org/v1.19/client-server-api/#third-party-invites) | tested | `conduit-server/src/api/client/third_party.rs`<br>`conduit/src/auth.rs:490` | `production_appservice.rs::third_party_invites_lookup_store_invite_and_onbind`<br>`conduit/tests/third_party_invite_auth.rs::signed_member_invite_rejections` (+2) | `conduit-y99.22.6` | Local rooms end to end (invite, store-invite, onbind exchange, signature-verified membership, join). Remote-room exchange and key_validity_url checks on join are federation (conduit-y99.22.6). |
 | `cs.mod.search` | [Server side search](https://spec.matrix.org/v1.19/client-server-api/#server-side-search) | tested | `conduit-server/src/api/client/room_content/search.rs` | `production_rooms.rs::search_room_events_with_ordering_context_and_groupings` |  |  |

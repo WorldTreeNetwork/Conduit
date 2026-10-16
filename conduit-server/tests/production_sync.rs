@@ -1779,6 +1779,140 @@ async fn joining_preserves_state_across_a_history_visibility_gap() {
     }
 }
 
+/// Visibility is the room's value when the event was sent, not the value now.
+/// A later `joined` setting must not hide events sent while the room was `shared`.
+#[tokio::test]
+async fn history_visibility_is_the_value_at_each_event() {
+    let server = Server::new().await;
+    let alice = server.register("alice").await;
+    let bob = server.register("bob").await;
+    let carol = server.register("carol").await;
+    let room = server
+        .request(
+            Method::POST,
+            "/_matrix/client/v3/createRoom",
+            Some(token(&alice)),
+            Some(json!({"preset": "public_chat", "initial_state": [{
+                "type": "m.room.history_visibility", "state_key": "",
+                "content": {"history_visibility": "shared"}
+            }]})),
+            200,
+        )
+        .await["room_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let early = send_text(
+        &server,
+        &alice,
+        &room,
+        "early",
+        json!({"msgtype": "m.text", "body": "shared-era"}),
+    )
+    .await;
+    server
+        .request(
+            Method::PUT,
+            &format!("/_matrix/client/v3/rooms/{room}/state/m.room.history_visibility"),
+            Some(token(&alice)),
+            Some(json!({"history_visibility": "joined"})),
+            200,
+        )
+        .await;
+    let late = send_text(
+        &server,
+        &alice,
+        &room,
+        "late",
+        json!({"msgtype": "m.text", "body": "joined-era"}),
+    )
+    .await;
+    join(&server, &bob, &room).await;
+    let after = send_text(
+        &server,
+        &alice,
+        &room,
+        "after",
+        json!({"msgtype": "m.text", "body": "after-join"}),
+    )
+    .await;
+
+    let response = sync_with(&server, &bob, json!({"room": {"timeline": {"limit": 100}}}), None).await;
+    let timeline = response["rooms"]["join"][&room]["timeline"]["events"].as_array().unwrap();
+    assert!(
+        !timeline.iter().any(|event| event["event_id"] == late),
+        "joined-era stays hidden from a later joiner: {timeline:?}"
+    );
+    assert!(
+        timeline.iter().any(|event| event["event_id"] == after),
+        "events after the join are visible: {timeline:?}"
+    );
+
+    let history = server
+        .request(
+            Method::GET,
+            &format!("/_matrix/client/v3/rooms/{room}/messages?dir=b&limit=100"),
+            Some(token(&bob)),
+            None,
+            200,
+        )
+        .await;
+    let chunk = history["chunk"].as_array().unwrap();
+    assert!(chunk.iter().any(|event| event["event_id"] == early), "{history}");
+    assert!(!chunk.iter().any(|event| event["event_id"] == late), "{history}");
+    assert!(chunk.iter().any(|event| event["event_id"] == after), "{history}");
+
+    for path in [
+        format!("/_matrix/client/v3/rooms/{room}/state"),
+        format!("/_matrix/client/v3/rooms/{room}/state/m.room.create"),
+        format!("/_matrix/client/v3/rooms/{room}/joined_members"),
+        format!("/_matrix/client/v3/rooms/{room}/messages?dir=b&limit=10"),
+    ] {
+        server.request(Method::GET, &path, Some(token(&carol)), None, 403).await;
+    }
+
+    server
+        .request(
+            Method::PUT,
+            &format!("/_matrix/client/v3/rooms/{room}/state/m.room.history_visibility"),
+            Some(token(&alice)),
+            Some(json!({"history_visibility": "world_readable"})),
+            200,
+        )
+        .await;
+    let peeked_message = send_text(
+        &server,
+        &alice,
+        &room,
+        "peek",
+        json!({"msgtype": "m.text", "body": "now-world-readable"}),
+    )
+    .await;
+    let peeked = server
+        .request(
+            Method::GET,
+            &format!("/_matrix/client/v3/rooms/{room}/messages?dir=b&limit=100"),
+            Some(token(&carol)),
+            None,
+            200,
+        )
+        .await;
+    let peeked_ids: Vec<&str> = peeked["chunk"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|event| event["event_id"].as_str())
+        .collect();
+    assert!(peeked_ids.contains(&peeked_message.as_str()), "{peeked}");
+    assert!(!peeked_ids.contains(&late.as_str()), "joined-era is not revealed later: {peeked}");
+    for path in [
+        format!("/_matrix/client/v3/rooms/{room}/state"),
+        format!("/_matrix/client/v3/rooms/{room}/joined_members"),
+    ] {
+        server.request(Method::GET, &path, Some(token(&carol)), None, 200).await;
+    }
+}
+
 
 async fn sync_mode(server: &Server, login: &Value, filter: Value, since: Option<&str>, after: bool, full: bool) -> Value {
     let path = format!("{}&use_state_after={after}&full_state={full}", filtered(filter, since));
