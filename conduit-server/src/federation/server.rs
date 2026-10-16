@@ -834,6 +834,41 @@ pub async fn invite(
 // x2r.7 — GET /state/:roomId and GET /state_ids/:roomId
 // ---------------------------------------------------------------------------
 
+/// Resolved room state before `event_id` is applied.
+///
+/// The spec snapshot is the state prior to the requested event, not the
+/// writer's current map and not a state that includes that event.
+async fn state_before_event(
+    storage: &Arc<dyn Storage>,
+    room_id: &str,
+    event_id: Option<&str>,
+) -> Result<Vec<Event>, Response> {
+    let Some(event_id) = event_id.filter(|id| !id.is_empty()) else {
+        return Err(matrix_error(
+            StatusCode::BAD_REQUEST,
+            "M_MISSING_PARAM",
+            "event_id is required",
+        ));
+    };
+    let event = match storage.get_event(event_id).await {
+        Ok(Some(event)) if event.room_id == room_id => event,
+        Ok(_) => return Err(not_found("Event not found")),
+        Err(e) => return Err(internal(&e.to_string())),
+    };
+    let position = match storage.event_stream_positions(&[event.event_id.clone()]).await {
+        Ok(positions) => match positions.get(&event.event_id).copied() {
+            Some(position) => position,
+            None => return Err(not_found("Event not found")),
+        },
+        Err(e) => return Err(internal(&e.to_string())),
+    };
+    let prior = match storage.state_events_through(room_id, position.saturating_sub(1)).await {
+        Ok(rows) => rows.into_iter().map(|(_, event)| event).collect::<Vec<_>>(),
+        Err(e) => return Err(internal(&e.to_string())),
+    };
+    Ok(conduit::room::state_res::snapshot_from_arrival(&prior).0.into_values().collect())
+}
+
 /// `GET /_matrix/federation/v1/state/:roomId?event_id=...`
 pub async fn state(
     State(state): State<FedState>,
@@ -849,16 +884,10 @@ pub async fn state(
         return response;
     }
 
-    let _event_id = params.get("event_id").cloned().unwrap_or_default();
-
-    let state_events = match state.storage.get_current_state(&room_id).await {
-        Ok(evs) => evs,
-        Err(e) => return internal(&e.to_string()),
+    let state_events = match state_before_event(&state.storage, &room_id, params.get("event_id").map(String::as_str)).await {
+        Ok(events) => events,
+        Err(response) => return response,
     };
-
-    if state_events.is_empty() {
-        return not_found("Room not found or has no state");
-    }
 
     let auth_chain = build_auth_chain(&state.storage, &state_events).await;
     let (pdus, auth_chain) = match (
@@ -891,16 +920,10 @@ pub async fn state_ids(
         return response;
     }
 
-    let _event_id = params.get("event_id").cloned().unwrap_or_default();
-
-    let state_events = match state.storage.get_current_state(&room_id).await {
-        Ok(evs) => evs,
-        Err(e) => return internal(&e.to_string()),
+    let state_events = match state_before_event(&state.storage, &room_id, params.get("event_id").map(String::as_str)).await {
+        Ok(events) => events,
+        Err(response) => return response,
     };
-
-    if state_events.is_empty() {
-        return not_found("Room not found or has no state");
-    }
 
     let auth_chain = build_auth_chain(&state.storage, &state_events).await;
 

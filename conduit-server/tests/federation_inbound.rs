@@ -706,11 +706,18 @@ async fn state_endpoint_returns_room_state() {
     ));
     storage_a.put_event(&create_ev).await.unwrap();
     storage_a.set_state_entry(room_id, "m.room.create", "", &create_ev.event_id).await.unwrap();
+    let name_ev = signed_event(&key_a, "server-a.test", Pdu::new(
+        room_id, creator, "m.room.name", Some(String::new()),
+        json!({ "name": "historical-name" }), 1001,
+        vec![create_ev.event_id.clone()], vec![create_ev.event_id.clone()], 2,
+    ));
+    storage_a.put_event(&name_ev).await.unwrap();
 
     let client = reqwest::Client::new();
     let path = format!(
-        "/_matrix/federation/v1/state/{}?event_id=$state_create",
-        urlencoding::encode(room_id)
+        "/_matrix/federation/v1/state/{}?event_id={}",
+        urlencoding::encode(room_id),
+        urlencoding::encode(&name_ev.event_id),
     );
     let auth = sign_req("GET", &path, "server-a.test", "server-a.test", None, &key_a);
 
@@ -724,8 +731,18 @@ async fn state_endpoint_returns_room_state() {
     assert_eq!(resp.status().as_u16(), 200);
     let body: Value = resp.json().await.unwrap();
     let pdus = body["pdus"].as_array().unwrap();
-    assert!(!pdus.is_empty(), "state should contain at least the create event");
+    assert!(pdus.iter().any(|pdu| pdu["type"] == "m.room.create"), "state before the name includes create: {body}");
+    assert!(pdus.iter().all(|pdu| pdu["content"]["name"] != "historical-name"), "the requested name is not in its own prior state: {body}");
     assert!(pdus.iter().all(|p| p.get("event_id").is_none()));
+
+    let missing = format!(
+        "/_matrix/federation/v1/state/{}?event_id=$state_create",
+        urlencoding::encode(room_id)
+    );
+    let auth = sign_req("GET", &missing, "server-a.test", "server-a.test", None, &key_a);
+    let resp = client.get(format!("{base_a}{missing}")).header("Authorization", auth).send().await.unwrap();
+    assert_eq!(resp.status().as_u16(), 404);
+    assert_eq!(resp.json::<Value>().await.unwrap()["errcode"], "M_NOT_FOUND");
 }
 
 // ---------------------------------------------------------------------------

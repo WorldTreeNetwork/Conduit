@@ -34,8 +34,8 @@
     },
     "ss": {
       "endpoint": {
-        "implemented+tested": 23,
-        "implemented-untested": 2,
+        "implemented+tested": 24,
+        "implemented-untested": 1,
         "partial": 6,
         "missing": 4,
         "not-applicable": 1,
@@ -5188,13 +5188,14 @@
         }
       ],
       "tests": [
-        "conduit-server/tests/federation_inbound.rs::state_endpoint_returns_room_state"
+        "conduit-server/tests/federation_inbound.rs::state_endpoint_returns_room_state",
+        "conduit-server/tests/production_pdu.rs::state_ids_are_the_room_state_before_the_event"
       ],
-      "tests_total": 1,
+      "tests_total": 2,
       "gap_beads": [
         "conduit-y99.22"
       ],
-      "notes": ""
+      "notes": "Returns the resolved state before the requested event. The event itself and later state are absent. An unknown event is 404."
     },
     {
       "id": "ss.ep.get_matrixfederationv1state_idsroomid",
@@ -5208,7 +5209,7 @@
       "rate_limited": "No",
       "deprecated": false,
       "role": "homeserver",
-      "status": "implemented-untested",
+      "status": "implemented+tested",
       "code": [
         {
           "loc": "conduit-server/src/federation/server.rs:1075",
@@ -5216,12 +5217,14 @@
           "kind": "exact"
         }
       ],
-      "tests": [],
-      "tests_total": 0,
+      "tests": [
+        "conduit-server/tests/production_pdu.rs::state_ids_are_the_room_state_before_the_event"
+      ],
+      "tests_total": 1,
       "gap_beads": [
         "conduit-y99.22"
       ],
-      "notes": ""
+      "notes": "Returns event ids for the resolved state before the requested event. A later state event is absent. A missing event_id is 400 M_MISSING_PARAM. An unknown event is 404."
     },
     {
       "id": "ss.ep.get_matrixfederationv1timestamp_to_eventroomid",
@@ -8994,13 +8997,15 @@
       "role": "homeserver",
       "status": "partial",
       "code": [],
-      "tests": [],
-      "tests_total": 0,
+      "tests": [
+        "conduit-server/tests/production_pdu.rs::state_ids_are_the_room_state_before_the_event"
+      ],
+      "tests_total": 1,
       "gap_beads": [
         "conduit-y99.22",
         "conduit-embed-pdu"
       ],
-      "notes": ""
+      "notes": "state and state_ids return the resolved state before the requested event. get_missing_events and timestamp_to_event remain open."
     },
     {
       "id": "ss.joining",

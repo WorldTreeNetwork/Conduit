@@ -602,8 +602,16 @@ async fn server_acl_denies_remote_participation_until_lifted() {
         .await;
     let marker_id = marker["event_id"].as_str().unwrap().to_owned();
 
-    let state_path = format!("/_matrix/federation/v1/state/{}", enc(&room));
-    let ids_path = format!("/_matrix/federation/v1/state_ids/{}", enc(&room));
+    let state_path = format!(
+        "/_matrix/federation/v1/state/{}?event_id={}",
+        enc(&room),
+        enc(&marker_id)
+    );
+    let ids_path = format!(
+        "/_matrix/federation/v1/state_ids/{}?event_id={}",
+        enc(&room),
+        enc(&marker_id)
+    );
     let join_path = format!("/_matrix/federation/v1/make_join/{}/{}", enc(&room), enc("@r:remote.test"));
     let backfill_path = format!("/_matrix/federation/v1/backfill/{}?limit=1", enc(&room));
     let auth_path = format!("/_matrix/federation/v1/event_auth/{}/{}", enc(&room), enc(&marker_id));
@@ -713,6 +721,117 @@ async fn server_acl_denies_remote_participation_until_lifted() {
     assert!(leaving["error"].as_str().unwrap_or("").contains("not in the room"), "{leaving}");
     let knock_body = fed(&server, &remote, Method::PUT, &send_knock, Some(json!({})), 400).await;
     assert_eq!(knock_body["errcode"], "M_BAD_JSON", "{knock_body}");
+}
+
+#[tokio::test]
+async fn state_ids_are_the_room_state_before_the_event() {
+    let remote = spawn_remote().await;
+    let server = federated_server(&remote).await;
+    let alice = server.register("alice").await;
+    let token = alice["access_token"].as_str().unwrap();
+    let room = server
+        .request(Method::POST, "/_matrix/client/v3/createRoom", Some(token), Some(json!({"preset": "public_chat"})), 200)
+        .await["room_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let name = |label: &str| {
+        let server = &server;
+        let room = room.clone();
+        let label = label.to_owned();
+        async move {
+            server
+                .request(
+                    Method::PUT,
+                    &format!("/_matrix/client/v3/rooms/{}/state/m.room.name/", enc(&room)),
+                    Some(token),
+                    Some(json!({"name": label})),
+                    200,
+                )
+                .await["event_id"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        }
+    };
+    let first = name("first").await;
+    let second = name("second").await;
+    let third = name("third").await;
+    let message = server
+        .request(
+            Method::PUT,
+            &format!("/_matrix/client/v3/rooms/{}/send/m.room.message/after-third", enc(&room)),
+            Some(token),
+            Some(json!({"msgtype": "m.text", "body": "after"})),
+            200,
+        )
+        .await["event_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let ids = |event_id: &str| {
+        let path = format!(
+            "/_matrix/federation/v1/state_ids/{}?event_id={}",
+            enc(&room),
+            enc(event_id)
+        );
+        let server = &server;
+        let remote = &remote;
+        async move {
+            let body = fed(server, remote, Method::GET, &path, None, 200).await;
+            body["pdu_ids"].as_array().unwrap().iter().map(|id| id.as_str().unwrap().to_owned()).collect::<Vec<_>>()
+        }
+    };
+    let at_second = ids(&second).await;
+    assert!(at_second.contains(&first), "state before the second name keeps the first: {at_second:?}");
+    assert!(!at_second.contains(&second), "the requested event is not part of the snapshot: {at_second:?}");
+    assert!(!at_second.contains(&third), "a later name is not the state at an earlier event: {at_second:?}");
+    let at_third = ids(&third).await;
+    assert!(at_third.contains(&second), "state before the third name is the second: {at_third:?}");
+    assert!(!at_third.contains(&first), "the replaced name is not still current: {at_third:?}");
+    assert!(!at_third.contains(&third), "{at_third:?}");
+    let at_message = ids(&message).await;
+    assert!(at_message.contains(&third), "a message sees the name that already happened: {at_message:?}");
+    assert!(!at_message.iter().any(|id| id == &message), "{at_message:?}");
+
+    let missing = fed(
+        &server,
+        &remote,
+        Method::GET,
+        &format!("/_matrix/federation/v1/state_ids/{}?event_id=$missing", enc(&room)),
+        None,
+        404,
+    )
+    .await;
+    assert_eq!(missing["errcode"], "M_NOT_FOUND", "{missing}");
+    let required = fed(
+        &server,
+        &remote,
+        Method::GET,
+        &format!("/_matrix/federation/v1/state_ids/{}", enc(&room)),
+        None,
+        400,
+    )
+    .await;
+    assert_eq!(required["errcode"], "M_MISSING_PARAM", "{required}");
+
+    let full = fed(
+        &server,
+        &remote,
+        Method::GET,
+        &format!("/_matrix/federation/v1/state/{}?event_id={}", enc(&room), enc(&second)),
+        None,
+        200,
+    )
+    .await;
+    let names: Vec<&str> = full["pdus"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|pdu| pdu["content"]["name"].as_str())
+        .collect();
+    assert_eq!(names, vec!["first"], "full state at the second name is the first: {full}");
 }
 
 struct PolicyRemote {
