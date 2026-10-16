@@ -1196,6 +1196,13 @@ fn v1_signing_bytes(event: &Value) -> Result<Vec<u8>, ()> {
     conduit::canonical_json::to_canonical_bytes(&Value::Object(kept)).map_err(|_| ())
 }
 
+/// SHA-256 of the v1 redacted event, unpadded standard base64.
+/// This is the hash carried beside an event id in `auth_events` and `prev_events`.
+pub(crate) fn v1_reference_hash(event: &Value) -> Result<String, ()> {
+    let bytes = v1_signing_bytes(event)?;
+    Ok(STANDARD_NO_PAD.encode(Sha256::digest(bytes)))
+}
+
 fn v1_content_digest(event: &Value) -> Result<Vec<u8>, ()> {
     let mut copy = event.as_object().cloned().ok_or(())?;
     copy.remove("hashes");

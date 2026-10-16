@@ -671,19 +671,21 @@ impl Client {
     }
 
     /// `PUT /_matrix/federation/v1/invite/{roomId}/{eventId}` for room versions 1 and 2.
+    /// `event` is the legacy JSON, including `event_id` and tuple `auth_events`.
     /// The response carries the co-signed event under `event`.
     pub async fn invite_v1(
         &self,
         dest: &str,
         room_id: &str,
-        pdu: &WirePdu,
+        event: &Value,
     ) -> Result<Value, FederationError> {
+        let event_id = event.get("event_id").and_then(Value::as_str).unwrap_or("");
         let path = format!(
             "/_matrix/federation/v1/invite/{}/{}",
             urlencoding(room_id),
-            urlencoding(&pdu.event_id())
+            urlencoding(event_id)
         );
-        let resp: Value = self.signed_put(dest, &path, pdu).await?;
+        let resp: Value = self.signed_put(dest, &path, event).await?;
         resp.get("event").cloned().ok_or_else(|| FederationError::Parse("missing 'event'".to_owned()))
     }
 

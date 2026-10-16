@@ -23,9 +23,8 @@ use serde_json::Value;
 
 use conduit::auth::{StateMap, auth_event_keys, check_auth};
 use conduit::event::{Event, Pdu};
-use conduit::hashing::event_id;
 use conduit::room::RoomEventSender;
-use conduit::signing::{sign_authored, SigningError};
+use conduit::signing::sign_authored_for_version;
 use conduit::Result as ConduitResult;
 
 use super::{AuthState, MatrixError};
@@ -188,6 +187,78 @@ async fn build_sign_and_persist_inner<S: AuthState>(
     Ok(event_id)
 }
 
+/// Key under which a room-version-1 or 2 event keeps the JSON that was signed.
+/// Client responses omit extensions, so this stays off the client wire.
+pub(crate) const LEGACY_WIRE: &str = "io.conduit.v1_event";
+
+/// An event signed for one room version.
+pub(crate) struct SignedDocument {
+    pub event_id: String,
+    pub document: Value,
+}
+
+/// Sign `body` with the rules of `version`.
+///
+/// Versions 1 and 2 keep `event_id` and the tuple form of `auth_events` and
+/// `prev_events` on `document`. Versions 3 and later return the PDU without
+/// `event_id`; the id is the version's reference hash.
+pub(crate) fn sign_for_room_version(
+    version: u32,
+    mut body: Value,
+    server_key: &conduit::keys::ServerKey,
+    server_name: &str,
+) -> Result<SignedDocument, String> {
+    if version < 3 {
+        let object = body.as_object_mut().ok_or("event is not an object")?;
+        object.entry("origin".to_owned()).or_insert_with(|| serde_json::json!(server_name));
+        if object.get("event_id").and_then(Value::as_str).unwrap_or("").is_empty() {
+            let event_id = format!("${}:{}", uuid::Uuid::new_v4().simple(), server_name);
+            object.insert("event_id".into(), serde_json::json!(event_id));
+        }
+        let event_id = body.get("event_id").and_then(Value::as_str).unwrap_or("").to_owned();
+        crate::federation::spec_v119::seal_v1_event(&mut body, server_key, server_name)
+            .map_err(|_| "v1 signing failed".to_owned())?;
+        return Ok(SignedDocument { event_id, document: body });
+    }
+    if version < 11 {
+        if let Some(object) = body.as_object_mut() {
+            object.entry("origin".to_owned()).or_insert_with(|| serde_json::json!(server_name));
+        }
+    }
+    let mut pdu: Pdu = serde_json::from_value(body).map_err(|error| error.to_string())?;
+    sign_authored_for_version(&mut pdu, version, server_key, server_name).map_err(|error| error.to_string())?;
+    let event_id = conduit::room_version::event_id_for(&pdu, version)
+        .map_err(|error| format!("{error:?}"))?
+        .ok_or_else(|| "room version has no reference hash".to_owned())?;
+    let document = serde_json::to_value(&pdu).map_err(|error| error.to_string())?;
+    Ok(SignedDocument { event_id, document })
+}
+
+async fn legacy_refs(storage: &dyn conduit::storage::Storage, ids: &[String]) -> Result<Vec<Value>, String> {
+    let mut refs = Vec::with_capacity(ids.len());
+    for id in ids {
+        let Some(event) = storage.get_event(id).await.map_err(|error| error.to_string())? else {
+            return Err(format!("missing event {id}"));
+        };
+        let Some(raw) = event.extensions.get(LEGACY_WIRE).and_then(Value::as_str) else {
+            return Err(format!("event {id} has no room-version-1 document"));
+        };
+        let document: Value = serde_json::from_str(raw).map_err(|error| error.to_string())?;
+        let hash = crate::federation::spec_v119::v1_reference_hash(&document)
+            .map_err(|_| format!("event {id} has no reference hash"))?;
+        refs.push(serde_json::json!([id, {"sha256": hash}]));
+    }
+    Ok(refs)
+}
+
+fn signing_failure(error: String) -> (StatusCode, Json<MatrixError>) {
+    if error.contains("event too large") {
+        MatrixError::too_large("event exceeds the 65536-byte PDU limit")
+    } else {
+        MatrixError::unknown(format!("signing error: {error}"))
+    }
+}
+
 /// Sign and store one locally authored event. Callers that have an account
 /// profile pass content through [`super::profile::with_join_profile`] first.
 pub async fn author_event(
@@ -267,9 +338,15 @@ pub async fn author_event(
     // Step 4 — auth_events: look up current state for required keys
     // ------------------------------------------------------------------
     let required_keys = auth_event_keys(&event);
-    let room_version = match storage.get_state_entry(room_id, "m.room.create", "").await {
-        Ok(Some(create)) => conduit::room_version::version_of_content(&create.content),
-        _ => 11,
+    // The create event is not stored yet, so its version comes from its content.
+    // A later event with no create event at all still uses room version 11.
+    let room_version = if event.event_type == "m.room.create" {
+        conduit::room_version::version_of_content(&event.content)
+    } else {
+        match storage.get_state_entry(room_id, "m.room.create", "").await {
+            Ok(Some(create)) => conduit::room_version::version_of_content(&create.content),
+            _ => 11,
+        }
     };
     let mut auth_events_ids: Vec<String> = Vec::new();
     let mut auth_state: StateMap<Event> = HashMap::new();
@@ -283,23 +360,43 @@ pub async fn author_event(
             auth_state.insert((ev_type.clone(), sk.clone()), state_ev);
         }
     }
-    event.auth_events = auth_events_ids;
+    event.auth_events = auth_events_ids.clone();
 
     // ------------------------------------------------------------------
-    // Step 5 & 6 — content hash + sign (sign_event sets hashes internally)
+    // Step 5–7 — sign and id with this room's version
     // ------------------------------------------------------------------
-    sign_authored(&mut event.pdu, server_key, server_name).map_err(|e| match e {
-        SigningError::TooLarge { .. } => MatrixError::too_large("event exceeds the 65536-byte PDU limit"),
-        e => MatrixError::unknown(format!("signing error: {e}")),
-    })?;
-
-    // ------------------------------------------------------------------
-    // Step 7 — event_id (reference hash)
-    // ------------------------------------------------------------------
-    let eid = event_id(&event).map_err(|e| {
-        MatrixError::unknown(format!("event_id error: {e}"))
-    })?;
-    event.event_id = eid.clone();
+    let eid = if room_version < 3 {
+        let auth_events = legacy_refs(storage, &auth_events_ids).await.map_err(signing_failure)?;
+        let prev_events = legacy_refs(storage, &event.prev_events).await.map_err(signing_failure)?;
+        let mut body = serde_json::json!({
+            "auth_events": auth_events,
+            "content": event.content,
+            "depth": event.depth,
+            "origin_server_ts": event.origin_server_ts,
+            "prev_events": prev_events,
+            "room_id": event.room_id,
+            "sender": event.sender,
+            "type": event.event_type,
+        });
+        if let Some(state_key) = &event.state_key {
+            body["state_key"] = serde_json::json!(state_key);
+        }
+        let signed = sign_for_room_version(room_version, body, server_key, server_name).map_err(signing_failure)?;
+        let decoded = conduit::wire::decode_pdu_for_version(signed.document.clone(), 1, now_ms()).map_err(|error| {
+            MatrixError::unknown(format!("v1 event does not decode: {error}"))
+        })?;
+        let mut pdu = decoded.pdu;
+        pdu.extensions.insert(LEGACY_WIRE.to_owned(), serde_json::json!(signed.document.to_string()));
+        event.pdu = pdu;
+        event.event_id = signed.event_id.clone();
+        signed.event_id
+    } else {
+        let template = serde_json::to_value(&event.pdu).map_err(|error| MatrixError::unknown(format!("signing error: {error}")))?;
+        let signed = sign_for_room_version(room_version, template, server_key, server_name).map_err(signing_failure)?;
+        event.pdu = serde_json::from_value(signed.document).map_err(|error| MatrixError::unknown(format!("signing error: {error}")))?;
+        event.event_id = signed.event_id.clone();
+        signed.event_id
+    };
 
     // ------------------------------------------------------------------
     // Step 8 — auth check
@@ -388,5 +485,61 @@ pub(crate) async fn fan_out_authored(
             Ok(false) => {}
             Err(error) => tracing::warn!(%error, dest, "federation fan-out skipped a destination"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sign_for_room_version;
+    use conduit::keys::generate_server_key;
+    use serde_json::json;
+
+    #[test]
+    fn signed_events_follow_the_room_version() {
+        let key = generate_server_key();
+        let legacy = json!({
+            "auth_events": [["$create:example.org", {"sha256": "abc"}]],
+            "content": {"membership": "invite"},
+            "depth": 2,
+            "origin_server_ts": 1_700_000_000_000u64,
+            "prev_events": [["$prev:example.org", {"sha256": "def"}]],
+            "room_id": "!room:example.org",
+            "sender": "@alice:example.org",
+            "state_key": "@bob:example.org",
+            "type": "m.room.member",
+        });
+        for version in [1u32, 2] {
+            let signed = sign_for_room_version(version, legacy.clone(), &key, "example.org").unwrap();
+            let id = signed.document["event_id"].as_str().unwrap();
+            assert_eq!(id, signed.event_id);
+            assert!(id.starts_with('$') && id.contains(':'), "{id}");
+            assert!(signed.document["auth_events"][0].is_array(), "{version}");
+            assert!(signed.document["prev_events"][0].is_array(), "{version}");
+            assert!(signed.document["signatures"].is_object());
+        }
+
+        let modern = json!({
+            "auth_events": [],
+            "content": {"body": "hi"},
+            "depth": 1,
+            "origin_server_ts": 5,
+            "prev_events": [],
+            "room_id": "!room:example.org",
+            "sender": "@alice:example.org",
+            "type": "m.room.message",
+        });
+        let v3 = sign_for_room_version(3, modern.clone(), &key, "example.org").unwrap();
+        assert!(v3.document.get("event_id").is_none());
+        let pdu3: conduit::event::Pdu = serde_json::from_value(v3.document).unwrap();
+        let expected3 = conduit::room_version::event_id_for(&pdu3, 3).ok().flatten().unwrap();
+        assert_eq!(v3.event_id, expected3);
+        assert!(!expected3[1..].contains('_') && !expected3[1..].contains('-'), "{expected3}");
+        assert_ne!(expected3, conduit::hashing::event_id(&pdu3).unwrap());
+
+        let v12 = sign_for_room_version(12, modern, &key, "example.org").unwrap();
+        assert!(v12.document.get("event_id").is_none());
+        let pdu12: conduit::event::Pdu = serde_json::from_value(v12.document).unwrap();
+        assert_eq!(v12.event_id, conduit::hashing::event_id(&pdu12).unwrap());
+        assert_eq!(v12.event_id, conduit::room_version::event_id_for(&pdu12, 12).ok().flatten().unwrap());
     }
 }

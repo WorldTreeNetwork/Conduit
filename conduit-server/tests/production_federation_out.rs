@@ -470,6 +470,108 @@ async fn remote_invite_refusal_fails_and_drops_membership() {
     assert_eq!(queued, 0, "refused invite is still queued");
 }
 
+#[tokio::test]
+async fn remote_v1_invite_is_legacy_and_rejected_cosign_retracts() {
+    let invites = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let invites_route = Arc::clone(&invites);
+    let sent = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let sent_route = Arc::clone(&sent);
+    let url = serve(
+        Arc::new(generate_server_key()),
+        Router::new()
+            .route(
+                "/_matrix/federation/v1/invite/:room_id/:event_id",
+                put(move |Json(body): Json<Value>| {
+                    let invites = Arc::clone(&invites_route);
+                    async move {
+                        invites.lock().unwrap().push(body);
+                        Json(json!({ "event": { "type": "m.room.member" } }))
+                    }
+                }),
+            )
+            .route(
+                "/_matrix/federation/v1/send/:txn",
+                put(move |Json(body): Json<Value>| {
+                    let sent = Arc::clone(&sent_route);
+                    async move {
+                        sent.lock().unwrap().push(body);
+                        Json(json!({ "pdus": {} }))
+                    }
+                }),
+            ),
+    )
+    .await;
+    let server = Server::with_env(&[
+        ("CONDUIT_FEDERATION", "1"),
+        ("CONDUIT_FEDERATION_BASE_URL", url.as_str()),
+        ("CONDUIT_REMOTE_KEYS_OVERRIDE", url.as_str()),
+    ])
+    .await;
+    let alice = server.register("alice").await;
+    let token = alice["access_token"].as_str().unwrap();
+    let room = server
+        .request(
+            Method::POST,
+            "/_matrix/client/v3/createRoom",
+            Some(token),
+            Some(json!({"preset": "private_chat", "room_version": "1"})),
+            200,
+        )
+        .await["room_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let pool = sqlx::PgPool::connect(&server.database_url).await.unwrap();
+    let storage = conduit_server::PostgresStorage::new(pool.clone());
+    let joined = "@joined:peer.test";
+    let member = Event::new(
+        "$member-join-joined-peer-test",
+        Pdu::new(&room, joined, "m.room.member", Some(joined.to_owned()), json!({"membership": "join"}), 1_700_000_000_000, vec![], vec![], 0),
+    );
+    storage.put_event(&member).await.unwrap();
+    storage.set_state_entry(&room, "m.room.member", joined, &member.event_id).await.unwrap();
+
+    let invitee = "@erin:peer.test";
+    let refused = server
+        .request(
+            Method::POST,
+            &format!("/_matrix/client/v3/rooms/{}/invite", enc(&room)),
+            Some(token),
+            Some(json!({"user_id": invitee})),
+            403,
+        )
+        .await;
+    assert_eq!(refused["errcode"], "M_FORBIDDEN", "{refused}\n{}", server.logs());
+    assert!(
+        storage.get_state_entry(&room, "m.room.member", invitee).await.unwrap().is_none(),
+        "rejected invite is still the membership\n{}",
+        server.logs()
+    );
+    let captured = invites.lock().unwrap().clone();
+    let body = captured.first().unwrap_or_else(|| panic!("PUT /v1/invite was not called\n{}", server.logs()));
+    let event_id = body["event_id"].as_str().unwrap_or_else(|| panic!("invite has no event_id: {body}"));
+    assert!(
+        event_id.starts_with('$') && event_id.ends_with(":production.test"),
+        "invite id is not $opaque:server: {event_id}"
+    );
+    assert!(body["auth_events"][0].is_array(), "auth_events are not tuples: {body}");
+    assert!(body["prev_events"][0].is_array(), "prev_events are not tuples: {body}");
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let bodies = sent.lock().unwrap().clone();
+    assert!(
+        bodies.iter().all(|sent_body| !sent_body.to_string().contains(invitee)),
+        "rejected invite was sent: {bodies:?}"
+    );
+    let queued: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM fed_outbound_queue WHERE payload_text LIKE $1",
+    )
+    .bind(format!("%{invitee}%"))
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(queued, 0, "rejected invite is still queued");
+}
+
 fn percent_decode(input: &str) -> String {
     let bytes = input.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());

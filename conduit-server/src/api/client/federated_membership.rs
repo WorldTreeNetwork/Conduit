@@ -4,9 +4,9 @@
 //! Resident rooms keep the local authoring path. A room with no `m.room.create`
 //! is joined or knocked through `make_*` / `send_*`. Room versions 1 and 2 use
 //! the v1 event format and `/send_join` v1. A remote invite is stored locally
-//! and offered over `/invite`. An answered refusal retracts that membership.
-//! A co-signed acceptance replaces the row. An unreachable invitee leaves the
-//! local invite in place.
+//! and offered over `/invite`. An HTTP error and a 200 that fails co-signature
+//! admission both retract that membership. A verified co-signature replaces
+//! the row. An unreachable invitee leaves the local invite in place.
 
 use std::future::Future;
 use std::time::Duration;
@@ -373,6 +373,41 @@ async fn attempt_invite<T>(
     }
 }
 
+/// What the invitee's server did with the invite.
+enum InviteAnswer {
+    /// DNS, connection, or timeout. No HTTP status.
+    Unreachable,
+    /// The invitee's server returned an error status.
+    HttpError { status: u16, body: String },
+    /// The returned event passed co-signature admission.
+    Admitted,
+    /// A 200 body failed `admit_cosigned_as` (or the v1 equivalent decode).
+    AdmitRejected,
+}
+
+/// Whether the local invite stays.
+enum InviteDisposition {
+    Keep,
+    Retract { status: u16, body: String },
+}
+
+/// Only silence and a verified co-signature keep the membership.
+/// An HTTP error and a rejected co-signature both retract it.
+fn invite_disposition(answer: InviteAnswer) -> InviteDisposition {
+    match answer {
+        InviteAnswer::Unreachable | InviteAnswer::Admitted => InviteDisposition::Keep,
+        InviteAnswer::HttpError { status, body } => InviteDisposition::Retract { status, body },
+        InviteAnswer::AdmitRejected => InviteDisposition::Retract {
+            status: 403,
+            body: serde_json::json!({
+                "errcode": "M_FORBIDDEN",
+                "error": "The invitee's server rejected the invite",
+            })
+            .to_string(),
+        },
+    }
+}
+
 fn refusal(status: u16, body: &str) -> Response {
     let code = StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY);
     let parsed: Value = serde_json::from_str(body).unwrap_or(Value::Null);
@@ -384,10 +419,18 @@ fn refusal(status: u16, body: &str) -> Response {
     MatrixError::forwarded(code, errcode, message).into_response()
 }
 
+fn legacy_invite_document(event: &Event) -> Result<Value, Response> {
+    let Some(raw) = event.extensions.get(super::event_pipeline::LEGACY_WIRE).and_then(Value::as_str) else {
+        return Err(MatrixError::unknown("room version 1 invite has no wire document").into_response());
+    };
+    serde_json::from_str(raw).map_err(|error| MatrixError::unknown(format!("room version 1 invite is unreadable: {error}")).into_response())
+}
+
 /// Offer a stored invite to the invitee's server.
 ///
-/// An HTTP error, including 403, fails the client request and retracts the
-/// invite. No answer from the peer leaves the local invite in place.
+/// An HTTP error, including 403, and a 200 that fails co-signature admission
+/// both fail the client request and retract the invite. No answer from the
+/// peer leaves the local invite in place.
 pub(crate) async fn deliver_remote_invite<S: AuthState>(state: &S, room_id: &str, event_id: &str) -> Result<(), Response> {
     if !federation_enabled() {
         return Ok(());
@@ -399,51 +442,65 @@ pub(crate) async fn deliver_remote_invite<S: AuthState>(state: &S, room_id: &str
     if dest == state.server_name() {
         return Ok(());
     }
-    let Some(wire) = WirePdu::checked(event_id, event.pdu.clone()) else { return Ok(()) };
     let Ok(version) = room_version_of(state.storage().as_ref(), room_id).await else { return Ok(()) };
     let Ok(stripped) = stripped_state(state.storage().as_ref(), room_id).await else { return Ok(()) };
     let parsed = conduit::room_version::parse(&version).unwrap_or(0);
-    let sent = if parsed <= 2 {
-        attempt_invite(client.invite_v1(&dest, room_id, &wire)).await
+    let modern = if parsed <= 2 {
+        None
     } else {
-        attempt_invite(client.invite(&dest, room_id, &version, stripped, &wire)).await
+        Some(WirePdu::checked_for_version(parsed, event.pdu.clone()).ok_or_else(|| {
+            MatrixError::unknown("invite PDU does not match its room version").into_response()
+        })?)
     };
-    let returned = match sent {
-        Ok(returned) => returned,
-        Err(InviteFailure::Unreachable(error)) => {
-            tracing::warn!(dest, %error, "remote invite was not answered; the local invite stands");
-            return Ok(());
+    let sent = if parsed <= 2 {
+        let document = legacy_invite_document(&event)?;
+        attempt_invite(client.invite_v1(&dest, room_id, &document)).await
+    } else {
+        let wire = modern.as_ref().expect("modern invite");
+        attempt_invite(client.invite(&dest, room_id, &version, stripped, wire)).await
+    };
+    let answer = match sent {
+        Err(InviteFailure::Unreachable(reason)) => {
+            tracing::debug!(reason, "remote invite had no HTTP answer");
+            InviteAnswer::Unreachable
         }
-        Err(InviteFailure::Remote { status, body }) => {
+        Err(InviteFailure::Remote { status, body }) => InviteAnswer::HttpError { status, body },
+        Ok(returned) => match &modern {
+            Some(wire) => match crate::federation::admit::admit_cosigned_as(
+                &client._keys,
+                &client.http,
+                returned,
+                wire,
+                &dest,
+                state.server_name(),
+                &state.server_key(),
+            )
+            .await
+            {
+                Ok(admitted) => {
+                    match state.storage().replace_cosigned_pdu(&admitted.into_event()).await {
+                        Ok(true) => {}
+                        Ok(false) => tracing::warn!(event_id, "co-signed invite did not replace the stored PDU"),
+                        Err(error) => tracing::warn!(%error, "co-signed invite was not stored"),
+                    }
+                    InviteAnswer::Admitted
+                }
+                Err(_) => InviteAnswer::AdmitRejected,
+            },
+            // Room versions 1 and 2 are not v3 PDUs, so `admit_cosigned_as`
+            // cannot take them. A 200 is not a co-signature of this invite.
+            None => InviteAnswer::AdmitRejected,
+        },
+    };
+    match invite_disposition(answer) {
+        InviteDisposition::Keep => Ok(()),
+        InviteDisposition::Retract { status, body } => {
             if let Err(error) = state.storage().retract_current_membership(room_id, &target, event_id).await {
                 return Err(MatrixError::unknown(format!("invite was refused and could not be retracted: {error}")).into_response());
             }
-            return Err(refusal(status, &body));
+            Err(refusal(status, &body))
         }
-    };
-    let admitted = match crate::federation::admit::admit_cosigned_as(
-        &client._keys,
-        &client.http,
-        returned,
-        &wire,
-        &dest,
-        state.server_name(),
-        &state.server_key(),
-    )
-    .await
-    {
-        Ok(admitted) => admitted,
-        Err(error) => {
-            tracing::warn!(dest, %error, "remote invite response was refused; the local invite stands");
-            return Ok(());
-        }
-    };
-    match state.storage().replace_cosigned_pdu(&admitted.into_event()).await {
-        Ok(true) => {}
-        Ok(false) => tracing::warn!(event_id, "co-signed invite did not replace the stored PDU"),
-        Err(error) => tracing::warn!(%error, "co-signed invite was not stored"),
     }
-    Ok(())
 }
 
 pub(crate) async fn fan_out_stored<S: AuthState>(state: &S, room_id: &str, event_id: &str) {
@@ -572,4 +629,31 @@ pub(crate) async fn knock_remote<S: AuthState>(
     let mut hinted = hinted.to_vec();
     hinted.extend(servers);
     knock_remote_room(state, sender, &room_id, &hinted, reason).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{invite_disposition, InviteAnswer, InviteDisposition};
+
+    #[test]
+    fn invite_answers_keep_only_silence_and_admission() {
+        assert!(matches!(invite_disposition(InviteAnswer::Unreachable), InviteDisposition::Keep));
+        assert!(matches!(invite_disposition(InviteAnswer::Admitted), InviteDisposition::Keep));
+        match invite_disposition(InviteAnswer::HttpError { status: 403, body: "no".into() }) {
+            InviteDisposition::Retract { status, body } => {
+                assert_eq!(status, 403);
+                assert_eq!(body, "no");
+            }
+            InviteDisposition::Keep => panic!("an HTTP error kept the invite"),
+        }
+        match invite_disposition(InviteAnswer::AdmitRejected) {
+            InviteDisposition::Retract { status, body } => {
+                assert_eq!(status, 403);
+                let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+                assert_eq!(parsed["errcode"], "M_FORBIDDEN");
+                assert_eq!(parsed["error"], "The invitee's server rejected the invite");
+            }
+            InviteDisposition::Keep => panic!("a rejected co-signature kept the invite"),
+        }
+    }
 }
