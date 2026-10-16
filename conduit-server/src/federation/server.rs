@@ -1563,6 +1563,21 @@ async fn resync_device_list(state: &FedState, origin: &str, user_id: &str) {
 
 
 /// Handle EDUs in an inbound federation transaction.
+///
+/// U+0000 rules for each EDU sink:
+/// - `m.direct_to_device`: `content_text` is lossless JSON text. `/sync`
+///   reads that column. The JSONB projection replaces U+0000 with U+FFFD
+///   and is not served.
+/// - `m.receipt`: `event_id` and `thread_id` that contain U+0000 are stored
+///   as JSON strings beside a U+FFFD projection. `/sync` serves the exact
+///   strings.
+/// - `m.typing` and `m.presence`: in-memory Rust strings. U+0000 is kept.
+///   They are not PostgreSQL sinks.
+/// - `m.device_list_update` and `m.signing_key_update`: user and device ids
+///   are PostgreSQL TEXT, which rejects U+0000, and a key document is JSONB.
+///   Those rows still fail as SQLSTATE class 22. `/send` drops that one EDU
+///   and continues. Identifiers containing U+0000 are not Matrix ids this
+///   server can match to a local user.
 pub(crate) async fn handle_edu(
     state: &FedState,
     origin: &str,

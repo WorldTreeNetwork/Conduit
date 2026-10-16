@@ -155,6 +155,43 @@ fn text_or_json(text: Option<String>, legacy: Option<Value>) -> Result<Value> {
     }
 }
 
+/// PostgreSQL TEXT cannot store U+0000. Projections use U+FFFD.
+fn pg_text(value: &str) -> String {
+    value.replace('\0', "\u{FFFD}")
+}
+
+/// JSON string (`"a\u0000b"`) when `value` contains U+0000, so the exact
+/// characters survive in a TEXT column. Absent when the projection is exact.
+fn nul_json(value: &str) -> Option<String> {
+    value.contains('\0').then(|| json_text(&Value::String(value.to_owned())))
+}
+
+fn exact_string(projection: String, exact: Option<String>) -> Result<String> {
+    match exact {
+        Some(text) => serde_json::from_str(&text).map_err(|e| Error::Storage(format!("stored exact string: {e}"))),
+        None => Ok(projection),
+    }
+}
+
+fn receipt_record(row: &sqlx::postgres::PgRow) -> Result<conduit::storage::ReceiptRecord> {
+    let thread = exact_string(
+        row.try_get("thread_id").map_err(map_sqlx)?,
+        row.try_get("thread_id_text").map_err(map_sqlx)?,
+    )?;
+    Ok(conduit::storage::ReceiptRecord {
+        room_id: row.try_get("room_id").map_err(map_sqlx)?,
+        user_id: row.try_get("user_id").map_err(map_sqlx)?,
+        receipt_type: row.try_get("receipt_type").map_err(map_sqlx)?,
+        thread_id: (!thread.is_empty()).then_some(thread),
+        event_id: exact_string(
+            row.try_get("event_id").map_err(map_sqlx)?,
+            row.try_get("event_id_text").map_err(map_sqlx)?,
+        )?,
+        ts: row.try_get("ts").map_err(map_sqlx)?,
+        stream_pos: row.try_get("stream_pos").map_err(map_sqlx)?,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Events: the single row decoder and writer (add-pdu-wire)
 // ---------------------------------------------------------------------------
@@ -554,14 +591,23 @@ impl Storage for PostgresStorage {
             lock_stream(&mut transaction, Stream::ToDevice).await?;
         }
         for message in local {
-            sqlx::query!(
+            // content_text is what /sync reads. JSONB cannot hold U+0000.
+            sqlx::query(
                 r#"
-                INSERT INTO to_device_queue (target_user, target_device, sender, event_type, content)
-                SELECT user_id, device_id, $3, $4, $5 FROM devices
+                INSERT INTO to_device_queue (target_user, target_device, sender, event_type, content, content_text)
+                SELECT user_id, device_id, $3, $4, $5, $6 FROM devices
                 WHERE user_id = $1 AND ($2 = '*' OR device_id = $2)
                 "#,
-                message.target_user, message.target_device, message.sender, message.event_type, message.content
-            ).execute(&mut *transaction).await.map_err(map_sqlx)?;
+            )
+            .bind(&message.target_user)
+            .bind(&message.target_device)
+            .bind(&message.sender)
+            .bind(&message.event_type)
+            .bind(conduit::wire::project_nul(&message.content))
+            .bind(json_text(&message.content))
+            .execute(&mut *transaction)
+            .await
+            .map_err(map_sqlx)?;
         }
         for delivery in remote {
             sqlx::query!(
@@ -2002,23 +2048,24 @@ impl Storage for PostgresStorage {
     ) -> Result<i64> {
         let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
         lock_stream(&mut transaction, Stream::ToDevice).await?;
-        let row = sqlx::query!(
+        let row = sqlx::query(
             r#"
-            INSERT INTO to_device_queue (target_user, target_device, sender, event_type, content)
-            VALUES ($1, $2, $3, $4, $5)
+            INSERT INTO to_device_queue (target_user, target_device, sender, event_type, content, content_text)
+            VALUES ($1, $2, $3, $4, $5, $6)
             RETURNING id
             "#,
-            target_user,
-            target_device,
-            sender,
-            event_type,
-            content
         )
+        .bind(target_user)
+        .bind(target_device)
+        .bind(sender)
+        .bind(event_type)
+        .bind(conduit::wire::project_nul(content))
+        .bind(json_text(content))
         .fetch_one(&mut *transaction)
         .await
         .map_err(map_sqlx)?;
         transaction.commit().await.map_err(map_sqlx)?;
-        Ok(row.id)
+        Ok(row.try_get("id").map_err(map_sqlx)?)
     }
 
     async fn drain_to_device(
@@ -2028,31 +2075,34 @@ impl Storage for PostgresStorage {
         since_id: i64,
         limit: i64,
     ) -> Result<Vec<ToDeviceMessage>> {
-        let rows = sqlx::query!(
+        let rows = sqlx::query(
             r#"
-            SELECT id, sender, event_type, content
+            SELECT id, sender, event_type, content, content_text
             FROM to_device_queue
             WHERE target_user = $1 AND target_device = $2 AND id > $3
             ORDER BY id ASC
             LIMIT $4
             "#,
-            target_user,
-            target_device,
-            since_id,
-            limit
         )
+        .bind(target_user)
+        .bind(target_device)
+        .bind(since_id)
+        .bind(limit)
         .fetch_all(&self.pool)
         .await
         .map_err(map_sqlx)?;
-        Ok(rows
-            .into_iter()
-            .map(|r| ToDeviceMessage {
-                id: r.id,
-                sender: r.sender,
-                event_type: r.event_type,
-                content: r.content,
-            })
-            .collect())
+        let mut messages = Vec::with_capacity(rows.len());
+        for row in rows {
+            let content_text: Option<String> = row.try_get("content_text").map_err(map_sqlx)?;
+            let content: Value = row.try_get("content").map_err(map_sqlx)?;
+            messages.push(ToDeviceMessage {
+                id: row.try_get("id").map_err(map_sqlx)?,
+                sender: row.try_get("sender").map_err(map_sqlx)?,
+                event_type: row.try_get("event_type").map_err(map_sqlx)?,
+                content: text_or_json(content_text, Some(content))?,
+            });
+        }
+        Ok(messages)
     }
 
     async fn delete_to_device_before(
@@ -2588,45 +2638,67 @@ impl Storage for PostgresStorage {
         &self,
         room_id: &str,
     ) -> Result<Vec<(String, String, String, i64)>> {
-        let rows = sqlx::query!(
+        let rows = sqlx::query(
             r#"
-            SELECT user_id, receipt_type, event_id, ts
+            SELECT user_id, receipt_type, event_id, event_id_text, ts
             FROM receipts
             WHERE room_id = $1 AND thread_id = ''
             "#,
-            room_id
         )
+        .bind(room_id)
         .fetch_all(&self.pool)
         .await
         .map_err(map_sqlx)?;
 
-        Ok(rows
-            .into_iter()
-            .map(|r| (r.user_id, r.receipt_type, r.event_id, r.ts))
-            .collect())
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            let event_id = exact_string(
+                row.try_get("event_id").map_err(map_sqlx)?,
+                row.try_get("event_id_text").map_err(map_sqlx)?,
+            )?;
+            out.push((
+                row.try_get("user_id").map_err(map_sqlx)?,
+                row.try_get("receipt_type").map_err(map_sqlx)?,
+                event_id,
+                row.try_get("ts").map_err(map_sqlx)?,
+            ));
+        }
+        Ok(out)
     }
 
     async fn receipts_since(
         &self,
         since_pos: i64,
     ) -> Result<Vec<(String, String, String, String, i64, i64)>> {
-        let rows = sqlx::query!(
+        let rows = sqlx::query(
             r#"
-            SELECT room_id, user_id, receipt_type, event_id, ts, stream_pos
+            SELECT room_id, user_id, receipt_type, event_id, event_id_text, ts, stream_pos
             FROM receipts
             WHERE stream_pos > $1 AND thread_id = ''
             ORDER BY stream_pos ASC
             "#,
-            since_pos
         )
+        .bind(since_pos)
         .fetch_all(&self.pool)
         .await
         .map_err(map_sqlx)?;
 
-        Ok(rows
-            .into_iter()
-            .map(|r| (r.room_id, r.user_id, r.receipt_type, r.event_id, r.ts, r.stream_pos))
-            .collect())
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            let event_id = exact_string(
+                row.try_get("event_id").map_err(map_sqlx)?,
+                row.try_get("event_id_text").map_err(map_sqlx)?,
+            )?;
+            out.push((
+                row.try_get("room_id").map_err(map_sqlx)?,
+                row.try_get("user_id").map_err(map_sqlx)?,
+                row.try_get("receipt_type").map_err(map_sqlx)?,
+                event_id,
+                row.try_get("ts").map_err(map_sqlx)?,
+                row.try_get("stream_pos").map_err(map_sqlx)?,
+            ));
+        }
+        Ok(out)
     }
 
     // -----------------------------------------------------------------------
@@ -5223,53 +5295,51 @@ impl Storage for PostgresStorage {
     ) -> Result<i64> {
         let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
         lock_stream(&mut transaction, Stream::Receipts).await?;
-        let row = sqlx::query!(
+        let thread = thread_id.unwrap_or_default();
+        let row = sqlx::query(
             r#"
-            INSERT INTO receipts (room_id, user_id, receipt_type, thread_id, event_id, ts)
-            VALUES ($1, $2, $3, $4, $5, $6)
+            INSERT INTO receipts (room_id, user_id, receipt_type, thread_id, event_id, ts, event_id_text, thread_id_text)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             ON CONFLICT (room_id, user_id, receipt_type, thread_id)
                 DO UPDATE SET event_id = EXCLUDED.event_id, ts = EXCLUDED.ts,
+                              event_id_text = EXCLUDED.event_id_text,
+                              thread_id_text = EXCLUDED.thread_id_text,
                               stream_pos = EXCLUDED.stream_pos
             RETURNING stream_pos
             "#,
-            room_id,
-            user_id,
-            receipt_type,
-            thread_id.unwrap_or_default(),
-            event_id,
-            ts
         )
+        .bind(room_id)
+        .bind(user_id)
+        .bind(receipt_type)
+        .bind(pg_text(thread))
+        .bind(pg_text(event_id))
+        .bind(ts)
+        .bind(nul_json(event_id))
+        .bind(nul_json(thread))
         .fetch_one(&mut *transaction)
         .await
         .map_err(map_sqlx)?;
         transaction.commit().await.map_err(map_sqlx)?;
-        Ok(row.stream_pos)
+        Ok(row.try_get("stream_pos").map_err(map_sqlx)?)
     }
 
     async fn threaded_receipts_since(
         &self,
         since_pos: i64,
     ) -> Result<Vec<conduit::storage::ReceiptRecord>> {
-        let rows = sqlx::query!(
-            r#"SELECT room_id, user_id, receipt_type, thread_id, event_id, ts, stream_pos
+        let rows = sqlx::query(
+            r#"SELECT room_id, user_id, receipt_type, thread_id, thread_id_text, event_id, event_id_text, ts, stream_pos
                FROM receipts WHERE stream_pos > $1 ORDER BY stream_pos ASC"#,
-            since_pos
         )
+        .bind(since_pos)
         .fetch_all(&self.pool)
         .await
         .map_err(map_sqlx)?;
-        Ok(rows
-            .into_iter()
-            .map(|r| conduit::storage::ReceiptRecord {
-                room_id: r.room_id,
-                user_id: r.user_id,
-                receipt_type: r.receipt_type,
-                thread_id: (!r.thread_id.is_empty()).then_some(r.thread_id),
-                event_id: r.event_id,
-                ts: r.ts,
-                stream_pos: r.stream_pos,
-            })
-            .collect())
+        let mut records = Vec::with_capacity(rows.len());
+        for row in rows {
+            records.push(receipt_record(&row)?);
+        }
+        Ok(records)
     }
 
     async fn client_transaction_ids(
@@ -5306,27 +5376,20 @@ impl Storage for PostgresStorage {
         room_id: &str,
         user_id: &str,
     ) -> Result<Vec<conduit::storage::ReceiptRecord>> {
-        let rows = sqlx::query!(
-            r#"SELECT room_id, user_id, receipt_type, thread_id, event_id, ts, stream_pos
+        let rows = sqlx::query(
+            r#"SELECT room_id, user_id, receipt_type, thread_id, thread_id_text, event_id, event_id_text, ts, stream_pos
                FROM receipts WHERE room_id = $1 AND user_id = $2 ORDER BY stream_pos ASC"#,
-            room_id,
-            user_id
         )
+        .bind(room_id)
+        .bind(user_id)
         .fetch_all(&self.pool)
         .await
         .map_err(map_sqlx)?;
-        Ok(rows
-            .into_iter()
-            .map(|r| conduit::storage::ReceiptRecord {
-                room_id: r.room_id,
-                user_id: r.user_id,
-                receipt_type: r.receipt_type,
-                thread_id: (!r.thread_id.is_empty()).then_some(r.thread_id),
-                event_id: r.event_id,
-                ts: r.ts,
-                stream_pos: r.stream_pos,
-            })
-            .collect())
+        let mut records = Vec::with_capacity(rows.len());
+        for row in rows {
+            records.push(receipt_record(&row)?);
+        }
+        Ok(records)
     }
 
     // --- Modules lane (conduit-y99.38/.39/.41/.43) --------------------------

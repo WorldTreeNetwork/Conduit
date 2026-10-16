@@ -162,7 +162,7 @@ async fn send_keeps_nul_content_drops_invalid_pdus_and_replays_identically() {
     let mut long = create("!long:remote.test", json!({"room_version": "11"}), 1);
     long.sender = long_sender;
     let (_, long) = sign(&remote, long);
-    // An EDU the database refuses (U+0000 in a to-device JSONB row) is dropped, not a 500.
+    // A to-device EDU whose content contains U+0000 is stored, not a 500.
     let nul_edu = json!({"edu_type": "m.direct_to_device", "content": {"sender": "@r:remote.test", "type": "m.test",
         "message_id": "nul-edu", "messages": {alice["user_id"].as_str().unwrap(): {"*": {"body": "a\u{0}b"}}}}});
 
@@ -273,6 +273,112 @@ async fn received_pdu_is_served_as_the_same_canonical_bytes() {
             String::from_utf8_lossy(&sent_bytes),
         );
     }
+}
+
+/// A to-device message and a read receipt whose strings contain U+0000
+/// arrive on PUT /send, the transaction returns 200, and /sync serves those
+/// same characters after a restart. Replacing U+0000 with U+FFFD fails this.
+#[tokio::test]
+async fn send_delivers_nul_to_device_and_receipt_byte_exact() {
+    let remote = spawn_remote().await;
+    let mut server = federated_server(&remote).await;
+    let alice = server.register("alice").await;
+    let token = alice["access_token"].as_str().unwrap();
+    let user_id = alice["user_id"].as_str().unwrap();
+    let device_id = alice["device_id"].as_str().unwrap();
+    let room = server
+        .request(
+            Method::POST,
+            "/_matrix/client/v3/createRoom",
+            Some(token),
+            Some(json!({"preset": "public_chat"})),
+            200,
+        )
+        .await["room_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let joiner = "@r:remote.test";
+    federation_join(&server, &remote, REMOTE, &room, joiner).await;
+    let since = server
+        .request(Method::GET, "/_matrix/client/v3/sync", Some(token), None, 200)
+        .await["next_batch"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let receipt_event = "$read\u{0}";
+    let body = txn(
+        vec![],
+        vec![
+            json!({
+                "edu_type": "m.direct_to_device",
+                "content": {
+                    "sender": joiner,
+                    "type": "m.room.encrypted",
+                    "message_id": "nul-to-device",
+                    "messages": { user_id: { device_id: { "body": "a\u{0}b" } } }
+                }
+            }),
+            json!({
+                "edu_type": "m.receipt",
+                "content": {
+                    room.clone(): {
+                        "m.read": {
+                            joiner: {
+                                "event_ids": [receipt_event],
+                                "data": { "ts": 1_700_000_000_000u64 }
+                            }
+                        }
+                    }
+                }
+            }),
+        ],
+    );
+    let sent = fed(
+        &server,
+        &remote,
+        Method::PUT,
+        "/_matrix/federation/v1/send/nul-edus",
+        Some(body),
+        200,
+    )
+    .await;
+    assert!(sent.get("errcode").is_none(), "{sent}");
+
+    server.stop();
+    server.start().await;
+    let sync = server
+        .request(
+            Method::GET,
+            &format!("/_matrix/client/v3/sync?since={since}"),
+            Some(token),
+            None,
+            200,
+        )
+        .await;
+    let to_device = sync["to_device"]["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["type"] == "m.room.encrypted")
+        .unwrap_or_else(|| panic!("NUL to-device missing: {sync}"));
+    assert_eq!(to_device["sender"], joiner, "{to_device}");
+    assert_eq!(to_device["content"]["body"], "a\u{0}b", "{to_device}");
+    let receipt = sync["rooms"]["join"][&room]["ephemeral"]["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["type"] == "m.receipt")
+        .unwrap_or_else(|| panic!("NUL receipt missing: {sync}"));
+    assert!(
+        receipt["content"].get(receipt_event).is_some(),
+        "receipt event id lost U+0000: {receipt}"
+    );
+    assert!(
+        receipt["content"][receipt_event]["m.read"].get(joiner).is_some(),
+        "{receipt}"
+    );
 }
 
 fn invite(remote: &Remote, room: &str, sender: &str, invitee: &str) -> Pdu {

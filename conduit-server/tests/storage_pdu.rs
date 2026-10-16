@@ -6,7 +6,7 @@
 //!   before/after inline classification and the sweep;
 //! - migrations 0090/0091 rewrite no table and legacy JSONB rows still work;
 //! - U+0000 and floats in the replay and outbox sinks;
-//! - data exceptions (SQLSTATE 22) surface as `Error::StorageData`.
+//! - to-device content keeps U+0000 in text and projects U+FFFD into JSONB.
 
 use std::borrow::Cow;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -295,7 +295,7 @@ async fn replay_and_outbox_sinks_keep_nul_and_floats() {
 }
 
 #[tokio::test]
-async fn data_exceptions_are_reported_as_storage_data_errors() {
+async fn to_device_content_keeps_nul_and_projects_replacement() {
     use conduit::storage::ToDeviceDelivery;
     let db = TempDb::new().await;
     let store = db.storage();
@@ -309,8 +309,18 @@ async fn data_exceptions_are_reported_as_storage_data_errors() {
         event_type: "m.test".into(),
         content: json!({"body": "a\u{0}b"}),
     };
-    let error = store.deliver_to_device_once(&key, &[delivery], &[]).await.unwrap_err();
-    assert!(matches!(error, conduit::Error::StorageData(_)), "{error:?}");
+    assert!(store.deliver_to_device_once(&key, &[delivery.clone()], &[]).await.unwrap());
+    let queued = store.drain_to_device("@bob:x.test", "B", 0, 10).await.unwrap();
+    assert_eq!(queued.len(), 1, "{queued:?}");
+    assert_eq!(queued[0].content["body"], "a\u{0}b");
+    let again = db.reopen().await.drain_to_device("@bob:x.test", "B", 0, 10).await.unwrap();
+    assert_eq!(again[0].content, queued[0].content);
+    // The JSONB projection is not the delivered copy.
+    let projected: serde_json::Value = sqlx::query_scalar("SELECT content FROM to_device_queue")
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(projected["body"], "a\u{FFFD}b");
 }
 
 // ---------------------------------------------------------------------------

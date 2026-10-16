@@ -8861,19 +8861,23 @@
         },
         {
           "loc": "conduit-server/src/federation/queue.rs"
+        },
+        {
+          "loc": "conduit-server/src/storage_pg.rs"
         }
       ],
       "tests": [
         "conduit-server/tests/federation_inbound.rs::send_transaction_persists_pdus",
-        "conduit-server/tests/federation.rs::queue_retries_on_failure"
+        "conduit-server/tests/federation.rs::queue_retries_on_failure",
+        "conduit-server/tests/production_pdu.rs::send_delivers_nul_to_device_and_receipt_byte_exact",
+        "conduit-server/tests/storage_pdu.rs::to_device_content_keeps_nul_and_projects_replacement"
       ],
-      "tests_total": 2,
+      "tests_total": 4,
       "gap_beads": [
-        "conduit-y99.22.4",
         "conduit-y99.22.5",
         "conduit-y99.33"
       ],
-      "notes": ""
+      "notes": "A to-device message and a read receipt containing U+0000 are delivered on /sync after restart. Typing and presence keep U+0000 in memory. Device-list and signing-key JSONB sinks still drop that one EDU on SQLSTATE class 22. Transaction and sent-outbox retention remains."
     },
     {
       "id": "ss.pdu.checks",
