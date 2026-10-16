@@ -129,7 +129,7 @@ fn allowed_content_fields(event_type: &str, version: u32) -> &'static [&'static 
         "m.room.member" if version >= 11 => &["membership", "join_authorised_via_users_server"],
         "m.room.member" => &["membership"],
         "m.room.create" => &["creator"],
-        "m.room.join_rules" if version >= 11 => &["join_rule", "allow"],
+        "m.room.join_rules" if version >= 8 => &["join_rule", "allow"],
         "m.room.join_rules" => &["join_rule"],
         "m.room.power_levels" if version >= 11 => &[
             "ban",
@@ -583,6 +583,48 @@ mod tests {
             event_id_for(&original, 6).unwrap(),
             "v7 redaction must not change the v6 reference hash"
         );
+    }
+
+    /// Room version 8 keeps `allow` on a redacted join-rules event. Version 7
+    /// drops it. A member event still drops `join_authorised_via_users_server`.
+    #[test]
+    fn v8_redaction_keeps_join_rules_allow() {
+        let mut rules = message();
+        rules.event_type = "m.room.join_rules".into();
+        rules.content = json!({
+            "join_rule": "restricted",
+            "allow": [{"type": "m.room_membership", "room_id": "!space:example.org"}],
+            "extra": true
+        });
+        assert_eq!(redact_pdu(&rules, 7).content, json!({"join_rule": "restricted"}));
+        assert_eq!(
+            redact_pdu(&rules, 8).content,
+            json!({
+                "join_rule": "restricted",
+                "allow": [{"type": "m.room_membership", "room_id": "!space:example.org"}]
+            })
+        );
+
+        let mut member = message();
+        member.event_type = "m.room.member".into();
+        member.state_key = Some("@b:example.org".into());
+        member.content = json!({
+            "membership": "join",
+            "join_authorised_via_users_server": "@a:example.org",
+            "displayname": "B"
+        });
+        assert_eq!(redact_pdu(&member, 8).content, json!({"membership": "join"}));
+
+        let mut levels = message();
+        levels.event_type = "m.room.power_levels".into();
+        levels.content = json!({"invite": 50, "ban": 50, "users": {}});
+        assert!(redact_pdu(&levels, 8).content.get("invite").is_none());
+        assert_eq!(redact_pdu(&levels, 8).content["ban"], 50);
+
+        let mut aliases = message();
+        aliases.event_type = "m.room.aliases".into();
+        aliases.content = json!({"aliases": ["#a:example.org"]});
+        assert!(redact_pdu(&aliases, 8).content.get("aliases").is_none());
     }
 
     #[test]

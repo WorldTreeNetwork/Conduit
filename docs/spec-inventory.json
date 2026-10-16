@@ -106,10 +106,10 @@
     },
     "rv": {
       "requirement": {
-        "implemented+tested": 48,
+        "implemented+tested": 49,
         "implemented-untested": 0,
         "partial": 6,
-        "missing": 7,
+        "missing": 6,
         "not-applicable": 0,
         "total": 61
       }
@@ -10748,14 +10748,18 @@
       "title": "Room version 8: Redaction algorithm",
       "source": "https://spec.matrix.org/v1.19/rooms/v8/#redactions",
       "role": "homeserver",
-      "status": "missing",
-      "code": [],
-      "tests": [],
-      "tests_total": 0,
-      "gap_beads": [
-        "conduit-y99.23"
+      "status": "implemented+tested",
+      "code": [
+        {
+          "loc": "conduit/src/room_version.rs"
+        }
       ],
-      "notes": "Kernel implements room version 11 only."
+      "tests": [
+        "conduit/src/room_version.rs::v8_redaction_keeps_join_rules_allow"
+      ],
+      "tests_total": 1,
+      "gap_beads": [],
+      "notes": "Room version 8 keeps allow on redacted join rules. Version 7 drops it. A member event still drops join_authorised_via_users_server, and power levels still drop invite."
     },
     {
       "id": "rv.v8.state-res",
