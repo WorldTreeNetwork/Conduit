@@ -13,8 +13,8 @@
 //!   unauthenticated): for rooms on this server the signed proof is
 //!   exchanged for an `m.room.member` invite carrying
 //!   `content.third_party_invite`, which the v11 auth rules verify against
-//!   the `m.room.third_party_invite` keys.  Rooms on other servers need
-//!   `exchange_third_party_invite` (federation, conduit-y99.22).
+//!   the `m.room.third_party_invite` keys.  Rooms on other servers are
+//!   exchanged with the inviting server.
 //! * `POST /account/3pid/bind`, `/unbind`, `/delete` and deactivation proxy
 //!   to the identity server and remember bindings so unbinding knows where.
 
@@ -32,6 +32,7 @@ use serde_json::{json, Value};
 use tracing::{info, warn};
 
 use conduit::room::Room;
+use conduit::signing::server_of_user_id;
 
 use crate::identity_service::{canonical_3pid, IdentityClient, IsError, Unbind};
 
@@ -223,8 +224,7 @@ pub async fn onbind<S: AuthState>(State(state): State<S>, Json(body): Json<Value
                 .is_some(),
         };
         if !local {
-            // Remote room: exchange_third_party_invite (conduit-y99.22).
-            warn!(room_id, "onbind for a remote room needs exchange_third_party_invite; not supported yet");
+            exchange_remote(&state, room_id, sender, mxid, invite).await;
             continue;
         }
         if let Err(e) = exchange_local(&state, room_id, sender, mxid, &invite["signed"]).await {
@@ -234,6 +234,40 @@ pub async fn onbind<S: AuthState>(State(state): State<S>, Json(body): Json<Value
         }
     }
     (StatusCode::OK, Json(json!({}))).into_response()
+}
+
+/// Ask the inviting server to auth a third-party invite for a room this
+/// server is not in. `onbind` still answers 200 when the exchange fails.
+async fn exchange_remote<S: AuthState>(state: &S, room_id: &str, sender: &str, mxid: &str, invite: &Value) {
+    let Some(dest) = server_of_user_id(sender) else {
+        warn!(room_id, sender, "onbind sender is not a user id");
+        return;
+    };
+    let Some(client) = state.federation_client() else {
+        warn!(room_id, "onbind remote exchange needs federation");
+        return;
+    };
+    let display_name = invite["display_name"]
+        .as_str()
+        .or_else(|| invite["address"].as_str())
+        .unwrap_or("");
+    let body = json!({
+        "type": "m.room.member",
+        "room_id": room_id,
+        "sender": sender,
+        "state_key": mxid,
+        "content": {
+            "membership": "invite",
+            "third_party_invite": {
+                "display_name": display_name,
+                "signed": invite["signed"],
+            },
+        },
+    });
+    match client.exchange_third_party_invite(dest, room_id, &body).await {
+        Ok(_) => info!(room_id, mxid, dest, "third-party invite exchanged with the inviting server"),
+        Err(error) => warn!(room_id, mxid, dest, %error, "third-party invite exchange failed"),
+    }
 }
 
 /// Turn a signed third-party invite into an `m.room.member` invite in a

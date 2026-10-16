@@ -2675,6 +2675,118 @@ fn identity_signed(mxid: &str, token: &str, signer: &ed25519_dalek::SigningKey) 
     json!({"mxid": mxid, "token": token, "signatures": {"id.test": {"ed25519:0": signature}}})
 }
 
+/// An onbind invite for a room on another server is exchanged with the
+/// inviting server. The homeserver still answers 200 when that exchange fails.
+#[tokio::test]
+async fn onbind_exchanges_a_remote_room_with_the_inviting_server() {
+    use axum::extract::Path as AxPath;
+    use tokio::sync::Mutex as AsyncMutex;
+
+    let remote = spawn_remote().await;
+    let seen = Arc::new(AsyncMutex::new(Vec::<Value>::new()));
+    let recorded = seen.clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let app = Router::new()
+        .route(
+            "/_matrix/key/v2/server",
+            get({
+                let doc = remote_key_document(&remote);
+                move || {
+                    let doc = doc.clone();
+                    async move { Json(doc) }
+                }
+            }),
+        )
+        .route(
+            "/_matrix/federation/v1/exchange_third_party_invite/:room_id",
+            put(move |headers: HeaderMap, AxPath(room_id): AxPath<String>, Json(body): Json<Value>| {
+                let seen = recorded.clone();
+                async move {
+                    let authed = headers
+                        .get("authorization")
+                        .and_then(|value| value.to_str().ok())
+                        .unwrap_or("")
+                        .contains("X-Matrix");
+                    seen.lock().await.push(json!({"room_id": room_id, "authed": authed, "body": body}));
+                    if room_id.contains("down") {
+                        return StatusCode::BAD_GATEWAY.into_response();
+                    }
+                    Json(json!({})).into_response()
+                }
+            }),
+        );
+    tokio::spawn(async move { axum::serve(listener, app).await.ok() });
+    let base = format!("http://{addr}");
+    let server = Server::with_env(&[
+        ("CONDUIT_FEDERATION", "1"),
+        ("CONDUIT_REMOTE_KEYS_OVERRIDE", &base),
+        ("CONDUIT_FEDERATION_BASE_URL", &base),
+    ])
+    .await;
+    let alice = server.register("alice").await;
+    let alice_id = alice["user_id"].as_str().unwrap();
+    let signer = ed25519_dalek::SigningKey::from_bytes(&[4u8; 32]);
+    let room = "!somewhere:remote.test";
+    let sender = "@bob:remote.test";
+    let onbind = |room_id: &str, address: &str| {
+        let signed = identity_signed(alice_id, "abc123", &signer);
+        json!({
+            "medium": "email",
+            "address": address,
+            "mxid": alice_id,
+            "invites": [{
+                "medium": "email",
+                "address": address,
+                "mxid": alice_id,
+                "room_id": room_id,
+                "sender": sender,
+                "signed": signed,
+            }],
+        })
+    };
+    let accepted = server
+        .request(Method::PUT, "/_matrix/federation/v1/3pid/onbind", None, Some(onbind(room, "carol@example.org")), 200)
+        .await;
+    assert_eq!(accepted, json!({}));
+    let calls = seen.lock().await.clone();
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert_eq!(calls[0]["authed"], true, "{calls:?}");
+    assert_eq!(calls[0]["room_id"], room, "{calls:?}");
+    let body = &calls[0]["body"];
+    assert_eq!(body["type"], "m.room.member");
+    assert_eq!(body["room_id"], room);
+    assert_eq!(body["sender"], sender);
+    assert_eq!(body["state_key"], alice_id);
+    assert_eq!(body["content"]["membership"], "invite");
+    assert_eq!(body["content"]["third_party_invite"]["display_name"], "carol@example.org");
+    assert_eq!(body["content"]["third_party_invite"]["signed"]["token"], "abc123");
+    assert_eq!(body["content"]["third_party_invite"]["signed"]["mxid"], alice_id);
+
+    let failed = server
+        .request(
+            Method::PUT,
+            "/_matrix/federation/v1/3pid/onbind",
+            None,
+            Some(onbind("!down:remote.test", "carol@example.org")),
+            200,
+        )
+        .await;
+    assert_eq!(failed, json!({}), "a failed exchange still completes the notification");
+    assert_eq!(seen.lock().await.len(), 2);
+
+    server
+        .request(
+            Method::PUT,
+            "/_matrix/federation/v1/3pid/onbind",
+            None,
+            Some(onbind(&format!("!here:{LOCAL}"), "carol@example.org")),
+            200,
+        )
+        .await;
+    assert_eq!(seen.lock().await.len(), 2, "a room on this server is not exchanged remotely");
+}
+
 #[tokio::test]
 async fn ss_membership_exchange_third_party_invite_issues_invite() {
     use axum::extract::Path as AxPath;

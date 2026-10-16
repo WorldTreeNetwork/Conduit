@@ -34,9 +34,9 @@
     },
     "ss": {
       "endpoint": {
-        "implemented+tested": 32,
+        "implemented+tested": 33,
         "implemented-untested": 0,
-        "partial": 3,
+        "partial": 2,
         "missing": 0,
         "not-applicable": 1,
         "total": 36
@@ -5499,22 +5499,21 @@
       "rate_limited": "No",
       "deprecated": false,
       "role": "homeserver",
-      "status": "partial",
+      "status": "implemented+tested",
       "code": [
         {
-          "loc": "conduit-server/src/api/client/third_party.rs:195",
+          "loc": "conduit-server/src/api/client/third_party.rs:196",
           "handler": "third_party::onbind",
           "kind": "exact"
         }
       ],
       "tests": [
+        "conduit-server/tests/production_pdu.rs::onbind_exchanges_a_remote_room_with_the_inviting_server",
         "conduit-server/tests/production_appservice.rs::third_party_invites_lookup_store_invite_and_onbind"
       ],
-      "tests_total": 1,
-      "gap_beads": [
-        "conduit-y99.22.6"
-      ],
-      "notes": "Invites into rooms on this server become signed m.room.member invites (forged proofs rejected by auth rules); invites into remote rooms are logged and skipped until exchange_third_party_invite (conduit-y99.22.6)."
+      "tests_total": 2,
+      "gap_beads": [],
+      "notes": "A room on this server becomes a signed member invite. A room on another server is exchanged with the inviting server, using the address as the display name when the invite has none. A failed exchange still returns 200. A room on this server is not sent remotely."
     },
     {
       "id": "ss.ep.put_matrixfederationv1exchange_third_party_inviteroomid",
@@ -9201,13 +9200,14 @@
       "tests": [
         "conduit/tests/third_party_invite_auth.rs::signed_member_invite_rejections",
         "conduit-server/tests/production_appservice.rs::third_party_invites_lookup_store_invite_and_onbind",
-        "conduit-server/tests/production_pdu.rs::ss_membership_exchange_third_party_invite_issues_invite"
+        "conduit-server/tests/production_pdu.rs::ss_membership_exchange_third_party_invite_issues_invite",
+        "conduit-server/tests/production_pdu.rs::onbind_exchanges_a_remote_room_with_the_inviting_server"
       ],
-      "tests_total": 3,
+      "tests_total": 4,
       "gap_beads": [
         "conduit-y99.22.6"
       ],
-      "notes": "exchange_third_party_invite verifies the signature and key_validity_url, then issues the outbound invite. Remote onbind still skips exchange, and join-time key_validity_url checks remain (conduit-y99.22.6)."
+      "notes": "exchange_third_party_invite verifies the signature and key_validity_url, then issues the outbound invite. Remote onbind asks the inviting server to exchange the invite. Join-time key_validity_url checks remain (conduit-y99.22.6)."
     },
     {
       "id": "ss.public-rooms",

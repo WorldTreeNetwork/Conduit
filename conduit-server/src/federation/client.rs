@@ -608,6 +608,23 @@ impl Client {
         self.signed_put(dest, &path, pdu).await
     }
 
+    /// `PUT /_matrix/federation/v1/exchange_third_party_invite/{roomId}`
+    ///
+    /// `body` is the partial `m.room.member` invite. The inviting server
+    /// auths it and issues the membership invite.
+    pub async fn exchange_third_party_invite(
+        &self,
+        dest: &str,
+        room_id: &str,
+        body: &Value,
+    ) -> Result<Value, FederationError> {
+        let path = format!(
+            "/_matrix/federation/v1/exchange_third_party_invite/{}",
+            urlencoding(room_id)
+        );
+        self.signed_put(dest, &path, body).await
+    }
+
     /// `PUT /_matrix/federation/v2/invite/{roomId}/{eventId}`
     ///
     /// `room_version` is the room's real version. Returns the raw `event` the
