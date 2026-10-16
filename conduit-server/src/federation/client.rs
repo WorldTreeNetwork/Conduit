@@ -737,9 +737,18 @@ impl Client {
     /// `GET /_matrix/federation/v1/hierarchy/{roomId}`.
     ///
     /// The v1.19 body is `{room, children, inaccessible_children}`. Callers
-    /// that only need a room summary use the `room` object.
-    pub async fn room_hierarchy(&self, dest: &str, room_id: &str) -> Result<Value, FederationError> {
-        let path = format!("/_matrix/federation/v1/hierarchy/{}", urlencoding(room_id));
+    /// that only need a room summary use the `room` object. `suggested_only`
+    /// is sent only when true; the spec default is false.
+    pub async fn room_hierarchy(
+        &self,
+        dest: &str,
+        room_id: &str,
+        suggested_only: bool,
+    ) -> Result<Value, FederationError> {
+        let mut path = format!("/_matrix/federation/v1/hierarchy/{}", urlencoding(room_id));
+        if suggested_only {
+            path.push_str("?suggested_only=true");
+        }
         self.signed_get(dest, &path).await
     }
 

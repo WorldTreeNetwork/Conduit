@@ -16,17 +16,17 @@
   "summary": {
     "cs": {
       "endpoint": {
-        "implemented+tested": 150,
+        "implemented+tested": 151,
         "implemented-untested": 0,
-        "partial": 13,
+        "partial": 12,
         "missing": 0,
         "not-applicable": 1,
         "total": 164
       },
       "requirement": {
-        "implemented+tested": 66,
+        "implemented+tested": 67,
         "implemented-untested": 0,
-        "partial": 11,
+        "partial": 10,
         "missing": 0,
         "not-applicable": 9,
         "total": 86
@@ -4818,7 +4818,7 @@
       "rate_limited": "Yes",
       "deprecated": false,
       "role": "homeserver",
-      "status": "partial",
+      "status": "implemented+tested",
       "code": [
         {
           "loc": "conduit-server/src/api/client/room_content/mod.rs:96",
@@ -4827,13 +4827,12 @@
         }
       ],
       "tests": [
-        "conduit-server/tests/production_rooms.rs::space_hierarchy_walks_children_depth_first"
+        "conduit-server/tests/production_rooms.rs::space_hierarchy_walks_children_depth_first",
+        "conduit-server/tests/production_rooms.rs::unknown_space_children_are_filled_from_federation"
       ],
-      "tests_total": 1,
-      "gap_beads": [
-        "conduit-y99.19.2"
-      ],
-      "notes": "Children unknown locally are skipped instead of fetched over federation."
+      "tests_total": 2,
+      "gap_beads": [],
+      "notes": "Unknown children are fetched from each via server with GET /hierarchy. Descendants already in that response are not requested again. inaccessible_children are not requested. A room this server knows keeps its local summary. A private remote child is omitted."
     },
     {
       "id": "cs.ep.get_matrixclientv1roomsroomidthreads",
@@ -8493,20 +8492,22 @@
       "title": "Spaces (hierarchy)",
       "source": "https://spec.matrix.org/v1.19/client-server-api/#spaces",
       "role": "homeserver",
-      "status": "partial",
+      "status": "implemented+tested",
       "code": [
         {
           "loc": "conduit-server/src/api/client/room_content/hierarchy.rs"
+        },
+        {
+          "loc": "conduit-server/src/federation/client.rs"
         }
       ],
       "tests": [
-        "conduit-server/tests/production_rooms.rs::space_hierarchy_walks_children_depth_first"
+        "conduit-server/tests/production_rooms.rs::space_hierarchy_walks_children_depth_first",
+        "conduit-server/tests/production_rooms.rs::unknown_space_children_are_filled_from_federation"
       ],
-      "tests_total": 1,
-      "gap_beads": [
-        "conduit-y99.19.2"
-      ],
-      "notes": "No federation fetch of unknown children."
+      "tests_total": 2,
+      "gap_beads": [],
+      "notes": "Unknown children are fetched from each via server with GET /hierarchy. Descendants already described are not requested again. inaccessible_children are not requested. Local state wins over the remote summary. A private remote child is omitted. The federation hierarchy response shape is ss.spaces."
     },
     {
       "id": "cs.mod.event-replacements",

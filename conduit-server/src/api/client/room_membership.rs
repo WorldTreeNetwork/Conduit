@@ -549,7 +549,7 @@ async fn remote_room_summary<S: AuthState>(
     };
 
     for dest in &dests {
-        let value = match client.room_hierarchy(dest, &room_id).await {
+        let value = match client.room_hierarchy(dest, &room_id, false).await {
             Ok(value) => value,
             Err(_) => continue,
         };

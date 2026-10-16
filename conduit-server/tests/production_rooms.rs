@@ -950,6 +950,176 @@ async fn space_hierarchy_walks_children_depth_first() {
 }
 
 #[tokio::test]
+async fn unknown_space_children_are_filled_from_federation() {
+    use std::sync::{Arc, Mutex};
+
+    use axum::response::IntoResponse;
+
+    let asked = Arc::new(Mutex::new(Vec::<String>::new()));
+    let kept_id = Arc::new(Mutex::new(String::new()));
+    let asked_route = Arc::clone(&asked);
+    let kept_route = Arc::clone(&kept_id);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        let app = axum::Router::new().route(
+            "/_matrix/federation/v1/hierarchy/:room_id",
+            axum::routing::get(
+                move |headers: axum::http::HeaderMap,
+                      axum::extract::Path(room_id): axum::extract::Path<String>,
+                      axum::extract::RawQuery(query): axum::extract::RawQuery| {
+                    let asked = Arc::clone(&asked_route);
+                    let kept_id = Arc::clone(&kept_route);
+                    async move {
+                        let host = headers.get("host").and_then(|value| value.to_str().ok()).unwrap_or("").to_owned();
+                        let suggested = query.unwrap_or_default();
+                        asked.lock().unwrap().push(format!("{host} {room_id} {suggested}"));
+                        let missing = (
+                            axum::http::StatusCode::NOT_FOUND,
+                            axum::Json(json!({"errcode": "M_NOT_FOUND", "error": "unknown room"})),
+                        )
+                            .into_response();
+                        let kept = kept_id.lock().unwrap().clone();
+                        let describe = |room_id: &str, name: &str, join_rule: &str, children_state: Value| {
+                            json!({
+                                "room_id": room_id,
+                                "name": name,
+                                "join_rule": join_rule,
+                                "world_readable": false,
+                                "guest_can_join": false,
+                                "num_joined_members": 3,
+                                "room_version": "12",
+                                "room_type": "m.space",
+                                "children_state": children_state
+                            })
+                        };
+                        if host == "down.test" {
+                            return missing;
+                        }
+                        if host == "remote.test" && room_id == "!remote-space:remote.test" {
+                            let grand = describe("!grand:remote.test", "Grand", "public", json!([]));
+                            let kept_remote = describe(&kept, "RemoteOverride", "public", json!([]));
+                            let body = json!({
+                                "room": describe(
+                                    "!remote-space:remote.test",
+                                    "Remote",
+                                    "public",
+                                    json!([
+                                        {
+                                            "type": "m.space.child",
+                                            "state_key": "!grand:remote.test",
+                                            "sender": "@alice:remote.test",
+                                            "origin_server_ts": 20,
+                                            "content": {"via": ["remote.test"], "order": "a", "suggested": true}
+                                        },
+                                        {
+                                            "type": "m.space.child",
+                                            "state_key": kept,
+                                            "sender": "@alice:remote.test",
+                                            "origin_server_ts": 10,
+                                            "content": {"via": ["remote.test"], "order": "b", "suggested": false}
+                                        }
+                                    ]),
+                                ),
+                                "children": [grand, kept_remote],
+                                "inaccessible_children": ["!blocked:remote.test"]
+                            });
+                            return (axum::http::StatusCode::OK, axum::Json(body)).into_response();
+                        }
+                        if host == "remote.test" && room_id == "!secret:remote.test" {
+                            let body = json!({
+                                "room": describe("!secret:remote.test", "Secret", "invite", json!([])),
+                                "children": [],
+                                "inaccessible_children": []
+                            });
+                            return (axum::http::StatusCode::OK, axum::Json(body)).into_response();
+                        }
+                        missing
+                    }
+                },
+            ),
+        );
+        axum::serve(listener, app).await.ok();
+    });
+
+    let server = Server::with_env(&[
+        ("CONDUIT_FEDERATION", "1"),
+        ("CONDUIT_FEDERATION_BASE_URL", &base_url),
+    ])
+    .await;
+    let alice = user(&server, "alice").await;
+    let bob = user(&server, "bob").await;
+    let space = create_room(
+        &server,
+        &alice,
+        json!({"preset": "public_chat", "name": "Space", "creation_content": {"type": "m.space"}}),
+    )
+    .await;
+    let kept = create_room(&server, &alice, json!({"preset": "public_chat", "name": "Kept"})).await;
+    *kept_id.lock().unwrap() = kept.clone();
+    let child = |via: &[&str], order: &str, suggested: bool| {
+        json!({"via": via, "order": order, "suggested": suggested})
+    };
+    state(&server, &alice, &space, "m.space.child", "!remote-space:remote.test", child(&["down.test", "remote.test"], "a", true)).await;
+    state(&server, &alice, &space, "m.space.child", &kept, child(&["production.test"], "b", false)).await;
+    state(&server, &alice, &space, "m.space.child", "!secret:remote.test", child(&["remote.test"], "c", false)).await;
+    state(&server, &alice, &space, "m.space.child", "!blocked:remote.test", child(&["remote.test"], "z", false)).await;
+    join(&server, &bob, &space).await;
+
+    let path = format!("/_matrix/client/v1/rooms/{space}/hierarchy");
+    let rooms_of = |body: &Value| -> Vec<String> {
+        body["rooms"].as_array().unwrap().iter().map(|room| room["room_id"].as_str().unwrap().to_owned()).collect()
+    };
+    let full = get(&server, &bob, &path, 200).await;
+    assert_eq!(
+        rooms_of(&full),
+        vec![space.clone(), "!remote-space:remote.test".to_owned(), "!grand:remote.test".to_owned(), kept.clone()]
+    );
+    assert_eq!(full["rooms"][1]["name"], "Remote");
+    assert_eq!(full["rooms"][1]["num_joined_members"], 3);
+    assert_eq!(full["rooms"][2]["name"], "Grand");
+    assert_eq!(full["rooms"][3]["name"], "Kept", "a room this server knows keeps its local name");
+    let remote_children = full["rooms"][1]["children_state"].as_array().unwrap();
+    assert!(remote_children.iter().any(|child| child["state_key"] == "!grand:remote.test"), "{remote_children:?}");
+    let asked_now = asked.lock().unwrap().clone();
+    assert!(
+        asked_now.iter().any(|line| line == "down.test !remote-space:remote.test "),
+        "the first via server is tried: {asked_now:?}"
+    );
+    assert!(
+        asked_now.iter().any(|line| line == "remote.test !remote-space:remote.test "),
+        "a later via server supplies the unknown child: {asked_now:?}"
+    );
+    assert!(
+        asked_now.iter().any(|line| line.starts_with("remote.test !secret:remote.test ")),
+        "a private remote child is still requested: {asked_now:?}"
+    );
+    assert!(
+        asked_now.iter().all(|line| !line.contains("!blocked:remote.test")),
+        "inaccessible_children are not requested: {asked_now:?}"
+    );
+    assert!(
+        asked_now.iter().all(|line| !line.contains("!grand:remote.test") && !line.contains(&kept)),
+        "rooms already described by the response are not fetched again: {asked_now:?}"
+    );
+
+    let shallow = get(&server, &bob, &format!("{path}?max_depth=1"), 200).await;
+    assert_eq!(rooms_of(&shallow), vec![space.clone(), "!remote-space:remote.test".to_owned(), kept.clone()]);
+    assert!(shallow["rooms"][1]["children_state"].as_array().unwrap().iter().any(|child| child["state_key"] == "!grand:remote.test"));
+
+    let suggested = get(&server, &bob, &format!("{path}?suggested_only=true"), 200).await;
+    assert_eq!(
+        rooms_of(&suggested),
+        vec![space.clone(), "!remote-space:remote.test".to_owned(), "!grand:remote.test".to_owned()]
+    );
+    let asked_now = asked.lock().unwrap().clone();
+    assert!(
+        asked_now.iter().any(|line| line == "remote.test !remote-space:remote.test suggested_only=true"),
+        "suggested_only is forwarded: {asked_now:?}"
+    );
+}
+
+#[tokio::test]
 async fn ignored_users_are_filtered_from_sync_messages_and_invites() {
     let server = Server::new().await;
     let alice = user(&server, "alice").await;

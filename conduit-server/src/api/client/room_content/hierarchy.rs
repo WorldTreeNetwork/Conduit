@@ -4,9 +4,9 @@
 //! children ordered per the spec (`order`, then `origin_server_ts`, then
 //! room ID). A room is listed when the requesting user is joined or
 //! invited, may join it (public, or restricted with a satisfied
-//! condition), may knock, or it is world-readable. Only rooms known to
-//! this server are described: filling unknown children over federation is
-//! tracked separately (see docs/features/client-server-api.md).
+//! condition), may knock, or it is world-readable. A child this server
+//! does not know is requested from the servers in its `via` list. Rooms
+//! this server already knows keep their local summary.
 
 use std::collections::{HashMap, HashSet};
 
@@ -19,7 +19,7 @@ use axum::{
 use serde_json::{json, Value};
 
 use conduit::auth::StateMap;
-use conduit::event::Event;
+use conduit::event::{Event, Pdu};
 use conduit::room_content::{is_valid_space_child, space_child_ordering};
 use conduit::storage::Storage;
 
@@ -194,10 +194,15 @@ pub async fn hierarchy<S: AuthState>(
     }
 
     // Depth-first, children in spec order; loops are cut by `visited`.
+    // `remote_rooms` holds summaries learned from federation during this
+    // walk. Local state is consulted first and wins.
     let mut rooms = Vec::new();
     let mut visited: HashSet<String> = HashSet::new();
-    let mut stack: Vec<(String, usize, Option<StateMap<Event>>)> = vec![(room_id.clone(), 0, Some(root_state))];
-    while let Some((room, depth, known_state)) = stack.pop() {
+    let mut remote_rooms: HashMap<String, Value> = HashMap::new();
+    let mut inaccessible: HashSet<String> = HashSet::new();
+    let mut stack: Vec<(String, usize, Option<StateMap<Event>>, Vec<String>)> =
+        vec![(room_id.clone(), 0, Some(root_state), Vec::new())];
+    while let Some((room, depth, known_state, via)) = stack.pop() {
         if !visited.insert(room.clone()) {
             continue;
         }
@@ -208,24 +213,43 @@ pub async fn hierarchy<S: AuthState>(
                 Err(e) => return storage_error(e),
             },
         };
-        if get(&room_state, "m.room.create").is_none() {
-            continue; // unknown locally; federation fill-in is not implemented
+        if get(&room_state, "m.room.create").is_some() {
+            match accessible(storage, &room_state, &authed.user_id).await {
+                Ok(true) => {}
+                Ok(false) => continue,
+                Err(e) => return storage_error(e),
+            }
+            let room_children = ordered_children(&room_state, suggested_only);
+            rooms.push(summary(&room, &room_state, &room_children));
+            if depth < max_depth {
+                push_children(&mut stack, &mut visited, &room_children, depth);
+            }
+            continue;
         }
-        match accessible(storage, &room_state, &authed.user_id).await {
+        if inaccessible.contains(&room) {
+            continue;
+        }
+        if !remote_rooms.contains_key(&room) {
+            fetch_remote_hierarchy(&state, &room, &via, suggested_only, &mut remote_rooms, &mut inaccessible).await;
+        }
+        if inaccessible.contains(&room) {
+            continue;
+        }
+        let Some(remote) = remote_rooms.get(&room).cloned() else {
+            continue;
+        };
+        let room_children = ordered_stripped_children(&remote, suggested_only);
+        match remote_user_may_see(storage, &room, &remote, &authed.user_id).await {
             Ok(true) => {}
             Ok(false) => continue,
             Err(e) => return storage_error(e),
         }
-        let room_children = ordered_children(&room_state, suggested_only);
-        rooms.push(summary(&room, &room_state, &room_children));
+        let Some(described) = client_room_from_remote(&remote, &room_children) else {
+            continue;
+        };
+        rooms.push(described);
         if depth < max_depth {
-            for child in room_children.iter().rev() {
-                if let Some(child_id) = &child.state_key {
-                    if !visited.contains(child_id) {
-                        stack.push((child_id.clone(), depth + 1, None));
-                    }
-                }
-            }
+            push_children(&mut stack, &mut visited, &room_children, depth);
         }
     }
     let total = rooms.len();
@@ -235,4 +259,192 @@ pub async fn hierarchy<S: AuthState>(
         body["next_batch"] = json!(format!("h{}_{}_{}", offset + limit, suggested_only as u8, max_depth));
     }
     (StatusCode::OK, Json(body)).into_response()
+}
+
+fn federation_enabled() -> bool {
+    std::env::var("CONDUIT_FEDERATION").ok().as_deref() != Some("0")
+}
+
+fn via_of(event: &Event) -> Vec<String> {
+    event
+        .content
+        .get("via")
+        .and_then(Value::as_array)
+        .map(|via| via.iter().filter_map(Value::as_str).filter(|server| !server.is_empty()).map(str::to_owned).collect())
+        .unwrap_or_default()
+}
+
+fn push_children(
+    stack: &mut Vec<(String, usize, Option<StateMap<Event>>, Vec<String>)>,
+    visited: &HashSet<String>,
+    children: &[Event],
+    depth: usize,
+) {
+    for child in children.iter().rev() {
+        let Some(child_id) = &child.state_key else { continue };
+        if visited.contains(child_id) {
+            continue;
+        }
+        stack.push((child_id.clone(), depth + 1, None, via_of(child)));
+    }
+}
+
+fn stripped_child(value: &Value) -> Option<Event> {
+    if value.get("type").and_then(Value::as_str) != Some("m.space.child") {
+        return None;
+    }
+    let state_key = value.get("state_key")?.as_str()?.to_owned();
+    let content = value.get("content")?.clone();
+    let sender = value.get("sender").and_then(Value::as_str).unwrap_or("").to_owned();
+    let origin_server_ts = value
+        .get("origin_server_ts")
+        .and_then(Value::as_u64)
+        .or_else(|| value.get("origin_server_ts").and_then(Value::as_i64).and_then(|ts| u64::try_from(ts).ok()))
+        .unwrap_or(0);
+    Some(Event::new(
+        format!("$space-child:{state_key}"),
+        Pdu::new("", sender, "m.space.child", Some(state_key), content, origin_server_ts, Vec::new(), Vec::new(), 1),
+    ))
+}
+
+fn ordered_stripped_children(room: &Value, suggested_only: bool) -> Vec<Event> {
+    let Some(children) = room.get("children_state").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let mut children: Vec<Event> = children
+        .iter()
+        .filter_map(stripped_child)
+        .filter(is_valid_space_child)
+        .filter(|event| !suggested_only || event.content["suggested"] == true)
+        .collect();
+    children.sort_by(space_child_ordering);
+    children
+}
+
+fn remote_summary_usable(room: &Value) -> bool {
+    room.get("room_id").and_then(Value::as_str).is_some_and(|id| id.starts_with('!'))
+        && room.get("guest_can_join").and_then(Value::as_bool).is_some()
+        && room.get("world_readable").and_then(Value::as_bool).is_some()
+        && room.get("num_joined_members").and_then(Value::as_i64).is_some_and(|count| count >= 0)
+}
+
+fn children_state_json(children: &[Event]) -> Value {
+    json!(children
+        .iter()
+        .map(|child| json!({
+            "type": child.event_type,
+            "state_key": child.state_key,
+            "content": child.content,
+            "sender": child.sender,
+            "origin_server_ts": child.origin_server_ts,
+        }))
+        .collect::<Vec<_>>())
+}
+
+/// Federation hierarchy `room` object, with `children_state` reduced to the
+/// valid children this response will walk.
+fn client_room_from_remote(room: &Value, children: &[Event]) -> Option<Value> {
+    if !remote_summary_usable(room) {
+        return None;
+    }
+    let mut described = json!({
+        "room_id": room.get("room_id")?,
+        "num_joined_members": room.get("num_joined_members")?,
+        "world_readable": room.get("world_readable")?,
+        "guest_can_join": room.get("guest_can_join")?,
+        "join_rule": room.get("join_rule").and_then(Value::as_str).filter(|rule| !rule.is_empty()).unwrap_or("public"),
+        "children_state": children_state_json(children),
+    });
+    for key in ["avatar_url", "canonical_alias", "encryption", "name", "topic", "room_type", "room_version"] {
+        if let Some(value) = room.get(key).and_then(Value::as_str).filter(|value| !value.is_empty()) {
+            described[key] = json!(value);
+        }
+    }
+    if let Some(ids) = room.get("allowed_room_ids").and_then(Value::as_array) {
+        let ids: Vec<&str> = ids.iter().filter_map(Value::as_str).filter(|id| !id.is_empty()).collect();
+        if !ids.is_empty() {
+            described["allowed_room_ids"] = json!(ids);
+        }
+    }
+    Some(described)
+}
+
+async fn remote_user_may_see(storage: &dyn Storage, room_id: &str, summary: &Value, user_id: &str) -> conduit::Result<bool> {
+    if let Some(member) = storage.get_state_entry(room_id, "m.room.member", user_id).await? {
+        match member.content.get("membership").and_then(Value::as_str) {
+            Some("ban") => return Ok(false),
+            Some("join" | "invite") => return Ok(true),
+            _ => {}
+        }
+    }
+    let world_readable = summary.get("world_readable").and_then(Value::as_bool).unwrap_or(false);
+    let join_rule = summary.get("join_rule").and_then(Value::as_str).unwrap_or("public");
+    if world_readable || matches!(join_rule, "public" | "knock" | "knock_restricted") {
+        return Ok(true);
+    }
+    if join_rule == "restricted" {
+        if let Some(allowed) = summary.get("allowed_room_ids").and_then(Value::as_array) {
+            for allowed_room in allowed.iter().filter_map(Value::as_str) {
+                let member = storage.get_state_entry(allowed_room, "m.room.member", user_id).await?;
+                if member.is_some_and(|event| event.content["membership"] == "join") {
+                    return Ok(true);
+                }
+            }
+        }
+    }
+    Ok(false)
+}
+
+/// `GET /_matrix/federation/v1/hierarchy/{roomId}` on each `via` server.
+/// The first usable response fills `remote_rooms`. Rooms named in
+/// `inaccessible_children` are not stored and are not requested again.
+async fn fetch_remote_hierarchy<S: AuthState>(
+    state: &S,
+    room_id: &str,
+    via: &[String],
+    suggested_only: bool,
+    remote_rooms: &mut HashMap<String, Value>,
+    inaccessible: &mut HashSet<String>,
+) {
+    if !federation_enabled() {
+        return;
+    }
+    let Some(client) = state.federation_client() else {
+        return;
+    };
+    let local = state.server_name();
+    for dest in via {
+        if dest.is_empty() || dest == local {
+            continue;
+        }
+        let value = match client.room_hierarchy(dest, room_id, suggested_only).await {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        let Some(room) = value.get("room").cloned() else {
+            continue;
+        };
+        if room.get("room_id").and_then(Value::as_str) != Some(room_id) || !remote_summary_usable(&room) {
+            continue;
+        }
+        remote_rooms.entry(room_id.to_owned()).or_insert(room);
+        if let Some(children) = value.get("children").and_then(Value::as_array) {
+            for child in children {
+                let Some(child_id) = child.get("room_id").and_then(Value::as_str) else {
+                    continue;
+                };
+                if child_id == room_id || inaccessible.contains(child_id) || !remote_summary_usable(child) {
+                    continue;
+                }
+                remote_rooms.entry(child_id.to_owned()).or_insert_with(|| child.clone());
+            }
+        }
+        if let Some(blocked) = value.get("inaccessible_children").and_then(Value::as_array) {
+            for blocked_id in blocked.iter().filter_map(Value::as_str) {
+                inaccessible.insert(blocked_id.to_owned());
+                remote_rooms.remove(blocked_id);
+            }
+        }
+        return;
+    }
 }

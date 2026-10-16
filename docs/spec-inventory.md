@@ -15,8 +15,8 @@ Statuses: **tested** = present and asserted by a named test; **untested** = pres
 
 | API | kind | tested | untested | partial | missing | n/a | total |
 |---|---|---:|---:|---:|---:|---:|---:|
-| Client-Server API | endpoints | 150 | 0 | 13 | 0 | 1 | 164 |
-| Client-Server API | requirements | 66 | 0 | 11 | 0 | 9 | 86 |
+| Client-Server API | endpoints | 151 | 0 | 12 | 0 | 1 | 164 |
+| Client-Server API | requirements | 67 | 0 | 10 | 0 | 9 | 86 |
 | Server-Server API | endpoints | 20 | 3 | 8 | 4 | 1 | 36 |
 | Server-Server API | requirements | 13 | 0 | 15 | 10 | 3 | 41 |
 | Application Service API | endpoints | 11 | 0 | 0 | 0 | 0 | 11 |
@@ -27,7 +27,7 @@ Statuses: **tested** = present and asserted by a named test; **untested** = pres
 | Identity Service API (homeserver as consumer) | requirements | 1 | 0 | 0 | 0 | 0 | 1 |
 | Room versions 1–12 | requirements | 30 | 0 | 6 | 25 | 0 | 61 |
 | Appendices | requirements | 9 | 0 | 4 | 4 | 4 | 21 |
-| All |  | 323 | 3 | 59 | 43 | 37 | 465 |
+| All |  | 325 | 3 | 57 | 43 | 37 | 465 |
 ## Gap beads
 
 New beads filed by this inventory (children of `conduit-y99`):
@@ -75,7 +75,7 @@ In-flight / pre-existing beads referenced (not duplicated):
 - `conduit-y99.18.2` - UIA for passwordless accounts (2 row(s))
 - `conduit-y99.18.3` - deactivation erase serving (0 row(s))
 - `conduit-y99.18.4` - remove guests when guest_access changes (0 row(s))
-- `conduit-y99.19.2` - space hierarchy over federation (4 row(s))
+- `conduit-y99.19.2` - space hierarchy over federation (1 row(s))
 - `conduit-y99.19.3` - room upgrade per-user settings (2 row(s))
 - `conduit-y99.19.4` - prune redacted content from storage (2 row(s))
 - `conduit-y99.20.1` - remote publicRooms + POST filters over federation (6 row(s))
@@ -263,7 +263,7 @@ In-flight / pre-existing beads referenced (not duplicated):
 | GET | [`/_matrix/client/v3/thirdparty/user/{protocol}`](https://spec.matrix.org/v1.19/client-server-api/#get_matrixclientv3thirdpartyuserprotocol) | tested | `conduit-server/src/api/client/thirdparty.rs:43` | `production_directory.rs::appservice_ping_thirdparty_and_network_directory`<br>`production_directory.rs::thirdparty_lookups_without_bridges_are_empty` |  |  |
 | POST | [`/_matrix/client/v3/user/{userId}/openid/request_token`](https://spec.matrix.org/v1.19/client-server-api/#post_matrixclientv3useruseridopenidrequest_token) | tested | `conduit-server/src/api/client/probe.rs (openid_request_token)` | `production_pdu.rs::minted_openid_token_is_redeemed_by_federation_userinfo`<br>`production_modules.rs::turn_openid_cors_direct_invites_and_unban` |  | Minted Bearer token is redeemed at federation /openid/userinfo as `sub`; unknown tokens are 401 `M_UNAUTHORIZED`. |
 | POST | [`/_matrix/client/v3/rooms/{roomId}/upgrade`](https://spec.matrix.org/v1.19/client-server-api/#post_matrixclientv3roomsroomidupgrade) | tested | `conduit-server/src/api/client/room_content/mod.rs:95` | `production_rooms.rs::room_upgrade_replaces_and_tombstones`<br>`production_rooms.rs::room_upgrade_applies_requested_creators_and_copies_settings` |  | Tombstone, transferred state, alias move, and power-level lockdown. additional_creators is taken only from the request on room v12 and ignored before v12. Joining the replacement copies that user's tags and room push rule. |
-| GET | [`/_matrix/client/v1/rooms/{roomId}/hierarchy`](https://spec.matrix.org/v1.19/client-server-api/#get_matrixclientv1roomsroomidhierarchy) | partial | `conduit-server/src/api/client/room_content/mod.rs:96` | `production_rooms.rs::space_hierarchy_walks_children_depth_first` | `conduit-y99.19.2` | Children unknown locally are skipped instead of fetched over federation. |
+| GET | [`/_matrix/client/v1/rooms/{roomId}/hierarchy`](https://spec.matrix.org/v1.19/client-server-api/#get_matrixclientv1roomsroomidhierarchy) | tested | `conduit-server/src/api/client/room_content/mod.rs:96` | `production_rooms.rs::space_hierarchy_walks_children_depth_first`<br>`production_rooms.rs::unknown_space_children_are_filled_from_federation` |  | Unknown children are fetched from each via server with GET /hierarchy. inaccessible_children are not requested. A room this server knows keeps its local summary. A private remote child is omitted. |
 | GET | [`/_matrix/client/v1/rooms/{roomId}/threads`](https://spec.matrix.org/v1.19/client-server-api/#get_matrixclientv1roomsroomidthreads) | tested | `conduit-server/src/api/client/room_content/mod.rs:85` | `production_rooms.rs::relations_threads_and_edit_aggregation` |  | Thread notification counts are y99.30. |
 | GET | [`/_matrix/client/v1/mutual_rooms`](https://spec.matrix.org/v1.19/client-server-api/#get_matrixclientv1mutual_rooms) | tested | `conduit-server/src/api/client/room_membership.rs:287` | `production_basics.rs::mutual_rooms_lists_shared_joins_in_batches` |  | count + joined + next_batch (user-bound tokens valid 1h); 400 M_MISSING_PARAM/M_INVALID_PARAM for missing, invalid or own user_id and bad tokens; unknown users share nothing. |
 
@@ -348,7 +348,7 @@ In-flight / pre-existing beads referenced (not duplicated):
 | `cs.mod.server-notices` | [Server notices](https://spec.matrix.org/v1.19/client-server-api/#server-notices) | tested | `conduit-server/src/api/client/server_notices.rs` | `production_modules.rs::server_notices_room_is_tagged_invite_only_and_reused` |  | One room per user (tag m.server_notice), invite not auto-join, msgtype m.server_notice, M_CANNOT_LEAVE_SERVER_NOTICE_ROOM on invite rejection, re-invite after leave; admin trigger POST /_matrix/conduit/admin/v1/server_notices. No usage limits exist, so usage_limit_reached notices are only sent manually. |
 | `cs.mod.policy-lists` | [Moderation policy lists](https://spec.matrix.org/v1.19/client-server-api/#moderation-policy-lists) | n/a |  |  |  | *client/bot* Spec: "Servers have no additional requirements placed on them by this module." m.policy.rule.* are ordinary state events. |
 | `cs.mod.policy-servers` | [Policy servers (client behaviour of homeserver)](https://spec.matrix.org/v1.19/client-server-api/#policy-servers) | tested | `conduit-server/src/federation/policy.rs` | `production_pdu.rs::policy_server_signature_is_required_before_a_client_event_is_sent`<br>`policy.rs::policy_config_requires_via_and_ed25519` |  | Client events ask the policy server before they are stored. A refusal is returned verbatim and the event is dropped. Incoming federation soft-fail is still open. |
-| `cs.mod.spaces` | [Spaces (hierarchy)](https://spec.matrix.org/v1.19/client-server-api/#spaces) | partial | `conduit-server/src/api/client/room_content/hierarchy.rs` | `production_rooms.rs::space_hierarchy_walks_children_depth_first` | `conduit-y99.19.2` | No federation fetch of unknown children. |
+| `cs.mod.spaces` | [Spaces (hierarchy)](https://spec.matrix.org/v1.19/client-server-api/#spaces) | tested | `conduit-server/src/api/client/room_content/hierarchy.rs`<br>`conduit-server/src/federation/client.rs` | `production_rooms.rs::space_hierarchy_walks_children_depth_first`<br>`production_rooms.rs::unknown_space_children_are_filled_from_federation` |  | Unknown children are fetched from each via server. Local state wins over the remote summary. inaccessible_children are not requested. The federation response shape remains ss.spaces. |
 | `cs.mod.event-replacements` | [Event replacements (edits) server behaviour](https://spec.matrix.org/v1.19/client-server-api/#event-replacements) | tested | `conduit-server/src/api/client/room_content/serve.rs` | `production_rooms.rs::relations_threads_and_edit_aggregation` |  | Latest valid edit bundled; original content untouched; bundle dropped/reverted on redaction. |
 | `cs.mod.annotations` | [Event annotations and reactions (M_DUPLICATE_ANNOTATION)](https://spec.matrix.org/v1.19/client-server-api/#event-annotations-and-reactions) | tested | `conduit-server/src/api/client/room_content/relations.rs` | `production_rooms.rs::relations_threads_and_edit_aggregation` |  | M_DUPLICATE_ANNOTATION; annotations not aggregated. |
 | `cs.mod.recent-emoji` | [Recently used emoji](https://spec.matrix.org/v1.19/client-server-api/#recently-used-emoji) | n/a |  |  |  | *client-only* Client-only account data (m.recent_emoji); generic account data storage suffices. |
