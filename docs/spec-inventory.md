@@ -18,7 +18,7 @@ Statuses: **tested** = present and asserted by a named test; **untested** = pres
 | Client-Server API | endpoints | 163 | 0 | 0 | 0 | 1 | 164 |
 | Client-Server API | requirements | 77 | 0 | 0 | 0 | 9 | 86 |
 | Server-Server API | endpoints | 29 | 0 | 6 | 0 | 1 | 36 |
-| Server-Server API | requirements | 19 | 0 | 13 | 6 | 3 | 41 |
+| Server-Server API | requirements | 20 | 0 | 13 | 5 | 3 | 41 |
 | Application Service API | endpoints | 11 | 0 | 0 | 0 | 0 | 11 |
 | Application Service API | requirements | 16 | 0 | 0 | 0 | 2 | 18 |
 | Push Gateway API (homeserver as client) | endpoints | 1 | 0 | 0 | 0 | 0 | 1 |
@@ -27,7 +27,7 @@ Statuses: **tested** = present and asserted by a named test; **untested** = pres
 | Identity Service API (homeserver as consumer) | requirements | 1 | 0 | 0 | 0 | 0 | 1 |
 | Room versions 1–12 | requirements | 61 | 0 | 0 | 0 | 0 | 61 |
 | Appendices | requirements | 10 | 0 | 3 | 4 | 4 | 21 |
-| All |  | 394 | 0 | 24 | 10 | 37 | 465 |
+| All |  | 395 | 0 | 24 | 9 | 37 | 465 |
 ## Gap beads
 
 New beads filed by this inventory (children of `conduit-y99`):
@@ -48,7 +48,7 @@ New beads filed by this inventory (children of `conduit-y99`):
 - `conduit-y99.41` - Server notices module (0 row(s))
 - `conduit-y99.42` - Deprecated legacy client endpoints (/events, /events/{id}, /initialSync, rooms initialSync) (0 row(s))
 - `conduit-y99.43` - Account locking and suspension admin endpoints and enforcement (0 row(s))
-- `conduit-y99.44` - Federation /version endpoint, v1 invite, federation M_UNRECOGNIZED (3 row(s))
+- `conduit-y99.44` - Federation /version endpoint, v1 invite, federation M_UNRECOGNIZED (1 row(s))
 - `conduit-y99.45` - Policy server client support (request/validate policy-server signatures) (2 row(s))
 - `conduit-y99.46` - Tests for implemented-but-untested surfaces (turnServer, openid, CORS, is_direct, unban, versions/capabilities) (0 row(s))
 
@@ -406,7 +406,7 @@ In-flight / pre-existing beads referenced (not duplicated):
 | ID | Requirement | Status | Code | Tests | Gap | Notes |
 |---|---|---|---|---|---|---|
 | `ss.std.tls` | [TLS for federation](https://spec.matrix.org/v1.19/server-server-api/#tls) | n/a |  |  |  | *deployment* The binary serves plain HTTP; TLS termination is a deployment responsibility (reverse proxy). Outbound federation uses reqwest certificate verification. Not verifiable in-repo. |
-| `ss.std.unsupported-endpoints` | [Unsupported endpoints (404/405 M_UNRECOGNIZED)](https://spec.matrix.org/v1.19/server-server-api/#unsupported-endpoints) | missing |  |  | `conduit-y99.44` |  |
+| `ss.std.unsupported-endpoints` | [Unsupported endpoints (404/405 M_UNRECOGNIZED)](https://spec.matrix.org/v1.19/server-server-api/#unsupported-endpoints) | tested | `conduit-server/src/api/client/standards.rs` | `production_basics.rs::federation_unknown_endpoints_answer_m_unrecognized` |  | An unknown federation path is 404 M_UNRECOGNIZED. POST /version is 405 M_UNRECOGNIZED and keeps Allow. GET /version still returns the server name. |
 | `ss.discovery.resolve` | [Resolving server names (well-known delegation, SRV, ports, Host header)](https://spec.matrix.org/v1.19/server-server-api/#resolving-server-names) | tested | `conduit-server/src/federation/discovery.rs` | `federation.rs::discovery_well_known_succeeds`<br>`federation.rs::discovery_falls_through_to_srv` |  |  |
 | `ss.discovery.keys.publish` | [Publishing keys (verify_keys, old_verify_keys, valid_until_ts, self-signature)](https://spec.matrix.org/v1.19/server-server-api/#publishing-keys) | tested | `conduit-server/src/main.rs (server_keys)` | `remote_keys.rs`<br>`federation_inbound.rs::inbound_signature_verified_or_rejected` |  |  |
 | `ss.discovery.keys.fetch` | [Retrieving remote server keys (direct fetch, caching, validity)](https://spec.matrix.org/v1.19/server-server-api/#retrieving-server-keys) | tested | `conduit-server/src/remote_keys.rs` | `remote_keys.rs` |  |  |
@@ -425,7 +425,7 @@ In-flight / pre-existing beads referenced (not duplicated):
 | `ss.joining` | [Joining rooms (make_join/send_join, room version negotiation)](https://spec.matrix.org/v1.19/server-server-api/#joining-rooms) | partial | `conduit-server/src/federation/server.rs`<br>`conduit-server/src/federation/client.rs` | `federation_roundtrip.rs::rt3_join_room_on_a`<br>`federation_inbound.rs::make_send_join_roundtrip` | `conduit-y99.22.1` `conduit-y99.22.2` |  |
 | `ss.joining.restricted` | [Restricted rooms (join_authorised_via_users_server)](https://spec.matrix.org/v1.19/server-server-api/#restricted-rooms) | tested | `conduit-server/src/federation/server.rs`<br>`conduit-server/src/api/client/room_membership.rs` | `production_pdu.rs::restricted_make_join_names_an_authoriser_or_refuses`<br>`auth.rs::restricted_join_requires_a_joined_authoriser_with_invite_power` |  | make_join names a local inviter. Unknown rooms are 400 M_UNABLE_TO_AUTHORISE_JOIN. No local inviter is 400 M_UNABLE_TO_GRANT_JOIN. A failed condition is 403. An invite omits the field. send_join co-signs. |
 | `ss.knocking` | [Knocking upon a room](https://spec.matrix.org/v1.19/server-server-api/#knocking-rooms) | tested | `conduit-server/src/federation/spec_v119.rs` | `production_pdu.rs::ss_membership_send_knock_returns_state_array` |  | Resident make_knock and send_knock. knock_room_state is an array containing m.room.create and the room name. A non-knock membership is 403. Room version 6 is M_INCOMPATIBLE_ROOM_VERSION. Outbound client knock of a remote room stays open. |
-| `ss.inviting` | [Inviting to a room (v2; v1 for room versions 1-2)](https://spec.matrix.org/v1.19/server-server-api/#inviting-to-a-room) | partial | `conduit-server/src/federation/server.rs`<br>`conduit-server/src/federation/spec_v119.rs` | `production_e2e.rs::production_chat_survives_restart`<br>`production_pdu.rs::ss_membership_v1_invite_keeps_v1_bytes` | `conduit-y99.44` `conduit-embed-pdu` | v1 invite co-signs the original room-version-1 event and leaves every other field untouched. v2 byte-exact wire amendments remain conduit-embed-pdu. Federation /version and unknown-endpoint M_UNRECOGNIZED remain conduit-y99.44. |
+| `ss.inviting` | [Inviting to a room (v2; v1 for room versions 1-2)](https://spec.matrix.org/v1.19/server-server-api/#inviting-to-a-room) | partial | `conduit-server/src/federation/server.rs`<br>`conduit-server/src/federation/spec_v119.rs` | `production_e2e.rs::production_chat_survives_restart`<br>`production_pdu.rs::ss_membership_v1_invite_keeps_v1_bytes` | `conduit-embed-pdu` | v1 invite co-signs the original room-version-1 event and leaves every other field untouched. v2 byte-exact wire amendments remain conduit-embed-pdu. |
 | `ss.leaving` | [Leaving rooms (rejecting invites)](https://spec.matrix.org/v1.19/server-server-api/#leaving-rooms-rejecting-invites) | tested | `conduit-server/src/federation/spec_v119.rs`<br>`conduit-server/src/federation/pipeline.rs` | `production_pdu.rs::ss_membership_send_leave_ends_membership` |  | A joined remote user leaves, and an invited remote user rejects, both with an empty 200. A user who is not in the room is 403. A non-leave membership is M_INVALID_PARAM. |
 | `ss.3pid-invites` | [Third-party invites (onbind, exchange_third_party_invite, verification)](https://spec.matrix.org/v1.19/server-server-api/#third-party-invites) | partial | `conduit/src/auth.rs:490`<br>`conduit-server/src/api/client/third_party.rs:230` (+1) | `conduit/tests/third_party_invite_auth.rs::signed_member_invite_rejections`<br>`production_appservice.rs::third_party_invites_lookup_store_invite_and_onbind` (+1) | `conduit-y99.22.6` | exchange_third_party_invite verifies the signature and key_validity_url, then issues the outbound invite. Remote onbind still skips exchange, and join-time key_validity_url checks remain (conduit-y99.22.6). |
 | `ss.public-rooms` | [Published room directory over federation](https://spec.matrix.org/v1.19/server-server-api/#published-room-directory) | missing |  |  | `conduit-y99.22` `conduit-y99.20.1` |  |

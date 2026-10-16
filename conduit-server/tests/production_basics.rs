@@ -129,6 +129,40 @@ async fn unknown_endpoints_and_methods_answer_m_unrecognized() {
 }
 
 #[tokio::test]
+async fn federation_unknown_endpoints_answer_m_unrecognized() {
+    let server = Server::new().await;
+
+    let (status, _, body) = raw(
+        &server,
+        Method::GET,
+        "/_matrix/federation/v1/not-an-endpoint",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, 404, "{body}");
+    assert_eq!(body["errcode"], "M_UNRECOGNIZED", "{body}");
+
+    let (status, headers, body) = raw(
+        &server,
+        Method::POST,
+        "/_matrix/federation/v1/version",
+        None,
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(status, 405, "{body}");
+    assert_eq!(body["errcode"], "M_UNRECOGNIZED", "{body}");
+    let allow = headers.get("allow").map(|v| v.to_str().unwrap_or("")).unwrap_or("");
+    assert!(allow.contains("GET"), "405 keeps Allow, got {allow:?}");
+
+    let version = server
+        .request(Method::GET, "/_matrix/federation/v1/version", None, None, 200)
+        .await;
+    assert_eq!(version["server"]["name"], "production.test");
+}
+
+#[tokio::test]
 async fn auth_metadata_reports_oauth_unsupported() {
     let server = Server::new().await;
     let (status, _, body) =

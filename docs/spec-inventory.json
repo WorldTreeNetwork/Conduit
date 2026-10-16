@@ -42,10 +42,10 @@
         "total": 36
       },
       "requirement": {
-        "implemented+tested": 19,
+        "implemented+tested": 20,
         "implemented-untested": 0,
         "partial": 13,
-        "missing": 6,
+        "missing": 5,
         "not-applicable": 3,
         "total": 41
       }
@@ -8719,14 +8719,18 @@
       "title": "Unsupported endpoints (404/405 M_UNRECOGNIZED)",
       "source": "https://spec.matrix.org/v1.19/server-server-api/#unsupported-endpoints",
       "role": "homeserver",
-      "status": "missing",
-      "code": [],
-      "tests": [],
-      "tests_total": 0,
-      "gap_beads": [
-        "conduit-y99.44"
+      "status": "implemented+tested",
+      "code": [
+        {
+          "loc": "conduit-server/src/api/client/standards.rs"
+        }
       ],
-      "notes": ""
+      "tests": [
+        "conduit-server/tests/production_basics.rs::federation_unknown_endpoints_answer_m_unrecognized"
+      ],
+      "tests_total": 1,
+      "gap_beads": [],
+      "notes": "An unknown federation path is 404 M_UNRECOGNIZED. POST /_matrix/federation/v1/version is 405 M_UNRECOGNIZED and keeps Allow. GET /version still returns the server name."
     },
     {
       "id": "ss.discovery.resolve",
@@ -9128,10 +9132,9 @@
       ],
       "tests_total": 2,
       "gap_beads": [
-        "conduit-y99.44",
         "conduit-embed-pdu"
       ],
-      "notes": "v1 invite co-signs the original room-version-1 event and leaves every other field untouched. v2 byte-exact wire amendments remain conduit-embed-pdu. Federation /version and unknown-endpoint M_UNRECOGNIZED remain conduit-y99.44."
+      "notes": "v1 invite co-signs the original room-version-1 event and leaves every other field untouched. v2 byte-exact wire amendments remain conduit-embed-pdu."
     },
     {
       "id": "ss.leaving",
