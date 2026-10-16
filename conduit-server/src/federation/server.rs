@@ -815,6 +815,7 @@ pub async fn invite(
         return response;
     }
 
+    let original_event = body.event.clone();
     let decoded = match decode_pdu(body.event, crate::federation::now_ms()) {
         Ok(decoded) => decoded,
         Err(error) => return bad_json(&error.to_string()),
@@ -861,6 +862,10 @@ pub async fn invite(
         }
     }
 
+    if let Some(reason) = invite_room_state_error(body.room_version.as_deref(), &room_id, &body.invite_room_state) {
+        return invalid_param(reason);
+    }
+
     if let Err(e) = add_signature(&mut pdu, &state.server_key, &state.server_name) {
         return internal(&format!("Failed to sign invite: {e}"));
     }
@@ -878,10 +883,87 @@ pub async fn invite(
         let _ = state.events_tx.send(pos);
     }
 
-    let Some(event) = WirePdu::checked(&received.event_id, pdu) else {
+    if WirePdu::checked(&received.event_id, pdu.clone()).is_none() {
         return internal("co-signed invite no longer reproduces its ID");
-    };
+    }
+    // The 200 body is the received object with this server's signature
+    // inserted. Re-serialising the PDU would reorder every other field.
+    let event = amend_resident_signature(original_event, &pdu.signatures, &state.server_name);
     (StatusCode::OK, Json(json!({ "event": event }))).into_response()
+}
+
+/// Insert `signatures[server]` from the co-signed PDU into the received
+/// event object. Every other key, including insertion order, stays as sent.
+fn amend_resident_signature(mut event: Value, signatures: &Value, server_name: &str) -> Value {
+    let Some(added) = signatures.get(server_name).and_then(Value::as_object).cloned() else {
+        return event;
+    };
+    let Some(object) = event.as_object_mut() else {
+        return event;
+    };
+    let signatures = object.entry("signatures".to_owned()).or_insert_with(|| json!({}));
+    if !signatures.is_object() {
+        *signatures = json!({});
+    }
+    let server = signatures
+        .as_object_mut()
+        .expect("signatures object")
+        .entry(server_name.to_owned())
+        .or_insert_with(|| json!({}));
+    if !server.is_object() {
+        *server = json!({});
+    }
+    let dest = server.as_object_mut().expect("server signature object");
+    for (key_id, signature) in added {
+        dest.insert(key_id, signature);
+    }
+    event
+}
+
+/// Room versions other than 1–11 must reject an `invite_room_state` that
+/// lacks `m.room.create`, is ill-formatted, or names another room. Versions
+/// 1–11 only warn while ecosystems migrate.
+fn invite_room_state_error(room_version: Option<&str>, room_id: &str, state: &[Value]) -> Option<&'static str> {
+    let strict = match room_version {
+        Some(version) => conduit::room_version::parse(version).is_none_or(|n| n > 11),
+        None => false,
+    };
+    let problem = if !state.iter().any(|event| event.get("type").and_then(Value::as_str) == Some("m.room.create")) {
+        Some("invite_room_state is missing m.room.create")
+    } else {
+        state.iter().find_map(|event| invite_state_entry_error(event, room_id, room_version))
+    };
+    if problem.is_some() && !strict {
+        tracing::warn!(room_version, problem, "invite_room_state failed validation");
+        return None;
+    }
+    problem.filter(|_| strict)
+}
+
+fn invite_state_entry_error(event: &Value, room_id: &str, room_version: Option<&str>) -> Option<&'static str> {
+    let Some(object) = event.as_object() else {
+        return Some("invite_room_state entry is not an object");
+    };
+    let version = room_version.and_then(conduit::room_version::parse).unwrap_or(1);
+    for field in ["type", "sender", "state_key"] {
+        match object.get(field) {
+            Some(Value::String(value)) if !value.contains('\0') => {}
+            _ => return Some("invite_room_state entry is ill-formatted"),
+        }
+    }
+    if !object.get("content").is_some_and(Value::is_object) {
+        return Some("invite_room_state entry is ill-formatted");
+    }
+    let is_create = object.get("type").and_then(Value::as_str) == Some("m.room.create");
+    if version >= 12 && is_create && object.contains_key("room_id") {
+        return Some("invite_room_state create event is ill-formatted");
+    }
+    if let Some(event_room) = object.get("room_id").and_then(Value::as_str) {
+        if event_room != room_id {
+            return Some("invite_room_state event is not in this room");
+        }
+    }
+    None
 }
 
 // ---------------------------------------------------------------------------
@@ -1672,6 +1754,12 @@ pub(crate) async fn handle_edu(
         if user_id.split_once(':').map(|(_, server)| server) != Some(origin) {
             return Ok(());
         }
+        // Non-compliant historical ids stay on events. They are not forwarded
+        // to clients as device-list updates.
+        if !conduit::identifiers::forwardable_user_id(&user_id) {
+            tracing::debug!(%user_id, "dropped non-compliant device list update");
+            return Ok(());
+        }
         let device_id = content
             .get("device_id")
             .and_then(|v| v.as_str())
@@ -1735,6 +1823,15 @@ pub(crate) async fn handle_edu(
         state.storage.record_device_list_change(&user_id).await?;
     }
     if edu_type == "m.signing_key_update" {
+        let user_id = edu
+            .get("content")
+            .and_then(|content| content.get("user_id"))
+            .and_then(|user| user.as_str())
+            .unwrap_or("");
+        if !user_id.is_empty() && !conduit::identifiers::forwardable_user_id(user_id) {
+            tracing::debug!(user_id, "dropped non-compliant signing key update");
+            return Ok(());
+        }
         let stored = crate::api::client::keys::apply_signing_key_update(state.storage.as_ref(), origin, edu).await?;
         if stored {
             let user_id = edu

@@ -21,6 +21,7 @@ use axum::response::IntoResponse;
 use axum::{routing::{get, post, put}, Json, Router};
 use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine as _};
 use sha2::Digest as _;
+use common::keys::Device;
 use common::production::Server;
 use reqwest::Method;
 use serde_json::{json, Value};
@@ -3051,6 +3052,232 @@ async fn ss_membership_v2_invite_keeps_every_field_but_the_resident_signature() 
         events.iter().any(|event| event["type"] == "m.room.member" && event["content"]["displayname"] == "Kept"),
         "{invite}"
     );
+}
+
+/// The v2 200 body is the received JSON object with this server's signature
+/// inserted. A rebuilt PDU would put `depth` back into struct order.
+/// Room version 12 rejects `invite_room_state` that lacks `m.room.create`,
+/// is not an object, names another room, or puts `room_id` on create.
+#[tokio::test]
+async fn ss_membership_v2_invite_amends_the_original_event_and_checks_room_state() {
+    let remote = spawn_remote().await;
+    let server = federated_server(&remote).await;
+    let alice = server.register("alice").await;
+    let alice_id = alice["user_id"].as_str().unwrap();
+    let room = "!v2wire:remote.test";
+    let mut pdu = Pdu::new(
+        room,
+        "@r:remote.test",
+        "m.room.member",
+        Some(alice_id.into()),
+        json!({"membership": "invite", "displayname": "Wire"}),
+        1_700_000_000_321,
+        vec!["$auth-wire:remote.test".into()],
+        vec!["$prev-wire:remote.test".into()],
+        4,
+    );
+    pdu.extensions.insert("org.example.kept".into(), json!("first"));
+    let (event_id, sent_struct) = sign(&remote, pdu);
+    let sent = reorder_first(&sent_struct, &["depth", "org.example.kept", "content"]);
+    assert_ne!(
+        serde_json::to_vec(&sent).unwrap(),
+        serde_json::to_vec(&sent_struct).unwrap(),
+        "the fixture must not already be in struct order"
+    );
+    let path = format!("/_matrix/federation/v2/invite/{}/{}", enc(room), enc(&event_id));
+    let create = json!({
+        "type": "m.room.create",
+        "state_key": "",
+        "sender": "@r:remote.test",
+        "content": {"room_version": "12"}
+    });
+    let name = json!({
+        "type": "m.room.name",
+        "state_key": "",
+        "sender": "@r:remote.test",
+        "content": {"name": "Wire"}
+    });
+
+    let missing = fed(
+        &server,
+        &remote,
+        Method::PUT,
+        &path,
+        Some(json!({"event": sent, "room_version": "12", "invite_room_state": [name]})),
+        400,
+    )
+    .await;
+    assert_eq!(missing["errcode"], "M_INVALID_PARAM", "{missing}");
+
+    let not_object = fed(
+        &server,
+        &remote,
+        Method::PUT,
+        &path,
+        Some(json!({"event": sent, "room_version": "12", "invite_room_state": [create, "nope"]})),
+        400,
+    )
+    .await;
+    assert_eq!(not_object["errcode"], "M_INVALID_PARAM", "{not_object}");
+
+    let mut other_room = name.clone();
+    other_room["room_id"] = json!("!other:remote.test");
+    let other = fed(
+        &server,
+        &remote,
+        Method::PUT,
+        &path,
+        Some(json!({"event": sent, "room_version": "12", "invite_room_state": [create, other_room]})),
+        400,
+    )
+    .await;
+    assert_eq!(other["errcode"], "M_INVALID_PARAM", "{other}");
+
+    let mut create_with_room = create.clone();
+    create_with_room["room_id"] = json!(room);
+    let formatted = fed(
+        &server,
+        &remote,
+        Method::PUT,
+        &path,
+        Some(json!({"event": sent, "room_version": "12", "invite_room_state": [create_with_room]})),
+        400,
+    )
+    .await;
+    assert_eq!(formatted["errcode"], "M_INVALID_PARAM", "{formatted}");
+
+    let response = fed(
+        &server,
+        &remote,
+        Method::PUT,
+        &path,
+        Some(json!({"event": sent, "room_version": "12", "invite_room_state": [create, name]})),
+        200,
+    )
+    .await;
+    let event = &response["event"];
+    assert!(event["signatures"][LOCAL].as_object().is_some_and(|keys| !keys.is_empty()), "{event}");
+    let mut stripped = event.clone();
+    stripped["signatures"].as_object_mut().unwrap().remove(LOCAL);
+    assert_eq!(
+        serde_json::to_vec(&stripped).unwrap(),
+        serde_json::to_vec(&sent).unwrap(),
+        "removing the resident signature must restore the received object bytes"
+    );
+    assert_eq!(independent_event_id(event), event_id);
+    assert_local_v11_signature(&server, event).await;
+}
+
+fn reorder_first(value: &Value, front: &[&str]) -> Value {
+    let map = value.as_object().expect("object");
+    let mut out = serde_json::Map::new();
+    for key in front {
+        if let Some(entry) = map.get(*key) {
+            out.insert((*key).to_owned(), entry.clone());
+        }
+    }
+    for (key, entry) in map {
+        out.entry(key.clone()).or_insert_with(|| entry.clone());
+    }
+    Value::Object(out)
+}
+
+/// Historical and non-compliant user ids are accepted as event senders.
+/// NUL is not. Device-list updates for non-compliant ids are not served
+/// to clients; a printable historical id (`@Bob`) is.
+#[tokio::test]
+async fn historical_user_ids_are_accepted_on_events_and_dropped_outside_them() {
+    let remote = spawn_remote().await;
+    let server = federated_server(&remote).await;
+    let alice = server.register("alice").await;
+    let cases = [
+        ("@:remote.test", "!emptyhist:remote.test"),
+        ("@世界:remote.test", "!unihist:remote.test"),
+        ("@a b:remote.test", "!spacehist:remote.test"),
+        ("@Bob:remote.test", "!bobhist:remote.test"),
+    ];
+    let mut pdus = Vec::new();
+    let mut ids = Vec::new();
+    for (sender, room) in cases {
+        let mut pdu = create(room, json!({"room_version": "11"}), 1);
+        pdu.sender = sender.to_owned();
+        let (id, value) = sign(&remote, pdu);
+        ids.push(id);
+        pdus.push(value);
+    }
+    let mut nul = create("!nulhist:remote.test", json!({"room_version": "11"}), 1);
+    nul.sender = "@a\u{0}b:remote.test".to_owned();
+    let (nul_id, nul_pdu) = sign(&remote, nul);
+    pdus.push(nul_pdu);
+
+    let bob = Device::new("@Bob:remote.test", "PHONE");
+    let empty = Device::new("@:remote.test", "PHONE");
+    let unicode = Device::new("@世界:remote.test", "PHONE");
+    let space = Device::new("@a b:remote.test", "PHONE");
+    let edus = [(&bob, 11), (&empty, 12), (&unicode, 13), (&space, 14)]
+        .into_iter()
+        .map(|(device, stream_id)| {
+            json!({
+                "edu_type": "m.device_list_update",
+                "content": {
+                    "user_id": device.user,
+                    "device_id": device.device,
+                    "stream_id": stream_id,
+                    "prev_id": [],
+                    "keys": device.keys,
+                }
+            })
+        })
+        .collect();
+
+    let result = fed(
+        &server,
+        &remote,
+        Method::PUT,
+        "/_matrix/federation/v1/send/historical-users-1",
+        Some(txn(pdus, edus)),
+        200,
+    )
+    .await;
+    for id in &ids {
+        assert_eq!(result["pdus"][id], json!({}), "{result}");
+    }
+    assert!(result["pdus"].get(&nul_id).is_none(), "NUL sender must be dropped: {result}");
+
+    for (id, sender) in ids.iter().zip(cases.iter().map(|(sender, _)| sender)) {
+        let served = fed(
+            &server,
+            &remote,
+            Method::GET,
+            &format!("/_matrix/federation/v1/event/{}", enc(id)),
+            None,
+            200,
+        )
+        .await;
+        assert_eq!(served["pdus"][0]["sender"], *sender, "{served}");
+    }
+
+    let queried = server
+        .request(
+            Method::POST,
+            "/_matrix/client/v3/keys/query",
+            Some(alice["access_token"].as_str().unwrap()),
+            Some(json!({
+                "timeout": 0,
+                "device_keys": {
+                    "@Bob:remote.test": [],
+                    "@:remote.test": [],
+                    "@世界:remote.test": [],
+                    "@a b:remote.test": [],
+                }
+            })),
+            200,
+        )
+        .await;
+    assert!(queried["device_keys"]["@Bob:remote.test"]["PHONE"].is_object(), "{queried}");
+    assert!(queried["device_keys"].get("@:remote.test").is_none(), "{queried}");
+    assert!(queried["device_keys"].get("@世界:remote.test").is_none(), "{queried}");
+    assert!(queried["device_keys"].get("@a b:remote.test").is_none(), "{queried}");
 }
 
 /// A message this server authors is served on GET /event with a content hash

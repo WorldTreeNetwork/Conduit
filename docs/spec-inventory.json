@@ -9173,11 +9173,12 @@
       "tests": [
         "conduit-server/tests/production_e2e.rs::production_chat_survives_restart",
         "conduit-server/tests/production_pdu.rs::ss_membership_v1_invite_keeps_v1_bytes",
-        "conduit-server/tests/production_pdu.rs::ss_membership_v2_invite_keeps_every_field_but_the_resident_signature"
+        "conduit-server/tests/production_pdu.rs::ss_membership_v2_invite_keeps_every_field_but_the_resident_signature",
+        "conduit-server/tests/production_pdu.rs::ss_membership_v2_invite_amends_the_original_event_and_checks_room_state"
       ],
-      "tests_total": 3,
+      "tests_total": 4,
       "gap_beads": [],
-      "notes": "v1 and v2 invites co-sign the original event and leave every other field untouched. The v2 signature verifies against the published key over the redacted canonical bytes."
+      "notes": "v1 and v2 invites co-sign by inserting this server's signature into the received event object. Removing that signature restores the received JSON bytes, including key order. Room versions other than 1-11 reject invite_room_state that lacks m.room.create, is ill-formatted, or names another room, with 400 M_INVALID_PARAM. Versions 1-11 still accept that state."
     },
     {
       "id": "ss.leaving",
@@ -11573,14 +11574,22 @@
       "code": [
         {
           "loc": "conduit-server/src/api/client/registration.rs (validate_localpart)"
+        },
+        {
+          "loc": "conduit/src/identifiers.rs"
+        },
+        {
+          "loc": "conduit-server/src/federation/server.rs"
         }
       ],
       "tests": [
-        "conduit-server/tests/production_account.rs::production_registration_validates_usernames_before_uia"
+        "conduit-server/tests/production_account.rs::production_registration_validates_usernames_before_uia",
+        "conduit/src/identifiers.rs::historical_user_ids_accept_any_localpart_and_forward_only_printable_ones",
+        "conduit-server/tests/production_pdu.rs::historical_user_ids_are_accepted_on_events_and_dropped_outside_them"
       ],
-      "tests_total": 1,
+      "tests_total": 3,
       "gap_beads": [],
-      "notes": "Localpart grammar enforced on registration; historical user IDs accepted for remote users is unverified (y99.40)."
+      "notes": "New local registration stays on the strict localpart grammar. Federation accepts historical senders, including an empty localpart and characters outside U+0021-U+007E, and still drops a NUL sender. Device-list updates for those non-compliant ids are not returned by /keys/query. A printable historical id such as @Bob is."
     },
     {
       "id": "app.id.room",

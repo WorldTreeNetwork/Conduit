@@ -76,6 +76,38 @@ pub fn valid_server_name(name: &str) -> bool {
         && host.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'.')
 }
 
+/// A user id that must be accepted on a federation event.
+///
+/// The localpart may be empty or any Unicode scalar except `:` and NUL.
+/// Surrogates cannot occur in a Rust string. The server name is non-empty
+/// and the whole id is at most 255 bytes.
+pub fn acceptable_historical_user_id(id: &str) -> bool {
+    if id.len() > 255 || id.contains('\0') {
+        return false;
+    }
+    let Some(rest) = id.strip_prefix('@') else {
+        return false;
+    };
+    let Some((local, server)) = rest.split_once(':') else {
+        return false;
+    };
+    !server.is_empty() && !local.contains(':')
+}
+
+/// A user id that may be shown to clients outside an event.
+///
+/// The localpart is non-empty and every character is in U+0021..=U+007E.
+/// An empty localpart, or any character outside that range, is a
+/// non-compliant historical id: events still carry it, and device-list
+/// updates must be dropped.
+pub fn forwardable_user_id(id: &str) -> bool {
+    if !acceptable_historical_user_id(id) {
+        return false;
+    }
+    let local = id.strip_prefix('@').and_then(|rest| rest.split_once(':')).map(|(local, _)| local);
+    local.is_some_and(|local| !local.is_empty() && local.chars().all(|c| ('\u{0021}'..='\u{007E}').contains(&c)))
+}
+
 /// `#localpart:server`. The localpart is any non-empty string without `:` or
 /// U+0000. The whole alias is at most 255 bytes.
 pub fn valid_room_alias(alias: &str) -> bool {
@@ -170,6 +202,23 @@ mod tests {
         assert!(!valid_server_name("999.1.1.1"));
         assert!(!valid_server_name("[::1"));
         assert!(!valid_server_name("has space"));
+    }
+
+    #[test]
+    fn historical_user_ids_accept_any_localpart_and_forward_only_printable_ones() {
+        assert!(acceptable_historical_user_id("@:remote.test"));
+        assert!(acceptable_historical_user_id("@世界:remote.test"));
+        assert!(acceptable_historical_user_id("@a b:remote.test"));
+        assert!(acceptable_historical_user_id("@Bob:remote.test"));
+        assert!(!acceptable_historical_user_id("@a\u{0}b:remote.test"));
+        assert!(!acceptable_historical_user_id("bob:remote.test"));
+        assert!(!acceptable_historical_user_id("@bob"));
+        assert!(forwardable_user_id("@Bob:remote.test"));
+        assert!(forwardable_user_id("@a*b:remote.test"));
+        assert!(!forwardable_user_id("@:remote.test"));
+        assert!(!forwardable_user_id("@世界:remote.test"));
+        assert!(!forwardable_user_id("@a b:remote.test"));
+        assert!(!forwardable_user_id("@a\u{0}b:remote.test"));
     }
 
     #[test]
