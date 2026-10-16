@@ -106,10 +106,10 @@
     },
     "rv": {
       "requirement": {
-        "implemented+tested": 34,
+        "implemented+tested": 35,
         "implemented-untested": 0,
         "partial": 6,
-        "missing": 21,
+        "missing": 20,
         "not-applicable": 0,
         "total": 61
       }
@@ -10111,14 +10111,18 @@
       "title": "Room version 2: Redaction algorithm",
       "source": "https://spec.matrix.org/v1.19/rooms/v2/#redactions",
       "role": "homeserver",
-      "status": "missing",
-      "code": [],
-      "tests": [],
-      "tests_total": 0,
-      "gap_beads": [
-        "conduit-y99.23"
+      "status": "implemented+tested",
+      "code": [
+        {
+          "loc": "conduit/src/room_version.rs"
+        }
       ],
-      "notes": "Kernel implements room version 11 only."
+      "tests": [
+        "conduit/src/room_version.rs::v2_redaction_keeps_the_v1_allow_list"
+      ],
+      "tests_total": 1,
+      "gap_beads": [],
+      "notes": "Room version 2 keeps the version 1 redaction allow-list: protected top-level keys, creator, membership, join_rule, history_visibility, and aliases. Power levels omit invite. Version 6 drops aliases."
     },
     {
       "id": "rv.v2.state-res",

@@ -363,6 +363,86 @@ mod tests {
         assert!(!redacted.extensions.contains_key("org.example.x"));
     }
 
+    /// Room version 2 uses the version 1 redaction keep-list: protected
+    /// top-level keys stay, message content is emptied, and power levels
+    /// omit `invite`. Aliases survive here and are removed from version 6.
+    #[test]
+    fn v2_redaction_keeps_the_v1_allow_list() {
+        let mut original = message();
+        original.extensions.insert("event_id".into(), json!("$evt:example.org"));
+        let redacted = redact_pdu(&original, 2);
+        assert_eq!(redacted.content, json!({}));
+        assert_eq!(redacted.room_id, original.room_id);
+        assert_eq!(redacted.sender, original.sender);
+        assert_eq!(redacted.event_type, "m.room.message");
+        assert!(redacted.state_key.is_none());
+        assert_eq!(redacted.depth, original.depth);
+        assert_eq!(redacted.origin_server_ts, original.origin_server_ts);
+        assert_eq!(redacted.prev_events, original.prev_events);
+        assert_eq!(redacted.auth_events, original.auth_events);
+        assert_eq!(redacted.hashes, original.hashes);
+        assert_eq!(redacted.signatures, original.signatures);
+        assert_eq!(redacted.extensions.get("event_id").and_then(Value::as_str), Some("$evt:example.org"));
+        assert_eq!(redacted.extensions.get("origin").and_then(Value::as_str), Some("example.org"));
+        assert!(redacted.extensions.contains_key("membership"));
+        assert!(redacted.extensions.contains_key("prev_state"));
+        assert!(!redacted.extensions.contains_key("org.example.x"));
+
+        let mut create = original.clone();
+        create.event_type = "m.room.create".into();
+        create.content = json!({"creator": "@a:example.org", "room_version": "2", "extra": true});
+        assert_eq!(redact_pdu(&create, 2).content, json!({"creator": "@a:example.org"}));
+
+        let mut member = original.clone();
+        member.event_type = "m.room.member".into();
+        member.content = json!({"membership": "join", "displayname": "A"});
+        assert_eq!(redact_pdu(&member, 2).content, json!({"membership": "join"}));
+
+        let mut rules = original.clone();
+        rules.event_type = "m.room.join_rules".into();
+        rules.content = json!({"join_rule": "public", "allow": []});
+        assert_eq!(redact_pdu(&rules, 2).content, json!({"join_rule": "public"}));
+
+        let mut levels = original.clone();
+        levels.event_type = "m.room.power_levels".into();
+        levels.content = json!({
+            "ban": 50,
+            "events": {"m.room.name": 50},
+            "events_default": 0,
+            "invite": 50,
+            "kick": 50,
+            "redact": 50,
+            "state_default": 50,
+            "users": {"@a:example.org": 100},
+            "users_default": 0,
+            "notifications": {"room": 50}
+        });
+        assert_eq!(
+            redact_pdu(&levels, 2).content,
+            json!({
+                "ban": 50,
+                "events": {"m.room.name": 50},
+                "events_default": 0,
+                "kick": 50,
+                "redact": 50,
+                "state_default": 50,
+                "users": {"@a:example.org": 100},
+                "users_default": 0
+            })
+        );
+
+        let mut aliases = original.clone();
+        aliases.event_type = "m.room.aliases".into();
+        aliases.content = json!({"aliases": ["#a:example.org"], "note": "x"});
+        assert_eq!(redact_pdu(&aliases, 2).content, json!({"aliases": ["#a:example.org"]}));
+        assert!(redact_pdu(&aliases, 6).content.get("aliases").is_none());
+
+        let mut history = original.clone();
+        history.event_type = "m.room.history_visibility".into();
+        history.content = json!({"history_visibility": "shared", "extra": 1});
+        assert_eq!(redact_pdu(&history, 2).content, json!({"history_visibility": "shared"}));
+    }
+
     #[test]
     fn v6_redaction_drops_aliases_and_v11_drops_legacy_top_level_keys() {
         let mut aliases = message();

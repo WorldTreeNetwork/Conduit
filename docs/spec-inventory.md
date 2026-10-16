@@ -25,9 +25,9 @@ Statuses: **tested** = present and asserted by a named test; **untested** = pres
 | Push Gateway API (homeserver as client) | requirements | 1 | 0 | 0 | 0 | 1 | 2 |
 | Identity Service API (homeserver as consumer) | endpoints | 5 | 0 | 2 | 0 | 16 | 23 |
 | Identity Service API (homeserver as consumer) | requirements | 1 | 0 | 0 | 0 | 0 | 1 |
-| Room versions 1–12 | requirements | 34 | 0 | 6 | 21 | 0 | 61 |
+| Room versions 1–12 | requirements | 35 | 0 | 6 | 20 | 0 | 61 |
 | Appendices | requirements | 10 | 0 | 3 | 4 | 4 | 21 |
-| All |  | 331 | 3 | 56 | 38 | 37 | 465 |
+| All |  | 332 | 3 | 56 | 37 | 37 | 465 |
 ## Gap beads
 
 New beads filed by this inventory (children of `conduit-y99`):
@@ -89,7 +89,7 @@ In-flight / pre-existing beads referenced (not duplicated):
 - `conduit-y99.22.3` - event_auth endpoint (1 row(s))
 - `conduit-y99.22.4` - EDU U+0000 / per-EDU error isolation (2 row(s))
 - `conduit-y99.22.5` - transactions/outbox retention (1 row(s))
-- `conduit-y99.23` - room versions 1-12 (33 row(s))
+- `conduit-y99.23` - room versions 1-12 (32 row(s))
 - `conduit-y99.24` - sync unread_notifications hard-coded to zero (3 row(s))
 - `conduit-y99.25` - profile changes not propagated to member events (0 row(s))
 - `conduit-y99.26` - /messages hides create/initial join (2 row(s))
@@ -552,7 +552,7 @@ In-flight / pre-existing beads referenced (not duplicated):
 | `rv.v1.canonical-json` | [Room version 1: Canonical JSON / integer rules](https://spec.matrix.org/v1.19/rooms/v1/#canonical-json) | tested | `conduit/src/auth.rs`<br>`conduit/src/room_version.rs` | `auth.rs::room_version_1_accepts_a_float_power_level` |  | Room version 1 does not strictly enforce canonical JSON: a float power level is truncated and accepted. Version 6 rejects the same event. |
 | `rv.v2.event-format` | [Room version 2: Event format and event IDs](https://spec.matrix.org/v1.19/rooms/v2/#event-format) | tested | `conduit/src/wire.rs`<br>`conduit-server/src/federation/server.rs` | `federation_inbound.rs::room_version_2_send_accepts_tuple_events` |  | Room version 2 uses the same tuple event format as version 1. A string `auth_events` list is dropped. |
 | `rv.v2.auth-rules` | [Room version 2: Authorisation rules](https://spec.matrix.org/v1.19/rooms/v2/#authorisation-rules) | tested | `conduit/src/auth.rs` | `auth.rs::room_version_2_redaction_auth_matches_event_id_domains` |  | Below the redact level, a redaction is allowed only when its event id and the target event id share a domain. Version 3 accepts that event without the redact level. |
-| `rv.v2.redaction` | [Room version 2: Redaction algorithm](https://spec.matrix.org/v1.19/rooms/v2/#redactions) | missing |  |  | `conduit-y99.23` | Kernel implements room version 11 only. |
+| `rv.v2.redaction` | [Room version 2: Redaction algorithm](https://spec.matrix.org/v1.19/rooms/v2/#redactions) | tested | `conduit/src/room_version.rs` | `room_version.rs::v2_redaction_keeps_the_v1_allow_list` |  | Version 2 keeps the version 1 allow-list, including aliases, and omits `invite` from power levels. Version 6 drops aliases. |
 | `rv.v2.state-res` | [Room version 2: State resolution algorithm](https://spec.matrix.org/v1.19/rooms/v2/#state-resolution) | tested | `conduit/src/room/state_res.rs` | `state_res.rs::room_version_2_prefers_later_timestamp_over_greater_depth` |  | State resolution v2: a later origin_server_ts beats a greater depth. Version 1 keeps the deeper event. |
 | `rv.v2.canonical-json` | [Room version 2: Canonical JSON / integer rules](https://spec.matrix.org/v1.19/rooms/v2/#canonical-json) | missing | `conduit/src/canonical_json.rs` |  | `conduit-y99.23` | Version-independent canonical JSON implemented; v1-5 accept out-of-range/float power levels (lenient) - not modelled. |
 | `rv.v3.event-format` | [Room version 3: Event format and event IDs](https://spec.matrix.org/v1.19/rooms/v3/#event-format) | tested |  | `conduit/src/room_version.rs::event_ids_follow_the_version_encoding` | | Reference-hash event ids. v3 is standard base64; v4-v10 share the URL-safe hash; v11 and v12 share the v11 redaction. A v12 create omits room_id. |
