@@ -687,17 +687,8 @@ pub async fn invite(
     }
     let unsigned = unsigned.as_object().is_some_and(|m| !m.is_empty()).then_some(unsigned);
     let stored = Event { event_id: received.event_id.clone(), pdu: pdu.clone(), unsigned };
-    if let Err(e) = state.storage.put_event(&stored).await {
+    if let Err(e) = state.storage.publish_event(&stored).await {
         return internal(&format!("Failed to store invite: {e}"));
-    }
-    if let Some(sk) = &stored.state_key {
-        if let Err(e) = state
-            .storage
-            .set_state_entry(&stored.room_id, &stored.event_type, sk, &stored.event_id)
-            .await
-        {
-            tracing::warn!(error = %e, "failed to update state for invite");
-        }
     }
     if let Ok(pos) = state.storage.global_max_stream_position().await {
         let _ = state.events_tx.send(pos);

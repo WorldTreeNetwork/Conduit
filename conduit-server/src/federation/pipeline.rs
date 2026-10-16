@@ -264,16 +264,9 @@ pub async fn process_received(
 
     // --- Persist ------------------------------------------------------------
     storage
-        .put_event(&pdu)
+        .publish_event(&pdu)
         .await
         .map_err(|e| PipelineError::Storage(e.to_string()))?;
-
-    if let Some(state_key) = &pdu.state_key {
-        storage
-            .set_state_entry(&pdu.room_id, &pdu.event_type, state_key, &pdu.event_id)
-            .await
-            .map_err(|e| PipelineError::Storage(e.to_string()))?;
-    }
 
     // --- Notify local /sync ---------------------------------------------------
     notify_sync(storage, events_tx).await;

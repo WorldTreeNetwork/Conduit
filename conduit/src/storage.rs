@@ -409,6 +409,19 @@ pub trait Storage: Send + Sync + 'static {
 
     async fn get_event(&self, event_id: &str) -> Result<Option<Event>>;
     async fn put_event(&self, event: &Event) -> Result<()>;
+    /// Event row and current-state pointer, visible together or not at all.
+    async fn publish_event(&self, event: &Event) -> Result<()> {
+        self.put_event(event).await?;
+        if let Some(state_key) = &event.state_key {
+            let room_id = if event.room_id.is_empty() {
+                crate::room_version::room_id_from_event_id(&event.event_id)
+            } else {
+                event.room_id.clone()
+            };
+            self.set_state_entry(&room_id, &event.event_type, state_key, &event.event_id).await?;
+        }
+        Ok(())
+    }
     async fn room_events(&self, room_id: &str) -> Result<Vec<Event>>;
 
     // --- Federation wire integrity (add-pdu-wire) ---------------------------
@@ -1839,6 +1852,28 @@ impl Storage for MemoryStorage {
         }
         inner.transactions.insert(key.clone(), serde_json::json!({"event_id": event.event_id}));
         Ok((event.event_id.clone(), true))
+    }
+
+    async fn publish_event(&self, event: &Event) -> Result<()> {
+        let mut inner = self.inner.write().await;
+        if !inner.events.contains_key(&event.event_id) {
+            inner.event_next_position += 1;
+            let position = inner.event_next_position;
+            inner.event_positions.insert(event.event_id.clone(), position);
+            inner.events.insert(event.event_id.clone(), event.clone());
+        }
+        if let Some(state_key) = &event.state_key {
+            let room_id = if event.room_id.is_empty() {
+                crate::room_version::room_id_from_event_id(&event.event_id)
+            } else {
+                event.room_id.clone()
+            };
+            inner.room_state.insert(
+                (room_id, event.event_type.clone(), state_key.clone()),
+                event.event_id.clone(),
+            );
+        }
+        Ok(())
     }
 
     async fn deliver_to_device_once(&self, key: &TransactionKey, local: &[ToDeviceDelivery], remote: &[OutboundDelivery]) -> Result<bool> {

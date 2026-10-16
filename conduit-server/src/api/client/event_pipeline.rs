@@ -295,23 +295,11 @@ pub async fn author_event(
         let (event_id, inserted) = storage.put_event_once(key, &event).await
             .map_err(|error| MatrixError::unknown(format!("storage error: {error}")))?;
         if !inserted { return Ok(event_id); }
+    } else if event.state_key.is_some() {
+        // The event row and its current-state pointer commit together.
+        storage.publish_event(&event).await.map_err(|error| MatrixError::unknown(format!("storage error: {error}")))?;
     } else {
         storage.put_event(&event).await.map_err(|error| MatrixError::unknown(format!("storage error: {error}")))?;
-    }
-
-    // ------------------------------------------------------------------
-    // Step 10 — update current state if this is a state event
-    // ------------------------------------------------------------------
-    if let Some(sk) = state_key {
-        let state_room = if room_id.is_empty() {
-            conduit::room_version::room_id_from_event_id(&eid)
-        } else {
-            room_id.to_owned()
-        };
-        storage
-            .set_state_entry(&state_room, type_, sk, &eid)
-            .await
-            .map_err(|e| MatrixError::unknown(format!("state update error: {e}")))?;
     }
 
     // ------------------------------------------------------------------

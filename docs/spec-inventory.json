@@ -1185,13 +1185,14 @@
         "conduit-server/tests/production_sync.rs::device_lists_report_only_shared_users_and_departures",
         "conduit/src/room/state_res.rs::a_later_arrival_with_an_earlier_timestamp_does_not_win",
         "conduit/src/room/state_res.rs::v12_snapshot_keeps_the_room_when_one_key_forks",
-        "conduit/src/room/state_res.rs::self_leave_replaces_the_earlier_join"
+        "conduit/src/room/state_res.rs::self_leave_replaces_the_earlier_join",
+        "conduit-server/tests/production_state_publication.rs::event_is_not_visible_while_its_current_state_update_is_blocked"
       ],
-      "tests_total": 53,
+      "tests_total": 54,
       "gap_beads": [
-        "conduit-y99.13"
+        "conduit-y99.13.8"
       ],
-      "notes": "Sync state is the resolved room state: a later arrival with an earlier origin_server_ts does not replace the winner, and a state event that never won is omitted from the timeline. use_state_after, filters, redactions, lazy members, commit-ordered cursors, device lists and the sending device's transaction_id are tested. Atomic event/current-state publication remains conduit-y99.13.7."
+      "notes": "Sync state is the resolved room state: a later arrival with an earlier origin_server_ts does not replace the winner, and a state event that never won is omitted from the timeline. The event row and its current-state pointer commit together (production_state_publication.rs::event_is_not_visible_while_its_current_state_update_is_blocked). Legacy rows still have no verified snapshot provenance (conduit-y99.13.8)."
     },
     {
       "id": "cs.ep.get_matrixclientv3events",
@@ -7332,6 +7333,9 @@
         },
         {
           "loc": "conduit/src/room/state_res.rs"
+        },
+        {
+          "loc": "conduit-server/src/storage_pg.rs"
         }
       ],
       "tests": [
@@ -7346,13 +7350,14 @@
         "conduit-server/tests/production_sync.rs::sync_never_skips_events_committed_out_of_order",
         "conduit-server/tests/production_sync.rs::only_the_sending_device_sees_its_transaction_id",
         "conduit/src/room/state_res.rs::v12_snapshot_keeps_the_room_when_one_key_forks",
-        "conduit/src/room/state_res.rs::self_leave_replaces_the_earlier_join"
+        "conduit/src/room/state_res.rs::self_leave_replaces_the_earlier_join",
+        "conduit-server/tests/production_state_publication.rs::event_is_not_visible_while_its_current_state_update_is_blocked"
       ],
-      "tests_total": 12,
+      "tests_total": 13,
       "gap_beads": [
-        "conduit-y99.13"
+        "conduit-y99.13.8"
       ],
-      "notes": "Sync state is the resolved room state: a later arrival with an earlier origin_server_ts does not replace the winner, and a state event that never won is omitted from the timeline. use_state_after, filters, redactions, lazy members, commit-ordered cursors and the sending device's transaction_id are tested. Atomic event/current-state publication remains conduit-y99.13.7."
+      "notes": "Sync state is the resolved room state: a later arrival with an earlier origin_server_ts does not replace the winner, and a state event that never won is omitted from the timeline. The event row and its current-state pointer commit together (production_state_publication.rs::event_is_not_visible_while_its_current_state_update_is_blocked). Legacy rows still have no verified snapshot provenance (conduit-y99.13.8)."
     },
     {
       "id": "cs.events.get",

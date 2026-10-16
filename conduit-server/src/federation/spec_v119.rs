@@ -778,10 +778,7 @@ pub async fn exchange_third_party_invite(
     if let Err(error) = conduit::auth::check_auth(&event, &auth_state) {
         return forbidden(&error.to_string());
     }
-    if let Err(error) = state.storage.put_event(&event).await {
-        return internal(&error.to_string());
-    }
-    if let Err(error) = state.storage.set_state_entry(&room_id, "m.room.member", mxid, &event_id).await {
+    if let Err(error) = state.storage.publish_event(&event).await {
         return internal(&error.to_string());
     }
     (StatusCode::OK, Json(json!({}))).into_response()

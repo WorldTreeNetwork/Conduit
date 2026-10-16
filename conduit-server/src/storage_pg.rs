@@ -465,6 +465,36 @@ impl Storage for PostgresStorage {
         Ok(())
     }
 
+    async fn publish_event(&self, event: &Event) -> Result<()> {
+        let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
+        lock_stream(&mut transaction, Stream::Events).await?;
+        insert_event(&mut transaction, event).await?;
+        if let Some(state_key) = &event.state_key {
+            let room_id = if event.room_id.is_empty() {
+                conduit::room_version::room_id_from_event_id(&event.event_id)
+            } else {
+                event.room_id.clone()
+            };
+            // Same statement as `set_state_entry`. It stays in this
+            // transaction so a lock on the state row hides the event too.
+            sqlx::query(
+                "INSERT INTO room_current_state (room_id, type, state_key, event_id)
+                 VALUES ($1, $2, $3, $4)
+                 ON CONFLICT (room_id, type, state_key)
+                 DO UPDATE SET event_id = EXCLUDED.event_id",
+            )
+            .bind(&room_id)
+            .bind(&event.event_type)
+            .bind(state_key)
+            .bind(&event.event_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(map_sqlx)?;
+        }
+        transaction.commit().await.map_err(map_sqlx)?;
+        Ok(())
+    }
+
     async fn room_events(&self, room_id: &str) -> Result<Vec<Event>> {
         let rows = sqlx::query!(
             r#"
