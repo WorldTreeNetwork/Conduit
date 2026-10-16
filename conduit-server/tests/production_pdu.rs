@@ -3380,6 +3380,109 @@ async fn soft_failed_topic_is_omitted_until_referenced_and_syncs_when_selected()
     );
 }
 
+/// `GET /query/{queryType}` serves profile and directory, and rejects any
+/// other type. A missing signature is unauthorized.
+#[tokio::test]
+async fn generic_query_serves_known_types_and_rejects_unknown() {
+    let remote = spawn_remote().await;
+    let server = federated_server(&remote).await;
+    let alice = server.register("alice").await;
+    let token = alice["access_token"].as_str().unwrap();
+    let alice_id = alice["user_id"].as_str().unwrap().to_owned();
+    server
+        .request(
+            Method::PUT,
+            &format!("/_matrix/client/v3/profile/{}/displayname", enc(&alice_id)),
+            Some(token),
+            Some(json!({"displayname": "Alice"})),
+            200,
+        )
+        .await;
+    let room = server
+        .request(Method::POST, "/_matrix/client/v3/createRoom", Some(token), Some(json!({"preset": "public_chat"})), 200)
+        .await["room_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let alias = format!("#lobby:{LOCAL}");
+    server
+        .request(
+            Method::PUT,
+            &format!("/_matrix/client/v3/directory/room/{}", enc(&alias)),
+            Some(token),
+            Some(json!({"room_id": room})),
+            200,
+        )
+        .await;
+
+    let unknown = fed(&server, &remote, Method::GET, "/_matrix/federation/v1/query/not-a-type", None, 404).await;
+    assert_eq!(unknown["errcode"], "M_UNRECOGNIZED", "{unknown}");
+
+    let unsigned = server
+        .http
+        .get(format!("{}/_matrix/federation/v1/query/not-a-type", server.base_url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unsigned.status().as_u16(), 401);
+    let unsigned_body: Value = unsigned.json().await.unwrap();
+    assert_eq!(unsigned_body["errcode"], "M_UNAUTHORIZED", "{unsigned_body}");
+
+    let profile_path = format!("/_matrix/federation/v1/query/profile?user_id={}", enc(&alice_id));
+    let profile = fed(&server, &remote, Method::GET, &profile_path, None, 200).await;
+    assert_eq!(profile["displayname"], "Alice");
+    let field_path = format!("{profile_path}&field=displayname");
+    let field = fed(&server, &remote, Method::GET, &field_path, None, 200).await;
+    assert_eq!(field, json!({"displayname": "Alice"}));
+    let foreign = fed(
+        &server,
+        &remote,
+        Method::GET,
+        &format!("/_matrix/federation/v1/query/profile?user_id={}", enc("@ghost:remote.test")),
+        None,
+        404,
+    )
+    .await;
+    assert_eq!(foreign["errcode"], "M_NOT_FOUND", "{foreign}");
+
+    let directory = fed(
+        &server,
+        &remote,
+        Method::GET,
+        &format!("/_matrix/federation/v1/query/directory?room_alias={}", enc(&alias)),
+        None,
+        200,
+    )
+    .await;
+    assert_eq!(directory["room_id"], room);
+    assert_eq!(directory["servers"], json!([LOCAL]));
+    let missing_alias = fed(
+        &server,
+        &remote,
+        Method::GET,
+        &format!("/_matrix/federation/v1/query/directory?room_alias={}", enc("#missing:production.test")),
+        None,
+        404,
+    )
+    .await;
+    assert_eq!(missing_alias["errcode"], "M_NOT_FOUND", "{missing_alias}");
+
+    let post_path = "/_matrix/federation/v1/query/not-a-type";
+    let auth = sign_request("POST", post_path, REMOTE, LOCAL, None::<&Value>, &remote.key);
+    let posted = server
+        .http
+        .post(format!("{}{post_path}", server.base_url))
+        .header("Authorization", auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(posted.status().as_u16(), 405);
+    let allow = posted.headers().get("allow").and_then(|value| value.to_str().ok()).unwrap_or("");
+    assert!(allow.contains("GET"), "405 keeps Allow, got {allow:?}");
+    let posted_body: Value = posted.json().await.unwrap();
+    assert_eq!(posted_body["errcode"], "M_UNRECOGNIZED", "{posted_body}");
+}
+
 fn remote_key_document(remote: &Remote) -> Value {
     let unsigned = json!({
         "server_name": REMOTE,

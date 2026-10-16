@@ -34,17 +34,17 @@
     },
     "ss": {
       "endpoint": {
-        "implemented+tested": 33,
+        "implemented+tested": 34,
         "implemented-untested": 0,
-        "partial": 2,
+        "partial": 1,
         "missing": 0,
         "not-applicable": 1,
         "total": 36
       },
       "requirement": {
-        "implemented+tested": 26,
+        "implemented+tested": 28,
         "implemented-untested": 0,
-        "partial": 12,
+        "partial": 10,
         "missing": 0,
         "not-applicable": 3,
         "total": 41
@@ -5694,30 +5694,24 @@
       "rate_limited": "No",
       "deprecated": false,
       "role": "homeserver",
-      "status": "partial",
+      "status": "implemented+tested",
       "code": [
         {
-          "loc": "conduit-server/src/federation/server.rs:1079",
-          "handler": "query_profile",
-          "kind": "partial"
-        },
-        {
-          "loc": "conduit-server/src/federation/server.rs:1080",
-          "handler": "query_directory",
-          "kind": "partial"
+          "loc": "conduit-server/src/federation/server.rs:1277",
+          "handler": "query",
+          "kind": "exact"
         }
       ],
       "tests": [
+        "conduit-server/tests/production_pdu.rs::generic_query_serves_known_types_and_rejects_unknown",
         "conduit-server/tests/federation.rs::query_profile_returns_displayname",
         "conduit-server/tests/federation_inbound.rs::inbound_signature_verified_or_rejected",
         "conduit-server/tests/federation_inbound.rs::query_profile_for_local_user",
         "conduit-server/tests/federation_inbound.rs::rate_limit_kicks_in_after_burst"
       ],
-      "tests_total": 4,
-      "gap_beads": [
-        "conduit-y99.22"
-      ],
-      "notes": "Only the profile and directory query types are routed; generic queryType handling missing."
+      "tests_total": 5,
+      "gap_beads": [],
+      "notes": "profile and directory are the known types. Any other queryType is 404 M_UNRECOGNIZED. A request without X-Matrix is 401 M_UNAUTHORIZED."
     },
     {
       "id": "ss.ep.get_matrixfederationv1openiduserinfo",
@@ -9334,20 +9328,19 @@
       "title": "Querying for information (directory, profile, generic)",
       "source": "https://spec.matrix.org/v1.19/server-server-api/#querying-for-information",
       "role": "homeserver",
-      "status": "partial",
+      "status": "implemented+tested",
       "code": [
         {
           "loc": "conduit-server/src/federation/server.rs"
         }
       ],
       "tests": [
+        "conduit-server/tests/production_pdu.rs::generic_query_serves_known_types_and_rejects_unknown",
         "conduit-server/tests/federation_inbound.rs::query_profile_for_local_user"
       ],
-      "tests_total": 1,
-      "gap_beads": [
-        "conduit-y99.22"
-      ],
-      "notes": ""
+      "tests_total": 2,
+      "gap_beads": [],
+      "notes": "The same test covers profile, directory, and an unknown type."
     },
     {
       "id": "ss.openid",

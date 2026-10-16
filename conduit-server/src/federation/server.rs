@@ -13,8 +13,7 @@
 //! - `GET  /backfill/:roomId`
 //! - `GET  /event/:eventId`
 //! - `POST /get_missing_events/:roomId`
-//! - `GET  /query/profile`
-//! - `GET  /query/directory`
+//! - `GET  /query/:queryType` (`profile`, `directory`, otherwise unrecognized)
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
@@ -1270,6 +1269,23 @@ pub async fn get_missing_events(
 // x2r.10 — GET /query/profile
 // ---------------------------------------------------------------------------
 
+/// `GET /_matrix/federation/v1/query/{queryType}`.
+///
+/// `profile` and `directory` are the known types and read the query string
+/// for that type. Any other type is `404 M_UNRECOGNIZED`.
+pub async fn query(
+    state: State<FedState>,
+    origin_ext: Option<axum::extract::Extension<FederationOrigin>>,
+    Path(query_type): Path<String>,
+    params: Query<HashMap<String, String>>,
+) -> Response {
+    match query_type.as_str() {
+        "profile" => query_profile(state, origin_ext, params).await,
+        "directory" => query_directory(state, origin_ext, params).await,
+        _ => matrix_error(StatusCode::NOT_FOUND, "M_UNRECOGNIZED", "Unrecognized query type"),
+    }
+}
+
 /// `GET /_matrix/federation/v1/query/profile?user_id=...&field=...`
 pub async fn query_profile(
     State(state): State<FedState>,
@@ -1649,8 +1665,7 @@ pub fn federation_router() -> axum::Router<FedState> {
         .route("/backfill/:roomId", get(backfill))
         .route("/event/:eventId", get(get_event))
         .route("/get_missing_events/:roomId", post(get_missing_events))
-        .route("/query/profile", get(query_profile))
-        .route("/query/directory", get(query_directory))
+        .route("/query/:queryType", get(query))
         .route("/event_auth/:roomId/:eventId", get(super::spec_v119::event_auth))
         .route("/timestamp_to_event/:roomId", get(super::spec_v119::timestamp_to_event))
         .route("/publicRooms", get(super::spec_v119::public_rooms_get).post(super::spec_v119::public_rooms_post))
