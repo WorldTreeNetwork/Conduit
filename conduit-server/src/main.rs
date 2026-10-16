@@ -263,6 +263,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             Err(_) => cache,
         };
+        let cache = match env::var("CONDUIT_TRUSTED_KEY_SERVERS") {
+            Ok(raw) => {
+                let notaries = raw
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|name| !name.is_empty())
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>();
+                tracing::info!(notaries = ?notaries, "trusted key notaries");
+                cache.with_notaries(notaries)
+            }
+            Err(_) => cache,
+        };
         Arc::new(cache)
     };
 

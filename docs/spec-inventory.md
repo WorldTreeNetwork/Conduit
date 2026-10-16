@@ -18,7 +18,7 @@ Statuses: **tested** = present and asserted by a named test; **untested** = pres
 | Client-Server API | endpoints | 163 | 0 | 0 | 0 | 1 | 164 |
 | Client-Server API | requirements | 77 | 0 | 0 | 0 | 9 | 86 |
 | Server-Server API | endpoints | 29 | 0 | 6 | 0 | 1 | 36 |
-| Server-Server API | requirements | 21 | 0 | 13 | 4 | 3 | 41 |
+| Server-Server API | requirements | 22 | 0 | 13 | 3 | 3 | 41 |
 | Application Service API | endpoints | 11 | 0 | 0 | 0 | 0 | 11 |
 | Application Service API | requirements | 16 | 0 | 0 | 0 | 2 | 18 |
 | Push Gateway API (homeserver as client) | endpoints | 1 | 0 | 0 | 0 | 0 | 1 |
@@ -27,7 +27,7 @@ Statuses: **tested** = present and asserted by a named test; **untested** = pres
 | Identity Service API (homeserver as consumer) | requirements | 1 | 0 | 0 | 0 | 0 | 1 |
 | Room versions 1–12 | requirements | 61 | 0 | 0 | 0 | 0 | 61 |
 | Appendices | requirements | 10 | 0 | 3 | 4 | 4 | 21 |
-| All |  | 396 | 0 | 24 | 8 | 37 | 465 |
+| All |  | 397 | 0 | 24 | 7 | 37 | 465 |
 ## Gap beads
 
 New beads filed by this inventory (children of `conduit-y99`):
@@ -55,7 +55,7 @@ New beads filed by this inventory (children of `conduit-y99`):
 In-flight / pre-existing beads referenced (not duplicated):
 
 - `conduit-2c7` - email/phone UIA stages (0 row(s))
-- `conduit-4w1` - notary key fetch (3 row(s))
+- `conduit-4w1` - notary key fetch (2 row(s))
 - `conduit-7pk` - outbound presence EDU (0 row(s))
 - `conduit-c3u` - AS query negative-result cache (1 row(s))
 - `conduit-embed-auth` - membership/visibility on reads (kernel) (0 row(s))
@@ -83,7 +83,7 @@ In-flight / pre-existing beads referenced (not duplicated):
 - `conduit-y99.21.1` - federation media multipart/mixed (0 row(s))
 - `conduit-y99.21.2` - animated thumbnails / non-UTF-8 previews (0 row(s))
 - `conduit-y99.21.3` - media blob hygiene (0 row(s))
-- `conduit-y99.22` - federation API completeness (10 row(s))
+- `conduit-y99.22` - federation API completeness (9 row(s))
 - `conduit-y99.22.1` - send_join state before join (2 row(s))
 - `conduit-y99.22.2` - make_join ver / M_INCOMPATIBLE_ROOM_VERSION (2 row(s))
 - `conduit-y99.22.3` - event_auth endpoint (1 row(s))
@@ -367,8 +367,8 @@ In-flight / pre-existing beads referenced (not duplicated):
 | GET | [`/.well-known/matrix/server`](https://spec.matrix.org/v1.19/server-server-api/#getwell-knownmatrixserver) | tested | `conduit-server/src/api/client/account.rs:74` | `production_account.rs::production_well_known_configured`<br>`production_account.rs::production_well_known_defaults_and_cors` |  | *homeserver (delegation optional)* Configured delegation, else 404. |
 | GET | [`/_matrix/federation/v1/version`](https://spec.matrix.org/v1.19/server-server-api/#get_matrixfederationv1version) | tested |  | `conduit-server/tests/federation_inbound.rs::federation_version_is_public_and_stable` | | Unauthenticated. server.name is this homeserver; server.version is the crate version. |
 | GET | [`/_matrix/key/v2/server`](https://spec.matrix.org/v1.19/server-server-api/#get_matrixkeyv2server) | tested | `conduit-server/src/main.rs:510` | `conduit-server/src/main.rs::custom_is_explicit`<br>`federation_inbound.rs::inbound_signature_verified_or_rejected` (+3) |  | Also serves deprecated /_matrix/key/v2/server/{keyId}. |
-| POST | [`/_matrix/key/v2/query`](https://spec.matrix.org/v1.19/server-server-api/#post_matrixkeyv2query) | tested |  | `conduit-server/tests/federation_inbound.rs::federation_directory_openid_and_local_key_query` | | Returns a signed key document for each requested server this process can fetch, including itself. |
-| GET | [`/_matrix/key/v2/query/{serverName}`](https://spec.matrix.org/v1.19/server-server-api/#get_matrixkeyv2queryservername) | tested |  | `conduit-server/tests/federation_inbound.rs::federation_directory_openid_and_local_key_query` | | Returns this server's signed key document when the path names it. |
+| POST | [`/_matrix/key/v2/query`](https://spec.matrix.org/v1.19/server-server-api/#post_matrixkeyv2query) | tested |  | `conduit-server/tests/federation_inbound.rs::federation_directory_openid_and_local_key_query`<br>`conduit-server/tests/production_notary.rs::notary_signs_remote_keys_and_fetches_through_a_notary` | | Unauthenticated. Empty server_keys is an empty array. Each returned document is signed by this server. Offline servers with no cache are omitted. |
+| GET | [`/_matrix/key/v2/query/{serverName}`](https://spec.matrix.org/v1.19/server-server-api/#get_matrixkeyv2queryservername) | tested |  | `conduit-server/tests/federation_inbound.rs::federation_directory_openid_and_local_key_query`<br>`conduit-server/tests/production_notary.rs::notary_signs_remote_keys_and_fetches_through_a_notary` | | Unauthenticated. Signs the queried server's document. An unreachable server with no cache is 200 and an empty server_keys array. |
 | PUT | [`/_matrix/federation/v1/send/{txnId}`](https://spec.matrix.org/v1.19/server-server-api/#put_matrixfederationv1sendtxnid) | partial | `conduit-server/src/federation/server.rs:1072` | `conduit-server/src/federation/auth.rs::xmatrix_with_body`<br>`federation.rs::send_transaction_to_mock_remote` (+4) | `conduit-y99.33` `conduit-y99.32` `conduit-y99.22` `conduit-y99.22.4` | PDUs persisted and authorised; no ACLs, soft failure or rejection tracking; only to-device and device-list EDUs. |
 | GET | [`/_matrix/federation/v1/event_auth/{roomId}/{eventId}`](https://spec.matrix.org/v1.19/server-server-api/#get_matrixfederationv1event_authroomideventid) | tested |  | `conduit-server/tests/federation_inbound.rs::federation_directory_openid_and_local_key_query` | | Returns the auth chain of the event as federation PDUs. |
 | GET | [`/_matrix/federation/v1/backfill/{roomId}`](https://spec.matrix.org/v1.19/server-server-api/#get_matrixfederationv1backfillroomid) | tested | `conduit-server/src/federation/server.rs:1076` | `federation_inbound.rs::backfill_returns_history_visibility_filtered_events`<br>`production_pdu.rs::backfill_returns_the_named_events_and_their_predecessors` (+1) |  | Returns the named events and the PDUs that preceded them, up to limit. A later event is absent. A missing v is 400 M_MISSING_PARAM. History visibility and server ACL still apply. Limit is capped at 100. |
@@ -410,7 +410,7 @@ In-flight / pre-existing beads referenced (not duplicated):
 | `ss.discovery.resolve` | [Resolving server names (well-known delegation, SRV, ports, Host header)](https://spec.matrix.org/v1.19/server-server-api/#resolving-server-names) | tested | `conduit-server/src/federation/discovery.rs` | `federation.rs::discovery_well_known_succeeds`<br>`federation.rs::discovery_falls_through_to_srv` |  |  |
 | `ss.discovery.keys.publish` | [Publishing keys (verify_keys, old_verify_keys, valid_until_ts, self-signature)](https://spec.matrix.org/v1.19/server-server-api/#publishing-keys) | tested | `conduit-server/src/main.rs (server_keys)` | `remote_keys.rs`<br>`federation_inbound.rs::inbound_signature_verified_or_rejected` |  |  |
 | `ss.discovery.keys.fetch` | [Retrieving remote server keys (direct fetch, caching, validity)](https://spec.matrix.org/v1.19/server-server-api/#retrieving-server-keys) | tested | `conduit-server/src/remote_keys.rs` | `remote_keys.rs` |  |  |
-| `ss.discovery.keys.notary` | [Querying keys through another server (notary)](https://spec.matrix.org/v1.19/server-server-api/#querying-keys-through-another-server) | missing |  |  | `conduit-y99.22` `conduit-4w1` |  |
+| `ss.discovery.keys.notary` | [Querying keys through another server (notary)](https://spec.matrix.org/v1.19/server-server-api/#querying-keys-through-another-server) | tested | `conduit-server/src/federation/spec_v119.rs`<br>`conduit-server/src/remote_keys.rs` | `production_notary.rs::notary_signs_remote_keys_and_fetches_through_a_notary` |  | Inbound notary signs fetched key documents. Direct key fetch failure retries GET /_matrix/key/v2/query/{serverName} on CONDUIT_TRUSTED_KEY_SERVERS and stores the document only when that notary's signature verifies. |
 | `ss.auth.xmatrix` | [Request authentication (X-Matrix, destination, signed URI)](https://spec.matrix.org/v1.19/server-server-api/#authentication) | tested | `conduit-server/src/federation/auth.rs`<br>`conduit-server/src/federation/middleware.rs` | `federation_inbound.rs::standard_v2_routes_verify_the_full_signed_uri`<br>`federation.rs::xmatrix_signature_roundtrip` |  |  |
 | `ss.auth.client-tls` | [Client TLS certificates](https://spec.matrix.org/v1.19/server-server-api/#client-tls-certificates) | n/a |  |  |  | *informative* Spec: requests are authenticated at the HTTP layer; client certificates are not used. |
 | `ss.transactions` | [Transactions (≤50 PDUs/≤100 EDUs, idempotent txnId, per-PDU results)](https://spec.matrix.org/v1.19/server-server-api/#transactions) | partial | `conduit-server/src/federation/server.rs`<br>`conduit-server/src/federation/queue.rs` | `federation_inbound.rs::send_transaction_persists_pdus`<br>`federation.rs::queue_retries_on_failure` | `conduit-y99.22.4` `conduit-y99.22.5` `conduit-y99.33` |  |

@@ -68,48 +68,105 @@ fn local_server_keys(state: &FedState) -> Value {
     response
 }
 
-async fn server_key_document(state: &FedState, server_name: &str) -> Option<Value> {
+/// Sign `document` with this server's key, leaving every other signature in
+/// place. The signed bytes are the document with `signatures` and `unsigned`
+/// removed, which is the same payload the origin signed.
+fn notarize(state: &FedState, mut document: Value) -> Option<Value> {
+    let mut unsigned = document.clone();
+    let obj = unsigned.as_object_mut()?;
+    obj.remove("signatures");
+    obj.remove("unsigned");
+    let bytes = conduit::canonical_json::to_canonical_bytes(&unsigned).ok()?;
+    let signature = state.server_key.signing_key.sign(&bytes);
+    let signatures = document.as_object_mut()?.entry("signatures").or_insert_with(|| json!({}));
+    let ours = signatures.as_object_mut()?.entry(state.server_name.to_string()).or_insert_with(|| json!({}));
+    ours.as_object_mut()?.insert(
+        state.server_key.key_id.clone(),
+        json!(STANDARD_NO_PAD.encode(signature.to_bytes())),
+    );
+    Some(document)
+}
+
+fn now_ms() -> i64 {
+    chrono::Utc::now().timestamp_millis()
+}
+
+/// Highest `minimum_valid_until_ts` in the criteria. An absent timestamp means
+/// the current time.
+fn requested_minimum(criteria: &Value) -> i64 {
+    let mut minimum = now_ms();
+    if let Some(keys) = criteria.as_object() {
+        for spec in keys.values() {
+            if let Some(ts) = spec.get("minimum_valid_until_ts").and_then(Value::as_i64) {
+                minimum = minimum.max(ts);
+            }
+        }
+    }
+    minimum
+}
+
+async fn fetch_origin_document(state: &FedState, server_name: &str) -> bool {
+    let Ok(response) = state.fed_client.get_raw(server_name, "/_matrix/key/v2/server").await else {
+        return false;
+    };
+    let Ok(value) = response.json::<Value>().await else {
+        return false;
+    };
+    if value.get("server_name").and_then(Value::as_str) != Some(server_name) {
+        return false;
+    }
+    state.remote_keys.store_verified_document(&value).await.is_ok()
+}
+
+/// The origin's key document, signed by this server. Offline origins with no
+/// cache are omitted. A cached document is reused for half its lifetime unless
+/// `minimum_valid_until_ts` asks for a longer validity, in which case a failed
+/// refetch still returns the last document.
+async fn notarized_document(state: &FedState, server_name: &str, minimum_valid_until_ts: i64) -> Option<Value> {
     if server_name == state.server_name.as_ref() {
         return Some(local_server_keys(state));
     }
-    let response = state.fed_client.get_raw(server_name, "/_matrix/key/v2/server").await.ok()?;
-    response.json().await.ok()
+    if let Some(document) = state.remote_keys.fresh_document(server_name, minimum_valid_until_ts).await {
+        return notarize(state, document);
+    }
+    if fetch_origin_document(state, server_name).await {
+        if let Some(document) = state.remote_keys.any_document(server_name).await {
+            return notarize(state, document);
+        }
+    }
+    state.remote_keys.any_document(server_name).await.and_then(|document| notarize(state, document))
 }
 
-/// `POST /_matrix/key/v2/query`.
-pub async fn key_query(
-    State(state): State<FedState>,
-    origin_ext: Option<axum::extract::Extension<FederationOrigin>>,
-    Json(body): Json<Value>,
-) -> Response {
-    if origin_of(origin_ext).is_err() {
-        return unauthorized("Not authenticated");
-    }
+/// `POST /_matrix/key/v2/query`. No authentication.
+pub async fn key_query(State(state): State<FedState>, Json(body): Json<Value>) -> Response {
     let Some(requested) = body.get("server_keys").and_then(Value::as_object) else {
         return bad_json("server_keys is required");
     };
     let mut server_keys = Vec::new();
-    for name in requested.keys() {
-        if let Some(document) = server_key_document(&state, name).await {
+    for (name, criteria) in requested {
+        if let Some(document) = notarized_document(&state, name, requested_minimum(criteria)).await {
             server_keys.push(document);
         }
     }
     (StatusCode::OK, Json(json!({ "server_keys": server_keys }))).into_response()
 }
 
-/// `GET /_matrix/key/v2/query/{serverName}`.
+/// `GET /_matrix/key/v2/query/{serverName}`. No authentication. An unreachable
+/// server with nothing cached is `200` and an empty `server_keys` array.
 pub async fn key_query_server(
     State(state): State<FedState>,
-    origin_ext: Option<axum::extract::Extension<FederationOrigin>>,
     Path(server_name): Path<String>,
+    Query(query): Query<HashMap<String, String>>,
 ) -> Response {
-    if origin_of(origin_ext).is_err() {
-        return unauthorized("Not authenticated");
-    }
-    match server_key_document(&state, &server_name).await {
-        Some(document) => (StatusCode::OK, Json(json!({ "server_keys": [document] }))).into_response(),
-        None => not_found("Server keys not available"),
-    }
+    let minimum = query
+        .get("minimum_valid_until_ts")
+        .and_then(|raw| raw.parse::<i64>().ok())
+        .unwrap_or_else(now_ms);
+    let server_keys = match notarized_document(&state, &server_name, minimum).await {
+        Some(document) => vec![document],
+        None => Vec::new(),
+    };
+    (StatusCode::OK, Json(json!({ "server_keys": server_keys }))).into_response()
 }
 
 async fn room_version(state: &FedState, room_id: &str) -> Result<u32, Response> {

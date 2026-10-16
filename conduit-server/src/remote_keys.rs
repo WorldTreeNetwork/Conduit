@@ -18,10 +18,12 @@
 //!
 //! # Server discovery
 //!
-//! Out of scope for this module (tracked in E08).  For now we fetch directly:
-//! `https://{server_name}/_matrix/key/v2/server`.  A test override base URL
-//! can be set via [`RemoteKeyCache::with_test_base_url`] (the server name is
-//! passed as a `server_name` query parameter).
+//! Direct fetch is `https://{server_name}/_matrix/key/v2/server`. When that
+//! fails, each trusted notary is asked
+//! `GET /_matrix/key/v2/query/{serverName}` and the returned document is
+//! accepted only when that notary's signature verifies. A test override base
+//! URL can be set via [`RemoteKeyCache::with_test_base_url`] (the server name
+//! is passed as a `server_name` query parameter).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -31,6 +33,17 @@ use serde::Deserialize;
 use tokio::sync::RwLock;
 
 use conduit::canonical_json::to_canonical_bytes;
+
+fn path_segment(value: &str) -> String {
+    let mut out = String::new();
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => out.push(byte as char),
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
 
 /// Seven days in milliseconds: the v11 cap on a key's `valid_until_ts`.
 pub const SEVEN_DAYS_MS: i64 = 7 * 24 * 60 * 60 * 1000;
@@ -140,13 +153,26 @@ pub fn effective_until(valid_until_ts: i64, fetched_at: i64, old_expired_ts: Opt
 // ---------------------------------------------------------------------------
 
 /// Thread-safe cache of remote server public keys with lazy network fetch.
+#[derive(Debug, Clone)]
+struct CachedDocument {
+    value: serde_json::Value,
+    valid_until_ts: i64,
+    fetched_at: i64,
+}
+
 pub struct RemoteKeyCache {
     inner: RwLock<HashMap<(String, String), CachedKey>>,
     /// Last eligibility-driven refetch attempt per server (Unix ms).
     last_refetch: RwLock<HashMap<String, i64>>,
+    /// Origin key documents, so this server can notarize from cache when the
+    /// origin is unreachable.
+    documents: RwLock<HashMap<String, CachedDocument>>,
     /// When `Some`, all requests go to `{base_url}/_matrix/key/v2/server`
     /// regardless of the actual `server_name`.  Useful for test setups.
     base_url_override: Option<String>,
+    /// Server names asked `GET /_matrix/key/v2/query/{serverName}` after a
+    /// direct fetch fails.
+    notaries: Vec<String>,
 }
 
 impl RemoteKeyCache {
@@ -155,8 +181,15 @@ impl RemoteKeyCache {
         Self {
             inner: RwLock::new(HashMap::new()),
             last_refetch: RwLock::new(HashMap::new()),
+            documents: RwLock::new(HashMap::new()),
             base_url_override: None,
+            notaries: Vec::new(),
         }
+    }
+
+    /// Notary servers used when a direct `GET /_matrix/key/v2/server` fails.
+    pub fn with_notaries(self, notaries: Vec<String>) -> Self {
+        Self { notaries, ..self }
     }
 
     /// Override the base URL used for all fetches.
@@ -180,6 +213,18 @@ impl RemoteKeyCache {
                 base.trim_end_matches('/')
             ),
             None => format!("https://{}/_matrix/key/v2/server", server_name),
+        }
+    }
+
+    /// `GET /_matrix/key/v2/query/{serverName}` on a trusted notary.
+    fn notary_url(&self, notary: &str, server_name: &str) -> String {
+        let segment = path_segment(server_name);
+        match &self.base_url_override {
+            Some(base) => format!(
+                "{}/_matrix/key/v2/query/{segment}?notary={notary}",
+                base.trim_end_matches('/')
+            ),
+            None => format!("https://{notary}/_matrix/key/v2/query/{segment}"),
         }
     }
 
@@ -283,19 +328,92 @@ impl RemoteKeyCache {
             })
     }
 
-    /// Fetch and verify the key document for `server_name`, then populate the
-    /// cache with its `verify_keys` and `old_verify_keys`.
-    ///
-    /// This is a direct network fetch — it does **not** check the cache first.
-    pub async fn fetch(
-        &self,
-        http: &reqwest::Client,
-        server_name: &str,
-    ) -> Result<(), FetchError> {
-        let url = self.key_url(server_name);
-        let fetched_at = Self::now_ms();
+    /// A cached origin document still inside half its published lifetime and
+    /// valid until at least `minimum_valid_until_ts`.
+    pub async fn fresh_document(&self, server_name: &str, minimum_valid_until_ts: i64) -> Option<serde_json::Value> {
+        let guard = self.documents.read().await;
+        let doc = guard.get(server_name)?;
+        let lifetime = doc.valid_until_ts.saturating_sub(doc.fetched_at);
+        let fresh_until = doc.fetched_at.saturating_add(lifetime / 2);
+        (Self::now_ms() < fresh_until && doc.valid_until_ts >= minimum_valid_until_ts).then(|| doc.value.clone())
+    }
 
-        // 1. Fetch raw JSON (keep it for signature verification).
+    /// The last origin document, including one past its validity, for a notary
+    /// whose refetch failed.
+    pub async fn any_document(&self, server_name: &str) -> Option<serde_json::Value> {
+        self.documents.read().await.get(server_name).map(|doc| doc.value.clone())
+    }
+
+    /// Verify `raw_value` as a server-key document and cache its keys.
+    pub async fn store_verified_document(&self, raw_value: &serde_json::Value) -> Result<(), FetchError> {
+        let fetched_at = Self::now_ms();
+        let response: KeyResponse = serde_json::from_value(raw_value.clone()).map_err(|e| {
+            FetchError::InvalidSignature {
+                server_name: raw_value
+                    .get("server_name")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("unknown")
+                    .to_owned(),
+                reason: format!("malformed key document: {e}"),
+            }
+        })?;
+        self.verify_self_signatures(raw_value, &response)?;
+        let decode = |kid: &str, key: &str| {
+            conduit::hashing::decode_unpadded_base64(key).map_err(|e| FetchError::InvalidSignature {
+                server_name: response.server_name.clone(),
+                reason: format!("base64 decode of verify_key '{kid}': {e}"),
+            })
+        };
+        let mut entries = Vec::new();
+        for (kid, entry) in &response.verify_keys {
+            entries.push((kid.clone(), decode(kid, &entry.key)?, None));
+        }
+        for (kid, entry) in &response.old_verify_keys {
+            if !response.verify_keys.contains_key(kid) {
+                entries.push((kid.clone(), decode(kid, &entry.key)?, Some(entry.expired_ts)));
+            }
+        }
+        for (kid, public, old) in entries {
+            self.insert_key(&response.server_name, &kid, public, response.valid_until_ts, fetched_at, old)
+                .await;
+        }
+        self.documents.write().await.insert(
+            response.server_name.clone(),
+            CachedDocument {
+                value: raw_value.clone(),
+                valid_until_ts: response.valid_until_ts,
+                fetched_at,
+            },
+        );
+        Ok(())
+    }
+
+    /// Fetch and verify the key document for `server_name`, then populate the
+    /// cache. A failed direct fetch falls back to each trusted notary.
+    ///
+    /// This does **not** check the cache first.
+    pub async fn fetch(&self, http: &reqwest::Client, server_name: &str) -> Result<(), FetchError> {
+        match self.fetch_direct(http, server_name).await {
+            Ok(()) => Ok(()),
+            Err(error) if self.notaries.is_empty() => Err(error),
+            Err(error) => {
+                let mut last = error;
+                for notary in &self.notaries {
+                    if notary == server_name {
+                        continue;
+                    }
+                    match self.fetch_via_notary(http, notary, server_name).await {
+                        Ok(()) => return Ok(()),
+                        Err(error) => last = error,
+                    }
+                }
+                Err(last)
+            }
+        }
+    }
+
+    async fn fetch_direct(&self, http: &reqwest::Client, server_name: &str) -> Result<(), FetchError> {
+        let url = self.key_url(server_name);
         let raw_value: serde_json::Value = http
             .get(&url)
             .send()
@@ -310,39 +428,82 @@ impl RemoteKeyCache {
                 server_name: server_name.to_owned(),
                 source: e,
             })?;
+        self.store_verified_document(&raw_value).await
+    }
 
-        // 2. Deserialise into our typed struct (for ergonomic field access).
-        let response: KeyResponse =
-            serde_json::from_value(raw_value.clone()).map_err(|e| {
-                FetchError::InvalidSignature {
-                    server_name: server_name.to_owned(),
-                    reason: format!("malformed key document: {e}"),
-                }
-            })?;
-
-        // 3. Verify self-signature(s).
-        self.verify_self_signatures(&raw_value, &response)?;
-
-        // 4. Store all keys into the cache.
-        let decode = |kid: &str, key: &str| {
-            conduit::hashing::decode_unpadded_base64(key).map_err(|e| FetchError::InvalidSignature {
+    async fn fetch_via_notary(
+        &self,
+        http: &reqwest::Client,
+        notary: &str,
+        server_name: &str,
+    ) -> Result<(), FetchError> {
+        self.fetch_direct(http, notary).await?;
+        let url = self.notary_url(notary, server_name);
+        let response = http.get(&url).send().await.map_err(|e| FetchError::Http {
+            server_name: server_name.to_owned(),
+            source: e,
+        })?;
+        if !response.status().is_success() {
+            return Err(FetchError::InvalidSignature {
                 server_name: server_name.to_owned(),
-                reason: format!("base64 decode of verify_key '{kid}': {e}"),
-            })
-        };
-        let mut entries = Vec::new();
-        for (kid, entry) in &response.verify_keys {
-            entries.push((kid.clone(), decode(kid, &entry.key)?, None));
+                reason: format!("notary {notary} returned {}", response.status()),
+            });
         }
-        for (kid, entry) in &response.old_verify_keys {
-            if !response.verify_keys.contains_key(kid) {
-                entries.push((kid.clone(), decode(kid, &entry.key)?, Some(entry.expired_ts)));
+        let raw: serde_json::Value = response.json().await.map_err(|e| FetchError::Parse {
+            server_name: server_name.to_owned(),
+            source: e,
+        })?;
+        let Some(document) = raw
+            .get("server_keys")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|docs| {
+                docs.iter()
+                    .find(|doc| doc.get("server_name").and_then(serde_json::Value::as_str) == Some(server_name))
+                    .cloned()
+            })
+        else {
+            return Err(FetchError::MissingKey {
+                server_name: server_name.to_owned(),
+                key_id: "*".to_owned(),
+            });
+        };
+        if !self.has_valid_notary_signature(&document, notary).await {
+            return Err(FetchError::InvalidSignature {
+                server_name: server_name.to_owned(),
+                reason: format!("notary {notary} did not sign the key document"),
+            });
+        }
+        self.store_verified_document(&document).await
+    }
+
+    /// The notary's signature covers the document with `signatures` and
+    /// `unsigned` removed, using a key this cache fetched from that notary.
+    async fn has_valid_notary_signature(&self, document: &serde_json::Value, notary: &str) -> bool {
+        let Some(sigs) = document.get("signatures").and_then(|value| value.get(notary)).and_then(|value| value.as_object()) else {
+            return false;
+        };
+        let mut unsigned = document.clone();
+        if let Some(obj) = unsigned.as_object_mut() {
+            obj.remove("signatures");
+            obj.remove("unsigned");
+        }
+        let Ok(bytes) = to_canonical_bytes(&unsigned) else {
+            return false;
+        };
+        let guard = self.inner.read().await;
+        for (key_id, sig) in sigs {
+            let Some(sig_b64) = sig.as_str() else { continue };
+            let Some(entry) = guard.get(&(notary.to_owned(), key_id.clone())) else { continue };
+            let Ok(sig_bytes) = conduit::hashing::decode_unpadded_base64(sig_b64) else { continue };
+            let Ok(pub_array): Result<[u8; 32], _> = entry.public.as_slice().try_into() else { continue };
+            let Ok(sig_array): Result<[u8; 64], _> = sig_bytes.try_into() else { continue };
+            let Ok(verifying_key) = VerifyingKey::from_bytes(&pub_array) else { continue };
+            let signature = Signature::from_bytes(&sig_array);
+            if verifying_key.verify_strict(&bytes, &signature).is_ok() {
+                return true;
             }
         }
-        for (kid, public, old) in entries {
-            self.insert_key(&response.server_name, &kid, public, response.valid_until_ts, fetched_at, old).await;
-        }
-        Ok(())
+        false
     }
 
     /// Verify that the response carries at least one valid self-signature from

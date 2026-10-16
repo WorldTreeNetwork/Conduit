@@ -1603,11 +1603,12 @@ where
             .with_state::<S>(state.clone())
     };
     let routes = authed(federation_router());
-    let key_query = authed(
-        axum::Router::new()
-            .route("/_matrix/key/v2/query", axum::routing::post(super::spec_v119::key_query))
-            .route("/_matrix/key/v2/query/:serverName", axum::routing::get(super::spec_v119::key_query_server)),
-    );
+    // Key query is a notary API: the spec requires no authentication and no
+    // rate limit. Other federation routes stay behind X-Matrix.
+    let key_query = axum::Router::new()
+        .route("/_matrix/key/v2/query", axum::routing::post(super::spec_v119::key_query))
+        .route("/_matrix/key/v2/query/:serverName", axum::routing::get(super::spec_v119::key_query_server))
+        .with_state::<S>(state.clone());
     // `/version` is unauthenticated. Spec: GET /_matrix/federation/v1/version.
     let version = axum::Router::new()
         .route("/_matrix/federation/v1/version", axum::routing::get(federation_version))

@@ -42,10 +42,10 @@
         "total": 36
       },
       "requirement": {
-        "implemented+tested": 21,
+        "implemented+tested": 22,
         "implemented-untested": 0,
         "partial": 13,
-        "missing": 4,
+        "missing": 3,
         "not-applicable": 3,
         "total": 41
       }
@@ -4985,11 +4985,12 @@
         }
       ],
       "tests": [
-        "conduit-server/tests/federation_inbound.rs::federation_directory_openid_and_local_key_query"
+        "conduit-server/tests/federation_inbound.rs::federation_directory_openid_and_local_key_query",
+        "conduit-server/tests/production_notary.rs::notary_signs_remote_keys_and_fetches_through_a_notary"
       ],
-      "tests_total": 1,
+      "tests_total": 2,
       "gap_beads": [],
-      "notes": "Returns a signed key document for each requested server this process can fetch, including itself."
+      "notes": "Unauthenticated. Empty server_keys is an empty array. Each returned document is signed by this server. Offline servers with no cache are omitted."
     },
     {
       "id": "ss.ep.get_matrixkeyv2queryservername",
@@ -5012,11 +5013,12 @@
         }
       ],
       "tests": [
-        "conduit-server/tests/federation_inbound.rs::federation_directory_openid_and_local_key_query"
+        "conduit-server/tests/federation_inbound.rs::federation_directory_openid_and_local_key_query",
+        "conduit-server/tests/production_notary.rs::notary_signs_remote_keys_and_fetches_through_a_notary"
       ],
-      "tests_total": 1,
+      "tests_total": 2,
       "gap_beads": [],
-      "notes": "Returns this server's signed key document when the path names it."
+      "notes": "Unauthenticated. Signs the queried server's document. An unreachable server with no cache is 200 and an empty server_keys array. minimum_valid_until_ts past the cached validity refetches; a failed refetch returns the last document."
     },
     {
       "id": "ss.ep.put_matrixfederationv1sendtxnid",
@@ -8798,15 +8800,21 @@
       "title": "Querying keys through another server (notary)",
       "source": "https://spec.matrix.org/v1.19/server-server-api/#querying-keys-through-another-server",
       "role": "homeserver",
-      "status": "missing",
-      "code": [],
-      "tests": [],
-      "tests_total": 0,
-      "gap_beads": [
-        "conduit-y99.22",
-        "conduit-4w1"
+      "status": "implemented+tested",
+      "code": [
+        {
+          "loc": "conduit-server/src/federation/spec_v119.rs"
+        },
+        {
+          "loc": "conduit-server/src/remote_keys.rs"
+        }
       ],
-      "notes": ""
+      "tests": [
+        "conduit-server/tests/production_notary.rs::notary_signs_remote_keys_and_fetches_through_a_notary"
+      ],
+      "tests_total": 1,
+      "gap_beads": [],
+      "notes": "Inbound notary signs fetched key documents. A direct key fetch that fails is retried via GET /_matrix/key/v2/query/{serverName} on CONDUIT_TRUSTED_KEY_SERVERS, and the document is stored only when that notary's signature verifies."
     },
     {
       "id": "ss.auth.xmatrix",
