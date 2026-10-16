@@ -382,7 +382,7 @@ async fn room_version_1_send_accepts_tuple_events_and_drops_malformed_ones() {
     }
 
     let accepted = "$a4ecee13e2accdadf56c1025:v1.test:8448";
-    let pdus = put_one_pdu(&client, &base, &key, "txn-ok", v1_wire(accepted, "!v1:v1.test")).await;
+    let pdus = put_one_pdu(&client, &base, &key, "v1.test", "txn-ok", v1_wire(accepted, "!v1:v1.test")).await;
     assert_eq!(pdus[accepted]["error"], "signature verification failed", "{pdus}");
     assert!(storage.get_event(accepted).await.unwrap().is_none());
 
@@ -430,9 +430,37 @@ async fn room_version_1_send_accepts_tuple_events_and_drops_malformed_ones() {
         })),
         ("v11-tuples", v1_wire("$tuple:v1.test:8448", "!v11:v1.test")),
     ] {
-        let pdus = put_one_pdu(&client, &base, &key, name, pdu).await;
+        let pdus = put_one_pdu(&client, &base, &key, "v1.test", name, pdu).await;
         assert_eq!(pdus, json!({}), "{name} was not dropped: {pdus}");
     }
+}
+
+/// Room version 2 uses the same tuple event format as version 1.
+#[tokio::test]
+async fn room_version_2_send_accepts_tuple_events() {
+    let (addr, storage, key, _typing, _presence) = spawn_test_server("v2.test").await;
+    let base = format!("http://{addr}");
+    let client = reqwest::Client::new();
+    let create = signed_event(&key, "v2.test", Pdu::new(
+        "!v2:v2.test", "@alice:v2.test", "m.room.create", Some(String::new()),
+        json!({"room_version": "2", "creator": "@alice:v2.test"}),
+        1, vec![], vec![], 1,
+    ));
+    storage.put_event(&create).await.unwrap();
+    storage.set_state_entry(&create.room_id, "m.room.create", "", &create.event_id).await.unwrap();
+
+    let accepted = "$a4ecee13e2accdadf56c1025:v2.test:8448";
+    let mut ok = v1_wire(accepted, "!v2:v2.test");
+    ok["sender"] = json!("@alice:v2.test");
+    let body_ok = put_one_pdu(&client, &base, &key, "v2.test", "txn-v2-ok", ok).await;
+    assert_eq!(body_ok[accepted]["error"], "signature verification failed", "{body_ok}");
+    assert!(storage.get_event(accepted).await.unwrap().is_none());
+
+    let mut strings = v1_wire("$strings:v2.test", "!v2:v2.test");
+    strings["sender"] = json!("@alice:v2.test");
+    strings["auth_events"] = json!(["$create:v2.test"]);
+    let dropped = put_one_pdu(&client, &base, &key, "v2.test", "txn-v2-strings", strings).await;
+    assert_eq!(dropped, json!({}), "{dropped}");
 }
 
 fn v1_wire(event_id: &str, room_id: &str) -> Value {
@@ -455,17 +483,18 @@ async fn put_one_pdu(
     client: &reqwest::Client,
     base: &str,
     key: &conduit::keys::ServerKey,
+    origin: &str,
     txn: &str,
     pdu: Value,
 ) -> Value {
     let body = json!({
-        "origin": "v1.test",
+        "origin": origin,
         "origin_server_ts": 5u64,
         "pdus": [pdu],
         "edus": [],
     });
     let path = format!("/_matrix/federation/v1/send/{txn}");
-    let auth = sign_req("PUT", &path, "v1.test", "v1.test", Some(&body), key);
+    let auth = sign_req("PUT", &path, origin, origin, Some(&body), key);
     let response = client
         .put(format!("{base}{path}"))
         .header("Authorization", auth)

@@ -205,21 +205,25 @@ pub struct SendTransactionBody {
     pub edus: Vec<Value>,
 }
 
-/// Room version used to pick a PDU decoder. Version 1 is selected only when
-/// `content.room_version` is exactly `"1"` on a create, or when the stored
-/// create says version 1. Anything else, including a missing field, stays on
-/// the v3+ decoder.
+/// Room version used to pick a PDU decoder. Versions 1 and 2 are selected
+/// only from an explicit `content.room_version` on a create, or from the
+/// stored create. Anything else, including a missing field, stays on the
+/// v3+ decoder.
 async fn received_room_version(storage: &dyn Storage, pdu: &Value) -> u32 {
     let Some(map) = pdu.as_object() else { return 11 };
     if map.get("type").and_then(Value::as_str) == Some("m.room.create") {
         return match map.get("content").and_then(|c| c.get("room_version")).and_then(Value::as_str) {
             Some("1") => 1,
+            Some("2") => 2,
             _ => 11,
         };
     }
     let Some(room_id) = map.get("room_id").and_then(Value::as_str) else { return 11 };
     match storage.get_state_entry(room_id, "m.room.create", "").await {
-        Ok(Some(create)) if conduit::room_version::version_of_event(&create) == 1 => 1,
+        Ok(Some(create)) => {
+            let version = conduit::room_version::version_of_event(&create);
+            if version == 1 || version == 2 { version } else { 11 }
+        }
         _ => 11,
     }
 }
@@ -285,9 +289,9 @@ pub async fn send_transaction(
     for pdu_val in body.pdus {
         // "Is a valid event, otherwise it is dropped": no result entry, since
         // an invalid PDU's ID cannot be trusted (as Synapse _handle_pdus_in_txn).
-        // Only an explicit room version of "1" (on create, or on the stored
-        // create) selects the v1 tuple format. A missing room_version stays
-        // on the v3+ decoder.
+        // Only an explicit room version of "1" or "2" (on create, or on the
+        // stored create) selects the tuple format. A missing room_version
+        // stays on the v3+ decoder.
         let version = received_room_version(state.storage.as_ref(), &pdu_val).await;
         let decoded = match conduit::wire::decode_pdu_for_version(pdu_val, version, received_ts) {
             Ok(decoded) => decoded,

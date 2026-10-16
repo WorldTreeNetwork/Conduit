@@ -106,10 +106,10 @@
     },
     "rv": {
       "requirement": {
-        "implemented+tested": 32,
+        "implemented+tested": 33,
         "implemented-untested": 0,
         "partial": 6,
-        "missing": 23,
+        "missing": 22,
         "not-applicable": 0,
         "total": 61
       }
@@ -9969,7 +9969,7 @@
       ],
       "tests_total": 2,
       "gap_beads": [],
-      "notes": "PUT /send accepts room version 1 PDUs: required $opaque:domain event id (domain may contain a port colon) and [event_id, {sha256}] auth/prev tuples (limits 10 and 20). Depth may be below 2^63-1, including 2^53. A float in content is not a format error. Version 2 still uses the v3+ decoder. A v11 room still drops an explicit event_id."
+      "notes": "PUT /send accepts room version 1 PDUs: required $opaque:domain event id (domain may contain a port colon) and [event_id, {sha256}] auth/prev tuples (limits 10 and 20). Depth may be below 2^63-1, including 2^53. A float in content is not a format error. A v11 room still drops an explicit event_id."
     },
     {
       "id": "rv.v1.auth-rules",
@@ -10068,14 +10068,21 @@
       "title": "Room version 2: Event format and event IDs",
       "source": "https://spec.matrix.org/v1.19/rooms/v2/#event-format",
       "role": "homeserver",
-      "status": "missing",
-      "code": [],
-      "tests": [],
-      "tests_total": 0,
-      "gap_beads": [
-        "conduit-y99.23"
+      "status": "implemented+tested",
+      "code": [
+        {
+          "loc": "conduit/src/wire.rs"
+        },
+        {
+          "loc": "conduit-server/src/federation/server.rs"
+        }
       ],
-      "notes": "Kernel implements room version 11 only."
+      "tests": [
+        "conduit-server/tests/federation_inbound.rs::room_version_2_send_accepts_tuple_events"
+      ],
+      "tests_total": 1,
+      "gap_beads": [],
+      "notes": "Room version 2 uses the same tuple event format as version 1. PUT /send accepts $opaque:domain ids and [event_id, {sha256}] tuples, and drops a string auth_events list."
     },
     {
       "id": "rv.v2.auth-rules",

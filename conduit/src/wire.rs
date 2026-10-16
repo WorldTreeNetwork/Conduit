@@ -242,14 +242,14 @@ pub fn decode_v1_pdu(value: Value, received_ts: u64) -> Result<DecodedPdu, PduDe
     decode_pdu_for_version(value, 1, received_ts)
 }
 
-/// Room version 1 uses [`decode_v1_pdu`]. Every other version uses the v3+
-/// decoder ([`decode_pdu`]), including version 2.
+/// Room versions 1 and 2 use the tuple event format. Later versions use the
+/// v3+ decoder ([`decode_pdu`]).
 pub fn decode_pdu_for_version(
     value: Value,
     version: u32,
     received_ts: u64,
 ) -> Result<DecodedPdu, PduDecodeError> {
-    if version == 1 {
+    if version == 1 || version == 2 {
         decode_v1_pdu_inner(value, received_ts)
     } else {
         decode_pdu(value, received_ts)
@@ -549,6 +549,7 @@ mod tests {
         let mut strings = v1_event();
         strings["auth_events"] = json!(["$create:v1.test"]);
         assert!(decode_v1_pdu(strings, 0).is_err());
+        assert!(decode_pdu_for_version(v1_event(), 2, 0).is_ok());
         assert!(decode_pdu_for_version(v1_event(), 11, 0).is_err());
     }
 }

@@ -25,9 +25,9 @@ Statuses: **tested** = present and asserted by a named test; **untested** = pres
 | Push Gateway API (homeserver as client) | requirements | 1 | 0 | 0 | 0 | 1 | 2 |
 | Identity Service API (homeserver as consumer) | endpoints | 5 | 0 | 2 | 0 | 16 | 23 |
 | Identity Service API (homeserver as consumer) | requirements | 1 | 0 | 0 | 0 | 0 | 1 |
-| Room versions 1–12 | requirements | 32 | 0 | 6 | 23 | 0 | 61 |
+| Room versions 1–12 | requirements | 33 | 0 | 6 | 22 | 0 | 61 |
 | Appendices | requirements | 10 | 0 | 3 | 4 | 4 | 21 |
-| All |  | 329 | 3 | 56 | 40 | 37 | 465 |
+| All |  | 330 | 3 | 56 | 39 | 37 | 465 |
 ## Gap beads
 
 New beads filed by this inventory (children of `conduit-y99`):
@@ -89,7 +89,7 @@ In-flight / pre-existing beads referenced (not duplicated):
 - `conduit-y99.22.3` - event_auth endpoint (1 row(s))
 - `conduit-y99.22.4` - EDU U+0000 / per-EDU error isolation (2 row(s))
 - `conduit-y99.22.5` - transactions/outbox retention (1 row(s))
-- `conduit-y99.23` - room versions 1-12 (35 row(s))
+- `conduit-y99.23` - room versions 1-12 (34 row(s))
 - `conduit-y99.24` - sync unread_notifications hard-coded to zero (3 row(s))
 - `conduit-y99.25` - profile changes not propagated to member events (0 row(s))
 - `conduit-y99.26` - /messages hides create/initial join (2 row(s))
@@ -545,12 +545,12 @@ In-flight / pre-existing beads referenced (not duplicated):
 
 | ID | Requirement | Status | Code | Tests | Gap | Notes |
 |---|---|---|---|---|---|---|
-| `rv.v1.event-format` | [Room version 1: Event format and event IDs](https://spec.matrix.org/v1.19/rooms/v1/#event-format) | tested | `conduit/src/wire.rs`<br>`conduit-server/src/federation/server.rs` | `wire.rs::room_version_1_accepts_tuples_large_depth_and_floats`<br>`federation_inbound.rs::room_version_1_send_accepts_tuple_events_and_drops_malformed_ones` |  | PUT /send accepts `$opaque:domain` event ids and `[event_id, {sha256}]` tuples. Depth may be below 2^63−1. A float is not a format error. Version 2 stays on the v3+ decoder. A v11 room still drops an explicit event_id. |
+| `rv.v1.event-format` | [Room version 1: Event format and event IDs](https://spec.matrix.org/v1.19/rooms/v1/#event-format) | tested | `conduit/src/wire.rs`<br>`conduit-server/src/federation/server.rs` | `wire.rs::room_version_1_accepts_tuples_large_depth_and_floats`<br>`federation_inbound.rs::room_version_1_send_accepts_tuple_events_and_drops_malformed_ones` |  | PUT /send accepts `$opaque:domain` event ids and `[event_id, {sha256}]` tuples. Depth may be below 2^63−1. A float is not a format error. A v11 room still drops an explicit event_id. |
 | `rv.v1.auth-rules` | [Room version 1: Authorisation rules](https://spec.matrix.org/v1.19/rooms/v1/#authorisation-rules) | tested |  | `conduit/src/auth.rs::room_version_auth_rules_follow_the_spec` | | v1 create requires content.creator. |
 | `rv.v1.redaction` | [Room version 1: Redaction algorithm](https://spec.matrix.org/v1.19/rooms/v1/#redactions) | tested |  | `conduit/src/room_version.rs::v1_redaction_keeps_legacy_keys_and_only_creator` | | v1 redaction keeps creator, origin, membership, and prev_state. |
 | `rv.v1.state-res` | [Room version 1: State resolution algorithm](https://spec.matrix.org/v1.19/rooms/v1/#state-resolution) | tested |  | `conduit/src/room_version.rs::state_resolution_v1_orders_power_levels_by_depth_then_sha1` | | v1 orders power levels by depth then SHA-1 and stops the list on the first auth failure. |
 | `rv.v1.canonical-json` | [Room version 1: Canonical JSON / integer rules](https://spec.matrix.org/v1.19/rooms/v1/#canonical-json) | tested | `conduit/src/auth.rs`<br>`conduit/src/room_version.rs` | `auth.rs::room_version_1_accepts_a_float_power_level` |  | Room version 1 does not strictly enforce canonical JSON: a float power level is truncated and accepted. Version 6 rejects the same event. |
-| `rv.v2.event-format` | [Room version 2: Event format and event IDs](https://spec.matrix.org/v1.19/rooms/v2/#event-format) | missing |  |  | `conduit-y99.23` | Kernel implements room version 11 only. |
+| `rv.v2.event-format` | [Room version 2: Event format and event IDs](https://spec.matrix.org/v1.19/rooms/v2/#event-format) | tested | `conduit/src/wire.rs`<br>`conduit-server/src/federation/server.rs` | `federation_inbound.rs::room_version_2_send_accepts_tuple_events` |  | Room version 2 uses the same tuple event format as version 1. A string `auth_events` list is dropped. |
 | `rv.v2.auth-rules` | [Room version 2: Authorisation rules](https://spec.matrix.org/v1.19/rooms/v2/#authorisation-rules) | missing |  |  | `conduit-y99.23` | Kernel implements room version 11 only. |
 | `rv.v2.redaction` | [Room version 2: Redaction algorithm](https://spec.matrix.org/v1.19/rooms/v2/#redactions) | missing |  |  | `conduit-y99.23` | Kernel implements room version 11 only. |
 | `rv.v2.state-res` | [Room version 2: State resolution algorithm](https://spec.matrix.org/v1.19/rooms/v2/#state-resolution) | tested | `conduit/src/room/state_res.rs` | `state_res.rs::room_version_2_prefers_later_timestamp_over_greater_depth` |  | State resolution v2: a later origin_server_ts beats a greater depth. Version 1 keeps the deeper event. |

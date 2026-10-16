@@ -105,7 +105,7 @@ pub async fn verify_received(
 ) -> Result<Received, VerifyError> {
     let keys = eligible_keys(remote_keys, http, &pdu).await;
     let mut received = check_received(pdu, lookup(keys))?;
-    // Room version 1 keeps the PDU's event id. Later versions derive it.
+    // Room versions 1 and 2 keep the PDU's event id. Later versions derive it.
     if let Some(event_id) = explicit_event_id {
         received.event_id = event_id;
     }
