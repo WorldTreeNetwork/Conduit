@@ -1580,6 +1580,28 @@ mod tests {
         assert!(check_auth(&clear, &creators).is_ok(), "v12 creator power is infinite without a users entry");
     }
 
+    /// Room version 1 must not strictly enforce canonical JSON: a float power
+    /// level is truncated and accepted. Version 6 rejects the same event.
+    #[test]
+    fn room_version_1_accepts_a_float_power_level() {
+        let alice = "@alice:example.com";
+        let room = "!room:example.com";
+        let mut v1 = HashMap::new();
+        apply_state_event(&mut v1, &create_with("1", alice, room, json!({ "creator": alice })));
+        apply_state_event(&mut v1, &make_member_event("$join", alice, alice, room, "join"));
+        let levels = make_power_levels_event(
+            "$pl",
+            alice,
+            room,
+            json!({ "users": { alice: 100 }, "events_default": 50.9 }),
+        );
+        assert!(check_auth(&levels, &v1).is_ok(), "v1 does not reject a float power level");
+        let mut v6 = HashMap::new();
+        apply_state_event(&mut v6, &create_with("6", alice, room, json!({ "creator": alice })));
+        apply_state_event(&mut v6, &make_member_event("$join", alice, alice, room, "join"));
+        assert!(check_auth(&levels, &v6).is_err(), "v6 rejects a float power level");
+    }
+
     fn v5_state_with_join(alice: &str, room: &str) -> StateMap<Event> {
         let mut state = HashMap::new();
         apply_state_event(&mut state, &create_with("5", alice, room, json!({ "creator": alice })));
