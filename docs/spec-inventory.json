@@ -88,9 +88,9 @@
     },
     "is": {
       "endpoint": {
-        "implemented+tested": 5,
+        "implemented+tested": 7,
         "implemented-untested": 0,
-        "partial": 2,
+        "partial": 0,
         "missing": 0,
         "not-applicable": 16,
         "total": 23
