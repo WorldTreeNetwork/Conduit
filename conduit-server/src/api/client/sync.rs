@@ -1368,10 +1368,11 @@ async fn promote_referenced_state(
     if candidates.is_empty() {
         return Ok(());
     }
-    let version12 = events
+    let version = events
         .iter()
         .find(|event| event.event_type == "m.room.create")
-        .is_some_and(|event| conduit::room_version::version_of_content(&event.content) >= 12);
+        .map(|event| conduit::room_version::version_of_content(&event.content))
+        .unwrap_or(11);
     let chain: HashMap<String, conduit::event::Event> =
         events.iter().map(|event| (event.event_id.clone(), event.clone())).collect();
     for event in candidates {
@@ -1390,11 +1391,7 @@ async fn promote_referenced_state(
         }
         fork.insert(key.clone(), event.clone());
         let sets = vec![state.clone(), fork];
-        let resolved = if version12 {
-            conduit::room::state_res::resolve_v12(sets, chain.clone())
-        } else {
-            conduit::room::state_res::resolve(sets, chain.clone())
-        };
+        let resolved = conduit::room::state_res::resolve_version(version, sets, chain.clone());
         if let Ok(next) = resolved {
             if next.get(&key).is_some_and(|winner| winner.event_id == event.event_id) {
                 *state = next;

@@ -9012,17 +9012,28 @@
       "code": [
         {
           "loc": "conduit/src/room/state_res.rs"
+        },
+        {
+          "loc": "conduit/src/room/mod.rs"
+        },
+        {
+          "loc": "conduit-server/src/federation/pipeline.rs"
+        },
+        {
+          "loc": "conduit-server/src/api/client/sync.rs"
         }
       ],
       "tests": [
-        "conduit/src/room/state_res.rs (unit tests)"
+        "conduit/src/room/state_res.rs::room_version_2_prefers_later_timestamp_over_greater_depth",
+        "conduit/src/room/state_res.rs::room_version_3_prefers_later_timestamp_over_greater_depth",
+        "conduit-server/tests/production_sync.rs::sync_state_follows_resolution_not_arrival_order"
       ],
-      "tests_total": 1,
+      "tests_total": 3,
       "gap_beads": [
         "conduit-y99.23",
         "conduit-s6m"
       ],
-      "notes": "State res v2 only."
+      "notes": "Version 1 uses state resolution v1 (greater depth). Versions 2-11 use v2 (later origin_server_ts). Version 12 uses v12, including a fork of two state sets. Strict auth-chain recursion and per-event history visibility remain conduit-s6m."
     },
     {
       "id": "ss.backfill",

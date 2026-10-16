@@ -353,12 +353,8 @@ pub async fn process_received(
             auth_chain.extend(build_auth_chain(storage, &referenced).await?);
             auth_chain.insert(referenced.event_id.clone(), referenced);
         }
-        let resolve = if state_sets.len() > 2 && room_version >= 12 {
-            state_res::resolve_v12
-        } else {
-            state_res::resolve
-        };
-        resolve(state_sets, auth_chain).map_err(|error| PipelineError::StateRes(error.to_string()))?
+        state_res::resolve_version(room_version, state_sets, auth_chain)
+            .map_err(|error| PipelineError::StateRes(error.to_string()))?
     };
 
     // --- Auth check against resolved state ---------------------------------

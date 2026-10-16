@@ -502,6 +502,25 @@ pub fn resolve_v12(
     resolve_inner(state_sets, auth_chain, true)
 }
 
+/// Room version 1 uses the v1 algorithm. Versions 2–11 use state resolution
+/// v2. Version 12 uses the v12 iterative-auth variant, including a fork of
+/// two state sets. A missing version is not passed here; callers use 11.
+pub fn resolve_version(
+    version: u32,
+    state_sets: Vec<StateMap<Event>>,
+    auth_chain: HashMap<String, Event>,
+) -> Result<StateMap<Event>, StateResError> {
+    if version == 1 {
+        Ok(crate::room_version::resolve_v1(&state_sets, |event, state| {
+            crate::auth::check_auth(event, state).is_ok()
+        }))
+    } else if version >= 12 {
+        resolve_v12(state_sets, auth_chain)
+    } else {
+        resolve(state_sets, auth_chain)
+    }
+}
+
 fn resolve_inner(
     state_sets: Vec<StateMap<Event>>,
     auth_chain: HashMap<String, Event>,
@@ -749,10 +768,11 @@ pub fn snapshot_from_arrival(events_in_stream_order: &[Event]) -> (StateMap<Even
         return (state, won);
     }
 
-    let version12 = events_in_stream_order
+    let version = events_in_stream_order
         .iter()
         .find(|event| event.event_type == "m.room.create")
-        .is_some_and(|event| crate::room_version::version_of_content(&event.content) >= 12);
+        .map(|event| crate::room_version::version_of_content(&event.content))
+        .unwrap_or(11);
     let mut state = StateMap::new();
     let mut won = HashSet::new();
     let mut chain: HashMap<String, Event> = HashMap::new();
@@ -767,11 +787,7 @@ pub fn snapshot_from_arrival(events_in_stream_order: &[Event]) -> (StateMap<Even
         } else {
             vec![state.clone(), incoming]
         };
-        let resolved = if version12 {
-            resolve_v12(sets, chain.clone())
-        } else {
-            resolve(sets, chain.clone())
-        };
+        let resolved = resolve_version(version, sets, chain.clone());
         match resolved {
             Ok(next) => {
                 let incoming_wins = next.get(&key).is_some_and(|winner| winner.event_id == event.event_id);
@@ -1646,6 +1662,20 @@ mod tests {
         assert_eq!(v1.get(&key).map(|event| event.event_id.as_str()), Some("$deep-early"));
 
         let (snapshot, _) = snapshot_from_arrival(&[
+            create.clone(),
+            alice_join.clone(),
+            rules.clone(),
+            shallow_late.clone(),
+            deep_early.clone(),
+        ]);
+        assert_eq!(
+            snapshot.get(&key).map(|event| event.event_id.as_str()),
+            Some("$shallow-late"),
+            "a version 2 room must not let the later, deeper arrival replace the timestamp winner"
+        );
+
+        create.content = json!({"creator": alice, "room_version": "1"});
+        let (v1_snapshot, _) = snapshot_from_arrival(&[
             create,
             alice_join,
             rules,
@@ -1653,9 +1683,9 @@ mod tests {
             deep_early,
         ]);
         assert_eq!(
-            snapshot.get(&key).map(|event| event.event_id.as_str()),
-            Some("$shallow-late"),
-            "a version 2 room must not let the later, deeper arrival replace the timestamp winner"
+            v1_snapshot.get(&key).map(|event| event.event_id.as_str()),
+            Some("$deep-early"),
+            "room version 1 keeps the deeper event, not the later timestamp"
         );
     }
 

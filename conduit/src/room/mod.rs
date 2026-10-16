@@ -382,7 +382,14 @@ pub fn current_state(
     state_sets: Vec<StateMap<Event>>,
     auth_chain: HashMap<String, Event>,
 ) -> Result<StateMap<Event>, state_res::StateResError> {
-    state_res::resolve(state_sets, auth_chain)
+    let version = state_sets
+        .iter()
+        .find_map(|set| {
+            set.get(&("m.room.create".to_owned(), String::new()))
+                .map(|event| crate::room_version::version_of_content(&event.content))
+        })
+        .unwrap_or(11);
+    state_res::resolve_version(version, state_sets, auth_chain)
 }
 
 // ---------------------------------------------------------------------------
