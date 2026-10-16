@@ -17,7 +17,7 @@ Statuses: **tested** = present and asserted by a named test; **untested** = pres
 |---|---|---:|---:|---:|---:|---:|---:|
 | Client-Server API | endpoints | 151 | 0 | 12 | 0 | 1 | 164 |
 | Client-Server API | requirements | 67 | 0 | 10 | 0 | 9 | 86 |
-| Server-Server API | endpoints | 20 | 3 | 8 | 4 | 1 | 36 |
+| Server-Server API | endpoints | 22 | 3 | 6 | 4 | 1 | 36 |
 | Server-Server API | requirements | 14 | 0 | 15 | 9 | 3 | 41 |
 | Application Service API | endpoints | 11 | 0 | 0 | 0 | 0 | 11 |
 | Application Service API | requirements | 16 | 0 | 0 | 0 | 2 | 18 |
@@ -27,7 +27,7 @@ Statuses: **tested** = present and asserted by a named test; **untested** = pres
 | Identity Service API (homeserver as consumer) | requirements | 1 | 0 | 0 | 0 | 0 | 1 |
 | Room versions 1–12 | requirements | 61 | 0 | 0 | 0 | 0 | 61 |
 | Appendices | requirements | 10 | 0 | 3 | 4 | 4 | 21 |
-| All |  | 358 | 3 | 50 | 17 | 37 | 465 |
+| All |  | 360 | 3 | 48 | 17 | 37 | 465 |
 ## Gap beads
 
 New beads filed by this inventory (children of `conduit-y99`):
@@ -80,7 +80,7 @@ In-flight / pre-existing beads referenced (not duplicated):
 - `conduit-y99.19.4` - prune redacted content from storage (2 row(s))
 - `conduit-y99.20.1` - remote publicRooms + POST filters over federation (6 row(s))
 - `conduit-y99.20.2` - federated knocking (4 row(s))
-- `conduit-y99.21.1` - federation media multipart/mixed (4 row(s))
+- `conduit-y99.21.1` - federation media multipart/mixed (2 row(s))
 - `conduit-y99.21.2` - animated thumbnails / non-UTF-8 previews (2 row(s))
 - `conduit-y99.21.3` - media blob hygiene (1 row(s))
 - `conduit-y99.22` - federation API completeness (20 row(s))
@@ -397,8 +397,8 @@ In-flight / pre-existing beads referenced (not duplicated):
 | GET | [`/_matrix/federation/v1/user/devices/{userId}`](https://spec.matrix.org/v1.19/server-server-api/#get_matrixfederationv1userdevicesuserid) | tested |  | `conduit-server/tests/federation_inbound.rs::federation_directory_openid_and_local_key_query` | | Local users return device_id and stream_id. Remote users are not found. |
 | POST | [`/_matrix/federation/v1/user/keys/claim`](https://spec.matrix.org/v1.19/server-server-api/#post_matrixfederationv1userkeysclaim) | tested |  | `conduit-server/tests/federation_inbound.rs::federation_directory_openid_and_local_key_query` | | Claims a local one-time key, else the fallback. An empty claim is an empty object for that device. |
 | POST | [`/_matrix/federation/v1/user/keys/query`](https://spec.matrix.org/v1.19/server-server-api/#post_matrixfederationv1userkeysquery) | tested |  | `conduit-server/tests/federation_inbound.rs::federation_directory_openid_and_local_key_query` | | Returns stored device keys for local users named in device_keys. |
-| GET | [`/_matrix/federation/v1/media/download/{mediaId}`](https://spec.matrix.org/v1.19/server-server-api/#get_matrixfederationv1mediadownloadmediaid) | partial | `conduit-server/src/federation/server.rs:1082` |  | `conduit-y99.21.1` | Must answer multipart/mixed. |
-| GET | [`/_matrix/federation/v1/media/thumbnail/{mediaId}`](https://spec.matrix.org/v1.19/server-server-api/#get_matrixfederationv1mediathumbnailmediaid) | partial | `conduit-server/src/federation/server.rs:1083` |  | `conduit-y99.21.1` | Must answer multipart/mixed; untested. |
+| GET | [`/_matrix/federation/v1/media/download/{mediaId}`](https://spec.matrix.org/v1.19/server-server-api/#get_matrixfederationv1mediadownloadmediaid) | tested | `conduit-server/src/api/client/media.rs` | `media.rs::federation_media_download_and_thumbnail_are_multipart_mixed` |  | 200 is multipart/mixed: an application/json {} part, then the bytes with Content-Type and Content-Disposition. |
+| GET | [`/_matrix/federation/v1/media/thumbnail/{mediaId}`](https://spec.matrix.org/v1.19/server-server-api/#get_matrixfederationv1mediathumbnailmediaid) | tested | `conduit-server/src/api/client/media.rs` | `media.rs::federation_media_download_and_thumbnail_are_multipart_mixed` |  | 200 is multipart/mixed: an application/json {} part, then the thumbnail bytes with an inline Content-Disposition. |
 | POST | [`/_matrix/policy/v1/sign`](https://spec.matrix.org/v1.19/server-server-api/#post_matrixpolicyv1sign) | n/a |  |  |  | *policy-server-only* Served only by Policy Servers. Homeserver-side obligation (calling it and validating signatures) is conduit-y99.45. |
 
 ### Modules and behavioural requirements

@@ -16,6 +16,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use axum::{
     Router,
     body::Body,
+    extract::{Path, Query, State},
     http::{Request, StatusCode, header},
     routing::{get, post},
 };
@@ -298,6 +299,62 @@ async fn download_round_trip() {
     assert_eq!(resp.status(), StatusCode::OK);
     let got = raw_body(resp).await;
     assert_eq!(got, data);
+}
+
+#[tokio::test]
+async fn federation_media_download_and_thumbnail_are_multipart_mixed() {
+    let db = TempDb::new().await;
+    let tmp = TempDir::new().unwrap();
+    let state = make_test_state(&db, &tmp).await;
+    let app = build_router(state.clone());
+    let token = register_user(&app, "fedmedia").await;
+    let png = minimal_png();
+    let body = upload_ok(&app, &token, &png, "image/png").await;
+    let media_id = body["content_uri"]
+        .as_str()
+        .unwrap()
+        .strip_prefix("mxc://localhost/")
+        .unwrap()
+        .to_owned();
+
+    let download = media_api::federation_download(
+        State(state.clone()),
+        Path(media_id.clone()),
+        Query(HashMap::new()),
+    )
+    .await;
+    assert_eq!(download.status(), StatusCode::OK);
+    let content_type = download.headers()[header::CONTENT_TYPE].to_str().unwrap().to_owned();
+    assert!(content_type.starts_with("multipart/mixed;"), "{content_type}");
+    let bytes = raw_body(download).await;
+    let parts = media_api::parse_multipart_mixed(&content_type, &bytes).expect("download multipart");
+    assert_eq!(parts.len(), 2, "federation download has a metadata part and a media part");
+    assert_eq!(parts[0].header("content-type"), Some("application/json"));
+    assert_eq!(parts[0].body, b"{}");
+    assert_eq!(parts[1].header("content-type"), Some("image/png"));
+    assert!(parts[1].header("content-disposition").is_some());
+    assert_eq!(parts[1].body, png);
+
+    let thumbnail = media_api::federation_thumbnail(
+        State(state),
+        Path(media_id),
+        Query(HashMap::from([
+            ("width".into(), "8".into()),
+            ("height".into(), "8".into()),
+            ("method".into(), "scale".into()),
+        ])),
+    )
+    .await;
+    assert_eq!(thumbnail.status(), StatusCode::OK);
+    let content_type = thumbnail.headers()[header::CONTENT_TYPE].to_str().unwrap().to_owned();
+    assert!(content_type.starts_with("multipart/mixed;"), "{content_type}");
+    let bytes = raw_body(thumbnail).await;
+    let parts = media_api::parse_multipart_mixed(&content_type, &bytes).expect("thumbnail multipart");
+    assert_eq!(parts.len(), 2);
+    assert_eq!(parts[0].body, b"{}");
+    assert!(parts[1].header("content-type").unwrap().starts_with("image/"));
+    assert!(parts[1].header("content-disposition").unwrap().starts_with("inline;"));
+    assert!(!parts[1].body.is_empty());
 }
 
 // ---------------------------------------------------------------------------

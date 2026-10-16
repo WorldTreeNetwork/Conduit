@@ -34,9 +34,9 @@
     },
     "ss": {
       "endpoint": {
-        "implemented+tested": 20,
+        "implemented+tested": 22,
         "implemented-untested": 3,
-        "partial": 8,
+        "partial": 6,
         "missing": 4,
         "not-applicable": 1,
         "total": 36
@@ -5817,7 +5817,7 @@
       "rate_limited": "Yes",
       "deprecated": false,
       "role": "homeserver",
-      "status": "partial",
+      "status": "implemented+tested",
       "code": [
         {
           "loc": "conduit-server/src/federation/server.rs:1082",
@@ -5825,12 +5825,12 @@
           "kind": "exact"
         }
       ],
-      "tests": [],
-      "tests_total": 0,
-      "gap_beads": [
-        "conduit-y99.21.1"
+      "tests": [
+        "conduit-server/tests/media.rs::federation_media_download_and_thumbnail_are_multipart_mixed"
       ],
-      "notes": "Must answer multipart/mixed."
+      "tests_total": 1,
+      "gap_beads": [],
+      "notes": "200 is multipart/mixed: an application/json {} part, then the bytes with Content-Type and Content-Disposition. Pending local media uses timeout_ms."
     },
     {
       "id": "ss.ep.get_matrixfederationv1mediathumbnailmediaid",
@@ -5844,7 +5844,7 @@
       "rate_limited": "Yes",
       "deprecated": false,
       "role": "homeserver",
-      "status": "partial",
+      "status": "implemented+tested",
       "code": [
         {
           "loc": "conduit-server/src/federation/server.rs:1083",
@@ -5852,12 +5852,12 @@
           "kind": "exact"
         }
       ],
-      "tests": [],
-      "tests_total": 0,
-      "gap_beads": [
-        "conduit-y99.21.1"
+      "tests": [
+        "conduit-server/tests/media.rs::federation_media_download_and_thumbnail_are_multipart_mixed"
       ],
-      "notes": "Must answer multipart/mixed; untested."
+      "tests_total": 1,
+      "gap_beads": [],
+      "notes": "200 is multipart/mixed: an application/json {} part, then the thumbnail bytes with an inline Content-Disposition."
     },
     {
       "id": "ss.ep.post_matrixpolicyv1sign",

@@ -997,30 +997,77 @@ pub async fn thumbnail_authed<S: MediaState + AuthState>(
 // Federation media handlers (mounted by the federation router)
 // ---------------------------------------------------------------------------
 
+/// Federation media is `multipart/mixed` with an empty JSON metadata part
+/// and the bytes. <https://spec.matrix.org/v1.19/server-server-api/#content-repository>
+pub fn multipart_mixed_media(content_type: &str, disposition: &str, bytes: Vec<u8>) -> Response {
+    let mut boundary = generate_media_id();
+    loop {
+        let marker = format!("--{boundary}");
+        if !bytes.windows(marker.len()).any(|window| window == marker.as_bytes()) {
+            break;
+        }
+        boundary = generate_media_id();
+    }
+    let mut body = Vec::new();
+    body.extend_from_slice(format!("--{boundary}\r\nContent-Type: application/json\r\n\r\n{{}}\r\n").as_bytes());
+    body.extend_from_slice(
+        format!("--{boundary}\r\nContent-Type: {content_type}\r\nContent-Disposition: {disposition}\r\n\r\n").as_bytes(),
+    );
+    body.extend_from_slice(&bytes);
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+    let mut headers = HeaderMap::new();
+    if let Ok(value) = HeaderValue::from_str(&format!("multipart/mixed; boundary={boundary}")) {
+        headers.insert(header::CONTENT_TYPE, value);
+    }
+    (headers, Body::from(body)).into_response()
+}
+
+async fn wrap_federation_media(response: Response) -> Response {
+    if response.status() != StatusCode::OK {
+        return response;
+    }
+    let content_type = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("application/octet-stream")
+        .to_owned();
+    let disposition = response
+        .headers()
+        .get(header::CONTENT_DISPOSITION)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("attachment")
+        .to_owned();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap_or_default()
+        .to_vec();
+    multipart_mixed_media(&content_type, &disposition, bytes)
+}
+
 pub async fn federation_download<S: MediaState>(
     State(state): State<S>,
     Path(media_id): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
 ) -> Response {
     let server_name = state.server_name().to_owned();
-    if !valid_media_id(&media_id) {
-        return not_found();
-    }
-    match state.storage().get_media(&media_id, &server_name).await {
-        Ok(Some(meta)) => {
-            let bytes = match state.blob_store().get(&meta.storage_path).await {
-                Ok(b) => b,
-                Err(e) => return MatrixError::unknown(format!("blob read: {e}")).into_response(),
-            };
-            let content_type = meta
-                .content_type
-                .as_deref()
-                .unwrap_or("application/octet-stream");
-            let headers = download_headers(content_type, meta.upload_name.as_deref(), bytes.len());
-            (headers, Body::from(bytes)).into_response()
-        }
-        Ok(None) => not_found(),
-        Err(e) => MatrixError::unknown(e.to_string()).into_response(),
-    }
+    let mut opts = match download_options(&params, false) {
+        Ok(opts) => opts,
+        Err(resp) => return resp,
+    };
+    opts.allow_remote = false;
+    let meta = match resolve_media(&state, &server_name, &media_id, opts).await {
+        Ok(meta) => meta,
+        Err(resp) => return resp,
+    };
+    let bytes = match state.blob_store().get(&meta.storage_path).await {
+        Ok(bytes) => bytes,
+        Err(e) => return MatrixError::unknown(format!("blob read: {e}")).into_response(),
+    };
+    let content_type = meta.content_type.as_deref().unwrap_or("application/octet-stream");
+    let kind = if is_inline_safe(content_type) { "inline" } else { "attachment" };
+    let disposition = content_disposition(kind, meta.upload_name.as_deref());
+    multipart_mixed_media(content_type, &disposition, bytes)
 }
 
 pub async fn federation_thumbnail<S: MediaState>(
@@ -1032,7 +1079,7 @@ pub async fn federation_thumbnail<S: MediaState>(
     match thumbnail_options(&params, false) {
         Ok((req, opts)) => {
             let opts = FetchOptions { allow_remote: false, ..opts };
-            serve_thumbnail(&state, &server_name, &media_id, req, opts).await
+            wrap_federation_media(serve_thumbnail(&state, &server_name, &media_id, req, opts).await).await
         }
         Err(resp) => resp,
     }
