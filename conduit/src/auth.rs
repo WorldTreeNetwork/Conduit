@@ -1786,6 +1786,76 @@ mod tests {
         );
     }
 
+    /// Room version 3 authorises a redaction like any other event. The redact
+    /// level is not an auth check. An `events` requirement still is. Version 2
+    /// still rejects the same cross-domain redaction.
+    #[test]
+    fn room_version_3_redaction_auth_ignores_the_redact_level() {
+        let alice = "@alice:example.com";
+        let bob = "@bob:example.com";
+        let room = "!room:example.com";
+        let cross = redaction("$redact:elsewhere.test", bob, room, "$target:example.com");
+
+        let mut v3 = HashMap::new();
+        apply_state_event(&mut v3, &create_with("3", alice, room, json!({ "creator": alice })));
+        apply_state_event(&mut v3, &make_member_event("$aj", alice, alice, room, "join"));
+        apply_state_event(&mut v3, &make_member_event("$bj", alice, bob, room, "join"));
+        apply_state_event(
+            &mut v3,
+            &make_power_levels_event(
+                "$pl",
+                alice,
+                room,
+                json!({ "users": { alice: 100, bob: 0 }, "redact": 100, "events_default": 0 }),
+            ),
+        );
+        assert!(
+            check_auth(&cross, &v3).is_ok(),
+            "v3 allows a redaction below the redact level"
+        );
+
+        let mut gated = v3.clone();
+        apply_state_event(
+            &mut gated,
+            &make_power_levels_event(
+                "$pl2",
+                alice,
+                room,
+                json!({
+                    "users": { alice: 100, bob: 0 },
+                    "redact": 0,
+                    "events": { "m.room.redaction": 50 },
+                    "events_default": 0
+                }),
+            ),
+        );
+        assert!(
+            matches!(
+                check_auth(&cross, &gated),
+                Err(AuthError::InsufficientPowerLevel { .. })
+            ),
+            "v3 still enforces the events power level for a redaction"
+        );
+
+        let mut v2 = HashMap::new();
+        apply_state_event(&mut v2, &create_with("2", alice, room, json!({ "creator": alice })));
+        apply_state_event(&mut v2, &make_member_event("$aj", alice, alice, room, "join"));
+        apply_state_event(&mut v2, &make_member_event("$bj", alice, bob, room, "join"));
+        apply_state_event(
+            &mut v2,
+            &make_power_levels_event(
+                "$pl",
+                alice,
+                room,
+                json!({ "users": { alice: 100, bob: 0 }, "redact": 100, "events_default": 0 }),
+            ),
+        );
+        assert!(
+            matches!(check_auth(&cross, &v2), Err(AuthError::RedactionDenied)),
+            "v2 still rejects that redaction below the redact level"
+        );
+    }
+
     fn redaction(event_id: &str, sender: &str, room: &str, target: &str) -> Event {
         let mut event = make_event(event_id, "m.room.redaction", sender, room, None, json!({}), vec![]);
         event.pdu.extensions.insert("redacts".into(), json!(target));
