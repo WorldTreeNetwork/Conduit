@@ -106,10 +106,10 @@
     },
     "rv": {
       "requirement": {
-        "implemented+tested": 49,
+        "implemented+tested": 50,
         "implemented-untested": 0,
         "partial": 6,
-        "missing": 6,
+        "missing": 5,
         "not-applicable": 0,
         "total": 61
       }
@@ -10768,14 +10768,18 @@
       "title": "Room version 8: State resolution algorithm",
       "source": "https://spec.matrix.org/v1.19/rooms/v8/#state-resolution",
       "role": "homeserver",
-      "status": "missing",
-      "code": [],
-      "tests": [],
-      "tests_total": 0,
-      "gap_beads": [
-        "conduit-y99.23"
+      "status": "implemented+tested",
+      "code": [
+        {
+          "loc": "conduit/src/room/state_res.rs"
+        }
       ],
-      "notes": "Kernel implements room version 11 only."
+      "tests": [
+        "conduit/src/room/state_res.rs::room_version_8_prefers_later_timestamp_over_greater_depth"
+      ],
+      "tests_total": 1,
+      "gap_beads": [],
+      "notes": "Room version 8 keeps state resolution v2. A later origin_server_ts beats a greater depth. Version 1 keeps the deeper event."
     },
     {
       "id": "rv.v8.canonical-json",
