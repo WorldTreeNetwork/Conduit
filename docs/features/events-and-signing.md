@@ -76,8 +76,11 @@ field omission, and signed events with mismatched content hashes. The
 signature constant was generated with OpenSSL from the RFC 8032 test-1
 seed; it is independent of Conduit's signing code.
 
-The local `Event` model still includes `event_id`, and currently drops
-unknown top-level PDU fields during deserialization. The distinct PDU
-wire model and preservation of unknown fields remain tracked in
-`conduit-embed-pdu`. These cryptographic tests do not establish complete
-federation or Matrix protocol compliance.
+`Pdu` is the federation wire type: it has no `event_id` and keeps every
+other top-level key in `extensions`. `Event` is the local
+`{event_id, pdu, unsigned}` view. A received PDU is stored as canonical
+JSON and served again as those same bytes.
+`production_pdu.rs::received_pdu_is_served_as_the_same_canonical_bytes`
+fails if a field is dropped or `event_id` is injected. These
+cryptographic tests do not establish complete federation or Matrix
+protocol compliance.

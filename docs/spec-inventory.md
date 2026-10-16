@@ -18,7 +18,7 @@ Statuses: **tested** = present and asserted by a named test; **untested** = pres
 | Client-Server API | endpoints | 163 | 0 | 0 | 0 | 1 | 164 |
 | Client-Server API | requirements | 77 | 0 | 0 | 0 | 9 | 86 |
 | Server-Server API | endpoints | 34 | 0 | 1 | 0 | 1 | 36 |
-| Server-Server API | requirements | 30 | 0 | 8 | 0 | 3 | 41 |
+| Server-Server API | requirements | 32 | 0 | 6 | 0 | 3 | 41 |
 | Application Service API | endpoints | 11 | 0 | 0 | 0 | 0 | 11 |
 | Application Service API | requirements | 16 | 0 | 0 | 0 | 2 | 18 |
 | Push Gateway API (homeserver as client) | endpoints | 1 | 0 | 0 | 0 | 0 | 1 |
@@ -27,7 +27,7 @@ Statuses: **tested** = present and asserted by a named test; **untested** = pres
 | Identity Service API (homeserver as consumer) | requirements | 1 | 0 | 0 | 0 | 0 | 1 |
 | Room versions 1–12 | requirements | 61 | 0 | 0 | 0 | 0 | 61 |
 | Appendices | requirements | 10 | 0 | 3 | 4 | 4 | 21 |
-| All |  | 412 | 0 | 12 | 4 | 37 | 465 |
+| All |  | 414 | 0 | 10 | 4 | 37 | 465 |
 ## Gap beads
 
 New beads filed by this inventory (children of `conduit-y99`):
@@ -37,7 +37,7 @@ New beads filed by this inventory (children of `conduit-y99`):
 - `conduit-y99.30` - Push rule evaluation, predefined rules, GET /pushrules/global/, /notifications and thread counts (10 row(s))
 - `conduit-y99.31` - Push gateway delivery conformance (/notify payload, rejected pushkeys, retries) (4 row(s))
 - `conduit-y99.32` - Federation EDUs: m.typing, m.receipt, m.presence, m.signing_key_update in+out (1 row(s))
-- `conduit-y99.33` - PDU receipt checks: rejection, soft failure, hash-mismatch redaction, size limits (3 row(s))
+- `conduit-y99.33` - PDU receipt checks: rejection, soft failure, hash-mismatch redaction, size limits (1 row(s))
 - `conduit-y99.34` - Application service transaction push conformance (Bearer hs_token, durable retry, interest rules, ephemeral) (0 row(s))
 - `conduit-y99.35` - Application service CS-API extensions (identity assertion, ts massaging, m.login.application_service login, rate-limit exemption) (0 row(s))
 - `conduit-y99.36` - Third-party invites and identity-server integration (lookup, store-invite, onbind, 3PID bind/unbind) (28 row(s))
@@ -59,8 +59,8 @@ In-flight / pre-existing beads referenced (not duplicated):
 - `conduit-7pk` - outbound presence EDU (0 row(s))
 - `conduit-c3u` - AS query negative-result cache (1 row(s))
 - `conduit-embed-auth` - membership/visibility on reads (kernel) (0 row(s))
-- `conduit-embed-pdu` - PDU wire model (in flight) (8 row(s))
-- `conduit-g12` - recursive auth-event verification (1 row(s))
+- `conduit-embed-pdu` - PDU wire model (in flight) (4 row(s))
+- `conduit-g12` - recursive auth-event verification (0 row(s))
 - `conduit-jt5` - restricted join rule evaluation (2 row(s))
 - `conduit-kqy` - federation knock (rv7+) (1 row(s))
 - `conduit-nq5` - keys/query merges cross-signing signatures (1 row(s))
@@ -414,7 +414,7 @@ In-flight / pre-existing beads referenced (not duplicated):
 | `ss.auth.xmatrix` | [Request authentication (X-Matrix, destination, signed URI)](https://spec.matrix.org/v1.19/server-server-api/#authentication) | tested | `conduit-server/src/federation/auth.rs`<br>`conduit-server/src/federation/middleware.rs` | `federation_inbound.rs::standard_v2_routes_verify_the_full_signed_uri`<br>`federation.rs::xmatrix_signature_roundtrip` |  |  |
 | `ss.auth.client-tls` | [Client TLS certificates](https://spec.matrix.org/v1.19/server-server-api/#client-tls-certificates) | n/a |  |  |  | *informative* Spec: requests are authenticated at the HTTP layer; client certificates are not used. |
 | `ss.transactions` | [Transactions (≤50 PDUs/≤100 EDUs, idempotent txnId, per-PDU results)](https://spec.matrix.org/v1.19/server-server-api/#transactions) | partial | `conduit-server/src/federation/server.rs`<br>`conduit-server/src/federation/queue.rs` | `federation_inbound.rs::send_transaction_persists_pdus`<br>`federation.rs::queue_retries_on_failure` | `conduit-y99.22.4` `conduit-y99.22.5` `conduit-y99.33` |  |
-| `ss.pdu.checks` | [Checks performed on receipt of a PDU (format, signatures, hashes, auth events, state-before, current state)](https://spec.matrix.org/v1.19/server-server-api/#checks-performed-on-receipt-of-a-pdu) | partial | `conduit-server/src/federation/pipeline.rs` | `federation_inbound.rs::inbound_signature_verified_or_rejected`<br>`production_pdu.rs::send_applies_acl_per_pdu_and_inbound_edus`<br>`production_pdu.rs::fetched_auth_chain_that_fails_auth_is_not_stored` | `conduit-y99.33` `conduit-g12` `conduit-embed-pdu` | Hash-mismatch redaction, rejection, soft failure, and the size limit are asserted on PUT /send. A missing auth event is fetched with the events it cites. A fetched event that fails the auth rules is not stored, and the PDU is rejected. Byte-exact wire remains. |
+| `ss.pdu.checks` | [Checks performed on receipt of a PDU (format, signatures, hashes, auth events, state-before, current state)](https://spec.matrix.org/v1.19/server-server-api/#checks-performed-on-receipt-of-a-pdu) | tested | `conduit-server/src/federation/pipeline.rs`<br>`conduit/src/wire.rs` | `federation_inbound.rs::inbound_signature_verified_or_rejected`<br>`production_pdu.rs::send_applies_acl_per_pdu_and_inbound_edus`<br>`production_pdu.rs::fetched_auth_chain_that_fails_auth_is_not_stored`<br>`production_pdu.rs::received_pdu_is_served_as_the_same_canonical_bytes` |  | Hash-mismatch redaction, rejection, soft failure, and the size limit are asserted on PUT /send. A missing auth event is fetched with the events it cites. A fetched event that fails the auth rules is not stored, and the PDU is rejected. GET /event serves a received PDU as the same canonical JSON, including extensions and U+0000, with no event_id, before and after restart. |
 | `ss.pdu.auth-events-selection` | [Auth events selection](https://spec.matrix.org/v1.19/server-server-api/#auth-events-selection) | tested | `conduit-server/src/federation/pipeline.rs` | `production_pdu.rs::auth_event_selection_rejects_and_current_state_soft_fails` |  | A message whose auth events are not exactly the selection from the state at its prev events is rejected. Room version 12 does not cite m.room.create. |
 | `ss.pdu.rejection` | [Rejection](https://spec.matrix.org/v1.19/server-server-api/#rejection) | tested | `conduit-server/src/federation/pipeline.rs` | `production_pdu.rs::auth_event_selection_rejects_and_current_state_soft_fails` |  | The transaction stays 200. The PDU is stored and omitted from client sync, federation GET /event, and later prev_events. Current state is unchanged. |
 | `ss.pdu.soft-failure` | [Soft failure](https://spec.matrix.org/v1.19/server-server-api/#soft-failure) | tested | `conduit-server/src/federation/pipeline.rs` | `production_pdu.rs::auth_event_selection_rejects_and_current_state_soft_fails`<br>`production_pdu.rs::soft_failed_topic_is_omitted_until_referenced_and_syncs_when_selected` |  | Stored, hidden from client sync until resolution selects it, omitted from new prev_events, and returned by federation GET /event. Backfill and get_missing_events return a soft-failed event only when a named event lists it in prev_events or auth_events. A later resolution that selects a soft-failed state event is pushed to clients. |
@@ -442,7 +442,7 @@ In-flight / pre-existing beads referenced (not duplicated):
 | `ss.acls` | [Server ACLs enforcement](https://spec.matrix.org/v1.19/server-server-api/#server-access-control-lists-acls) | tested | `conduit/src/server_acl.rs`<br>`conduit-server/src/federation/server.rs` | `production_pdu.rs::server_acl_denies_remote_participation_until_lifted`<br>`server_acl.rs::acl_order_globs_ports_and_ip_literals` |  | Denied origins are rejected on the MUST endpoints and per PDU on /send; lifting the deny list restores access. |
 | `ss.policy-servers` | [Policy servers (homeserver obligations in rooms using one)](https://spec.matrix.org/v1.19/server-server-api/#policy-servers) | tested | `conduit-server/src/federation/policy.rs`<br>`conduit-server/src/federation/pipeline.rs` | `production_pdu.rs::policy_server_signature_is_required_before_a_client_event_is_sent`<br>`production_pdu.rs::policy_server_refusal_soft_fails_a_federated_event` |  | Client events are signed before send. A refusal is not stored. A federated PDU with a valid signature is not requested again. A missing signature is requested and stored. A refusal is soft-failed: HTTP 200, GET /event returns it, /sync omits it. An invalid signature is requested again. |
 | `ss.signing.outgoing` | [Adding hashes and signatures to outgoing events](https://spec.matrix.org/v1.19/server-server-api/#adding-hashes-and-signatures-to-outgoing-events) | partial | `conduit/src/hashing.rs`<br>`conduit/src/signing.rs` | `matrix_v11_crypto.rs` | `conduit-embed-pdu` | Byte-exact for typed v11 events; wire PDU model in conduit-embed-pdu. |
-| `ss.signing.validate` | [Validating hashes and signatures on received events](https://spec.matrix.org/v1.19/server-server-api/#validating-hashes-and-signatures-on-received-events) | partial | `conduit-server/src/federation/pipeline.rs` | `federation_inbound.rs::inbound_signature_verified_or_rejected`<br>`production_pdu.rs::send_applies_acl_per_pdu_and_inbound_edus` | `conduit-y99.33` `conduit-embed-pdu` | Signatures are checked. A content-hash mismatch on PUT /send is stored as the redacted PDU with the original hashes. Byte-exact wire persistence remains. |
+| `ss.signing.validate` | [Validating hashes and signatures on received events](https://spec.matrix.org/v1.19/server-server-api/#validating-hashes-and-signatures-on-received-events) | tested | `conduit-server/src/federation/pipeline.rs`<br>`conduit/src/wire.rs` | `federation_inbound.rs::inbound_signature_verified_or_rejected`<br>`production_pdu.rs::send_applies_acl_per_pdu_and_inbound_edus`<br>`production_pdu.rs::received_pdu_is_served_as_the_same_canonical_bytes` |  | Signatures are checked. A content-hash mismatch on PUT /send is stored as the redacted PDU with the original hashes. A valid PDU is persisted and served as the same canonical JSON. |
 | `ss.signing.reference-hash` | [Calculating the reference hash](https://spec.matrix.org/v1.19/server-server-api/#calculating-the-reference-hash-for-an-event) | tested | `conduit/src/hashing.rs` | `matrix_v11_crypto.rs` |  |  |
 | `ss.signing.content-hash` | [Calculating the content hash](https://spec.matrix.org/v1.19/server-server-api/#calculating-the-content-hash-for-an-event) | tested | `conduit/src/hashing.rs` | `matrix_v11_crypto.rs` |  |  |
 | `ss.security` | [Security considerations](https://spec.matrix.org/v1.19/server-server-api/#security-considerations) | n/a |  |  |  | *informative* Informative guidance. |

@@ -202,6 +202,79 @@ async fn send_keeps_nul_content_drops_invalid_pdus_and_replays_identically() {
     }
 }
 
+/// A received v11 PDU is stored and served as the same canonical JSON.
+/// Dropping an extension, injecting `event_id`, or rounding a number changes
+/// those bytes and fails this test. Restart reads the stored copy, not the
+/// request that was just parsed.
+#[tokio::test]
+async fn received_pdu_is_served_as_the_same_canonical_bytes() {
+    let remote = spawn_remote().await;
+    let mut server = federated_server(&remote).await;
+
+    let mut pdu = create(
+        "!wire:remote.test",
+        json!({
+            "room_version": "11",
+            "org.test": "a\u{0}b",
+            "nested": {"z": 1, "a": [true, false, null, "世界"]},
+            "n": 9_007_199_254_740_991i64,
+            "neg": -1,
+            "empty": {},
+            "list": []
+        }),
+        1,
+    );
+    pdu.extensions.insert(
+        "org.example.ext".into(),
+        json!({
+            "opaque": "preserve me",
+            "unicode": "世界",
+            "nul": "a\u{0}b",
+            "n": 9_007_199_254_740_991i64,
+            "neg": -1,
+            "flag": true,
+            "nil": null,
+            "tags": ["b", "a", {"z": 1, "a": [true, false, null]}],
+            "empty": {}
+        }),
+    );
+    pdu.extensions.insert("aaa".into(), json!("first"));
+    pdu.extensions.insert("redacts".into(), json!("$not-a-redaction"));
+    pdu.extensions.insert("zzz".into(), json!({"m": "last"}));
+    let (id, sent) = sign(&remote, pdu);
+    let sent_bytes = conduit::canonical_json::to_canonical_bytes(&sent).unwrap();
+
+    let result = fed(
+        &server,
+        &remote,
+        Method::PUT,
+        "/_matrix/federation/v1/send/wire-exact",
+        Some(txn(vec![sent], vec![])),
+        200,
+    )
+    .await;
+    assert_eq!(result["pdus"][&id], json!({}), "{result}");
+
+    let path = format!("/_matrix/federation/v1/event/{}", enc(&id));
+    for restart in [false, true] {
+        if restart {
+            server.stop();
+            server.start().await;
+        }
+        let served = fed(&server, &remote, Method::GET, &path, None, 200).await["pdus"][0].clone();
+        assert!(served.get("event_id").is_none(), "{served}");
+        assert!(served.get("unsigned").is_none(), "{served}");
+        let served_bytes = conduit::canonical_json::to_canonical_bytes(&served).unwrap();
+        assert_eq!(
+            served_bytes,
+            sent_bytes,
+            "served {}\nsent {}",
+            String::from_utf8_lossy(&served_bytes),
+            String::from_utf8_lossy(&sent_bytes),
+        );
+    }
+}
+
 fn invite(remote: &Remote, room: &str, sender: &str, invitee: &str) -> Pdu {
     let mut pdu = Pdu::new(room, sender, "m.room.member", Some(invitee.into()),
         json!({"membership": "invite", "displayname": "Alice"}), 1_700_000_000_000, vec![], vec![], 1);
