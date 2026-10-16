@@ -770,7 +770,7 @@ fn check_member(
                     }
                     JoinRule::Restricted | JoinRule::KnockRestricted
                         if (matches!(join_rule, JoinRule::Restricted) && version >= 8)
-                            || (matches!(join_rule, JoinRule::KnockRestricted) && version >= 9) =>
+                            || (matches!(join_rule, JoinRule::KnockRestricted) && version >= 10) =>
                     {
                         // An invite (or an existing join) bypasses allow
                         // conditions. Otherwise the event must name a joined
@@ -903,7 +903,7 @@ fn check_member(
         // Knock
         // -------------------------------------------------------------------
         Membership::Knock => {
-            if version < 7 || (join_rule == JoinRule::KnockRestricted && version < 9) {
+            if version < 7 || (join_rule == JoinRule::KnockRestricted && version < 10) {
                 return Err(AuthError::InvalidMemberTransition {
                     from: target_membership,
                     to: Membership::Knock,
@@ -2542,7 +2542,7 @@ mod tests {
         apply_state_event(&mut old, &create_with("7", alice, room_id, json!({ "creator": alice })));
         assert!(check_auth(&join_via(dave), &old).is_err(), "v7 ignores the authoriser");
 
-        // knock_restricted starts at room version 9.
+        // knock_restricted starts at room version 10.
         apply_state_event(
             &mut state,
             &make_join_rules_event_with_allow(
@@ -2557,7 +2557,58 @@ mod tests {
         assert!(check_auth(&join_via(dave), &v8).is_err(), "v8 has no knock_restricted");
         let mut v9 = state.clone();
         apply_state_event(&mut v9, &create_with("9", alice, room_id, json!({ "creator": alice })));
-        assert!(check_auth(&join_via(dave), &v9).is_ok(), "v9 knock_restricted accepts the authoriser");
+        assert!(check_auth(&join_via(dave), &v9).is_err(), "v9 has no knock_restricted");
+        let mut v10 = state.clone();
+        apply_state_event(&mut v10, &create_with("10", alice, room_id, json!({ "creator": alice })));
+        assert!(check_auth(&join_via(dave), &v10).is_ok(), "v10 knock_restricted accepts the authoriser");
+    }
+
+    /// Room version 9 still accepts a restricted join. It does not accept
+    /// `knock_restricted`, which starts at room version 10.
+    #[test]
+    fn room_version_9_keeps_restricted_joins_and_rejects_knock_restricted() {
+        let alice = "@alice:example.com";
+        let bob = "@bob:example.com";
+        let dave = "@dave:example.com";
+        let room = "!room:example.com";
+        let room_at = |rule: &str| {
+            let mut state = HashMap::new();
+            apply_state_event(&mut state, &create_with("9", alice, room, json!({ "creator": alice })));
+            apply_state_event(&mut state, &make_member_event("$aj", alice, alice, room, "join"));
+            apply_state_event(&mut state, &make_member_event("$dj", alice, dave, room, "join"));
+            apply_state_event(
+                &mut state,
+                &make_join_rules_event_with_allow(
+                    alice,
+                    room,
+                    rule,
+                    json!([{ "type": "m.room_membership", "room_id": "!space:example.com" }]),
+                ),
+            );
+            apply_state_event(
+                &mut state,
+                &make_power_levels_event(
+                    "$pl",
+                    alice,
+                    room,
+                    json!({ "invite": 50, "users": { alice: 100, dave: 50 } }),
+                ),
+            );
+            state
+        };
+        let mut join = make_member_event("$bj", bob, bob, room, "join");
+        join.content["join_authorised_via_users_server"] = json!(dave);
+        assert!(check_auth(&join, &room_at("restricted")).is_ok(), "v9 keeps restricted joins");
+        assert!(
+            check_auth(&join, &room_at("knock_restricted")).is_err(),
+            "v9 does not recognise knock_restricted"
+        );
+        let knock = make_member_event("$bk", bob, bob, room, "knock");
+        assert!(check_auth(&knock, &room_at("knock")).is_ok(), "v9 still allows knock");
+        assert!(
+            check_auth(&knock, &room_at("knock_restricted")).is_err(),
+            "v9 does not allow knocking on knock_restricted"
+        );
     }
 
     /// Room version 8 accepts a restricted join that names a joined user who

@@ -128,7 +128,7 @@ pub async fn decide_restricted_join(
         .as_ref()
         .map(|event| conduit::room_version::version_of_content(&event.content))
         .unwrap_or(11);
-    let supported = if rule == "knock_restricted" { version >= 9 } else { version >= 8 };
+    let supported = if rule == "knock_restricted" { version >= 10 } else { version >= 8 };
     if !supported {
         return Ok(RestrictedDecision::Forbidden);
     }

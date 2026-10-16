@@ -579,7 +579,7 @@ pub async fn make_knock(
         .flatten()
         .and_then(|event| event.content["join_rule"].as_str().map(str::to_owned))
         .unwrap_or_else(|| "invite".into());
-    let min = if rule == "knock_restricted" { 9 } else { 7 };
+    let min = if rule == "knock_restricted" { 10 } else { 7 };
     if rule != "knock" && rule != "knock_restricted" || version < min {
         return forbidden("Knocking is not allowed");
     }

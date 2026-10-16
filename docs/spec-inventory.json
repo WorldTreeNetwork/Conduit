@@ -106,10 +106,10 @@
     },
     "rv": {
       "requirement": {
-        "implemented+tested": 52,
+        "implemented+tested": 53,
         "implemented-untested": 0,
         "partial": 6,
-        "missing": 3,
+        "missing": 2,
         "not-applicable": 0,
         "total": 61
       }
@@ -10831,14 +10831,18 @@
       "title": "Room version 9: Authorisation rules",
       "source": "https://spec.matrix.org/v1.19/rooms/v9/#authorisation-rules",
       "role": "homeserver",
-      "status": "missing",
-      "code": [],
-      "tests": [],
-      "tests_total": 0,
-      "gap_beads": [
-        "conduit-y99.23"
+      "status": "implemented+tested",
+      "code": [
+        {
+          "loc": "conduit/src/auth.rs"
+        }
       ],
-      "notes": "Kernel implements room version 11 only."
+      "tests": [
+        "conduit/src/auth.rs::room_version_9_keeps_restricted_joins_and_rejects_knock_restricted"
+      ],
+      "tests_total": 1,
+      "gap_beads": [],
+      "notes": "Room version 9 keeps restricted joins and knock. knock_restricted is rejected until room version 10."
     },
     {
       "id": "rv.v9.redaction",
