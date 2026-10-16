@@ -443,6 +443,44 @@ mod tests {
         assert_eq!(redact_pdu(&history, 2).content, json!({"history_visibility": "shared"}));
     }
 
+    /// Room version 3 keeps the version 1 redaction allow-list. Version 11
+    /// keeps create extras and `invite`; version 6 drops aliases.
+    #[test]
+    fn v3_redaction_keeps_the_v1_allow_list() {
+        let mut original = message();
+        original.extensions.insert("event_id".into(), json!("$evt:example.org"));
+        let redacted = redact_pdu(&original, 3);
+        assert_eq!(redacted.content, json!({}));
+        assert_eq!(redacted.extensions.get("event_id").and_then(Value::as_str), Some("$evt:example.org"));
+        assert_eq!(redacted.extensions.get("origin").and_then(Value::as_str), Some("example.org"));
+        assert!(redacted.extensions.contains_key("membership"));
+        assert!(redacted.extensions.contains_key("prev_state"));
+        assert!(!redacted.extensions.contains_key("org.example.x"));
+
+        let mut create = original.clone();
+        create.event_type = "m.room.create".into();
+        create.content = json!({"creator": "@a:example.org", "room_version": "3", "extra": true});
+        assert_eq!(redact_pdu(&create, 3).content, json!({"creator": "@a:example.org"}));
+        assert!(redact_pdu(&create, 11).content.get("extra").is_some());
+
+        let mut rules = original.clone();
+        rules.event_type = "m.room.join_rules".into();
+        rules.content = json!({"join_rule": "public", "allow": []});
+        assert_eq!(redact_pdu(&rules, 3).content, json!({"join_rule": "public"}));
+
+        let mut levels = original.clone();
+        levels.event_type = "m.room.power_levels".into();
+        levels.content = json!({"ban": 50, "invite": 50, "users": {}});
+        assert!(redact_pdu(&levels, 3).content.get("invite").is_none());
+        assert_eq!(redact_pdu(&levels, 11).content["invite"], 50);
+
+        let mut aliases = original.clone();
+        aliases.event_type = "m.room.aliases".into();
+        aliases.content = json!({"aliases": ["#a:example.org"], "note": "x"});
+        assert_eq!(redact_pdu(&aliases, 3).content, json!({"aliases": ["#a:example.org"]}));
+        assert!(redact_pdu(&aliases, 6).content.get("aliases").is_none());
+    }
+
     #[test]
     fn v6_redaction_drops_aliases_and_v11_drops_legacy_top_level_keys() {
         let mut aliases = message();
