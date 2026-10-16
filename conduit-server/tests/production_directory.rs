@@ -975,3 +975,129 @@ async fn appservice_ping_thirdparty_and_network_directory() {
         .await;
     assert_eq!(post(json!({"include_all_networks": true})).await, vec![local]);
 }
+
+#[tokio::test]
+async fn remote_public_rooms_come_from_the_named_server() {
+    use axum::response::IntoResponse;
+
+    let asked = Arc::new(Mutex::new(Vec::<String>::new()));
+    let asked_route = Arc::clone(&asked);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        let app = axum::Router::new().route(
+            "/_matrix/federation/v1/publicRooms",
+            axum::routing::any(move |headers: axum::http::HeaderMap, req: axum::extract::Request| {
+                let asked = Arc::clone(&asked_route);
+                async move {
+                    let host = headers.get("host").and_then(|value| value.to_str().ok()).unwrap_or("").to_owned();
+                    let method = req.method().as_str().to_owned();
+                    let query = req.uri().query().unwrap_or("").to_owned();
+                    let bytes = axum::body::to_bytes(req.into_body(), 64 * 1024).await.unwrap_or_default();
+                    let text = String::from_utf8_lossy(&bytes);
+                    asked.lock().unwrap().push(format!("{method} {host} {query} {text}"));
+                    if host == "down.test" {
+                        return (
+                            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                            axum::Json(json!({"errcode": "M_UNKNOWN", "error": "down"})),
+                        )
+                            .into_response();
+                    }
+                    (
+                        axum::http::StatusCode::OK,
+                        axum::Json(json!({
+                            "chunk": [
+                                {
+                                    "room_id": "!alpha:remote.test",
+                                    "name": "Alpha",
+                                    "topic": "first",
+                                    "num_joined_members": 3,
+                                    "world_readable": false,
+                                    "guest_can_join": false
+                                },
+                                {
+                                    "room_id": "!beta:remote.test",
+                                    "name": "Beta",
+                                    "topic": "second",
+                                    "num_joined_members": 1,
+                                    "world_readable": true,
+                                    "guest_can_join": true
+                                }
+                            ],
+                            "total_room_count_estimate": 2
+                        })),
+                    )
+                        .into_response()
+                }
+            }),
+        );
+        axum::serve(listener, app).await.ok();
+    });
+
+    let server = Server::with_env(&[
+        ("CONDUIT_FEDERATION", "1"),
+        ("CONDUIT_FEDERATION_BASE_URL", &base_url),
+    ])
+    .await;
+    let alice = server.register("alice").await;
+
+    let listed = server
+        .request(
+            Method::GET,
+            "/_matrix/client/v3/publicRooms?server=remote.test&limit=2",
+            None,
+            None,
+            200,
+        )
+        .await;
+    let ids: Vec<&str> = listed["chunk"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|room| room["room_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, vec!["!alpha:remote.test", "!beta:remote.test"], "{listed}");
+    assert_eq!(listed["total_room_count_estimate"], 2);
+    {
+        let calls = asked.lock().unwrap();
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        assert!(calls[0].starts_with("GET remote.test "), "{calls:?}");
+        assert!(calls[0].contains("limit=2"), "{calls:?}");
+    }
+
+    let _local = server
+        .request(Method::GET, "/_matrix/client/v3/publicRooms?server=production.test", None, None, 200)
+        .await;
+    assert_eq!(
+        asked.lock().unwrap().len(),
+        1,
+        "this server's directory is not fetched: {:?}",
+        asked.lock().unwrap()
+    );
+
+    let filtered = server
+        .request(
+            Method::POST,
+            "/_matrix/client/v3/publicRooms?server=remote.test",
+            Some(token(&alice)),
+            Some(json!({"filter": {"generic_search_term": "alp"}})),
+            200,
+        )
+        .await;
+    let ids: Vec<&str> = filtered["chunk"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|room| room["room_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, vec!["!alpha:remote.test"], "{filtered}");
+    let calls = asked.lock().unwrap().clone();
+    let posted = calls.iter().find(|call| call.starts_with("POST ")).expect(&format!("{calls:?}"));
+    assert!(posted.contains("remote.test"), "{posted}");
+    assert!(posted.contains("alp"), "{posted}");
+
+    let down = server
+        .request(Method::GET, "/_matrix/client/v3/publicRooms?server=down.test", None, None, 502)
+        .await;
+    assert_eq!(down["errcode"], "M_UNKNOWN", "{down}");
+}

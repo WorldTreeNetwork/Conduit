@@ -24,7 +24,7 @@ use axum::{
     routing::{get, put},
     Json, Router,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
 use conduit::auth::{current_state_map, may_send_state_event, StateMap};
@@ -152,7 +152,7 @@ fn searchable_text(chunk: &Map<String, Value>, state: &StateMap<Event>) -> Strin
 // Listing
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 pub struct PublicRoomsFilter {
     pub generic_search_term: Option<String>,
     /// `null` entries select rooms without a type.
@@ -268,12 +268,47 @@ fn encode(value: &str) -> String {
     url::form_urlencoded::byte_serialize(value.as_bytes()).collect()
 }
 
-/// Remote directories are read with the federation `GET /publicRooms`.
-/// A POST filter is applied to the page the remote returned.
+/// Remote directories are read over federation. A request that carries a
+/// filter, a network flag, or a third-party instance is `POST /publicRooms`
+/// so the remote applies it. Anything else is `GET /publicRooms`. The page
+/// that comes back is filtered again, so a remote that ignored the body
+/// still honors the caller's search.
 async fn list_remote<S: AuthState>(state: &S, server: &str, body: PublicRoomsBody) -> Response {
     let Some(client) = state.federation_client() else {
         return MatrixError::new_not_found("federation is not available").into_response();
     };
+    let forward_body = body.filter.is_some()
+        || body.include_all_networks.is_some()
+        || body.third_party_instance_id.is_some();
+    if forward_body {
+        let mut payload = Map::new();
+        if let Some(limit) = body.limit {
+            payload.insert("limit".into(), json!(limit));
+        }
+        if let Some(since) = &body.since {
+            payload.insert("since".into(), json!(since));
+        }
+        if let Some(filter) = &body.filter {
+            payload.insert("filter".into(), serde_json::to_value(filter).unwrap_or(Value::Null));
+        }
+        if let Some(all) = body.include_all_networks {
+            payload.insert("include_all_networks".into(), json!(all));
+        }
+        if let Some(instance) = &body.third_party_instance_id {
+            payload.insert("third_party_instance_id".into(), json!(instance));
+        }
+        let remote = match client.public_rooms(server, &Value::Object(payload)).await {
+            Ok(value) => value,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    Json(json!({"errcode": "M_UNKNOWN", "error": format!("failed to fetch room directory: {e}")})),
+                )
+                    .into_response()
+            }
+        };
+        return finish_remote(remote, body.filter);
+    }
     let mut params = Vec::new();
     if let Some(limit) = body.limit {
         params.push(format!("limit={limit}"));
@@ -310,8 +345,11 @@ async fn list_remote<S: AuthState>(state: &S, server: &str, body: PublicRoomsBod
                 .into_response()
         }
     };
-    let mut remote = remote;
-    if let Some(filter) = body.filter {
+    finish_remote(remote, body.filter)
+}
+
+fn finish_remote(mut remote: Value, filter: Option<PublicRoomsFilter>) -> Response {
+    if let Some(filter) = filter {
         let needle = filter.generic_search_term.map(|t| t.to_lowercase());
         if let Some(chunk) = remote["chunk"].as_array_mut() {
             chunk.retain(|room| {

@@ -788,6 +788,12 @@ impl Client {
         self.signed_get(dest, &path).await
     }
 
+    /// `POST /_matrix/federation/v1/publicRooms`. The body is the directory
+    /// filter, limit, and pagination token. The remote applies the filter.
+    pub async fn public_rooms(&self, dest: &str, body: &Value) -> Result<Value, FederationError> {
+        self.signed_post(dest, "/_matrix/federation/v1/publicRooms", body).await
+    }
+
     /// `GET /_matrix/federation/v1/query/directory?room_alias={alias}`
     pub async fn query_directory(
         &self,

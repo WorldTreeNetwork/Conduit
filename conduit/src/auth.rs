@@ -1244,8 +1244,9 @@ pub fn may_send_state_event(state: &StateMap<Event>, user_id: &str, event_type: 
     if get_membership(state, user_id) != Some(Membership::Join) {
         return false;
     }
-    let pl_event = state.get(&("m.room.power_levels".to_owned(), String::new()));
-    let level = user_power_level(user_id, pl_event, creator_id(state).as_deref());
+    // Room version 12 creators have infinite power even when the power-levels
+    // event does not list them. `effective_user_level` is what auth uses.
+    let level = effective_user_level(user_id, state);
     level >= level_required_for_event(event_type, true, &get_pl_content(state))
 }
 

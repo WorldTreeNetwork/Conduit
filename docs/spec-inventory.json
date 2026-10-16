@@ -42,10 +42,10 @@
         "total": 36
       },
       "requirement": {
-        "implemented+tested": 20,
+        "implemented+tested": 21,
         "implemented-untested": 0,
         "partial": 13,
-        "missing": 5,
+        "missing": 4,
         "not-applicable": 3,
         "total": 41
       }
@@ -2197,13 +2197,12 @@
       ],
       "tests": [
         "conduit-server/tests/production_directory.rs::directory_visibility_changes_are_authorized",
-        "conduit-server/tests/production_directory.rs::public_room_directory_lists_filters_and_paginates"
+        "conduit-server/tests/production_directory.rs::public_room_directory_lists_filters_and_paginates",
+        "conduit-server/tests/production_directory.rs::remote_public_rooms_come_from_the_named_server"
       ],
-      "tests_total": 2,
-      "gap_beads": [
-        "conduit-y99.20.1"
-      ],
-      "notes": "Remote server= param unverified against a live peer."
+      "tests_total": 3,
+      "gap_beads": [],
+      "notes": "server= names a remote directory. limit is forwarded. This server's own name stays local. A failed fetch is 502 M_UNKNOWN."
     },
     {
       "id": "cs.ep.post_matrixclientv3publicrooms",
@@ -2227,13 +2226,12 @@
       ],
       "tests": [
         "conduit-server/tests/production_directory.rs::appservice_ping_thirdparty_and_network_directory",
-        "conduit-server/tests/production_directory.rs::public_room_directory_lists_filters_and_paginates"
+        "conduit-server/tests/production_directory.rs::public_room_directory_lists_filters_and_paginates",
+        "conduit-server/tests/production_directory.rs::remote_public_rooms_come_from_the_named_server"
       ],
-      "tests_total": 2,
-      "gap_beads": [
-        "conduit-y99.20.1"
-      ],
-      "notes": ""
+      "tests_total": 3,
+      "gap_beads": [],
+      "notes": "A generic_search_term filter is applied to the page the named server returned."
     },
     {
       "id": "cs.ep.get_matrixclientv1room_summaryroomidoralias",
@@ -7618,13 +7616,12 @@
         }
       ],
       "tests": [
-        "conduit-server/tests/production_directory.rs::public_room_directory_lists_filters_and_paginates"
+        "conduit-server/tests/production_directory.rs::public_room_directory_lists_filters_and_paginates",
+        "conduit-server/tests/production_directory.rs::remote_public_rooms_come_from_the_named_server"
       ],
-      "tests_total": 1,
-      "gap_beads": [
-        "conduit-y99.20.1"
-      ],
-      "notes": ""
+      "tests_total": 2,
+      "gap_beads": [],
+      "notes": "server= fetches that server's published directory and filters the returned page. This server's own directory is not fetched."
     },
     {
       "id": "cs.rooms.summaries",
@@ -9196,15 +9193,22 @@
       "title": "Published room directory over federation",
       "source": "https://spec.matrix.org/v1.19/server-server-api/#published-room-directory",
       "role": "homeserver",
-      "status": "missing",
-      "code": [],
-      "tests": [],
-      "tests_total": 0,
-      "gap_beads": [
-        "conduit-y99.22",
-        "conduit-y99.20.1"
+      "status": "implemented+tested",
+      "code": [
+        {
+          "loc": "conduit-server/src/federation/spec_v119.rs"
+        },
+        {
+          "loc": "conduit-server/src/api/client/room_directory.rs"
+        }
       ],
-      "notes": ""
+      "tests": [
+        "conduit-server/tests/federation_inbound.rs::federation_directory_openid_and_local_key_query",
+        "conduit-server/tests/production_directory.rs::remote_public_rooms_come_from_the_named_server"
+      ],
+      "tests_total": 2,
+      "gap_beads": [],
+      "notes": "Inbound GET lists published rooms and POST generic_search_term filters them. A client publicRooms?server= query fetches that server and forwards limit. A filter is posted to the remote and applied to the returned page. This server's own directory is not fetched. A failed remote directory is 502 M_UNKNOWN."
     },
     {
       "id": "ss.spaces",
