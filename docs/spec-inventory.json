@@ -10124,11 +10124,12 @@
         }
       ],
       "tests": [
+        "conduit/src/auth.rs::omitted_room_version_is_authorised_as_version_one",
         "conduit/src/auth.rs::room_version_auth_rules_follow_the_spec"
       ],
-      "tests_total": 1,
+      "tests_total": 2,
       "gap_beads": [],
-      "notes": "v1 create requires content.creator."
+      "notes": "A create event with no room_version is room version 1: it requires content.creator, content.creator is the creator, and a float power level is accepted."
     },
     {
       "id": "rv.v1.redaction",

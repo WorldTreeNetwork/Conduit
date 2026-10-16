@@ -3,8 +3,8 @@
 //! <https://spec.matrix.org/v1.19/rooms/>
 //!
 //! Redaction, event IDs, and state resolution v1 live here so a test can call
-//! them without HTTP. Authorization differences are applied by [`crate::auth`]
-//! using [`version_of_content`].
+//! them without HTTP. Authorization uses [`spec_default_when_absent`].
+//! [`version_of_content`] keeps the historical kernel default for other readers.
 
 use std::collections::HashMap;
 

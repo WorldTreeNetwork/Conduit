@@ -382,7 +382,7 @@ fn create_event(auth_state: &StateMap<Event>) -> Option<&Event> {
 
 fn room_version_from_state(auth_state: &StateMap<Event>) -> u32 {
     create_event(auth_state)
-        .map(crate::room_version::version_of_event)
+        .map(|event| crate::room_version::spec_default_when_absent(&event.content))
         .unwrap_or(11)
 }
 
@@ -391,7 +391,7 @@ fn creators_of(auth_state: &StateMap<Event>) -> Vec<String> {
     let Some(create) = create_event(auth_state) else {
         return Vec::new();
     };
-    let version = crate::room_version::version_of_event(create);
+    let version = crate::room_version::spec_default_when_absent(&create.content);
     if version >= 12 {
         let mut creators = vec![create.sender.clone()];
         creators.extend(crate::room_version::additional_creators(&create.content));
@@ -577,7 +577,7 @@ fn check_create(event: &Event, auth_state: &StateMap<Event>) -> Result<(), AuthE
         return Err(AuthError::CreateHasPrevEvents);
     }
 
-    let version = crate::room_version::version_of_event(event);
+    let version = crate::room_version::spec_default_when_absent(&event.content);
     if version >= 12 {
         if !event.room_id.is_empty() {
             return Err(AuthError::CreateMustOmitRoomId);
@@ -1645,6 +1645,73 @@ mod tests {
         apply_state_event(&mut v6, &create_with("6", alice, room, json!({ "creator": alice })));
         apply_state_event(&mut v6, &make_member_event("$join", alice, alice, room, "join"));
         assert!(check_auth(&levels, &v6).is_err(), "v6 rejects a float power level");
+    }
+
+    /// An omitted `content.room_version` is room version 1. Version 11 would
+    /// accept a create with no creator, reject a float power level, and treat
+    /// the create sender as the creator.
+    #[test]
+    fn omitted_room_version_is_authorised_as_version_one() {
+        let alice = "@alice:example.com";
+        let bob = "@bob:example.com";
+        let room = "!room:example.com";
+
+        let bare = make_event(
+            "$bare",
+            "m.room.create",
+            alice,
+            room,
+            Some(""),
+            json!({}),
+            vec![],
+        );
+        assert!(
+            matches!(check_auth(&bare, &HashMap::new()), Err(AuthError::CreateMissingCreator)),
+            "omitted room_version is version 1, which requires content.creator"
+        );
+
+        let create = make_event(
+            "$create_omitted",
+            "m.room.create",
+            alice,
+            room,
+            Some(""),
+            json!({ "creator": bob }),
+            vec![],
+        );
+        assert!(check_auth(&create, &HashMap::new()).is_ok());
+
+        let mut state = HashMap::new();
+        apply_state_event(&mut state, &create);
+        apply_state_event(
+            &mut state,
+            &make_member_event("$join", alice, alice, room, "join"),
+        );
+        let from_sender = make_power_levels_event(
+            "$pl_sender",
+            alice,
+            room,
+            json!({ "users": {} }),
+        );
+        assert!(
+            check_auth(&from_sender, &state).is_err(),
+            "version 1 creator is content.creator, so the create sender has no power"
+        );
+
+        apply_state_event(
+            &mut state,
+            &make_member_event("$bob", alice, bob, room, "join"),
+        );
+        let float_levels = make_power_levels_event(
+            "$pl_float",
+            bob,
+            room,
+            json!({ "users": {}, "events_default": 50.9 }),
+        );
+        assert!(
+            check_auth(&float_levels, &state).is_ok(),
+            "version 1 accepts a float power level"
+        );
     }
 
     /// Room version 2 does not strictly enforce canonical JSON. String power
