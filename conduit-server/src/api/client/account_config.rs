@@ -12,6 +12,7 @@
 //! | `CONDUIT_WELL_KNOWN_SERVER` | unset (404) | `m.server` delegation in `/.well-known/matrix/server` |
 //! | `CONDUIT_SUPPORT_PAGE` | unset | `support_page` in `/.well-known/matrix/support` |
 //! | `CONDUIT_SUPPORT_CONTACTS` | local admins | JSON array of contact objects |
+//! | `CONDUIT_THREEPID_SINK` | unset | HTTP endpoint that receives validation tokens; unset disables 3PID changes |
 
 use std::sync::OnceLock;
 
@@ -28,6 +29,9 @@ pub struct AccountConfig {
     pub server_delegation: Option<String>,
     pub support_page: Option<String>,
     pub support_contacts: Option<Value>,
+    /// Where validation tokens are delivered. Unset means this server
+    /// does not validate email or phone numbers.
+    pub threepid_sink: Option<String>,
 }
 
 impl Default for AccountConfig {
@@ -42,6 +46,7 @@ impl Default for AccountConfig {
             server_delegation: None,
             support_page: None,
             support_contacts: None,
+            threepid_sink: None,
         }
     }
 }
@@ -85,6 +90,7 @@ impl AccountConfig {
             support_contacts: non_empty(get("CONDUIT_SUPPORT_CONTACTS"))
                 .and_then(|v| serde_json::from_str::<Value>(&v).ok())
                 .filter(Value::is_array),
+            threepid_sink: non_empty(get("CONDUIT_THREEPID_SINK")),
         }
     }
 
@@ -96,6 +102,10 @@ impl AccountConfig {
 
     pub fn registration_token_valid(&self, token: &str) -> bool {
         self.registration_tokens.iter().any(|t| t == token)
+    }
+
+    pub fn threepid_enabled(&self) -> bool {
+        self.threepid_sink.is_some()
     }
 }
 

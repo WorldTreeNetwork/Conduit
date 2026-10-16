@@ -8,10 +8,9 @@
 //!   POST /_matrix/client/v3/{register,account/password,account/3pid}/{email,msisdn}/requestToken
 //!   GET  /_matrix/client/v3/admin/whois/{userId}
 //!
-//! This server stores no third-party identifiers and has neither an
-//! identity-server client nor outbound email/SMS, so `m.3pid_changes`
-//! is disabled and the 3PID endpoints answer with the spec's errcodes
-//! for that situation rather than 404.
+//! Homeserver-validated 3PIDs are off unless `CONDUIT_THREEPID_SINK` is
+//! set. Without it, `m.3pid_changes` is disabled and the add / requestToken
+//! endpoints answer with the spec's refusal errcodes.
 
 use axum::{
     extract::{Path, State},
@@ -42,17 +41,19 @@ pub fn router<S: AuthState>() -> Router<S> {
         // Account
         .route(&format!("{V3}/account/password"), post(change_password::<S>))
         .route(&format!("{V3}/account/deactivate"), post(deactivate::<S>))
-        .route(&format!("{V3}/account/3pid"), get(get_3pids::<S>).post(threepid_changes_disabled::<S>))
-        .route(&format!("{V3}/account/3pid/add"), post(threepid_changes_disabled::<S>))
+        .route(&format!("{V3}/account/3pid"), get(get_3pids::<S>).post(super::threepid_validation::add_legacy::<S>))
+        .route(&format!("{V3}/account/3pid/add"), post(super::threepid_validation::add::<S>))
         .route(&format!("{V3}/account/3pid/bind"), post(super::third_party::account_bind::<S>))
         .route(&format!("{V3}/account/3pid/delete"), post(super::third_party::account_unbind::<S>))
         .route(&format!("{V3}/account/3pid/unbind"), post(super::third_party::account_unbind::<S>))
-        .route(&format!("{V3}/account/3pid/email/requestToken"), post(threepid_denied))
-        .route(&format!("{V3}/account/3pid/msisdn/requestToken"), post(threepid_denied))
-        .route(&format!("{V3}/account/password/email/requestToken"), post(threepid_denied))
-        .route(&format!("{V3}/account/password/msisdn/requestToken"), post(threepid_denied))
-        .route(&format!("{V3}/register/email/requestToken"), post(threepid_denied))
-        .route(&format!("{V3}/register/msisdn/requestToken"), post(threepid_denied))
+        .route(&format!("{V3}/account/3pid/email/requestToken"), post(super::threepid_validation::add_email::<S>))
+        .route(&format!("{V3}/account/3pid/msisdn/requestToken"), post(super::threepid_validation::add_msisdn::<S>))
+        .route(&format!("{V3}/account/password/email/requestToken"), post(super::threepid_validation::password_email::<S>))
+        .route(&format!("{V3}/account/password/msisdn/requestToken"), post(super::threepid_validation::password_msisdn::<S>))
+        .route(&format!("{V3}/register/email/requestToken"), post(super::threepid_validation::register_email::<S>))
+        .route(&format!("{V3}/register/msisdn/requestToken"), post(super::threepid_validation::register_msisdn::<S>))
+        .route(&format!("{V3}/validate/email/submitToken"), post(super::threepid_validation::submit_token::<S>).get(super::threepid_validation::submit_token_get::<S>))
+        .route(&format!("{V3}/validate/msisdn/submitToken"), post(super::threepid_validation::submit_token::<S>).get(super::threepid_validation::submit_token_get::<S>))
         // Registration helpers
         .route(&format!("{V3}/register/available"), get(registration::available::<S>))
         .route(
@@ -125,7 +126,7 @@ pub async fn change_password<S: AuthState>(
     let req = uia::UiaRequest::new(
         "POST /account/password",
         authed.as_ref().map(|a| a.user_id.as_str()),
-        vec![vec![uia::PASSWORD]],
+        super::threepid_validation::password_flows(),
     );
     let passed = match uia::authenticate(&state, req, body.get("auth")).await {
         Ok(p) => p,
@@ -181,6 +182,10 @@ pub async fn deactivate_user<S: AuthState>(state: &S, user_id: &str, erase: bool
         .deactivate_account(user_id)
         .await
         .map_err(|e| MatrixError::unknown(e.to_string()).into_response())?;
+    storage
+        .remove_account_threepids(user_id)
+        .await
+        .map_err(|e| MatrixError::unknown(e.to_string()).into_response())?;
     let devices = device_ids_except(state, user_id, None).await?;
     remove_devices(state, user_id, &devices).await
 }
@@ -222,26 +227,24 @@ pub async fn deactivate<S: AuthState>(
 // Third-party identifiers
 // ---------------------------------------------------------------------------
 
-pub async fn get_3pids<S: AuthState>(_authed: AuthedUser) -> Response {
-    (StatusCode::OK, Json(json!({ "threepids": [] }))).into_response()
-}
-
-pub async fn threepid_changes_disabled<S: AuthState>(_authed: AuthedUser) -> Response {
-    MatrixError::forbidden("Third-party identifier changes are disabled on this homeserver (m.3pid_changes)")
-        .into_response()
-}
-
-/// Validation-token requests: this server cannot send email or SMS and
-/// does not delegate to an identity server.
-pub async fn threepid_denied() -> Response {
-    (
-        StatusCode::FORBIDDEN,
-        Json(json!({
-            "errcode": "M_THREEPID_DENIED",
-            "error": "Third-party identifiers are not supported on this homeserver",
-        })),
-    )
-        .into_response()
+pub async fn get_3pids<S: AuthState>(State(state): State<S>, authed: AuthedUser) -> Response {
+    match state.storage().list_account_threepids(&authed.user_id).await {
+        Ok(rows) => {
+            let threepids: Vec<_> = rows
+                .into_iter()
+                .map(|row| {
+                    json!({
+                        "medium": row.medium,
+                        "address": row.address,
+                        "added_at": row.added_at,
+                        "validated_at": row.validated_at,
+                    })
+                })
+                .collect();
+            (StatusCode::OK, Json(json!({ "threepids": threepids }))).into_response()
+        }
+        Err(e) => MatrixError::unknown(e.to_string()).into_response(),
+    }
 }
 
 // ---------------------------------------------------------------------------

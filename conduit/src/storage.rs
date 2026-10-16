@@ -1499,6 +1499,61 @@ pub trait Storage: Send + Sync + 'static {
         id_server: Option<&str>,
     ) -> Result<()>;
 
+    /// The open validation attempt for this medium, canonical address and
+    /// client secret, if one exists.
+    async fn threepid_session_for_client(
+        &self,
+        medium: &str,
+        address: &str,
+        client_secret: &str,
+    ) -> Result<Option<ThreepidValidation>>;
+
+    /// Insert a new validation session. `sid` is unique.
+    async fn insert_threepid_session(&self, session: &ThreepidValidation) -> Result<()>;
+
+    /// Replace the token and attempt counter. Clears `validated_at`.
+    async fn retarget_threepid_session(
+        &self,
+        sid: &str,
+        purpose: &str,
+        send_attempt: i32,
+        token_hash: &str,
+    ) -> Result<()>;
+
+    async fn threepid_session(&self, sid: &str) -> Result<Option<ThreepidValidation>>;
+
+    /// Record that the token for `sid` was accepted at `validated_at` (ms).
+    async fn mark_threepid_validated(&self, sid: &str, validated_at: i64) -> Result<()>;
+
+    /// The user who has this canonical address on the homeserver.
+    async fn account_threepid_owner(
+        &self,
+        medium: &str,
+        address: &str,
+    ) -> Result<Option<String>>;
+
+    async fn list_account_threepids(&self, user_id: &str) -> Result<Vec<AccountThreepid>>;
+
+    /// Associate `address` with `user_id`. A row owned by someone else is
+    /// left untouched and reported as `Ok(false)`.
+    async fn add_account_threepid(
+        &self,
+        user_id: &str,
+        medium: &str,
+        address: &str,
+        added_at: i64,
+        validated_at: i64,
+    ) -> Result<bool>;
+
+    async fn remove_account_threepid(
+        &self,
+        user_id: &str,
+        medium: &str,
+        address: &str,
+    ) -> Result<()>;
+
+    async fn remove_account_threepids(&self, user_id: &str) -> Result<()>;
+
     // --- Sync & E2EE semantics (conduit-y99.14 / .15 / .16) ----------------
 
     /// Cross-signing signatures whose target belongs to `target_user`, as
@@ -1569,6 +1624,28 @@ pub struct AppserviceCursor {
     pub receipt_pos: i64,
 }
 
+/// One homeserver 3PID validation attempt. The raw token is never stored.
+#[derive(Debug, Clone)]
+pub struct ThreepidValidation {
+    pub sid: String,
+    pub client_secret: String,
+    pub medium: String,
+    pub address: String,
+    pub purpose: String,
+    pub send_attempt: i32,
+    pub token_hash: String,
+    pub validated_at: Option<i64>,
+}
+
+/// A third-party identifier the homeserver itself has validated.
+#[derive(Debug, Clone)]
+pub struct AccountThreepid {
+    pub medium: String,
+    pub address: String,
+    pub added_at: i64,
+    pub validated_at: i64,
+}
+
 /// In-memory application-service push state for [`MemoryStorage`].
 #[derive(Default)]
 struct MemoryAppservice {
@@ -1578,6 +1655,10 @@ struct MemoryAppservice {
     txns: std::collections::BTreeMap<(String, i64), Value>,
     /// (user_id, medium, address, id_server)
     bindings: std::collections::BTreeSet<(String, String, String, String)>,
+    /// sid -> validation session
+    threepid_sessions: HashMap<String, ThreepidValidation>,
+    /// (medium, address) -> (user_id, added_at, validated_at)
+    account_threepids: HashMap<(String, String), (String, i64, i64)>,
 }
 
 /// Admin moderation state of an account (conduit-y99.43).
@@ -4216,6 +4297,135 @@ impl Storage for MemoryStorage {
         self.appservice.write().await.bindings.retain(|(u, m, a, s)| {
             !(u == user_id && m == medium && a == address && id_server.is_none_or(|i| i == s))
         });
+        Ok(())
+    }
+
+    async fn threepid_session_for_client(
+        &self,
+        medium: &str,
+        address: &str,
+        client_secret: &str,
+    ) -> Result<Option<ThreepidValidation>> {
+        Ok(self
+            .appservice
+            .read()
+            .await
+            .threepid_sessions
+            .values()
+            .find(|s| s.medium == medium && s.address == address && s.client_secret == client_secret)
+            .cloned())
+    }
+
+    async fn insert_threepid_session(&self, session: &ThreepidValidation) -> Result<()> {
+        self.appservice
+            .write()
+            .await
+            .threepid_sessions
+            .insert(session.sid.clone(), session.clone());
+        Ok(())
+    }
+
+    async fn retarget_threepid_session(
+        &self,
+        sid: &str,
+        purpose: &str,
+        send_attempt: i32,
+        token_hash: &str,
+    ) -> Result<()> {
+        let mut appservice = self.appservice.write().await;
+        let Some(session) = appservice.threepid_sessions.get_mut(sid) else {
+            return Err(Error::Storage(format!("no 3pid session {sid}")));
+        };
+        session.purpose = purpose.to_owned();
+        session.send_attempt = send_attempt;
+        session.token_hash = token_hash.to_owned();
+        session.validated_at = None;
+        Ok(())
+    }
+
+    async fn threepid_session(&self, sid: &str) -> Result<Option<ThreepidValidation>> {
+        Ok(self.appservice.read().await.threepid_sessions.get(sid).cloned())
+    }
+
+    async fn mark_threepid_validated(&self, sid: &str, validated_at: i64) -> Result<()> {
+        let mut appservice = self.appservice.write().await;
+        let Some(session) = appservice.threepid_sessions.get_mut(sid) else {
+            return Err(Error::Storage(format!("no 3pid session {sid}")));
+        };
+        session.validated_at = Some(validated_at);
+        Ok(())
+    }
+
+    async fn account_threepid_owner(&self, medium: &str, address: &str) -> Result<Option<String>> {
+        Ok(self
+            .appservice
+            .read()
+            .await
+            .account_threepids
+            .get(&(medium.to_owned(), address.to_owned()))
+            .map(|(user, _, _)| user.clone()))
+    }
+
+    async fn list_account_threepids(&self, user_id: &str) -> Result<Vec<AccountThreepid>> {
+        let mut rows: Vec<_> = self
+            .appservice
+            .read()
+            .await
+            .account_threepids
+            .iter()
+            .filter(|(_, (user, _, _))| user == user_id)
+            .map(|((medium, address), (_, added_at, validated_at))| AccountThreepid {
+                medium: medium.clone(),
+                address: address.clone(),
+                added_at: *added_at,
+                validated_at: *validated_at,
+            })
+            .collect();
+        rows.sort_by(|a, b| {
+            (a.added_at, a.medium.as_str(), a.address.as_str())
+                .cmp(&(b.added_at, b.medium.as_str(), b.address.as_str()))
+        });
+        Ok(rows)
+    }
+
+    async fn add_account_threepid(
+        &self,
+        user_id: &str,
+        medium: &str,
+        address: &str,
+        added_at: i64,
+        validated_at: i64,
+    ) -> Result<bool> {
+        let mut appservice = self.appservice.write().await;
+        let key = (medium.to_owned(), address.to_owned());
+        if let Some((owner, _, _)) = appservice.account_threepids.get(&key) {
+            return Ok(owner == user_id);
+        }
+        appservice
+            .account_threepids
+            .insert(key, (user_id.to_owned(), added_at, validated_at));
+        Ok(true)
+    }
+
+    async fn remove_account_threepid(&self, user_id: &str, medium: &str, address: &str) -> Result<()> {
+        let mut appservice = self.appservice.write().await;
+        let key = (medium.to_owned(), address.to_owned());
+        if appservice
+            .account_threepids
+            .get(&key)
+            .is_some_and(|(owner, _, _)| owner == user_id)
+        {
+            appservice.account_threepids.remove(&key);
+        }
+        Ok(())
+    }
+
+    async fn remove_account_threepids(&self, user_id: &str) -> Result<()> {
+        self.appservice
+            .write()
+            .await
+            .account_threepids
+            .retain(|_, (owner, _, _)| owner != user_id);
         Ok(())
     }
 

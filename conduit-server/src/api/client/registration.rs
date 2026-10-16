@@ -192,11 +192,12 @@ struct RegisterBody {
 }
 
 fn registration_flows() -> Vec<Vec<&'static str>> {
-    if AccountConfig::get().registration_tokens.is_empty() {
-        vec![vec![uia::DUMMY]]
+    let base = if AccountConfig::get().registration_tokens.is_empty() {
+        vec![uia::DUMMY]
     } else {
-        vec![vec![uia::REGISTRATION_TOKEN]]
-    }
+        vec![uia::REGISTRATION_TOKEN]
+    };
+    super::threepid_validation::registration_flows(base)
 }
 
 fn bearer(headers: &HeaderMap) -> Option<&str> {
@@ -398,12 +399,15 @@ async fn register_user<S: AuthState>(state: &S, body: RegisterBody, headers: &He
     }
 
     // UIA (application services authenticate with their as_token).
-    if appservice.is_none() {
+    let proved = if appservice.is_none() {
         let req = uia::UiaRequest::new("POST /register", None, registration_flows());
-        if let Err(r) = uia::authenticate(state, req, body.auth.as_ref()).await {
-            return r;
+        match uia::authenticate(state, req, body.auth.as_ref()).await {
+            Ok(passed) => Some(passed),
+            Err(r) => return r,
         }
-    }
+    } else {
+        None
+    };
 
     let password_hash = match body.password.as_deref() {
         Some(pw) if !pw.is_empty() => match hash_password(pw.to_owned()).await {
@@ -466,6 +470,12 @@ async fn register_user<S: AuthState>(state: &S, body: RegisterBody, headers: &He
             conduit::identity::link_at_registration(state.storage().as_ref(), &key, &user_id).await
         {
             return MatrixError::forbidden(e.to_string()).into_response();
+        }
+    }
+
+    if let Some(passed) = &proved {
+        if let Err(r) = super::threepid_validation::bind_registration(state, &user_id, passed).await {
+            return r;
         }
     }
 

@@ -16,17 +16,17 @@
   "summary": {
     "cs": {
       "endpoint": {
-        "implemented+tested": 154,
+        "implemented+tested": 162,
         "implemented-untested": 0,
-        "partial": 9,
+        "partial": 1,
         "missing": 0,
         "not-applicable": 1,
         "total": 164
       },
       "requirement": {
-        "implemented+tested": 70,
+        "implemented+tested": 71,
         "implemented-untested": 0,
-        "partial": 7,
+        "partial": 6,
         "missing": 0,
         "not-applicable": 9,
         "total": 86
@@ -594,23 +594,21 @@
       "rate_limited": "No",
       "deprecated": false,
       "role": "homeserver",
-      "status": "partial",
+      "status": "implemented+tested",
       "code": [
         {
-          "loc": "conduit-server/src/api/client/account.rs:54",
-          "handler": "threepid_denied",
+          "loc": "conduit-server/src/api/client/account.rs:53",
+          "handler": "threepid_validation::register_email",
           "kind": "exact"
         }
       ],
       "tests": [
-        "conduit-server/tests/production_account.rs::production_threepid_endpoints_answer_honestly"
+        "conduit-server/tests/production_account.rs::production_threepid_endpoints_answer_honestly",
+        "conduit-server/tests/production_account.rs::homeserver_validated_threepids_require_the_delivered_token"
       ],
-      "tests_total": 1,
-      "gap_beads": [
-        "conduit-y99.36.1",
-        "conduit-2c7"
-      ],
-      "notes": "Honest refusal (403 M_THREEPID_DENIED); no email/SMS validation."
+      "tests_total": 2,
+      "gap_beads": [],
+      "notes": "With CONDUIT_THREEPID_SINK set, returns sid and submit_url after delivering a token; 400 M_THREEPID_IN_USE when the address is already associated. Unset sink is 403 M_THREEPID_DENIED before field checks."
     },
     {
       "id": "cs.ep.post_matrixclientv3registermsisdnrequesttoken",
@@ -624,23 +622,21 @@
       "rate_limited": "No",
       "deprecated": false,
       "role": "homeserver",
-      "status": "partial",
+      "status": "implemented+tested",
       "code": [
         {
-          "loc": "conduit-server/src/api/client/account.rs:55",
-          "handler": "threepid_denied",
+          "loc": "conduit-server/src/api/client/account.rs:54",
+          "handler": "threepid_validation::register_msisdn",
           "kind": "exact"
         }
       ],
       "tests": [
-        "conduit-server/tests/production_account.rs::production_threepid_endpoints_answer_honestly"
+        "conduit-server/tests/production_account.rs::production_threepid_endpoints_answer_honestly",
+        "conduit-server/tests/production_account.rs::homeserver_validated_threepids_require_the_delivered_token"
       ],
-      "tests_total": 1,
-      "gap_beads": [
-        "conduit-y99.36.1",
-        "conduit-2c7"
-      ],
-      "notes": "Honest refusal (403 M_THREEPID_DENIED); no email/SMS validation."
+      "tests_total": 2,
+      "gap_beads": [],
+      "notes": "With CONDUIT_THREEPID_SINK set, canonicalises the MSISDN and returns sid plus submit_url; 400 M_THREEPID_IN_USE when that number is already associated. Unset sink is 403 M_THREEPID_DENIED before field checks."
     },
     {
       "id": "cs.ep.post_matrixclientv3accountpassword",
@@ -683,23 +679,21 @@
       "rate_limited": "No",
       "deprecated": false,
       "role": "homeserver",
-      "status": "partial",
+      "status": "implemented+tested",
       "code": [
         {
-          "loc": "conduit-server/src/api/client/account.rs:52",
-          "handler": "threepid_denied",
+          "loc": "conduit-server/src/api/client/account.rs:51",
+          "handler": "threepid_validation::password_email",
           "kind": "exact"
         }
       ],
       "tests": [
-        "conduit-server/tests/production_account.rs::production_threepid_endpoints_answer_honestly"
+        "conduit-server/tests/production_account.rs::production_threepid_endpoints_answer_honestly",
+        "conduit-server/tests/production_account.rs::homeserver_validated_threepids_require_the_delivered_token"
       ],
-      "tests_total": 1,
-      "gap_beads": [
-        "conduit-y99.36.1",
-        "conduit-2c7"
-      ],
-      "notes": "Honest refusal (403 M_THREEPID_DENIED); no email/SMS validation."
+      "tests_total": 2,
+      "gap_beads": [],
+      "notes": "With the sink set, 400 M_THREEPID_NOT_FOUND unless the email is already on an account; a validated session completes m.login.email.identity on password reset. Unset sink is 403 M_THREEPID_DENIED before field checks."
     },
     {
       "id": "cs.ep.post_matrixclientv3accountpasswordmsisdnrequesttoken",
@@ -713,23 +707,21 @@
       "rate_limited": "No",
       "deprecated": false,
       "role": "homeserver",
-      "status": "partial",
+      "status": "implemented+tested",
       "code": [
         {
-          "loc": "conduit-server/src/api/client/account.rs:53",
-          "handler": "threepid_denied",
+          "loc": "conduit-server/src/api/client/account.rs:52",
+          "handler": "threepid_validation::password_msisdn",
           "kind": "exact"
         }
       ],
       "tests": [
-        "conduit-server/tests/production_account.rs::production_threepid_endpoints_answer_honestly"
+        "conduit-server/tests/production_account.rs::production_threepid_endpoints_answer_honestly",
+        "conduit-server/tests/production_account.rs::homeserver_validated_threepids_require_the_delivered_token"
       ],
-      "tests_total": 1,
-      "gap_beads": [
-        "conduit-y99.36.1",
-        "conduit-2c7"
-      ],
-      "notes": "Honest refusal (403 M_THREEPID_DENIED); no email/SMS validation."
+      "tests_total": 2,
+      "gap_beads": [],
+      "notes": "With the sink set, 400 M_THREEPID_NOT_FOUND unless the MSISDN is already on an account; a validated session completes m.login.msisdn on password reset. Unset sink is 403 M_THREEPID_DENIED before field checks."
     },
     {
       "id": "cs.ep.post_matrixclientv3accountdeactivate",
@@ -803,17 +795,18 @@
       "status": "implemented+tested",
       "code": [
         {
-          "loc": "conduit-server/src/api/client/account.rs:45",
+          "loc": "conduit-server/src/api/client/account.rs:44",
           "handler": "get_3pids",
           "kind": "exact"
         }
       ],
       "tests": [
-        "conduit-server/tests/production_account.rs::production_threepid_endpoints_answer_honestly"
+        "conduit-server/tests/production_account.rs::production_threepid_endpoints_answer_honestly",
+        "conduit-server/tests/production_account.rs::homeserver_validated_threepids_require_the_delivered_token"
       ],
-      "tests_total": 1,
+      "tests_total": 2,
       "gap_beads": [],
-      "notes": "Always empty (no 3PID support; m.3pid_changes disabled)."
+      "notes": "Lists homeserver-associated 3PIDs (medium, address, added_at, validated_at). Empty when the account has none. m.3pid_changes is enabled only when CONDUIT_THREEPID_SINK is set and the caller is not a guest."
     },
     {
       "id": "cs.ep.post_matrixclientv3account3pid",
@@ -827,22 +820,21 @@
       "rate_limited": "No",
       "deprecated": true,
       "role": "homeserver",
-      "status": "partial",
+      "status": "implemented+tested",
       "code": [
         {
-          "loc": "conduit-server/src/api/client/account.rs:45",
-          "handler": "threepid_changes_disabled",
+          "loc": "conduit-server/src/api/client/account.rs:44",
+          "handler": "threepid_validation::add_legacy",
           "kind": "exact"
         }
       ],
       "tests": [
-        "conduit-server/tests/production_account.rs::production_threepid_endpoints_answer_honestly"
+        "conduit-server/tests/production_account.rs::production_threepid_endpoints_answer_honestly",
+        "conduit-server/tests/production_account.rs::homeserver_validated_threepids_require_the_delivered_token"
       ],
-      "tests_total": 1,
-      "gap_beads": [
-        "conduit-y99.36.1"
-      ],
-      "notes": "Deprecated but present: answers 403 M_FORBIDDEN (honest refusal)."
+      "tests_total": 2,
+      "gap_beads": [],
+      "notes": "Deprecated add: three_pid_creds of a validated homeserver add session (id_server ignored). 403 M_THREEPID_AUTH_FAILED when the session is missing or unvalidated. Unset sink is 403 M_FORBIDDEN."
     },
     {
       "id": "cs.ep.post_matrixclientv3account3pidadd",
@@ -856,22 +848,21 @@
       "rate_limited": "Yes",
       "deprecated": false,
       "role": "homeserver",
-      "status": "partial",
+      "status": "implemented+tested",
       "code": [
         {
-          "loc": "conduit-server/src/api/client/account.rs:46",
-          "handler": "threepid_changes_disabled",
+          "loc": "conduit-server/src/api/client/account.rs:45",
+          "handler": "threepid_validation::add",
           "kind": "exact"
         }
       ],
       "tests": [
-        "conduit-server/tests/production_account.rs::production_threepid_endpoints_answer_honestly"
+        "conduit-server/tests/production_account.rs::production_threepid_endpoints_answer_honestly",
+        "conduit-server/tests/production_account.rs::homeserver_validated_threepids_require_the_delivered_token"
       ],
-      "tests_total": 1,
-      "gap_beads": [
-        "conduit-y99.36.1"
-      ],
-      "notes": "Honest refusal (403): homeserver-validated 3PIDs are conduit-y99.36.1."
+      "tests_total": 2,
+      "gap_beads": [],
+      "notes": "UIA plus a validated add-purpose session. Another user's address is 400 M_THREEPID_IN_USE; the same user is idempotent. Unvalidated creds are 403 M_THREEPID_AUTH_FAILED. Unset sink is 403 M_FORBIDDEN."
     },
     {
       "id": "cs.ep.post_matrixclientv3account3pidbind",
@@ -916,18 +907,19 @@
       "status": "implemented+tested",
       "code": [
         {
-          "loc": "conduit-server/src/api/client/third_party.rs:354",
+          "loc": "conduit-server/src/api/client/third_party.rs:365",
           "handler": "third_party::account_unbind",
           "kind": "exact"
         }
       ],
       "tests": [
         "conduit-server/tests/production_appservice.rs::account_3pid_bind_unbind_delete_and_deactivate_use_the_identity_server",
-        "conduit-server/tests/production_account.rs::production_threepid_endpoints_answer_honestly"
+        "conduit-server/tests/production_account.rs::production_threepid_endpoints_answer_honestly",
+        "conduit-server/tests/production_account.rs::homeserver_validated_threepids_require_the_delivered_token"
       ],
-      "tests_total": 2,
+      "tests_total": 3,
       "gap_beads": [],
-      "notes": "No homeserver-held 3PIDs exist (conduit-y99.36.1), so delete performs the identity-server unbind and reports id_server_unbind_result."
+      "notes": "Removes a homeserver-held 3PID so the address can be reused, then performs the identity-server unbind. With no identity server, id_server_unbind_result is no-support."
     },
     {
       "id": "cs.ep.post_matrixclientv3account3pidemailrequesttoken",
@@ -941,23 +933,21 @@
       "rate_limited": "No",
       "deprecated": false,
       "role": "homeserver",
-      "status": "partial",
+      "status": "implemented+tested",
       "code": [
         {
-          "loc": "conduit-server/src/api/client/account.rs:50",
-          "handler": "threepid_denied",
+          "loc": "conduit-server/src/api/client/account.rs:49",
+          "handler": "threepid_validation::add_email",
           "kind": "exact"
         }
       ],
       "tests": [
-        "conduit-server/tests/production_account.rs::production_threepid_endpoints_answer_honestly"
+        "conduit-server/tests/production_account.rs::production_threepid_endpoints_answer_honestly",
+        "conduit-server/tests/production_account.rs::homeserver_validated_threepids_require_the_delivered_token"
       ],
-      "tests_total": 1,
-      "gap_beads": [
-        "conduit-y99.36.1",
-        "conduit-2c7"
-      ],
-      "notes": "Honest refusal (403 M_THREEPID_DENIED); no email/SMS validation."
+      "tests_total": 2,
+      "gap_beads": [],
+      "notes": "With the sink set, 400 M_THREEPID_IN_USE when the email is already associated; otherwise sid and submit_url. A repeated send_attempt does not resend. Unset sink is 403 M_THREEPID_DENIED before field checks."
     },
     {
       "id": "cs.ep.post_matrixclientv3account3pidmsisdnrequesttoken",
@@ -971,23 +961,21 @@
       "rate_limited": "No",
       "deprecated": false,
       "role": "homeserver",
-      "status": "partial",
+      "status": "implemented+tested",
       "code": [
         {
-          "loc": "conduit-server/src/api/client/account.rs:51",
-          "handler": "threepid_denied",
+          "loc": "conduit-server/src/api/client/account.rs:50",
+          "handler": "threepid_validation::add_msisdn",
           "kind": "exact"
         }
       ],
       "tests": [
-        "conduit-server/tests/production_account.rs::production_threepid_endpoints_answer_honestly"
+        "conduit-server/tests/production_account.rs::production_threepid_endpoints_answer_honestly",
+        "conduit-server/tests/production_account.rs::homeserver_validated_threepids_require_the_delivered_token"
       ],
-      "tests_total": 1,
-      "gap_beads": [
-        "conduit-y99.36.1",
-        "conduit-2c7"
-      ],
-      "notes": "Honest refusal (403 M_THREEPID_DENIED); no email/SMS validation."
+      "tests_total": 2,
+      "gap_beads": [],
+      "notes": "With the sink set, canonicalises country plus phone_number and returns sid plus submit_url; 400 M_THREEPID_IN_USE when that number is already associated. Unset sink is 403 M_THREEPID_DENIED before field checks."
     },
     {
       "id": "cs.ep.post_matrixclientv3account3pidunbind",
@@ -6886,15 +6874,15 @@
       ],
       "tests": [
         "conduit-server/tests/production_account.rs::production_device_lifecycle_with_uia_keys_and_device_lists",
-        "conduit-server/tests/production_account.rs::production_password_fallback_page_completes_uia"
+        "conduit-server/tests/production_account.rs::production_password_fallback_page_completes_uia",
+        "conduit-server/tests/production_account.rs::homeserver_validated_threepids_require_the_delivered_token"
       ],
-      "tests_total": 2,
+      "tests_total": 3,
       "gap_beads": [
         "conduit-y99.18.2",
-        "conduit-vfm",
-        "conduit-2c7"
+        "conduit-vfm"
       ],
-      "notes": "Password, dummy and registration_token stages with fallback pages; passwordless accounts get m.login.dummy (y99.18.2); sessions in process memory (conduit-vfm); no email/msisdn stages."
+      "notes": "Password, dummy, registration_token, and (when CONDUIT_THREEPID_SINK is set) email.identity and msisdn stages, with fallback pages. Passwordless accounts get m.login.dummy (y99.18.2). Sessions stay in process memory (conduit-vfm)."
     },
     {
       "id": "cs.auth.uia.token-registration",
@@ -7148,21 +7136,23 @@
       "title": "Adding account administrative contact information (3PIDs)",
       "source": "https://spec.matrix.org/v1.19/client-server-api/#adding-account-administrative-contact-information",
       "role": "homeserver",
-      "status": "partial",
+      "status": "implemented+tested",
       "code": [
+        {
+          "loc": "conduit-server/src/api/client/threepid_validation.rs"
+        },
         {
           "loc": "conduit-server/src/api/client/account.rs"
         }
       ],
       "tests": [
         "conduit-server/tests/production_account.rs::production_threepid_endpoints_answer_honestly",
+        "conduit-server/tests/production_account.rs::homeserver_validated_threepids_require_the_delivered_token",
         "conduit-server/tests/production_appservice.rs::account_3pid_bind_unbind_delete_and_deactivate_use_the_identity_server"
       ],
-      "tests_total": 2,
-      "gap_beads": [
-        "conduit-y99.36.1"
-      ],
-      "notes": "Identity-server bind/unbind/delete and deactivation unbind implemented (conduit-y99.36); homeserver-validated 3PIDs (requestToken/add) remain honest refusals (conduit-y99.36.1)."
+      "tests_total": 3,
+      "gap_beads": [],
+      "notes": "Homeserver validates email and MSISDN through CONDUIT_THREEPID_SINK (hashed token, submit_url). Unset sink keeps 403 M_THREEPID_DENIED / M_FORBIDDEN. Identity-server bind, unbind, and delete remain."
     },
     {
       "id": "cs.auth.whoami",

@@ -187,5 +187,6 @@ server in-test), `conduit/tests/third_party_invite_auth.rs`.
   the outbound SSRF policy (`safe_fetch`), so private/loopback identity
   servers are refused unless allow-listed (`CONDUIT_IS_ALLOW_CIDRS`).
   `CONDUIT_IS_INSECURE_HTTP=1` switches to HTTP for local testing.
-- Still refused (conduit-y99.36.1): homeserver-validated 3PIDs —
-  `requestToken`, `/account/3pid/add`, deprecated `POST /account/3pid`.
+- Homeserver-validated 3PIDs (requestToken, submitToken, `/account/3pid/add`,
+  deprecated `POST /account/3pid`) run when `CONDUIT_THREEPID_SINK` is set
+  and stay `M_THREEPID_DENIED` / `M_FORBIDDEN` when it is not.

@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE threepid_validation_sessions\n            SET purpose = $2, send_attempt = $3, token_hash = $4, validated_at = NULL\n            WHERE sid = $1\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Int4",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "ca53fe481ec50875223030d6be73343fab022932e1e40116ed0cdac980b75c8f"
+}

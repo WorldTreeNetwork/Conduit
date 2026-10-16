@@ -4585,6 +4585,207 @@ impl Storage for PostgresStorage {
         Ok(())
     }
 
+    async fn threepid_session_for_client(
+        &self,
+        medium: &str,
+        address: &str,
+        client_secret: &str,
+    ) -> Result<Option<conduit::storage::ThreepidValidation>> {
+        let row = sqlx::query!(
+            r#"
+            SELECT sid, client_secret, medium, address, purpose, send_attempt, token_hash, validated_at
+            FROM threepid_validation_sessions
+            WHERE medium = $1 AND address = $2 AND client_secret = $3
+            "#,
+            medium,
+            address,
+            client_secret
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(row.map(|r| conduit::storage::ThreepidValidation {
+            sid: r.sid,
+            client_secret: r.client_secret,
+            medium: r.medium,
+            address: r.address,
+            purpose: r.purpose,
+            send_attempt: r.send_attempt,
+            token_hash: r.token_hash,
+            validated_at: r.validated_at,
+        }))
+    }
+
+    async fn insert_threepid_session(&self, session: &conduit::storage::ThreepidValidation) -> Result<()> {
+        sqlx::query!(
+            r#"
+            INSERT INTO threepid_validation_sessions
+                (sid, client_secret, medium, address, purpose, send_attempt, token_hash, validated_at, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            "#,
+            session.sid,
+            session.client_secret,
+            session.medium,
+            session.address,
+            session.purpose,
+            session.send_attempt,
+            session.token_hash,
+            session.validated_at,
+            chrono::Utc::now().timestamp_millis()
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(())
+    }
+
+    async fn retarget_threepid_session(
+        &self,
+        sid: &str,
+        purpose: &str,
+        send_attempt: i32,
+        token_hash: &str,
+    ) -> Result<()> {
+        sqlx::query!(
+            r#"
+            UPDATE threepid_validation_sessions
+            SET purpose = $2, send_attempt = $3, token_hash = $4, validated_at = NULL
+            WHERE sid = $1
+            "#,
+            sid,
+            purpose,
+            send_attempt,
+            token_hash
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(())
+    }
+
+    async fn threepid_session(&self, sid: &str) -> Result<Option<conduit::storage::ThreepidValidation>> {
+        let row = sqlx::query!(
+            r#"
+            SELECT sid, client_secret, medium, address, purpose, send_attempt, token_hash, validated_at
+            FROM threepid_validation_sessions
+            WHERE sid = $1
+            "#,
+            sid
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(row.map(|r| conduit::storage::ThreepidValidation {
+            sid: r.sid,
+            client_secret: r.client_secret,
+            medium: r.medium,
+            address: r.address,
+            purpose: r.purpose,
+            send_attempt: r.send_attempt,
+            token_hash: r.token_hash,
+            validated_at: r.validated_at,
+        }))
+    }
+
+    async fn mark_threepid_validated(&self, sid: &str, validated_at: i64) -> Result<()> {
+        sqlx::query!(
+            "UPDATE threepid_validation_sessions SET validated_at = $2 WHERE sid = $1",
+            sid,
+            validated_at
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(())
+    }
+
+    async fn account_threepid_owner(&self, medium: &str, address: &str) -> Result<Option<String>> {
+        let row = sqlx::query!(
+            "SELECT user_id FROM account_threepids WHERE medium = $1 AND address = $2",
+            medium,
+            address
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(row.map(|r| r.user_id))
+    }
+
+    async fn list_account_threepids(&self, user_id: &str) -> Result<Vec<conduit::storage::AccountThreepid>> {
+        let rows = sqlx::query!(
+            r#"
+            SELECT medium, address, added_at, validated_at
+            FROM account_threepids
+            WHERE user_id = $1
+            ORDER BY added_at, medium, address
+            "#,
+            user_id
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(rows
+            .into_iter()
+            .map(|r| conduit::storage::AccountThreepid {
+                medium: r.medium,
+                address: r.address,
+                added_at: r.added_at,
+                validated_at: r.validated_at,
+            })
+            .collect())
+    }
+
+    async fn add_account_threepid(
+        &self,
+        user_id: &str,
+        medium: &str,
+        address: &str,
+        added_at: i64,
+        validated_at: i64,
+    ) -> Result<bool> {
+        let inserted = sqlx::query!(
+            r#"
+            INSERT INTO account_threepids (medium, address, user_id, added_at, validated_at)
+            VALUES ($1, $2, $3, $4, $5)
+            ON CONFLICT (medium, address) DO NOTHING
+            "#,
+            medium,
+            address,
+            user_id,
+            added_at,
+            validated_at
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        if inserted.rows_affected() == 1 {
+            return Ok(true);
+        }
+        let owner = self.account_threepid_owner(medium, address).await?;
+        Ok(owner.as_deref() == Some(user_id))
+    }
+
+    async fn remove_account_threepid(&self, user_id: &str, medium: &str, address: &str) -> Result<()> {
+        sqlx::query!(
+            "DELETE FROM account_threepids WHERE user_id = $1 AND medium = $2 AND address = $3",
+            user_id,
+            medium,
+            address
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(())
+    }
+
+    async fn remove_account_threepids(&self, user_id: &str) -> Result<()> {
+        sqlx::query!("DELETE FROM account_threepids WHERE user_id = $1", user_id)
+            .execute(&self.pool)
+            .await
+            .map_err(map_sqlx)?;
+        Ok(())
+    }
+
     // -----------------------------------------------------------------------
     // Sync & E2EE semantics (conduit-y99.14 / .15 / .16)
     // -----------------------------------------------------------------------

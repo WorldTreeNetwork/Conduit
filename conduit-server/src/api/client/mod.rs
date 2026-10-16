@@ -48,6 +48,7 @@ pub mod standards;
 pub mod server_notices;
 pub mod sync;
 pub mod third_party;
+pub mod threepid_validation;
 pub mod thirdparty;
 pub mod typing;
 pub mod uia;

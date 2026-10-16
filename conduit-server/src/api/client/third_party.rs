@@ -360,9 +360,8 @@ pub async fn unbind<S: AuthState>(
 
 /// `POST /account/3pid/unbind` and `POST /account/3pid/delete`.
 ///
-/// No 3PID is ever added to an account here (no email/SMS validation;
-/// `m.3pid_changes` is off), so delete only performs the identity-server
-/// unbind the spec attaches to it.
+/// Removes a homeserver-validated address, then unbinds it from any
+/// identity server this homeserver published it to.
 pub async fn account_unbind<S: AuthState>(
     State(state): State<S>,
     authed: AuthedUser,
@@ -379,6 +378,13 @@ pub async fn account_unbind<S: AuthState>(
         Some(_) => return MatrixError::bad_json("id_server must be a string").into_response(),
     };
     let address = canonical_3pid(medium, address).unwrap_or_else(|| address.to_owned());
+    if let Err(e) = state
+        .storage()
+        .remove_account_threepid(&authed.user_id, medium, &address)
+        .await
+    {
+        return MatrixError::unknown(e.to_string()).into_response();
+    }
     match unbind(&state, &authed.user_id, medium, &address, id_server).await {
         Ok(result) => (StatusCode::OK, Json(json!({ "id_server_unbind_result": result }))).into_response(),
         Err(r) => r,

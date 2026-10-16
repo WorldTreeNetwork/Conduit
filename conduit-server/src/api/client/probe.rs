@@ -49,7 +49,7 @@ pub async fn capabilities<S: AuthState>(
     // Account capabilities reflect what this account can actually do
     // (conduit-y99.18): passwordless and guest accounts cannot change a
     // password, guests may only change their display name and cannot
-    // mint login tokens, and no 3PIDs are supported.
+    // mint login tokens. 3PID changes require CONDUIT_THREEPID_SINK.
     let (has_password, is_guest) = match state.storage().get_account(&authed.user_id).await {
         Ok(Some(a)) => (a.password_hash.is_some(), a.is_guest),
         Ok(None) => (false, false),
@@ -68,7 +68,7 @@ pub async fn capabilities<S: AuthState>(
                 },
                 "m.set_displayname":  { "enabled": true },
                 "m.set_avatar_url":   { "enabled": !is_guest },
-                "m.3pid_changes":     { "enabled": false },
+                "m.3pid_changes":     { "enabled": super::account_config::AccountConfig::get().threepid_enabled() && !is_guest },
                 "m.get_login_token":  { "enabled": !is_guest },
                 // Every room version the kernel creates and authorises.
                 "m.room_versions": room_version_capability(),

@@ -312,11 +312,16 @@ devices (tokens, keys), marks the account; `erase: true` also clears profile and
 account data and records `accounts.erased_at`. The admin API deactivates the
 same way. Login then answers `M_USER_DEACTIVATED`.
 
-**3PIDs.** None are stored; there is no identity-server client and no outbound
-email/SMS. `GET /account/3pid` is empty, add/bind/legacy-add are `403
-M_FORBIDDEN` (`m.3pid_changes` disabled), delete/unbind return
-`id_server_unbind_result: no-support`, every `requestToken` is `403
-M_THREEPID_DENIED`, and deactivation reports `success` (nothing to unbind).
+**3PIDs.** `CONDUIT_THREEPID_SINK` is an HTTP endpoint that receives
+`{medium, address, sid, purpose, send_attempt, token}`. Unset, the server
+stores no addresses: `GET /account/3pid` is empty, add and legacy add are
+`403 M_FORBIDDEN` (`m.3pid_changes` disabled), and every `requestToken` is
+`403 M_THREEPID_DENIED`. Set, requestToken opens a validation session and
+posts the token; `submitToken` accepts only that token; `/account/3pid/add`
+and deprecated `POST /account/3pid` store it; registration and password
+reset accept `m.login.email.identity` and `m.login.msisdn` for those
+sessions. Delete removes a stored address and still reports the
+identity-server unbind result.
 
 **Discovery.** `/.well-known/matrix/client` uses
 `CONDUIT_WELL_KNOWN_CLIENT_BASE_URL` or the origin the request reached

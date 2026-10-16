@@ -6,9 +6,11 @@ mod common;
 
 use std::time::Duration;
 
+use axum::extract::State;
 use common::production::Server;
 use reqwest::Method;
 use serde_json::{json, Value};
+use tokio::sync::mpsc;
 
 const PASSWORD: &str = "test-password";
 
@@ -1314,6 +1316,484 @@ async fn production_threepid_endpoints_answer_honestly() {
         assert_eq!(r["errcode"], "M_THREEPID_DENIED", "{path}");
     }
     server.request(Method::GET, "/_matrix/client/v3/account/3pid", None, None, 401).await;
+}
+
+async fn token_sink() -> (String, mpsc::UnboundedReceiver<Value>) {
+    let (tx, rx) = mpsc::unbounded_channel();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        let app = axum::Router::new()
+            .route(
+                "/",
+                axum::routing::post(
+                    |State(tx): State<mpsc::UnboundedSender<Value>>, axum::Json(body): axum::Json<Value>| async move {
+                        let _ = tx.send(body);
+                        axum::http::StatusCode::OK
+                    },
+                ),
+            )
+            .with_state(tx);
+        axum::serve(listener, app).await.ok();
+    });
+    (url, rx)
+}
+
+async fn delivered(rx: &mut mpsc::UnboundedReceiver<Value>) -> Value {
+    tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .expect("validation sink timed out")
+        .expect("validation sink closed")
+}
+
+async fn nothing_delivered(rx: &mut mpsc::UnboundedReceiver<Value>) {
+    let arrived = tokio::time::timeout(Duration::from_millis(200), rx.recv()).await;
+    assert!(arrived.is_err(), "sink received a token that should not have been sent: {arrived:?}");
+}
+
+async fn submit_token(server: &Server, submit_url: &str, sid: &str, secret: &str, token: &str) -> (u16, Value) {
+    let response = server
+        .http
+        .post(submit_url)
+        .json(&json!({"sid": sid, "client_secret": secret, "token": token}))
+        .send()
+        .await
+        .unwrap();
+    let status = response.status().as_u16();
+    let text = response.text().await.unwrap();
+    (status, serde_json::from_str(&text).unwrap_or(json!({"raw": text})))
+}
+
+fn addresses(list: &Value) -> Vec<(String, String)> {
+    list["threepids"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| {
+            (
+                row["medium"].as_str().unwrap().to_owned(),
+                row["address"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn homeserver_validated_threepids_require_the_delivered_token() {
+    let (sink, mut rx) = token_sink().await;
+    let server = Server::with_env(&[("CONDUIT_THREEPID_SINK", &sink)]).await;
+    let alice = server.register("alice").await;
+    let alice_token = token(&alice);
+    let caps = server
+        .request(Method::GET, "/_matrix/client/v3/capabilities", Some(alice_token), None, 200)
+        .await;
+    assert_eq!(caps["capabilities"]["m.3pid_changes"]["enabled"], true);
+
+    // Adding an email: a repeated send_attempt does not send again, a
+    // wrong token does not validate, and only the sink's token does.
+    let secret = "add-email-secret";
+    let requested = server
+        .request(
+            Method::POST,
+            "/_matrix/client/v3/account/3pid/email/requestToken",
+            None,
+            Some(json!({"client_secret": secret, "email": "Alice@Example.com", "send_attempt": 1})),
+            200,
+        )
+        .await;
+    let sid = requested["sid"].as_str().unwrap().to_owned();
+    let submit_url = requested["submit_url"].as_str().unwrap().to_owned();
+    assert!(submit_url.starts_with(&server.base_url), "{submit_url}");
+    assert!(submit_url.ends_with("/_matrix/client/v3/validate/email/submitToken"), "{submit_url}");
+    let first = delivered(&mut rx).await;
+    assert_eq!(first["address"], "alice@example.com");
+    assert_eq!(first["sid"], sid);
+    assert_eq!(first["purpose"], "add");
+    let token1 = first["token"].as_str().unwrap().to_owned();
+    server
+        .request(
+            Method::POST,
+            "/_matrix/client/v3/account/3pid/email/requestToken",
+            None,
+            Some(json!({"client_secret": secret, "email": "alice@example.com", "send_attempt": 1})),
+            200,
+        )
+        .await;
+    nothing_delivered(&mut rx).await;
+
+    let (status, body) = submit_token(&server, &submit_url, &sid, secret, "WRONG-TOKEN-DISTINCTIVE").await;
+    assert_eq!(status, 400, "{body}");
+    assert_eq!(body["errcode"], "M_INVALID_PARAM");
+    let rejected = server
+        .request(
+            Method::POST,
+            "/_matrix/client/v3/account/3pid/add",
+            Some(alice_token),
+            Some(json!({
+                "sid": sid,
+                "client_secret": secret,
+                "auth": password_auth("alice", PASSWORD, &Value::Null),
+            })),
+            403,
+        )
+        .await;
+    assert_eq!(rejected["errcode"], "M_THREEPID_AUTH_FAILED");
+    assert_eq!(
+        server.request(Method::GET, "/_matrix/client/v3/account/3pid", Some(alice_token), None, 200).await["threepids"],
+        json!([])
+    );
+
+    let resent = server
+        .request(
+            Method::POST,
+            "/_matrix/client/v3/account/3pid/email/requestToken",
+            None,
+            Some(json!({"client_secret": secret, "email": "alice@example.com", "send_attempt": 2})),
+            200,
+        )
+        .await;
+    assert_eq!(resent["sid"], sid);
+    let second = delivered(&mut rx).await;
+    let token2 = second["token"].as_str().unwrap().to_owned();
+    assert_ne!(token2, token1);
+    let (status, _) = submit_token(&server, &submit_url, &sid, secret, &token1).await;
+    assert_eq!(status, 400, "the replaced token must no longer validate");
+    let (status, body) = submit_token(&server, &submit_url, &sid, secret, &token2).await;
+    assert_eq!((status, body["success"].as_bool()), (200, Some(true)));
+
+    server
+        .request(
+            Method::POST,
+            "/_matrix/client/v3/account/3pid/add",
+            Some(alice_token),
+            Some(json!({
+                "sid": sid,
+                "client_secret": secret,
+                "auth": password_auth("alice", PASSWORD, &Value::Null),
+            })),
+            200,
+        )
+        .await;
+    let listed = server
+        .request(Method::GET, "/_matrix/client/v3/account/3pid", Some(alice_token), None, 200)
+        .await;
+    assert_eq!(addresses(&listed), vec![("email".into(), "alice@example.com".into())]);
+    assert!(listed["threepids"][0]["added_at"].as_i64().unwrap() > 0);
+    assert!(listed["threepids"][0]["validated_at"].as_i64().unwrap() > 0);
+
+    let bob = server.register("bob").await;
+    let in_use = server
+        .request(
+            Method::POST,
+            "/_matrix/client/v3/account/3pid/email/requestToken",
+            Some(token(&bob)),
+            Some(json!({"client_secret": "bob-secret", "email": "alice@example.com", "send_attempt": 1})),
+            400,
+        )
+        .await;
+    assert_eq!(in_use["errcode"], "M_THREEPID_IN_USE");
+    nothing_delivered(&mut rx).await;
+
+    // Deprecated POST /account/3pid accepts the same homeserver session.
+    let legacy_secret = "legacy-email-secret";
+    let legacy = server
+        .request(
+            Method::POST,
+            "/_matrix/client/v3/account/3pid/email/requestToken",
+            None,
+            Some(json!({"client_secret": legacy_secret, "email": "legacy@example.com", "send_attempt": 1})),
+            200,
+        )
+        .await;
+    let legacy_mail = delivered(&mut rx).await;
+    let (status, _) = submit_token(
+        &server,
+        legacy["submit_url"].as_str().unwrap(),
+        legacy["sid"].as_str().unwrap(),
+        legacy_secret,
+        "WRONG-TOKEN-DISTINCTIVE",
+    )
+    .await;
+    assert_eq!(status, 400);
+    let failed = server
+        .request(
+            Method::POST,
+            "/_matrix/client/v3/account/3pid",
+            Some(alice_token),
+            Some(json!({"three_pid_creds": {"sid": legacy["sid"], "client_secret": legacy_secret}})),
+            403,
+        )
+        .await;
+    assert_eq!(failed["errcode"], "M_THREEPID_AUTH_FAILED");
+    let (status, _) = submit_token(
+        &server,
+        legacy["submit_url"].as_str().unwrap(),
+        legacy["sid"].as_str().unwrap(),
+        legacy_secret,
+        legacy_mail["token"].as_str().unwrap(),
+    )
+    .await;
+    assert_eq!(status, 200);
+    server
+        .request(
+            Method::POST,
+            "/_matrix/client/v3/account/3pid",
+            Some(alice_token),
+            Some(json!({"three_pid_creds": {"sid": legacy["sid"], "client_secret": legacy_secret}})),
+            200,
+        )
+        .await;
+
+    // Password reset proves the email only after the delivered token is submitted.
+    let unknown = server
+        .request(
+            Method::POST,
+            "/_matrix/client/v3/account/password/email/requestToken",
+            None,
+            Some(json!({"client_secret": "pw-missing", "email": "nobody@example.com", "send_attempt": 1})),
+            400,
+        )
+        .await;
+    assert_eq!(unknown["errcode"], "M_THREEPID_NOT_FOUND");
+    nothing_delivered(&mut rx).await;
+    let pw_secret = "pw-email-secret";
+    let pw = server
+        .request(
+            Method::POST,
+            "/_matrix/client/v3/account/password/email/requestToken",
+            None,
+            Some(json!({"client_secret": pw_secret, "email": "alice@example.com", "send_attempt": 1})),
+            200,
+        )
+        .await;
+    let pw_mail = delivered(&mut rx).await;
+    let early = server
+        .request(
+            Method::POST,
+            "/_matrix/client/v3/account/password",
+            None,
+            Some(json!({
+                "new_password": "should-not-stick",
+                "logout_devices": false,
+                "auth": {"type": "m.login.email.identity", "threepid_creds": {"sid": pw["sid"], "client_secret": pw_secret}},
+            })),
+            401,
+        )
+        .await;
+    assert_eq!(early["errcode"], "M_FORBIDDEN");
+    login(&server, "alice", PASSWORD, json!({})).await;
+    let (status, _) = submit_token(
+        &server,
+        pw["submit_url"].as_str().unwrap(),
+        pw["sid"].as_str().unwrap(),
+        pw_secret,
+        pw_mail["token"].as_str().unwrap(),
+    )
+    .await;
+    assert_eq!(status, 200);
+    server
+        .request(
+            Method::POST,
+            "/_matrix/client/v3/account/password",
+            None,
+            Some(json!({
+                "new_password": "reset-password",
+                "logout_devices": false,
+                "auth": {"type": "m.login.email.identity", "threepid_creds": {"sid": pw["sid"], "client_secret": pw_secret}},
+            })),
+            200,
+        )
+        .await;
+    server
+        .request(
+            Method::POST,
+            "/_matrix/client/v3/login",
+            None,
+            Some(json!({
+                "type": "m.login.password",
+                "identifier": {"type": "m.id.user", "user": "alice"},
+                "password": PASSWORD,
+            })),
+            403,
+        )
+        .await;
+    login(&server, "alice", "reset-password", json!({})).await;
+
+    // Registration binds the validated email and refuses one already in use.
+    let taken = server
+        .request(
+            Method::POST,
+            "/_matrix/client/v3/register/email/requestToken",
+            None,
+            Some(json!({"client_secret": "reg-taken", "email": "alice@example.com", "send_attempt": 1})),
+            400,
+        )
+        .await;
+    assert_eq!(taken["errcode"], "M_THREEPID_IN_USE");
+    nothing_delivered(&mut rx).await;
+    let reg_secret = "reg-email-secret";
+    let reg = server
+        .request(
+            Method::POST,
+            "/_matrix/client/v3/register/email/requestToken",
+            None,
+            Some(json!({"client_secret": reg_secret, "email": "carol@example.com", "send_attempt": 1})),
+            200,
+        )
+        .await;
+    let reg_mail = delivered(&mut rx).await;
+    let (status, _) = submit_token(
+        &server,
+        reg["submit_url"].as_str().unwrap(),
+        reg["sid"].as_str().unwrap(),
+        reg_secret,
+        reg_mail["token"].as_str().unwrap(),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let carol = server
+        .request(
+            Method::POST,
+            "/_matrix/client/v3/register",
+            None,
+            Some(json!({
+                "username": "carol",
+                "password": PASSWORD,
+                "auth": {"type": "m.login.email.identity", "threepid_creds": {"sid": reg["sid"], "client_secret": reg_secret}},
+            })),
+            200,
+        )
+        .await;
+    let carol_list = server
+        .request(Method::GET, "/_matrix/client/v3/account/3pid", Some(token(&carol)), None, 200)
+        .await;
+    assert_eq!(addresses(&carol_list), vec![("email".into(), "carol@example.com".into())]);
+
+    // Phone numbers follow the same session, including m.login.msisdn.
+    let phone_secret = "add-msisdn-secret";
+    let phone = server
+        .request(
+            Method::POST,
+            "/_matrix/client/v3/account/3pid/msisdn/requestToken",
+            None,
+            Some(json!({"client_secret": phone_secret, "country": "GB", "phone_number": "07700900001", "send_attempt": 1})),
+            200,
+        )
+        .await;
+    let sms = delivered(&mut rx).await;
+    assert_eq!(sms["address"], "447700900001");
+    assert_eq!(sms["medium"], "msisdn");
+    let (status, _) = submit_token(
+        &server,
+        phone["submit_url"].as_str().unwrap(),
+        phone["sid"].as_str().unwrap(),
+        phone_secret,
+        "WRONG-TOKEN-DISTINCTIVE",
+    )
+    .await;
+    assert_eq!(status, 400);
+    let (status, _) = submit_token(
+        &server,
+        phone["submit_url"].as_str().unwrap(),
+        phone["sid"].as_str().unwrap(),
+        phone_secret,
+        sms["token"].as_str().unwrap(),
+    )
+    .await;
+    assert_eq!(status, 200);
+    server
+        .request(
+            Method::POST,
+            "/_matrix/client/v3/account/3pid/add",
+            Some(alice_token),
+            Some(json!({
+                "sid": phone["sid"],
+                "client_secret": phone_secret,
+                "auth": password_auth("alice", "reset-password", &Value::Null),
+            })),
+            200,
+        )
+        .await;
+    let taken_phone = server
+        .request(
+            Method::POST,
+            "/_matrix/client/v3/register/msisdn/requestToken",
+            None,
+            Some(json!({"client_secret": "reg-phone", "country": "GB", "phone_number": "07700900001", "send_attempt": 1})),
+            400,
+        )
+        .await;
+    assert_eq!(taken_phone["errcode"], "M_THREEPID_IN_USE");
+    let missing_phone = server
+        .request(
+            Method::POST,
+            "/_matrix/client/v3/account/password/msisdn/requestToken",
+            None,
+            Some(json!({"client_secret": "pw-phone-missing", "country": "GB", "phone_number": "07700900002", "send_attempt": 1})),
+            400,
+        )
+        .await;
+    assert_eq!(missing_phone["errcode"], "M_THREEPID_NOT_FOUND");
+    nothing_delivered(&mut rx).await;
+    let pw_phone_secret = "pw-phone-secret";
+    let pw_phone = server
+        .request(
+            Method::POST,
+            "/_matrix/client/v3/account/password/msisdn/requestToken",
+            None,
+            Some(json!({"client_secret": pw_phone_secret, "country": "GB", "phone_number": "07700900001", "send_attempt": 1})),
+            200,
+        )
+        .await;
+    let pw_sms = delivered(&mut rx).await;
+    let (status, _) = submit_token(
+        &server,
+        pw_phone["submit_url"].as_str().unwrap(),
+        pw_phone["sid"].as_str().unwrap(),
+        pw_phone_secret,
+        pw_sms["token"].as_str().unwrap(),
+    )
+    .await;
+    assert_eq!(status, 200);
+    server
+        .request(
+            Method::POST,
+            "/_matrix/client/v3/account/password",
+            None,
+            Some(json!({
+                "new_password": "phone-password",
+                "logout_devices": false,
+                "auth": {"type": "m.login.msisdn", "threepid_creds": {"sid": pw_phone["sid"], "client_secret": pw_phone_secret}},
+            })),
+            200,
+        )
+        .await;
+    login(&server, "alice", "phone-password", json!({})).await;
+
+    server
+        .request(
+            Method::POST,
+            "/_matrix/client/v3/account/3pid/delete",
+            Some(alice_token),
+            Some(json!({"medium": "msisdn", "address": "447700900001"})),
+            200,
+        )
+        .await;
+    let after_delete = server
+        .request(Method::GET, "/_matrix/client/v3/account/3pid", Some(alice_token), None, 200)
+        .await;
+    assert!(!addresses(&after_delete).iter().any(|(medium, _)| medium == "msisdn"));
+    server
+        .request(
+            Method::POST,
+            "/_matrix/client/v3/register/msisdn/requestToken",
+            None,
+            Some(json!({"client_secret": "reg-phone-free", "country": "GB", "phone_number": "07700900001", "send_attempt": 1})),
+            200,
+        )
+        .await;
+    let freed = delivered(&mut rx).await;
+    assert_eq!(freed["purpose"], "register");
 }
 
 #[tokio::test]

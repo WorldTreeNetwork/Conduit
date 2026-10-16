@@ -12,7 +12,8 @@
 //! (notably `/login/get_token`) re-prompts.
 //!
 //! Supported stages: `m.login.password`, `m.login.dummy`,
-//! `m.login.registration_token`.
+//! `m.login.registration_token`, and, when a validation sink is
+//! configured, `m.login.email.identity` and `m.login.msisdn`.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -33,6 +34,8 @@ use super::{verify_password, AuthState, MatrixError};
 pub const PASSWORD: &str = "m.login.password";
 pub const DUMMY: &str = "m.login.dummy";
 pub const REGISTRATION_TOKEN: &str = "m.login.registration_token";
+pub const EMAIL_IDENTITY: &str = "m.login.email.identity";
+pub const MSISDN: &str = "m.login.msisdn";
 
 const SESSION_TTL: Duration = Duration::from_secs(30 * 60);
 
@@ -44,6 +47,7 @@ struct Session {
     params: Value,
     completed: Vec<String>,
     created: Instant,
+    threepid: Option<super::threepid_validation::ValidatedThreepid>,
 }
 
 static SESSIONS: Mutex<Option<HashMap<String, Session>>> = Mutex::new(None);
@@ -106,6 +110,8 @@ impl UiaRequest {
 pub struct UiaPassed {
     /// The user the stages proved, if any stage identified one.
     pub user_id: Option<String>,
+    /// Set when an email or phone stage proved a homeserver validation session.
+    pub threepid: Option<super::threepid_validation::ValidatedThreepid>,
 }
 
 /// The flows protecting an account operation for `user_id`.
@@ -228,6 +234,24 @@ async fn run_stage<S: AuthState>(
                 return Err(("M_FORBIDDEN", "Invalid registration token".into()));
             }
         }
+        EMAIL_IDENTITY | MSISDN => {
+            let medium = if stage == EMAIL_IDENTITY { "email" } else { "msisdn" };
+            let creds = auth.get("threepid_creds").cloned().unwrap_or(Value::Null);
+            let (user_id, proved) =
+                super::threepid_validation::identity_stage(state, &session.operation, medium, &creds).await?;
+            if let (Some(expected), Some(user_id)) = (&session.user_id, &user_id) {
+                if expected != user_id {
+                    return Err((
+                        "M_FORBIDDEN",
+                        "identifier does not match the authenticated user".into(),
+                    ));
+                }
+            }
+            if let Some(user_id) = user_id {
+                session.user_id = Some(user_id);
+            }
+            session.threepid = Some(proved);
+        }
         other => {
             return Err(("M_UNRECOGNIZED", format!("unsupported authentication type {other}")));
         }
@@ -286,6 +310,7 @@ pub async fn authenticate<S: AuthState>(
                 params: req.params.clone(),
                 completed: Vec::new(),
                 created: Instant::now(),
+                threepid: None,
             };
             (random_id(), session)
         }
@@ -315,7 +340,7 @@ pub async fn authenticate<S: AuthState>(
 
     if error.is_none() && flow_complete(&session) {
         with_sessions(|m| m.remove(&session_id));
-        return Ok(UiaPassed { user_id: session.user_id });
+        return Ok(UiaPassed { user_id: session.user_id, threepid: session.threepid });
     }
     with_sessions(|m| m.insert(session_id.clone(), session.clone()));
     Err(challenge(&session_id, &session, error))
@@ -382,6 +407,7 @@ mod tests {
             params: json!({}),
             completed: completed.iter().map(|s| s.to_string()).collect(),
             created: Instant::now(),
+            threepid: None,
         }
     }
 
