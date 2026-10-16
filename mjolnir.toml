@@ -37,15 +37,13 @@
 # Postgres and survive cutover.
 #
 # The Svelte client in web/ is not this service. It is a second app.
+#
+# start_command is one line. Runtime embeds it in ExecStart=/bin/sh -lc '…',
+# and a newline there makes systemd reject the unit ("Bad message").
 
 base_image = "ubuntu-24.04"
 port = 8008
-start_command = """
-set -e
-[ -f /run/mjolnir/secrets.env ] && . /run/mjolnir/secrets.env
-mkdir -p /var/lib/conduit/media
-exec env CONDUIT_LISTEN_ADDR=0.0.0.0:8008 CONDUIT_SERVER_NAME=conduit.vm.worldtree.network CONDUIT_ALLOW_GUEST_ACCESS=false CONDUIT_MEDIA_ROOT=/var/lib/conduit/media CONDUIT_WELL_KNOWN_CLIENT_BASE_URL=https://conduit.vm.worldtree.network CONDUIT_WELL_KNOWN_SERVER=conduit.vm.worldtree.network:443 CONDUIT_OIDC_REDIRECT_URI=https://conduit.vm.worldtree.network/_matrix/client/v3/login/identikey/callback ./target/release/conduit-server
-"""
+start_command = "set -e; if [ -f /run/mjolnir/secrets.env ]; then . /run/mjolnir/secrets.env; fi; mkdir -p /var/lib/conduit/media; exec env CONDUIT_LISTEN_ADDR=0.0.0.0:8008 CONDUIT_SERVER_NAME=conduit.vm.worldtree.network CONDUIT_ALLOW_GUEST_ACCESS=false CONDUIT_MEDIA_ROOT=/var/lib/conduit/media CONDUIT_WELL_KNOWN_CLIENT_BASE_URL=https://conduit.vm.worldtree.network CONDUIT_WELL_KNOWN_SERVER=conduit.vm.worldtree.network:443 CONDUIT_OIDC_REDIRECT_URI=https://conduit.vm.worldtree.network/_matrix/client/v3/login/identikey/callback ./target/release/conduit-server"
 # Empty inputs keep apt and the getty mask off the source hash, so a
 # code change does not reinstall the toolchain. The `mise` step must
 # start with `mise` or Orchestrator treats it as a source build. The
