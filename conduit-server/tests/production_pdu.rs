@@ -38,6 +38,15 @@ fn enc(value: &str) -> String {
     url::form_urlencoded::byte_serialize(value.as_bytes()).collect()
 }
 
+/// Every room version this server can authorise, as repeated `ver` parameters.
+fn supported_ver_query() -> String {
+    conduit::room_version::SUPPORTED
+        .iter()
+        .map(|version| format!("ver={version}"))
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
 struct Remote {
     key: Arc<ServerKey>,
     keys_url: String,
@@ -263,8 +272,12 @@ async fn send_join_validates_sender_state_key_origin_and_path() {
         .await["room_id"].as_str().unwrap().to_owned();
     let joiner = "@r:remote.test";
 
-    let make_join = format!("/_matrix/federation/v1/make_join/{}/{}?ver=11",
-        enc(&room), enc(joiner));
+    let make_join = format!(
+        "/_matrix/federation/v1/make_join/{}/{}?{}",
+        enc(&room),
+        enc(joiner),
+        supported_ver_query()
+    );
     let template = fed(&server, &remote, Method::GET, &make_join, None, 200).await["event"].clone();
     assert!(template.get("event_id").is_none() && template.get("hashes").is_none(), "{template}");
 
@@ -351,7 +364,7 @@ async fn restricted_make_join_names_an_authoriser_or_refuses() {
         let server = &server;
         let remote = &remote;
         async move {
-            let path = format!("/_matrix/federation/v1/make_join/{}/{}", enc(&room), enc(&user));
+            let path = format!("/_matrix/federation/v1/make_join/{}/{}?{}", enc(&room), enc(&user), supported_ver_query());
             let template = fed(server, remote, Method::GET, &path, None, 200).await["event"].clone();
             let pdu: Pdu = serde_json::from_value(template).unwrap();
             let (id, body) = sign(remote, pdu);
@@ -379,7 +392,7 @@ async fn restricted_make_join_names_an_authoriser_or_refuses() {
         .await;
 
     let make = |user: &str| {
-        let path = format!("/_matrix/federation/v1/make_join/{}/{}", enc(&room), enc(user));
+        let path = format!("/_matrix/federation/v1/make_join/{}/{}?{}", enc(&room), enc(user), supported_ver_query());
         let server = &server;
         let remote = &remote;
         async move { fed(server, remote, Method::GET, &path, None, 200).await }
@@ -431,7 +444,7 @@ async fn restricted_make_join_names_an_authoriser_or_refuses() {
         &server,
         &remote,
         Method::GET,
-        &format!("/_matrix/federation/v1/make_join/{}/{}", enc(&room), enc("@outsider:remote.test")),
+        &format!("/_matrix/federation/v1/make_join/{}/{}?{}", enc(&room), enc("@outsider:remote.test"), supported_ver_query()),
         None,
         403,
     )
@@ -454,7 +467,7 @@ async fn restricted_make_join_names_an_authoriser_or_refuses() {
         &server,
         &remote,
         Method::GET,
-        &format!("/_matrix/federation/v1/make_join/{}/{}", enc(&room), enc("@r2:remote.test")),
+        &format!("/_matrix/federation/v1/make_join/{}/{}?{}", enc(&room), enc("@r2:remote.test"), supported_ver_query()),
         None,
         400,
     )
@@ -496,7 +509,7 @@ async fn restricted_make_join_names_an_authoriser_or_refuses() {
         &server,
         &remote,
         Method::GET,
-        &format!("/_matrix/federation/v1/make_join/{}/{}", enc(&room), enc("@r2:remote.test")),
+        &format!("/_matrix/federation/v1/make_join/{}/{}?{}", enc(&room), enc("@r2:remote.test"), supported_ver_query()),
         None,
         400,
     )
@@ -630,7 +643,7 @@ async fn server_acl_denies_remote_participation_until_lifted() {
         enc(&room),
         enc(&marker_id)
     );
-    let join_path = format!("/_matrix/federation/v1/make_join/{}/{}", enc(&room), enc("@r:remote.test"));
+    let join_path = format!("/_matrix/federation/v1/make_join/{}/{}?{}", enc(&room), enc("@r:remote.test"), supported_ver_query());
     let backfill_path = format!(
         "/_matrix/federation/v1/backfill/{}?limit=1&v={}",
         enc(&room),
@@ -1273,7 +1286,7 @@ async fn policy_server_signature_is_required_before_a_client_event_is_sent() {
     assert_eq!(policy.calls.load(Ordering::SeqCst), 0, "via has no joined user yet");
 
     let joiner = "@ps:remote.test";
-    let make_join = format!("/_matrix/federation/v1/make_join/{}/{}", enc(&room), enc(joiner));
+    let make_join = format!("/_matrix/federation/v1/make_join/{}/{}?{}", enc(&room), enc(joiner), supported_ver_query());
     let template = fed(&server, &policy.remote, Method::GET, &make_join, None, 200).await["event"].clone();
     let join_pdu: Pdu = serde_json::from_value(template).unwrap();
     let (join_id, join_body) = sign(&policy.remote, join_pdu);
@@ -1745,12 +1758,82 @@ async fn backfill_returns_the_named_events_and_their_predecessors() {
 }
 
 async fn federation_join(server: &Server, remote: &Remote, origin: &str, room: &str, user: &str) {
-    let make = format!("/_matrix/federation/v1/make_join/{}/{}", enc(room), enc(user));
+    let make = format!("/_matrix/federation/v1/make_join/{}/{}?{}", enc(room), enc(user), supported_ver_query());
     let template = fed_as(server, remote, origin, Method::GET, &make, None, 200).await["event"].clone();
     let pdu: Pdu = serde_json::from_value(template).unwrap();
     let (id, body) = sign_as(remote, origin, pdu);
     let send = format!("/_matrix/federation/v2/send_join/{}/{}", enc(room), enc(&id));
     fed_as(server, remote, origin, Method::PUT, &send, Some(body), 200).await;
+}
+
+/// A missing `ver` list means room version 1. The resident returns 400
+/// `M_INCOMPATIBLE_ROOM_VERSION` and the room's version when that list does
+/// not include it. A listed version returns the unsigned join template.
+#[tokio::test]
+async fn make_join_rejects_room_versions_missing_from_ver() {
+    let remote = spawn_remote().await;
+    let server = federated_server(&remote).await;
+    let alice = server.register("alice").await;
+    let token = alice["access_token"].as_str().unwrap();
+    let create = |version: &str| {
+        let version = version.to_owned();
+        let server = &server;
+        async move {
+            server
+                .request(
+                    Method::POST,
+                    "/_matrix/client/v3/createRoom",
+                    Some(token),
+                    Some(json!({"preset": "public_chat", "room_version": version})),
+                    200,
+                )
+                .await["room_id"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        }
+    };
+    let v12 = create("12").await;
+    let v11 = create("11").await;
+    let joiner = "@r:remote.test";
+    let ask = |room: &str, query: &str, status: u16| {
+        let path = if query.is_empty() {
+            format!("/_matrix/federation/v1/make_join/{}/{}", enc(room), enc(joiner))
+        } else {
+            format!("/_matrix/federation/v1/make_join/{}/{}?{query}", enc(room), enc(joiner))
+        };
+        let server = &server;
+        let remote = &remote;
+        async move { fed(server, remote, Method::GET, &path, None, status).await }
+    };
+
+    let missing = ask(&v12, "", 400).await;
+    assert_eq!(missing["errcode"], "M_INCOMPATIBLE_ROOM_VERSION", "{missing}");
+    assert_eq!(missing["room_version"], "12", "{missing}");
+    assert!(missing.get("event").is_none(), "{missing}");
+    let only_old = ask(&v12, "ver=1&ver=11", 400).await;
+    assert_eq!(only_old["errcode"], "M_INCOMPATIBLE_ROOM_VERSION", "{only_old}");
+    assert_eq!(only_old["room_version"], "12", "{only_old}");
+    let v11_missing = ask(&v11, "", 400).await;
+    assert_eq!(v11_missing["room_version"], "11", "{v11_missing}");
+    assert_eq!(v11_missing["errcode"], "M_INCOMPATIBLE_ROOM_VERSION", "{v11_missing}");
+
+    let one = ask(&v12, "ver=12", 200).await;
+    assert_eq!(one["room_version"], "12", "{one}");
+    assert_eq!(one["event"]["type"], "m.room.member", "{one}");
+    assert_eq!(one["event"]["sender"], joiner, "{one}");
+    assert_eq!(one["event"]["state_key"], joiner, "{one}");
+    assert_eq!(one["event"]["content"]["membership"], "join", "{one}");
+    assert_eq!(one["event"]["room_id"], v12, "{one}");
+    assert!(one["event"].get("event_id").is_none(), "{one}");
+    let repeated = ask(&v12, "ver=1&ver=12", 200).await;
+    assert_eq!(repeated["room_version"], "12", "{repeated}");
+    assert_eq!(repeated["event"]["content"]["membership"], "join", "{repeated}");
+    let eleven = ask(&v11, "ver=11", 200).await;
+    assert_eq!(eleven["room_version"], "11", "{eleven}");
+
+    let unknown = ask("!missing:production.test", "ver=12", 404).await;
+    assert_eq!(unknown["errcode"], "M_NOT_FOUND", "{unknown}");
 }
 
 fn pdu_with_hash<'a>(pdus: &'a [Value], hash: &Value) -> &'a Value {
@@ -2235,7 +2318,7 @@ async fn ss_membership_send_knock_returns_state_array() {
             &server,
             &remote,
             Method::GET,
-            &format!("/_matrix/federation/v1/make_join/{}/{}", enc(&public), enc(knocker)),
+            &format!("/_matrix/federation/v1/make_join/{}/{}?{}", enc(&public), enc(knocker), supported_ver_query()),
             None,
             200,
         )
@@ -2466,7 +2549,7 @@ async fn ss_membership_send_leave_ends_membership() {
             &server,
             &remote,
             Method::GET,
-            &format!("/_matrix/federation/v1/make_join/{}/{}", enc(&room), enc(joiner)),
+            &format!("/_matrix/federation/v1/make_join/{}/{}?{}", enc(&room), enc(joiner), supported_ver_query()),
             None,
             200,
         )

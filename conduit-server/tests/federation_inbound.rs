@@ -636,8 +636,13 @@ async fn make_send_join_roundtrip() {
 
     // Step 1: make_join for a user on server-a, so key_a can sign the join.
     let user_id = "@bob:server-a.test";
+    let versions = conduit::room_version::SUPPORTED
+        .iter()
+        .map(|version| format!("ver={version}"))
+        .collect::<Vec<_>>()
+        .join("&");
     let path = format!(
-        "/_matrix/federation/v1/make_join/{}/{}",
+        "/_matrix/federation/v1/make_join/{}/{}?{versions}",
         urlencoding::encode(room_id),
         urlencoding::encode(user_id),
     );

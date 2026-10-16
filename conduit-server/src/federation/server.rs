@@ -454,10 +454,14 @@ pub async fn send_transaction(
 // x2r.5 — GET /make_join/:roomId/:userId
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Deserialize)]
-pub struct MakeJoinQuery {
-    #[serde(rename = "ver")]
-    pub ver: Option<Vec<String>>,
+/// Repeated `ver` values. serde's query extractor keeps one string, so the
+/// raw query is parsed. An absent list is empty; the caller treats that as `["1"]`.
+fn query_versions(raw: Option<&str>) -> Vec<String> {
+    let Some(raw) = raw else { return Vec::new() };
+    url::form_urlencoded::parse(raw.as_bytes())
+        .filter(|(key, _)| key == "ver")
+        .map(|(_, value)| value.into_owned())
+        .collect()
 }
 
 /// `GET /_matrix/federation/v1/make_join/:roomId/:userId`
@@ -465,7 +469,7 @@ pub async fn make_join(
     State(state): State<FedState>,
     origin_ext: Option<axum::extract::Extension<FederationOrigin>>,
     Path((room_id, user_id)): Path<(String, String)>,
-    Query(_query): Query<HashMap<String, String>>,
+    RawQuery(raw_query): RawQuery,
 ) -> Response {
     let origin = match origin_ext {
         Some(axum::extract::Extension(o)) => o.server_name,
@@ -485,6 +489,28 @@ pub async fn make_join(
         Ok(None) => return not_found("Room not found"),
         Err(e) => return internal(&e.to_string()),
     };
+
+    // A missing `ver` list means the sender only supports room version 1.
+    // The same string is returned as `room_version` below; a missing create
+    // field stays "11" (this server always writes the field).
+    let room_version = create_ev
+        .content
+        .get("room_version")
+        .and_then(|v| v.as_str())
+        .unwrap_or("11");
+    let advertised = query_versions(raw_query.as_deref());
+    let supported = if advertised.is_empty() { vec!["1".to_owned()] } else { advertised };
+    if !supported.iter().any(|version| version == room_version) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "errcode": "M_INCOMPATIBLE_ROOM_VERSION",
+                "error": "Your homeserver does not support the features required to join this room",
+                "room_version": room_version,
+            })),
+        )
+            .into_response();
+    }
 
     // Check join rules — for public rooms anyone can join.
     let join_rule = match state
@@ -595,14 +621,6 @@ pub async fn make_join(
         "depth": depth,
         "origin_server_ts": crate::federation::now_ms(),
     });
-
-    // Extract room version from create event.
-    let room_version = create_ev
-        .content
-        .get("room_version")
-        .and_then(|v| v.as_str())
-        .unwrap_or("11")
-        .to_owned();
 
     (StatusCode::OK, Json(json!({
         "event": template,

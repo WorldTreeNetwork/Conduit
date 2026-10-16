@@ -34,9 +34,9 @@
     },
     "ss": {
       "endpoint": {
-        "implemented+tested": 30,
+        "implemented+tested": 31,
         "implemented-untested": 0,
-        "partial": 5,
+        "partial": 4,
         "missing": 0,
         "not-applicable": 1,
         "total": 36
@@ -5271,23 +5271,22 @@
       "rate_limited": "No",
       "deprecated": false,
       "role": "homeserver",
-      "status": "partial",
+      "status": "implemented+tested",
       "code": [
         {
-          "loc": "conduit-server/src/federation/server.rs:1073",
+          "loc": "conduit-server/src/federation/server.rs:468",
           "handler": "make_join",
           "kind": "exact"
         }
       ],
       "tests": [
         "conduit-server/tests/federation_inbound.rs::make_send_join_roundtrip",
-        "conduit-server/tests/federation_roundtrip.rs::rt3_join_room_on_a"
+        "conduit-server/tests/federation_roundtrip.rs::rt3_join_room_on_a",
+        "conduit-server/tests/production_pdu.rs::make_join_rejects_room_versions_missing_from_ver"
       ],
-      "tests_total": 2,
-      "gap_beads": [
-        "conduit-y99.22.2"
-      ],
-      "notes": ""
+      "tests_total": 3,
+      "gap_beads": [],
+      "notes": "A missing ver list means room version 1. A room whose version is not in the repeated ver list is 400 M_INCOMPATIBLE_ROOM_VERSION with room_version. A listed version returns the unsigned join template and the room version. An unknown room is 404."
     },
     {
       "id": "ss.ep.put_matrixfederationv2send_joinroomideventid",
@@ -9077,14 +9076,14 @@
       ],
       "tests": [
         "conduit-server/tests/federation_roundtrip.rs::rt3_join_room_on_a",
-        "conduit-server/tests/federation_inbound.rs::make_send_join_roundtrip"
+        "conduit-server/tests/federation_inbound.rs::make_send_join_roundtrip",
+        "conduit-server/tests/production_pdu.rs::make_join_rejects_room_versions_missing_from_ver"
       ],
-      "tests_total": 2,
+      "tests_total": 3,
       "gap_beads": [
-        "conduit-y99.22.1",
-        "conduit-y99.22.2"
+        "conduit-y99.22.1"
       ],
-      "notes": ""
+      "notes": "make_join negotiates ver and returns M_INCOMPATIBLE_ROOM_VERSION with room_version. Outbound make_join advertises versions 1-12. send_join state is still the current state, not the state before the join."
     },
     {
       "id": "ss.joining.restricted",

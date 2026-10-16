@@ -265,8 +265,13 @@ async fn rt3_join_room_on_a() {
 
     // Step 1: make_join for bob@a.test (using a's key for auth).
     let bob_id = "@bob:a.test";
+    let versions = conduit::room_version::SUPPORTED
+        .iter()
+        .map(|version| format!("ver={version}"))
+        .collect::<Vec<_>>()
+        .join("&");
     let make_join_path = format!(
-        "/_matrix/federation/v1/make_join/{}/{}",
+        "/_matrix/federation/v1/make_join/{}/{}?{versions}",
         pct_encode(room_id),
         pct_encode(bob_id),
     );

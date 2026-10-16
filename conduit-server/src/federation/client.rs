@@ -579,8 +579,13 @@ impl Client {
         room_id: &str,
         user_id: &str,
     ) -> Result<MakeJoinResponse, FederationError> {
+        let versions = conduit::room_version::SUPPORTED
+            .iter()
+            .map(|version| format!("ver={version}"))
+            .collect::<Vec<_>>()
+            .join("&");
         let path = format!(
-            "/_matrix/federation/v1/make_join/{}/{}",
+            "/_matrix/federation/v1/make_join/{}/{}?{versions}",
             urlencoding(room_id),
             urlencoding(user_id)
         );
