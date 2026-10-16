@@ -8,7 +8,8 @@
 //!    server of a restricted join) with keys eligible at the event's
 //!    `origin_server_ts`; failure drops the PDU. Observed signers (the
 //!    authoriser on non-join memberships) are recorded in `SignedBy`.
-//! 2. **ID + content hash** — the ID is derived, never read; a hash mismatch
+//! 2. **ID + content hash** — v3+ ids are derived; room version 1 keeps the
+//!    PDU's `event_id`. A hash mismatch
 //!    keeps the redacted copy under the same ID.
 //! 3. **Dedup** on the derived ID.
 //! 4. **Auth-event fetch** through [`super::admit::admit_fetched`]
@@ -100,9 +101,15 @@ pub async fn verify_received(
     remote_keys: &RemoteKeyCache,
     http: &reqwest::Client,
     pdu: Pdu,
+    explicit_event_id: Option<String>,
 ) -> Result<Received, VerifyError> {
     let keys = eligible_keys(remote_keys, http, &pdu).await;
-    check_received(pdu, lookup(keys))
+    let mut received = check_received(pdu, lookup(keys))?;
+    // Room version 1 keeps the PDU's event id. Later versions derive it.
+    if let Some(event_id) = explicit_event_id {
+        received.event_id = event_id;
+    }
+    Ok(received)
 }
 
 /// [`verify_received`] where this server is itself a required signer (the
@@ -114,6 +121,7 @@ pub async fn verify_received_as(
     pdu: Pdu,
     local_server: &str,
     local_key: &conduit::keys::ServerKey,
+    explicit_event_id: Option<String>,
 ) -> Result<Received, VerifyError> {
     let mut keys = HashMap::new();
     if let Ok(signers) = signers(&pdu) {
@@ -127,7 +135,11 @@ pub async fn verify_received_as(
         }
     }
     keys.insert((local_server.to_owned(), local_key.key_id.clone()), conduit::keys::public_bytes(local_key));
-    check_received(pdu, lookup(keys))
+    let mut received = check_received(pdu, lookup(keys))?;
+    if let Some(event_id) = explicit_event_id {
+        received.event_id = event_id;
+    }
+    Ok(received)
 }
 
 // ---------------------------------------------------------------------------
@@ -150,7 +162,8 @@ pub async fn process_incoming_pdu(
     decoded: DecodedPdu,
     origin: &str,
 ) -> Result<String, PipelineError> {
-    let received = verify_received(remote_keys, http, decoded.pdu).await?;
+    let explicit_event_id = decoded.explicit_event_id.clone();
+    let received = verify_received(remote_keys, http, decoded.pdu, explicit_event_id).await?;
     process_received(storage, remote_keys, http, events_tx, fed_client, recent, received, decoded.unsigned, origin).await
 }
 

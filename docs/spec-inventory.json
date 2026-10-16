@@ -106,10 +106,10 @@
     },
     "rv": {
       "requirement": {
-        "implemented+tested": 30,
+        "implemented+tested": 31,
         "implemented-untested": 0,
         "partial": 6,
-        "missing": 25,
+        "missing": 24,
         "not-applicable": 0,
         "total": 61
       }
@@ -9954,14 +9954,22 @@
       "title": "Room version 1: Event format and event IDs",
       "source": "https://spec.matrix.org/v1.19/rooms/v1/#event-format",
       "role": "homeserver",
-      "status": "missing",
-      "code": [],
-      "tests": [],
-      "tests_total": 0,
-      "gap_beads": [
-        "conduit-y99.23"
+      "status": "implemented+tested",
+      "code": [
+        {
+          "loc": "conduit/src/wire.rs"
+        },
+        {
+          "loc": "conduit-server/src/federation/server.rs"
+        }
       ],
-      "notes": "Kernel implements room version 11 only."
+      "tests": [
+        "conduit/src/wire.rs::room_version_1_accepts_tuples_large_depth_and_floats",
+        "conduit-server/tests/federation_inbound.rs::room_version_1_send_accepts_tuple_events_and_drops_malformed_ones"
+      ],
+      "tests_total": 2,
+      "gap_beads": [],
+      "notes": "PUT /send accepts room version 1 PDUs: required $opaque:domain event id (domain may contain a port colon) and [event_id, {sha256}] auth/prev tuples (limits 10 and 20). Depth may be below 2^63-1, including 2^53. A float in content is not a format error. Version 2 still uses the v3+ decoder. A v11 room still drops an explicit event_id."
     },
     {
       "id": "rv.v1.auth-rules",

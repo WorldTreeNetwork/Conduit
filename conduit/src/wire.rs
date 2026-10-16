@@ -74,6 +74,9 @@ pub struct DecodedPdu {
     pub pdu: Pdu,
     /// Allow-listed unsigned with `age` rewritten to `age_ts`.
     pub unsigned: Option<Value>,
+    /// Room versions 1 and 2 put `event_id` on the PDU (`$opaque:domain`).
+    /// Later versions derive the id and leave this empty.
+    pub explicit_event_id: Option<String>,
 }
 
 const KNOWN: [&str; 11] = [
@@ -224,7 +227,149 @@ pub fn decode_pdu(value: Value, received_ts: u64) -> Result<DecodedPdu, PduDecod
     if reencoded != received {
         return Err(PduDecodeError::NonRoundTrip);
     }
-    Ok(DecodedPdu { pdu, unsigned: local_unsigned })
+    Ok(DecodedPdu { pdu, unsigned: local_unsigned, explicit_event_id: None })
+}
+
+/// Decode a room-version-1 PDU.
+///
+/// Version 1 requires `event_id` (`$opaque:domain`; the domain may contain
+/// further colons) and `[event_id, {"sha256": hash}]` tuples for
+/// `auth_events` (≤10) and `prev_events` (≤20). Depth is an integer in
+/// `0..2^63-1`. Canonical JSON is not enforced here.
+///
+/// <https://spec.matrix.org/v1.19/rooms/v1/#event-format>
+pub fn decode_v1_pdu(value: Value, received_ts: u64) -> Result<DecodedPdu, PduDecodeError> {
+    decode_pdu_for_version(value, 1, received_ts)
+}
+
+/// Room version 1 uses [`decode_v1_pdu`]. Every other version uses the v3+
+/// decoder ([`decode_pdu`]), including version 2.
+pub fn decode_pdu_for_version(
+    value: Value,
+    version: u32,
+    received_ts: u64,
+) -> Result<DecodedPdu, PduDecodeError> {
+    if version == 1 {
+        decode_v1_pdu_inner(value, received_ts)
+    } else {
+        decode_pdu(value, received_ts)
+    }
+}
+
+fn decode_v1_pdu_inner(value: Value, received_ts: u64) -> Result<DecodedPdu, PduDecodeError> {
+    let Value::Object(mut map) = value else { return Err(PduDecodeError::NotAnObject) };
+
+    let event_type_hint = map.get("type").and_then(Value::as_str).map(str::to_owned);
+    let (_raw_unsigned, local_unsigned) =
+        allow_listed_unsigned(map.remove("unsigned"), event_type_hint.as_deref(), received_ts);
+
+    let event_id = string(&map, "event_id")?;
+    legacy_event_id(&event_id)?;
+    let room_id = string(&map, "room_id")?;
+    let sender = string(&map, "sender")?;
+    let event_type = string(&map, "type")?;
+    reject_nul(&room_id, "room_id")?;
+    reject_nul(&sender, "sender")?;
+    reject_nul(&event_type, "type")?;
+    let state_key = match map.get("state_key") {
+        None => None,
+        Some(Value::Null) => return Err(PduDecodeError::NullStateKey),
+        Some(Value::String(s)) => {
+            reject_nul(s, "state_key")?;
+            Some(s.clone())
+        }
+        Some(_) => return Err(PduDecodeError::WrongType("state_key")),
+    };
+    let content = object(&map, "content")?;
+    let hashes = object(&map, "hashes")?;
+    require_sha256(&hashes)?;
+    let signatures = object(&map, "signatures")?;
+    let origin_server_ts = match map.get("origin_server_ts") {
+        None => return Err(PduDecodeError::Missing("origin_server_ts")),
+        Some(v) => v.as_u64().ok_or(PduDecodeError::WrongType("origin_server_ts"))?,
+    };
+    let depth = match map.get("depth") {
+        None => return Err(PduDecodeError::Missing("depth")),
+        Some(Value::Number(n)) => n
+            .as_i64()
+            .filter(|d| (0..i64::MAX).contains(d))
+            .ok_or(PduDecodeError::DepthOutOfRange)?,
+        Some(_) => return Err(PduDecodeError::WrongType("depth")),
+    };
+    let auth_events = legacy_id_list(&map, "auth_events", MAX_AUTH_EVENTS, PduDecodeError::TooManyAuthEvents)?;
+    let prev_events = legacy_id_list(&map, "prev_events", MAX_PREV_EVENTS, PduDecodeError::TooManyPrevEvents)?;
+
+    for key in KNOWN {
+        map.remove(key);
+    }
+    map.remove("event_id");
+    let pdu = Pdu {
+        room_id, sender, event_type, content, state_key, origin_server_ts,
+        auth_events, prev_events, hashes, signatures, depth,
+        extensions: map.into_iter().collect(),
+    };
+    Ok(DecodedPdu { pdu, unsigned: local_unsigned, explicit_event_id: Some(event_id) })
+}
+
+/// `$opaque:domain`. The first colon separates the opaque id from the
+/// creating server, which may itself contain colons (a port, or IPv6).
+fn legacy_event_id(id: &str) -> Result<(), PduDecodeError> {
+    reject_nul(id, "event_id")?;
+    let Some(rest) = id.strip_prefix('$') else {
+        return Err(PduDecodeError::WrongType("event_id"));
+    };
+    let Some((opaque, domain)) = rest.split_once(':') else {
+        return Err(PduDecodeError::WrongType("event_id"));
+    };
+    if opaque.is_empty() || domain.is_empty() {
+        return Err(PduDecodeError::WrongType("event_id"));
+    }
+    Ok(())
+}
+
+fn reject_nul(value: &str, field: &'static str) -> Result<(), PduDecodeError> {
+    if value.contains('\0') {
+        Err(PduDecodeError::NulInField(field))
+    } else {
+        Ok(())
+    }
+}
+
+fn require_sha256(hashes: &Value) -> Result<(), PduDecodeError> {
+    match hashes.get("sha256") {
+        Some(Value::String(_)) => Ok(()),
+        Some(_) => Err(PduDecodeError::WrongType("hashes")),
+        None => Err(PduDecodeError::Missing("hashes")),
+    }
+}
+
+fn legacy_id_list(
+    map: &Map<String, Value>,
+    field: &'static str,
+    max: usize,
+    too_many: PduDecodeError,
+) -> Result<Vec<String>, PduDecodeError> {
+    let Some(value) = map.get(field) else { return Err(PduDecodeError::Missing(field)) };
+    let array = value.as_array().ok_or(PduDecodeError::WrongType(field))?;
+    if array.len() > max {
+        return Err(too_many);
+    }
+    let mut ids = Vec::with_capacity(array.len());
+    for item in array {
+        let pair = item.as_array().ok_or(PduDecodeError::WrongType(field))?;
+        if pair.len() != 2 {
+            return Err(PduDecodeError::WrongType(field));
+        }
+        let id = pair[0].as_str().ok_or(PduDecodeError::WrongType(field))?;
+        legacy_event_id(id)?;
+        let hash = pair[1].as_object().ok_or(PduDecodeError::WrongType(field))?;
+        match hash.get("sha256") {
+            Some(Value::String(_)) => {}
+            _ => return Err(PduDecodeError::WrongType(field)),
+        }
+        ids.push(id.to_owned());
+    }
+    Ok(ids)
 }
 
 // ---------------------------------------------------------------------------
@@ -371,5 +516,39 @@ mod tests {
         let secret = "SECRET\u{0}VALUE";
         let err = decode_pdu(with("state_key", json!(secret)), 0).unwrap_err();
         assert!(!err.to_string().contains("SECRET"));
+    }
+
+    fn v1_event() -> Value {
+        json!({
+            "auth_events": [["$create:v1.test", {"sha256": "aabb"}]],
+            "content": {"body": "hi", "n": 1.5},
+            "depth": 9_007_199_254_740_992i64,
+            "event_id": "$a4ecee13e2accdadf56c1025:v1.test:8448",
+            "hashes": {"sha256": "ccdd"},
+            "origin_server_ts": 5,
+            "prev_events": [["$prev:v1.test", {"sha256": "eeff"}]],
+            "room_id": "!v1:v1.test",
+            "sender": "@alice:v1.test",
+            "signatures": {},
+            "type": "m.room.message"
+        })
+    }
+
+    #[test]
+    fn room_version_1_accepts_tuples_large_depth_and_floats() {
+        let decoded = decode_v1_pdu(v1_event(), 0).unwrap();
+        assert_eq!(decoded.explicit_event_id.as_deref(), Some("$a4ecee13e2accdadf56c1025:v1.test:8448"));
+        assert_eq!(decoded.pdu.auth_events, vec!["$create:v1.test"]);
+        assert_eq!(decoded.pdu.prev_events, vec!["$prev:v1.test"]);
+        assert_eq!(decoded.pdu.depth, 9_007_199_254_740_992);
+        assert_eq!(decoded.pdu.content["n"], 1.5);
+        assert!(decoded.pdu.extensions.get("event_id").is_none());
+        let mut over = v1_event();
+        over["depth"] = json!(i64::MAX);
+        assert!(decode_v1_pdu(over, 0).is_err());
+        let mut strings = v1_event();
+        strings["auth_events"] = json!(["$create:v1.test"]);
+        assert!(decode_v1_pdu(strings, 0).is_err());
+        assert!(decode_pdu_for_version(v1_event(), 11, 0).is_err());
     }
 }

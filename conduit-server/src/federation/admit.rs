@@ -101,7 +101,7 @@ pub async fn verify_returned(
     value: Value,
 ) -> Result<Admitted, FetchError> {
     let decoded = decode_pdu(value, now_ms())?;
-    let received = super::pipeline::verify_received(remote_keys, http, decoded.pdu).await?;
+    let received = super::pipeline::verify_received(remote_keys, http, decoded.pdu, None).await?;
     Ok(Admitted { received, unsigned: decoded.unsigned })
 }
 

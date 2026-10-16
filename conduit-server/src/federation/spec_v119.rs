@@ -660,7 +660,7 @@ async fn accept_membership(
     if server_of_user_id(&pdu.sender) != Some(origin) {
         return Err(invalid_param("sender is not a user on the requesting server"));
     }
-    let received = super::pipeline::verify_received(&state.remote_keys, &state.http, pdu)
+    let received = super::pipeline::verify_received(&state.remote_keys, &state.http, pdu, None)
         .await
         .map_err(|_| invalid_param("signature check failed"))?;
     if received.event_id != path_event_id {

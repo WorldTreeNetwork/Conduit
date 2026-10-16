@@ -351,6 +351,135 @@ async fn send_transaction_persists_pdus() {
     assert_eq!(stored.pdu, pdu);
 }
 
+/// Room version 1 event format on `PUT /send`: `$opaque:domain` ids (a port
+/// colon is part of the domain) and `[event_id, {sha256}]` tuples. A format
+/// failure leaves `pdus` empty. A format-valid PDU with no signatures is
+/// reported under that explicit id. Depth above 2^53−1 and floats are
+/// accepted by the decoder; they cannot ride in an X-Matrix body because
+/// request signing requires canonical JSON.
+#[tokio::test]
+async fn room_version_1_send_accepts_tuple_events_and_drops_malformed_ones() {
+    let (addr, storage, key, _typing, _presence) = spawn_test_server("v1.test").await;
+    let base = format!("http://{addr}");
+    let client = reqwest::Client::new();
+
+    let create = signed_event(&key, "v1.test", Pdu::new(
+        "!v1:v1.test", "@alice:v1.test", "m.room.create", Some(String::new()),
+        json!({"room_version": "1", "creator": "@alice:v1.test"}),
+        1, vec![], vec![], 1,
+    ));
+    let v11 = signed_event(&key, "v1.test", Pdu::new(
+        "!v11:v1.test", "@alice:v1.test", "m.room.create", Some(String::new()),
+        json!({"room_version": "11", "creator": "@alice:v1.test"}),
+        1, vec![], vec![], 1,
+    ));
+    for event in [&create, &v11] {
+        storage.put_event(event).await.unwrap();
+        storage
+            .set_state_entry(&event.room_id, "m.room.create", "", &event.event_id)
+            .await
+            .unwrap();
+    }
+
+    let accepted = "$a4ecee13e2accdadf56c1025:v1.test:8448";
+    let pdus = put_one_pdu(&client, &base, &key, "txn-ok", v1_wire(accepted, "!v1:v1.test")).await;
+    assert_eq!(pdus[accepted]["error"], "signature verification failed", "{pdus}");
+    assert!(storage.get_event(accepted).await.unwrap().is_none());
+
+    for (name, pdu) in [
+        ("strings", {
+            let mut pdu = v1_wire("$strings:v1.test", "!v1:v1.test");
+            pdu["auth_events"] = json!(["$create:v1.test"]);
+            pdu
+        }),
+        ("bad-id", v1_wire("nope", "!v1:v1.test")),
+        ("no-domain", v1_wire("$nodomain", "!v1:v1.test")),
+        ("empty-opaque", v1_wire("$:v1.test", "!v1:v1.test")),
+        ("missing-id", {
+            let mut pdu = v1_wire("$gone:v1.test", "!v1:v1.test");
+            pdu.as_object_mut().unwrap().remove("event_id");
+            pdu
+        }),
+        ("missing-sha", {
+            let mut pdu = v1_wire("$nosha:v1.test", "!v1:v1.test");
+            pdu["auth_events"] = json!([["$create:v1.test", {}]]);
+            pdu
+        }),
+        ("too-many-auth", {
+            let mut pdu = v1_wire("$auth:v1.test", "!v1:v1.test");
+            pdu["auth_events"] = json!((0..11).map(|i| json!([format!("$a{i}:v1.test"), {"sha256": "h"}])).collect::<Vec<_>>());
+            pdu
+        }),
+        ("too-many-prev", {
+            let mut pdu = v1_wire("$prev:v1.test", "!v1:v1.test");
+            pdu["prev_events"] = json!((0..21).map(|i| json!([format!("$p{i}:v1.test"), {"sha256": "h"}])).collect::<Vec<_>>());
+            pdu
+        }),
+        ("v11-explicit-id", json!({
+            "auth_events": ["$create:v1.test"],
+            "content": {"body": "hi"},
+            "depth": 3,
+            "event_id": "$explicit:v1.test",
+            "hashes": {"sha256": "ccdd"},
+            "origin_server_ts": 5,
+            "prev_events": ["$prev:v1.test"],
+            "room_id": "!v11:v1.test",
+            "sender": "@alice:v1.test",
+            "signatures": {},
+            "type": "m.room.message"
+        })),
+        ("v11-tuples", v1_wire("$tuple:v1.test:8448", "!v11:v1.test")),
+    ] {
+        let pdus = put_one_pdu(&client, &base, &key, name, pdu).await;
+        assert_eq!(pdus, json!({}), "{name} was not dropped: {pdus}");
+    }
+}
+
+fn v1_wire(event_id: &str, room_id: &str) -> Value {
+    json!({
+        "auth_events": [["$create:v1.test", {"sha256": "aabb"}]],
+        "content": {"body": "hi"},
+        "depth": 4,
+        "event_id": event_id,
+        "hashes": {"sha256": "ccdd"},
+        "origin_server_ts": 5,
+        "prev_events": [["$prev:v1.test:8448", {"sha256": "eeff"}]],
+        "room_id": room_id,
+        "sender": "@alice:v1.test",
+        "signatures": {},
+        "type": "m.room.message"
+    })
+}
+
+async fn put_one_pdu(
+    client: &reqwest::Client,
+    base: &str,
+    key: &conduit::keys::ServerKey,
+    txn: &str,
+    pdu: Value,
+) -> Value {
+    let body = json!({
+        "origin": "v1.test",
+        "origin_server_ts": 5u64,
+        "pdus": [pdu],
+        "edus": [],
+    });
+    let path = format!("/_matrix/federation/v1/send/{txn}");
+    let auth = sign_req("PUT", &path, "v1.test", "v1.test", Some(&body), key);
+    let response = client
+        .put(format!("{base}{path}"))
+        .header("Authorization", auth)
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    let status = response.status().as_u16();
+    let text = response.text().await.unwrap_or_default();
+    assert_eq!(status, 200, "{txn} body={text}");
+    let parsed: Value = serde_json::from_str(&text).unwrap();
+    parsed["pdus"].clone()
+}
+
 #[tokio::test]
 async fn standard_v2_routes_require_authentication() {
     let (addr, _, _, _typing, _presence) = spawn_test_server("routes.test").await;
