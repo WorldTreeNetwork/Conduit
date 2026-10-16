@@ -1059,12 +1059,18 @@ async fn stripped_membership_preview(
     membership: &conduit::event::Event,
     user: &str,
 ) -> Result<Vec<Value>, Response> {
-    let events = storage
-        .get_current_state(&membership.room_id)
+    // Stripped invite state is the room at that membership event. A later
+    // current-state pointer is not a snapshot of the invite.
+    let positions = storage
+        .event_stream_positions(std::slice::from_ref(&membership.event_id))
         .await
         .map_err(|error| MatrixError::unknown(error.to_string()).into_response())?;
+    let Some(until) = positions.get(&membership.event_id).copied() else {
+        return Ok(Vec::new());
+    };
+    let (snapshot, _) = resolved_through(storage, &membership.room_id, until).await?;
     let mut preview = Vec::new();
-    for event in events {
+    for event in snapshot.into_values() {
         let safe = matches!(
             event.event_type.as_str(),
             "m.room.create"
@@ -1743,10 +1749,184 @@ mod token_tests {
 
 #[cfg(test)]
 mod state_tests {
-    use super::{memberships_at, state_for_sync, RoomSyncBoundary};
+    use super::{memberships_at, state_for_sync, stripped_membership_preview, RoomSyncBoundary};
     use conduit::event::{Event, Pdu};
     use conduit::storage::{MemoryStorage, Storage};
     use serde_json::json;
+
+    fn event(
+        id: &str,
+        room: &str,
+        kind: &str,
+        state_key: &str,
+        content: serde_json::Value,
+        ts: u64,
+        auth: &[&str],
+        depth: i64,
+    ) -> Event {
+        Event::new(id, Pdu::new(
+            room,
+            "@alice:test",
+            kind,
+            Some(state_key.into()),
+            content,
+            ts,
+            auth.iter().map(|id| (*id).to_owned()).collect(),
+            vec![],
+            depth,
+        ))
+    }
+
+    #[tokio::test]
+    async fn resolved_snapshot_ignores_a_losing_current_state_pointer() {
+        let storage = MemoryStorage::default();
+        let room = "!fork:test";
+        let create = event("$create", room, "m.room.create", "", json!({"room_version": "11"}), 1000, &[], 1);
+        let join = event(
+            "$join",
+            room,
+            "m.room.member",
+            "@alice:test",
+            json!({"membership": "join"}),
+            1001,
+            &["$create"],
+            2,
+        );
+        let power = event(
+            "$power",
+            room,
+            "m.room.power_levels",
+            "",
+            json!({"users": {"@alice:test": 100}, "users_default": 0, "state_default": 50}),
+            1500,
+            &["$create", "$join"],
+            3,
+        );
+        let winner = event(
+            "$winner",
+            room,
+            "m.room.name",
+            "",
+            json!({"name": "Resolved"}),
+            3000,
+            &["$create", "$join", "$power"],
+            4,
+        );
+        let loser = event(
+            "$loser",
+            room,
+            "m.room.name",
+            "",
+            json!({"name": "Arrived later"}),
+            1,
+            &["$create", "$join", "$power"],
+            4,
+        );
+        for stored in [&create, &join, &power, &winner, &loser] {
+            storage.put_event(stored).await.unwrap();
+        }
+        // The pointer names the later arrival. Resolution still keeps the
+        // later timestamp. A missing event id must not be invented either.
+        storage.set_state_entry(room, "m.room.name", "", "$loser").await.unwrap();
+        storage.set_state_entry(room, "m.room.topic", "", "$not-stored").await.unwrap();
+        let positions = storage
+            .event_stream_positions(&["$winner".into(), "$loser".into()])
+            .await
+            .unwrap();
+        let at_winner = state_for_sync(&storage, room, 0, &[], RoomSyncBoundary {
+            since: None,
+            until: positions["$winner"],
+            full_state: false,
+            state_after: true,
+        })
+        .await
+        .unwrap_or_else(|_| panic!("snapshot at the winner"));
+        let names_at_winner: Vec<_> = at_winner.events.iter().filter(|event| event["type"] == "m.room.name").collect();
+        assert_eq!(names_at_winner.len(), 1);
+        assert_eq!(names_at_winner[0]["event_id"], "$winner");
+        let state = state_for_sync(&storage, room, 0, &[], RoomSyncBoundary {
+            since: None,
+            until: positions["$loser"],
+            full_state: false,
+            state_after: true,
+        })
+        .await
+        .unwrap_or_else(|_| panic!("resolved snapshot"));
+        let names: Vec<_> = state.events.iter().filter(|event| event["type"] == "m.room.name").collect();
+        assert_eq!(names.len(), 1, "{:?}", state.events);
+        assert_eq!(names[0]["event_id"], "$winner", "a current-state pointer is not the snapshot");
+        assert_eq!(names[0]["content"]["name"], "Resolved");
+        assert!(state.events.iter().all(|event| event["event_id"] != "$loser" && event["event_id"] != "$not-stored"));
+    }
+
+    #[tokio::test]
+    async fn invite_preview_stops_at_the_invite_not_the_current_pointer() {
+        let storage = MemoryStorage::default();
+        let room = "!invite:test";
+        let create = event("$create", room, "m.room.create", "", json!({"room_version": "11"}), 1000, &[], 1);
+        let join = event(
+            "$join",
+            room,
+            "m.room.member",
+            "@alice:test",
+            json!({"membership": "join"}),
+            1001,
+            &["$create"],
+            2,
+        );
+        let power = event(
+            "$power",
+            room,
+            "m.room.power_levels",
+            "",
+            json!({"users": {"@alice:test": 100}, "users_default": 0, "state_default": 50}),
+            1500,
+            &["$create", "$join"],
+            3,
+        );
+        let old_name = event(
+            "$old-name",
+            room,
+            "m.room.name",
+            "",
+            json!({"name": "At the invite"}),
+            2000,
+            &["$create", "$join", "$power"],
+            4,
+        );
+        let invite = event(
+            "$invite",
+            room,
+            "m.room.member",
+            "@bob:test",
+            json!({"membership": "invite"}),
+            2100,
+            &["$create", "$join", "$power"],
+            5,
+        );
+        let later = event(
+            "$later-name",
+            room,
+            "m.room.name",
+            "",
+            json!({"name": "After the invite"}),
+            4000,
+            &["$create", "$join", "$power"],
+            6,
+        );
+        for stored in [&create, &join, &power, &old_name, &invite, &later] {
+            storage.put_event(stored).await.unwrap();
+        }
+        storage.set_state_entry(room, "m.room.name", "", "$later-name").await.unwrap();
+        let preview = stripped_membership_preview(&storage, &invite, "@bob:test")
+            .await
+            .unwrap_or_else(|_| panic!("invite preview"));
+        let names: Vec<_> = preview.iter().filter(|event| event["type"] == "m.room.name").collect();
+        assert_eq!(names.len(), 1, "{preview:?}");
+        assert_eq!(names[0]["content"]["name"], "At the invite");
+        assert!(preview.iter().all(|event| event.get("event_id").is_none()));
+        assert!(preview.iter().any(|event| event["type"] == "m.room.member" && event["state_key"] == "@bob:test"));
+    }
 
     #[tokio::test]
     async fn snapshots_do_not_include_state_or_membership_after_the_cursor() {
