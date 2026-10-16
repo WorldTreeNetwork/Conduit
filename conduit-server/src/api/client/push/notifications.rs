@@ -16,6 +16,7 @@ use std::collections::HashMap;
 
 use serde_json::Value;
 
+use conduit::auth::{self, StateMap};
 use conduit::event::Event;
 use conduit::storage::{PushDelivery, PushNotification, PushReadMark, Storage};
 use conduit::Result;
@@ -40,12 +41,17 @@ struct RoomFacts {
     joined: Vec<String>,
     display_names: HashMap<String, String>,
     power_levels: Option<Value>,
-    creator: Option<String>,
+    auth_state: StateMap<Event>,
 }
 
 async fn room_facts(storage: &dyn Storage, room_id: &str) -> Result<RoomFacts> {
     let state = storage.get_current_state(room_id).await?;
-    let mut facts = RoomFacts { joined: Vec::new(), display_names: HashMap::new(), power_levels: None, creator: None };
+    let mut facts = RoomFacts {
+        joined: Vec::new(),
+        display_names: HashMap::new(),
+        power_levels: None,
+        auth_state: StateMap::new(),
+    };
     for event in state {
         match (event.event_type.as_str(), event.state_key.as_deref()) {
             ("m.room.member", Some(user)) => {
@@ -56,8 +62,13 @@ async fn room_facts(storage: &dyn Storage, room_id: &str) -> Result<RoomFacts> {
                     facts.display_names.insert(user.to_owned(), name.to_owned());
                 }
             }
-            ("m.room.power_levels", Some("")) => facts.power_levels = Some(event.content.clone()),
-            ("m.room.create", Some("")) => facts.creator = Some(event.sender.clone()),
+            ("m.room.power_levels", Some("")) => {
+                facts.power_levels = Some(event.content.clone());
+                facts.auth_state.insert((event.event_type.clone(), String::new()), event);
+            }
+            ("m.room.create", Some("")) => {
+                facts.auth_state.insert((event.event_type.clone(), String::new()), event);
+            }
             _ => {}
         }
     }
@@ -187,7 +198,7 @@ async fn evaluate_event(
         return Ok(());
     }
     let json = serde_json::to_value(event).map_err(|e| conduit::Error::InvalidEvent(e.to_string()))?;
-    let sender_power_level = rules::power_level(facts.power_levels.as_ref(), facts.creator.as_deref(), &event.sender);
+    let sender_power_level = auth::effective_user_level(&event.sender, &facts.auth_state);
     let now = now_ms();
     for user in recipients {
         if users.ignores(storage, user, &event.sender).await? {

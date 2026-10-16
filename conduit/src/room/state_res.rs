@@ -502,9 +502,17 @@ pub fn resolve_v12(
     resolve_inner(state_sets, auth_chain, true)
 }
 
+/// Room version that selects the state-resolution algorithm.
+///
+/// An absent or unknown `content.room_version` is version 1. Authorization
+/// keeps its own default for fixtures that predate the field.
+pub fn version_for_resolution(content: &serde_json::Value) -> u32 {
+    crate::room_version::spec_default_when_absent(content)
+}
+
 /// Room version 1 uses the v1 algorithm. Versions 2–11 use state resolution
 /// v2. Version 12 uses the v12 iterative-auth variant, including a fork of
-/// two state sets. A missing version is not passed here; callers use 11.
+/// two state sets.
 pub fn resolve_version(
     version: u32,
     state_sets: Vec<StateMap<Event>>,
@@ -744,7 +752,7 @@ fn create_event_for_room(room_id: &str, auth_chain: &HashMap<String, Event>) -> 
 /// earlier `origin_server_ts` does not replace the winner. `won` is every
 /// state event that was the resolved value of its key at the moment it arrived.
 ///
-/// A missing `m.room.create` `room_version` uses the same default as auth (`11`).
+/// A missing `m.room.create` `room_version` is version 1.
 pub fn snapshot_from_arrival(events_in_stream_order: &[Event]) -> (StateMap<Event>, HashSet<String>) {
     let mut counts: HashMap<(String, String), usize> = HashMap::new();
     let mut conflicted = false;
@@ -771,7 +779,7 @@ pub fn snapshot_from_arrival(events_in_stream_order: &[Event]) -> (StateMap<Even
     let version = events_in_stream_order
         .iter()
         .find(|event| event.event_type == "m.room.create")
-        .map(|event| crate::room_version::version_of_content(&event.content))
+        .map(|event| version_for_resolution(&event.content))
         .unwrap_or(11);
     let mut state = StateMap::new();
     let mut won = HashSet::new();
@@ -2324,6 +2332,218 @@ mod tests {
         assert!(
             resolve(vec![left, right], chain).is_ok(),
             "the same conflict resolves once the recursive auth event is in the chain"
+        );
+    }
+
+    /// `resolve_version` is what federation and sync call. Version 1 keeps the
+    /// deeper event. Versions 2 and 11 keep the later timestamp. Version 12
+    /// starts iterative auth empty, so it drops a topic whose only power is a
+    /// leave that v2 still sees. An absent `room_version` is version 1.
+    /// A conflict whose auth chain stops at a grandchild id fails for every
+    /// version that walks that chain.
+    #[test]
+    fn resolve_version_uses_the_spec_algorithm_and_rejects_a_recursive_auth_hole() {
+        let room = "!r:example.org";
+        let alice = "@alice:example.org";
+        let bob = "@bob:example.org";
+        let key = ("m.room.member".to_owned(), bob.to_owned());
+        let mut create = make_create(room, alice);
+        let alice_join = make_member(
+            "$alice",
+            alice,
+            alice,
+            room,
+            "join",
+            vec!["$create".into()],
+            2,
+            1_100,
+        );
+        let rules = make_join_rules(
+            "$rules",
+            alice,
+            room,
+            "public",
+            vec!["$create".into(), "$alice".into()],
+            3,
+            1_200,
+        );
+        let shallow_late = make_member(
+            "$shallow-late",
+            bob,
+            bob,
+            room,
+            "join",
+            vec!["$create".into(), "$alice".into(), "$rules".into()],
+            4,
+            9_000,
+        );
+        let deep_early = make_member(
+            "$deep-early",
+            bob,
+            bob,
+            room,
+            "join",
+            vec!["$create".into(), "$alice".into(), "$rules".into()],
+            20,
+            2_000,
+        );
+        let mut chain = HashMap::new();
+        for event in [&create, &alice_join, &rules, &shallow_late, &deep_early] {
+            chain.insert(event.event_id.clone(), event.clone());
+        }
+        let left = state_set_from(&[&create, &alice_join, &rules, &shallow_late]);
+        let right = state_set_from(&[&create, &alice_join, &rules, &deep_early]);
+
+        let version_1 = resolve_version(1, vec![left.clone(), right.clone()], chain.clone()).unwrap();
+        assert_eq!(
+            version_1.get(&key).map(|event| event.event_id.as_str()),
+            Some("$deep-early"),
+            "version 1 keeps the greater depth"
+        );
+        let version_2 = resolve_version(2, vec![left.clone(), right.clone()], chain.clone()).unwrap();
+        assert_eq!(
+            version_2.get(&key).map(|event| event.event_id.as_str()),
+            Some("$shallow-late"),
+            "version 2 keeps the later origin_server_ts"
+        );
+        create.content = json!({"creator": alice, "room_version": "11"});
+        chain.insert(create.event_id.clone(), create.clone());
+        let left = state_set_from(&[&create, &alice_join, &rules, &shallow_late]);
+        let right = state_set_from(&[&create, &alice_join, &rules, &deep_early]);
+        let version_11 = resolve_version(11, vec![left, right], chain).unwrap();
+        assert_eq!(
+            version_11.get(&key).map(|event| event.event_id.as_str()),
+            Some("$shallow-late"),
+            "version 11 keeps state resolution v2"
+        );
+
+        create.content = json!({"creator": alice});
+        let (omitted, _) = snapshot_from_arrival(&[
+            create,
+            alice_join.clone(),
+            rules,
+            shallow_late,
+            deep_early,
+        ]);
+        assert_eq!(
+            omitted.get(&key).map(|event| event.event_id.as_str()),
+            Some("$deep-early"),
+            "a create event with no room_version resolves as version 1"
+        );
+
+        let create = make_create(room, alice);
+        let pl = make_pl(
+            "$pl",
+            alice,
+            room,
+            json!({"users": {alice: 100}}),
+            vec!["$create".into(), "$missing".into()],
+            3,
+            1_200,
+        );
+        let bob_a = make_member(
+            "$bob-a",
+            bob,
+            bob,
+            room,
+            "join",
+            vec!["$create".into(), "$alice".into(), "$pl".into()],
+            4,
+            2_000,
+        );
+        let bob_b = make_member(
+            "$bob-b",
+            bob,
+            bob,
+            room,
+            "join",
+            vec!["$create".into(), "$alice".into(), "$pl".into()],
+            4,
+            3_000,
+        );
+        let left = state_set_from(&[&create, &alice_join, &bob_a]);
+        let right = state_set_from(&[&create, &alice_join, &bob_b]);
+        let mut chain = HashMap::new();
+        for event in [&create, &alice_join, &pl, &bob_a, &bob_b] {
+            chain.insert(event.event_id.clone(), event.clone());
+        }
+        for version in [2_u32, 11, 12] {
+            let missing = resolve_version(version, vec![left.clone(), right.clone()], chain.clone());
+            assert!(
+                matches!(
+                    missing,
+                    Err(StateResError::MissingAuthEvent { ref event_id }) if event_id == "$missing"
+                ),
+                "version {version} must reject the grandchild auth id, got {missing:?}"
+            );
+        }
+        let present = make_event(
+            "$missing",
+            "m.room.topic",
+            alice,
+            room,
+            Some(""),
+            json!({"topic": "present"}),
+            vec!["$create".into()],
+            2,
+            1_150,
+        );
+        chain.insert(present.event_id.clone(), present);
+        assert!(
+            resolve_version(11, vec![left, right], chain).is_ok(),
+            "version 11 resolves the same conflict once the grandchild is in the chain"
+        );
+
+        let leave = make_event(
+            "$leave",
+            "m.room.member",
+            alice,
+            room,
+            Some(alice),
+            json!({"membership": "leave"}),
+            vec!["$create".into(), "$alice".into()],
+            3,
+            2_500,
+        );
+        let topic_a = make_event(
+            "$topic-a",
+            "m.room.topic",
+            alice,
+            room,
+            Some(""),
+            json!({"topic": "a"}),
+            vec!["$create".into(), "$leave".into()],
+            4,
+            3_000,
+        );
+        let topic_b = make_event(
+            "$topic-b",
+            "m.room.topic",
+            alice,
+            room,
+            Some(""),
+            json!({"topic": "b"}),
+            vec!["$create".into(), "$leave".into()],
+            4,
+            4_000,
+        );
+        let mut topic_left = HashMap::new();
+        topic_left.insert(("m.room.create".into(), String::new()), create.clone());
+        topic_left.insert(("m.room.member".into(), alice.into()), alice_join.clone());
+        topic_left.insert(("m.room.topic".into(), String::new()), topic_a.clone());
+        let mut topic_right = topic_left.clone();
+        topic_right.insert(("m.room.topic".into(), String::new()), topic_b.clone());
+        let mut topic_chain = HashMap::new();
+        for event in [&create, &alice_join, &leave, &topic_a, &topic_b] {
+            topic_chain.insert(event.event_id.clone(), event.clone());
+        }
+        let topic_key = ("m.room.topic".into(), String::new());
+        let v2_topic = resolve_version(11, vec![topic_left.clone(), topic_right.clone()], topic_chain.clone()).unwrap();
+        let v12_topic = resolve_version(12, vec![topic_left, topic_right], topic_chain).unwrap();
+        assert!(v2_topic.contains_key(&topic_key), "version 11 keeps the topic");
+        assert!(
+            !v12_topic.contains_key(&topic_key),
+            "version 12 drops the topic because iterative auth starts empty"
         );
     }
 }

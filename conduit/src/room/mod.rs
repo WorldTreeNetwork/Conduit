@@ -386,7 +386,7 @@ pub fn current_state(
         .iter()
         .find_map(|set| {
             set.get(&("m.room.create".to_owned(), String::new()))
-                .map(|event| crate::room_version::version_of_content(&event.content))
+                .map(|event| crate::room::state_res::version_for_resolution(&event.content))
         })
         .unwrap_or(11);
     state_res::resolve_version(version, state_sets, auth_chain)

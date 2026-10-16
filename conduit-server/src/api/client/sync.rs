@@ -1371,7 +1371,7 @@ async fn promote_referenced_state(
     let version = events
         .iter()
         .find(|event| event.event_type == "m.room.create")
-        .map(|event| conduit::room_version::version_of_content(&event.content))
+        .map(|event| conduit::room::state_res::version_for_resolution(&event.content))
         .unwrap_or(11);
     let chain: HashMap<String, conduit::event::Event> =
         events.iter().map(|event| (event.event_id.clone(), event.clone())).collect();

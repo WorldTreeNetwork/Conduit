@@ -18,7 +18,7 @@ Statuses: **tested** = present and asserted by a named test; **untested** = pres
 | Client-Server API | endpoints | 163 | 0 | 0 | 0 | 1 | 164 |
 | Client-Server API | requirements | 77 | 0 | 0 | 0 | 9 | 86 |
 | Server-Server API | endpoints | 35 | 0 | 0 | 0 | 1 | 36 |
-| Server-Server API | requirements | 37 | 0 | 1 | 0 | 3 | 41 |
+| Server-Server API | requirements | 38 | 0 | 0 | 0 | 3 | 41 |
 | Application Service API | endpoints | 11 | 0 | 0 | 0 | 0 | 11 |
 | Application Service API | requirements | 16 | 0 | 0 | 0 | 2 | 18 |
 | Push Gateway API (homeserver as client) | endpoints | 1 | 0 | 0 | 0 | 0 | 1 |
@@ -27,7 +27,7 @@ Statuses: **tested** = present and asserted by a named test; **untested** = pres
 | Identity Service API (homeserver as consumer) | requirements | 1 | 0 | 0 | 0 | 0 | 1 |
 | Room versions 1–12 | requirements | 61 | 0 | 0 | 0 | 0 | 61 |
 | Appendices | requirements | 17 | 0 | 0 | 0 | 4 | 21 |
-| All |  | 427 | 0 | 1 | 0 | 37 | 465 |
+| All |  | 428 | 0 | 0 | 0 | 37 | 465 |
 ## Gap beads
 
 New beads filed by this inventory (children of `conduit-y99`):
@@ -64,7 +64,7 @@ In-flight / pre-existing beads referenced (not duplicated):
 - `conduit-jt5` - restricted join rule evaluation (2 row(s))
 - `conduit-kqy` - federation knock (rv7+) (1 row(s))
 - `conduit-nq5` - keys/query merges cross-signing signatures (1 row(s))
-- `conduit-s6m` - state res v2 strictness + per-event visibility (1 row(s))
+- `conduit-s6m` - state res v2 strictness + per-event visibility (0 row(s))
 - `conduit-vfm` - distributed UIA session store (0 row(s))
 - `conduit-y99.13` - sync membership/state/pagination semantics (4 row(s))
 - `conduit-y99.13.4` - structured filters across sync streams (3 row(s))
@@ -89,7 +89,7 @@ In-flight / pre-existing beads referenced (not duplicated):
 - `conduit-y99.22.3` - event_auth endpoint (1 row(s))
 - `conduit-y99.22.4` - EDU U+0000 / per-EDU error isolation (0 row(s))
 - `conduit-y99.22.5` - transactions/outbox retention (0 row(s))
-- `conduit-y99.23` - room versions 1-12 (3 row(s))
+- `conduit-y99.23` - room versions 1-12 (2 row(s))
 - `conduit-y99.24` - sync unread_notifications hard-coded to zero (3 row(s))
 - `conduit-y99.25` - profile changes not propagated to member events (0 row(s))
 - `conduit-y99.26` - /messages hides create/initial join (2 row(s))
@@ -419,7 +419,7 @@ In-flight / pre-existing beads referenced (not duplicated):
 | `ss.pdu.rejection` | [Rejection](https://spec.matrix.org/v1.19/server-server-api/#rejection) | tested | `conduit-server/src/federation/pipeline.rs` | `production_pdu.rs::auth_event_selection_rejects_and_current_state_soft_fails` |  | The transaction stays 200. The PDU is stored and omitted from client sync, federation GET /event, and later prev_events. Current state is unchanged. |
 | `ss.pdu.soft-failure` | [Soft failure](https://spec.matrix.org/v1.19/server-server-api/#soft-failure) | tested | `conduit-server/src/federation/pipeline.rs` | `production_pdu.rs::auth_event_selection_rejects_and_current_state_soft_fails`<br>`production_pdu.rs::soft_failed_topic_is_omitted_until_referenced_and_syncs_when_selected` |  | Stored, hidden from client sync until resolution selects it, omitted from new prev_events, and returned by federation GET /event. Backfill and get_missing_events return a soft-failed event only when a named event lists it in prev_events or auth_events. A later resolution that selects a soft-failed state event is pushed to clients. |
 | `ss.edus` | [EDUs (general)](https://spec.matrix.org/v1.19/server-server-api/#edus) | tested | `conduit-server/src/federation/server.rs`<br>`conduit-server/src/api/client/typing.rs`<br>`conduit-server/src/api/client/receipts.rs`<br>`conduit-server/src/api/client/presence.rs` | `production_pdu.rs::send_applies_acl_per_pdu_and_inbound_edus`<br>`presence.rs::local_typing_is_federated_to_joined_remote_servers`<br>`presence.rs::local_public_receipt_is_federated_and_private_is_not`<br>`presence.rs::local_presence_is_federated_to_servers_that_share_a_room`<br>`production_sync.rs::signing_key_updates_federate_and_keys_query_merges_cross_signing` |  | Inbound typing, receipt, presence, and signing-key updates are applied. Typing and receipt EDUs for an ACL-denied room are ignored. Outbound typing, public receipts, presence, and signing-key updates go to servers with a joined member. A left server is not a destination. Private receipts are not federated. |
-| `ss.state-res` | [Room state resolution](https://spec.matrix.org/v1.19/server-server-api/#room-state-resolution) | partial | `conduit/src/room/state_res.rs`<br>`conduit/src/room/mod.rs`<br>`conduit-server/src/federation/pipeline.rs`<br>`conduit-server/src/api/client/sync.rs` | `state_res.rs::room_version_2_prefers_later_timestamp_over_greater_depth`<br>`state_res.rs::room_version_3_prefers_later_timestamp_over_greater_depth`<br>`production_sync.rs::sync_state_follows_resolution_not_arrival_order` | `conduit-y99.23` `conduit-s6m` | Version 1 uses state resolution v1 (greater depth). Versions 2-11 use v2 (later origin_server_ts). Version 12 uses v12, including a fork of two state sets. Strict auth-chain recursion and per-event history visibility remain conduit-s6m. |
+| `ss.state-res` | [Room state resolution](https://spec.matrix.org/v1.19/server-server-api/#room-state-resolution) | tested | `conduit/src/room/state_res.rs`<br>`conduit/src/room/mod.rs`<br>`conduit-server/src/federation/pipeline.rs`<br>`conduit-server/src/api/client/sync.rs` | `state_res.rs::resolve_version_uses_the_spec_algorithm_and_rejects_a_recursive_auth_hole`<br>`production_sync.rs::sync_state_follows_resolution_not_arrival_order` (+1) |  | Version 1, including a create event with no room_version, keeps the greater depth. Versions 2–11 keep the later origin_server_ts. Version 12 starts iterative auth empty. A conflict whose auth chain is missing a grandchild id is rejected. |
 | `ss.backfill` | [Backfilling and retrieving missing events](https://spec.matrix.org/v1.19/server-server-api/#backfilling-and-retrieving-missing-events) | tested | `conduit-server/src/federation/server.rs`<br>`conduit-server/src/federation/client.rs` | `production_pdu.rs::backfill_returns_the_named_events_and_their_predecessors`<br>`production_pdu.rs::get_missing_events_returns_prev_events_between_the_bounds` (+1) |  | Backfill returns the named events and their predecessors. get_missing_events walks prev_events of latest_events and stops at earliest_events. |
 | `ss.retrieving-events` | [Retrieving events (event, state, state_ids, timestamp_to_event)](https://spec.matrix.org/v1.19/server-server-api/#retrieving-events) | tested | `conduit-server/src/federation/server.rs`<br>`conduit-server/src/federation/spec_v119.rs` | `production_pdu.rs::state_ids_are_the_room_state_before_the_event`<br>`production_pdu.rs::received_pdu_is_served_as_the_same_canonical_bytes`<br>`production_pdu.rs::timestamp_to_event_picks_the_closest_event_in_each_direction` |  | state and state_ids return the resolved state before the requested event. GET /event serves the stored PDU. timestamp_to_event returns the closest event in the requested direction. |
 | `ss.joining` | [Joining rooms (make_join/send_join, room version negotiation)](https://spec.matrix.org/v1.19/server-server-api/#joining-rooms) | tested | `conduit-server/src/federation/server.rs`<br>`conduit-server/src/federation/client.rs` | `production_pdu.rs::send_join_returns_state_from_before_the_join`<br>`production_pdu.rs::make_join_rejects_room_versions_missing_from_ver` (+2) |  | make_join negotiates ver and returns M_INCOMPATIBLE_ROOM_VERSION with room_version. Outbound make_join advertises versions 1-12. send_join state is the resolved room state before the join, and the accepted membership is stored. |

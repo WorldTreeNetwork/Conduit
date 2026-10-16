@@ -304,7 +304,7 @@ pub async fn process_received(
 
     let room_version = prior_state
         .get(&("m.room.create".to_owned(), String::new()))
-        .map(|event| conduit::room_version::version_of_content(&event.content))
+        .map(|event| conduit::room::state_res::version_for_resolution(&event.content))
         .unwrap_or(11);
 
     let resolved_state = if current_state_map.is_empty() {

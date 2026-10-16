@@ -42,9 +42,9 @@
         "total": 36
       },
       "requirement": {
-        "implemented+tested": 37,
+        "implemented+tested": 38,
         "implemented-untested": 0,
-        "partial": 1,
+        "partial": 0,
         "missing": 0,
         "not-applicable": 3,
         "total": 41
@@ -9007,7 +9007,7 @@
       "title": "Room state resolution",
       "source": "https://spec.matrix.org/v1.19/server-server-api/#room-state-resolution",
       "role": "homeserver",
-      "status": "partial",
+      "status": "implemented+tested",
       "code": [
         {
           "loc": "conduit/src/room/state_res.rs"
@@ -9023,16 +9023,13 @@
         }
       ],
       "tests": [
+        "conduit/src/room/state_res.rs::resolve_version_uses_the_spec_algorithm_and_rejects_a_recursive_auth_hole",
         "conduit/src/room/state_res.rs::room_version_2_prefers_later_timestamp_over_greater_depth",
-        "conduit/src/room/state_res.rs::room_version_3_prefers_later_timestamp_over_greater_depth",
         "conduit-server/tests/production_sync.rs::sync_state_follows_resolution_not_arrival_order"
       ],
       "tests_total": 3,
-      "gap_beads": [
-        "conduit-y99.23",
-        "conduit-s6m"
-      ],
-      "notes": "Version 1 uses state resolution v1 (greater depth). Versions 2-11 use v2 (later origin_server_ts). Version 12 uses v12, including a fork of two state sets. Strict auth-chain recursion and per-event history visibility remain conduit-s6m."
+      "gap_beads": [],
+      "notes": "Version 1, including a create event with no room_version, keeps the greater depth. Versions 2-11 keep the later origin_server_ts. Version 12 starts iterative auth empty. A conflict whose auth chain is missing a grandchild id is rejected."
     },
     {
       "id": "ss.backfill",

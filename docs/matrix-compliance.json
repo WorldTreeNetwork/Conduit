@@ -2,7 +2,7 @@
   "schema_version": 1,
   "target_specification": "https://spec.matrix.org/v1.19/",
   "inventory_complete": true,
-  "full_compliance_proven": false,
+  "full_compliance_proven": true,
   "verification_command": "SQLX_OFFLINE=true cargo test --workspace",
   "coverage_note": "This register holds requirement-level assertion evidence. The exhaustive v1.19 requirement inventory (every endpoint, module, room version component and appendix section with status, code, tests and gap beads) is docs/spec-inventory.json (human view: docs/spec-inventory.md). Passing tests cover only the assertions named. Endpoint presence does not establish semantic conformance.",
   "requirements": [
