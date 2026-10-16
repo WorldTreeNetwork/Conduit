@@ -24,9 +24,9 @@
         "total": 164
       },
       "requirement": {
-        "implemented+tested": 69,
+        "implemented+tested": 70,
         "implemented-untested": 0,
-        "partial": 8,
+        "partial": 7,
         "missing": 0,
         "not-applicable": 9,
         "total": 86
@@ -8081,7 +8081,7 @@
       "title": "Room previews (world_readable reads without joining)",
       "source": "https://spec.matrix.org/v1.19/client-server-api/#room-previews",
       "role": "homeserver",
-      "status": "partial",
+      "status": "implemented+tested",
       "code": [
         {
           "loc": "conduit/src/auth.rs (may_read_room)"
@@ -8091,13 +8091,12 @@
         }
       ],
       "tests": [
-        "conduit-server/tests/production_modules.rs::legacy_room_preview_peeks_only_world_readable_rooms"
+        "conduit-server/tests/production_modules.rs::legacy_room_preview_peeks_only_world_readable_rooms",
+        "conduit-server/tests/production_modules.rs::world_readable_peek_hides_events_sent_before_it"
       ],
-      "tests_total": 1,
-      "gap_beads": [
-        "conduit-embed-auth"
-      ],
-      "notes": "GET /events?room_id and rooms/{roomId}/initialSync peek world_readable rooms; non-world_readable events are filtered per event."
+      "tests_total": 2,
+      "gap_beads": [],
+      "notes": "GET /events?room_id and rooms/{roomId}/initialSync allow a non-member only while the room is world_readable. Events sent before that visibility stay hidden, and a room_id peek does not include other rooms."
     },
     {
       "id": "cs.mod.tagging",

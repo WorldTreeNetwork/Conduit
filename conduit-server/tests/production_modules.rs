@@ -1006,6 +1006,113 @@ async fn legacy_room_preview_peeks_only_world_readable_rooms() {
     assert_eq!(e["errcode"], "M_FORBIDDEN");
 }
 
+/// A room that becomes `world_readable` can be peeked, and only events sent
+/// under that visibility. A `room_id` peek does not include other rooms.
+#[tokio::test]
+async fn world_readable_peek_hides_events_sent_before_it() {
+    let server = Server::new().await;
+    let alice = server.register("alice").await;
+    let lurker = server.register("lurker").await;
+    let room = create_room(
+        &server,
+        token(&alice),
+        json!({"preset": "public_chat", "initial_state": [{
+            "type": "m.room.history_visibility", "state_key": "",
+            "content": {"history_visibility": "joined"}
+        }]}),
+    )
+    .await;
+    server
+        .request(
+            Method::PUT,
+            &format!("/_matrix/client/v3/rooms/{}/send/m.room.message/secret", enc(&room)),
+            Some(token(&alice)),
+            Some(json!({"msgtype": "m.text", "body": "secret-before-preview"})),
+            200,
+        )
+        .await;
+    for path in [
+        format!("/_matrix/client/v3/rooms/{}/initialSync", enc(&room)),
+        format!("/_matrix/client/v3/events?room_id={}&timeout=0", enc(&room)),
+    ] {
+        let denied = server.request(Method::GET, &path, Some(token(&lurker)), None, 403).await;
+        assert_eq!(denied["errcode"], "M_FORBIDDEN", "{path}: {denied}");
+    }
+
+    server
+        .request(
+            Method::PUT,
+            &format!("/_matrix/client/v3/rooms/{}/state/m.room.history_visibility", enc(&room)),
+            Some(token(&alice)),
+            Some(json!({"history_visibility": "world_readable"})),
+            200,
+        )
+        .await;
+    let from = server.request(Method::GET, "/_matrix/client/v3/initialSync", Some(token(&lurker)), None, 200).await["end"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    server
+        .request(
+            Method::PUT,
+            &format!("/_matrix/client/v3/rooms/{}/send/m.room.message/visible", enc(&room)),
+            Some(token(&alice)),
+            Some(json!({"msgtype": "m.text", "body": "visible-preview"})),
+            200,
+        )
+        .await;
+    let side = create_room(&server, token(&lurker), json!({"preset": "private_chat"})).await;
+    server
+        .request(
+            Method::PUT,
+            &format!("/_matrix/client/v3/rooms/{}/send/m.room.message/side", enc(&side)),
+            Some(token(&lurker)),
+            Some(json!({"msgtype": "m.text", "body": "side-chatter"})),
+            200,
+        )
+        .await;
+
+    let peeked = server
+        .request(
+            Method::GET,
+            &format!("/_matrix/client/v3/events?room_id={}&from={from}&timeout=0", enc(&room)),
+            Some(token(&lurker)),
+            None,
+            200,
+        )
+        .await;
+    let bodies: Vec<&str> = peeked["chunk"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|event| event["content"]["body"].as_str())
+        .collect();
+    assert_eq!(bodies, vec!["visible-preview"], "{peeked}");
+    assert!(peeked["chunk"].as_array().unwrap().iter().all(|event| event["room_id"] == room));
+
+    let preview = server
+        .request(
+            Method::GET,
+            &format!("/_matrix/client/v3/rooms/{}/initialSync", enc(&room)),
+            Some(token(&lurker)),
+            None,
+            200,
+        )
+        .await;
+    assert!(preview.get("membership").is_none(), "{preview}");
+    let history: Vec<&str> = preview["messages"]["chunk"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|event| event["content"]["body"].as_str())
+        .collect();
+    assert!(history.contains(&"visible-preview"), "{preview}");
+    assert!(!history.contains(&"secret-before-preview"), "{preview}");
+    assert!(preview["state"].as_array().unwrap().iter().any(|event| {
+        event["type"] == "m.room.history_visibility" && event["content"]["history_visibility"] == "world_readable"
+    }));
+}
+
 // ---------------------------------------------------------------------------
 // Guest revocation and deactivation erasure (conduit-y99.18.4, .18.3)
 // ---------------------------------------------------------------------------

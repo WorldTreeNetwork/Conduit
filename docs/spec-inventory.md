@@ -16,7 +16,7 @@ Statuses: **tested** = present and asserted by a named test; **untested** = pres
 | API | kind | tested | untested | partial | missing | n/a | total |
 |---|---|---:|---:|---:|---:|---:|---:|
 | Client-Server API | endpoints | 154 | 0 | 9 | 0 | 1 | 164 |
-| Client-Server API | requirements | 69 | 0 | 8 | 0 | 9 | 86 |
+| Client-Server API | requirements | 70 | 0 | 7 | 0 | 9 | 86 |
 | Server-Server API | endpoints | 22 | 3 | 6 | 4 | 1 | 36 |
 | Server-Server API | requirements | 14 | 0 | 15 | 9 | 3 | 41 |
 | Application Service API | endpoints | 11 | 0 | 0 | 0 | 0 | 11 |
@@ -27,7 +27,7 @@ Statuses: **tested** = present and asserted by a named test; **untested** = pres
 | Identity Service API (homeserver as consumer) | requirements | 1 | 0 | 0 | 0 | 0 | 1 |
 | Room versions 1–12 | requirements | 61 | 0 | 0 | 0 | 0 | 61 |
 | Appendices | requirements | 10 | 0 | 3 | 4 | 4 | 21 |
-| All |  | 365 | 3 | 43 | 17 | 37 | 465 |
+| All |  | 366 | 3 | 42 | 17 | 37 | 465 |
 ## Gap beads
 
 New beads filed by this inventory (children of `conduit-y99`):
@@ -58,7 +58,7 @@ In-flight / pre-existing beads referenced (not duplicated):
 - `conduit-4w1` - notary key fetch (3 row(s))
 - `conduit-7pk` - outbound presence EDU (0 row(s))
 - `conduit-c3u` - AS query negative-result cache (1 row(s))
-- `conduit-embed-auth` - membership/visibility on reads (kernel) (1 row(s))
+- `conduit-embed-auth` - membership/visibility on reads (kernel) (0 row(s))
 - `conduit-embed-pdu` - PDU wire model (in flight) (9 row(s))
 - `conduit-g12` - recursive auth-event verification (1 row(s))
 - `conduit-jt5` - restricted join rule evaluation (2 row(s))
@@ -329,7 +329,7 @@ In-flight / pre-existing beads referenced (not duplicated):
 | `cs.mod.3pid-invites` | [Third-party invites](https://spec.matrix.org/v1.19/client-server-api/#third-party-invites) | tested | `conduit-server/src/api/client/third_party.rs`<br>`conduit/src/auth.rs:490` | `production_appservice.rs::third_party_invites_lookup_store_invite_and_onbind`<br>`conduit/tests/third_party_invite_auth.rs::signed_member_invite_rejections` (+2) | `conduit-y99.22.6` | Local rooms end to end (invite, store-invite, onbind exchange, signature-verified membership, join). Remote-room exchange and key_validity_url checks on join are federation (conduit-y99.22.6). |
 | `cs.mod.search` | [Server side search](https://spec.matrix.org/v1.19/client-server-api/#server-side-search) | tested | `conduit-server/src/api/client/room_content/search.rs` | `production_rooms.rs::search_room_events_with_ordering_context_and_groupings` |  |  |
 | `cs.mod.guest-access` | [Guest access](https://spec.matrix.org/v1.19/client-server-api/#guest-access) | tested | `conduit-server/src/api/client/guest_access.rs`<br>`conduit-server/src/federation/server.rs` | `production_modules.rs::revoking_guest_access_removes_joined_guests`<br>`production_pdu.rs::federation_guest_access_revocation_removes_local_guests` |  | Joined local guests leave when `m.room.guest_access` stops being `can_join`, including when that state arrives over federation. Registered members stay. |
-| `cs.mod.room-previews` | [Room previews (world_readable reads without joining)](https://spec.matrix.org/v1.19/client-server-api/#room-previews) | partial | `conduit/src/auth.rs (may_read_room)`<br>`conduit-server/src/api/client/legacy.rs` | `production_modules.rs::legacy_room_preview_peeks_only_world_readable_rooms` | `conduit-embed-auth` | GET /events?room_id and rooms/{roomId}/initialSync peek world_readable rooms; non-world_readable events are filtered per event. |
+| `cs.mod.room-previews` | [Room previews (world_readable reads without joining)](https://spec.matrix.org/v1.19/client-server-api/#room-previews) | tested | `conduit/src/auth.rs (may_read_room)`<br>`conduit-server/src/api/client/legacy.rs` | `production_modules.rs::world_readable_peek_hides_events_sent_before_it`<br>`production_modules.rs::legacy_room_preview_peeks_only_world_readable_rooms` |  | A non-member can peek only a world_readable room. Events sent before that visibility stay hidden, and a room_id peek excludes other rooms. |
 | `cs.mod.tagging` | [Room tagging](https://spec.matrix.org/v1.19/client-server-api/#room-tagging) | tested | `conduit-server/src/api/client/room_content/events.rs` | `production_rooms.rs::read_markers_and_room_tags` |  |  |
 | `cs.mod.client-config` | [Client config (account data; 405 for m.fully_read/m.push_rules)](https://spec.matrix.org/v1.19/client-server-api/#client-config) | tested | `conduit-server/src/api/client/account_data.rs` | `presence.rs::account_data_per_room_round_trip`<br>`production_basics.rs::server_managed_account_data_is_rejected_with_405` |  | 405 M_BAD_JSON for m.fully_read/m.push_rules, global and per-room. |
 | `cs.mod.server-admin` | [Server administration (whois, lock, suspend)](https://spec.matrix.org/v1.19/client-server-api/#server-administration) | tested | `conduit-server/src/api/client/account.rs (whois)`<br>`conduit-server/src/api/client/moderation.rs` | `production_account.rs::production_whois_reports_sessions_to_self_and_admins`<br>`production_modules.rs::admin_lock_endpoints_and_locked_account_enforcement` (+1) |  | whois, lock, suspend. Conduit admin API also under /_matrix/conduit/admin/v1 (non-spec). |
