@@ -1,7 +1,7 @@
 //! State Resolution v2.
 //!
 //! Implements the Matrix State Resolution v2 algorithm as a pure function.
-//! Reference: <https://spec.matrix.org/latest/rooms/v11/#state-resolution>
+//! Reference: <https://spec.matrix.org/v1.19/rooms/v11/#state-resolution>
 //!
 //! ## Public API
 //!
@@ -183,16 +183,16 @@ fn auth_chain_for_set(
         if !visited.insert(eid.clone()) {
             continue; // already processed
         }
-        // Every referenced auth event must be in auth_chain.
-        if let Some(ev) = auth_chain.get(&eid) {
-            for auth_eid in &ev.auth_events {
-                if !visited.contains(auth_eid.as_str()) {
-                    stack.push(auth_eid.clone());
-                }
+        // The spec auth chain is every auth_events id, then theirs, recursively.
+        // A hole at any depth makes the auth difference undefined.
+        let Some(ev) = auth_chain.get(&eid) else {
+            return Err(StateResError::MissingAuthEvent { event_id: eid });
+        };
+        for auth_eid in &ev.auth_events {
+            if !visited.contains(auth_eid.as_str()) {
+                stack.push(auth_eid.clone());
             }
         }
-        // If not in auth_chain, it's OK — it might be the state event itself
-        // that lives in the state set but not in auth_chain.
     }
 
     Ok(visited)
@@ -1527,18 +1527,8 @@ mod tests {
         let set_a = state_set_from(&[&create, &alice_join]);
         let set_b = state_set_from(&[&create, &alice_join, &bob_join]);
 
-        // The auth_chain does NOT contain "$ghost".
-        // The auth_difference step must traverse bob_join's auth_events and
-        // encounter $ghost while walking the auth_chain.
-        //
-        // However, our implementation only validates that auth_chain entries
-        // themselves are consistent, not that every auth_event ID referenced
-        // by a state set event is present.  To trigger MissingAuthEvent we
-        // need to explicitly validate references.
-        //
-        // Per our contract: if auth_chain is incomplete, return
-        // MissingAuthEvent.  We enforce this by validating that every
-        // auth_event reference by every state-set event is in auth_chain.
+        // $ghost is a direct auth event of the conflicted join and is absent
+        // from the chain. resolve_strict rejects that missing id.
         let result = resolve_strict(vec![set_a, set_b], chain);
         assert!(
             matches!(result, Err(StateResError::MissingAuthEvent { .. })),
@@ -1555,23 +1545,34 @@ mod tests {
             Some("@alice:example.org"), json!({"membership": "join"}),
             vec!["$create".into()], 2, 2_000,
         );
+        // The topics cite a leave, which is in the auth chain and not in the
+        // state sets. v2 starts from the unconflicted join, so the topic is
+        // allowed. v12 starts empty and uses that leave, so the topic is not.
+        let leave = make_event(
+            "$leave", "m.room.member", "@alice:example.org", "!r:example.org",
+            Some("@alice:example.org"), json!({"membership": "leave"}),
+            vec!["$create".into(), "$join".into()], 3, 2_500,
+        );
         let topic_a = make_event(
             "$topic-a", "m.room.topic", "@alice:example.org", "!r:example.org",
             Some(""), json!({"topic": "a"}),
-            vec!["$create".into(), "$join".into()], 3, 3_000,
+            vec!["$create".into(), "$leave".into()], 4, 3_000,
         );
         let topic_b = make_event(
             "$topic-b", "m.room.topic", "@alice:example.org", "!r:example.org",
             Some(""), json!({"topic": "b"}),
-            vec!["$create".into(), "$join".into()], 3, 4_000,
+            vec!["$create".into(), "$leave".into()], 4, 4_000,
         );
         let mut left = HashMap::new();
         left.insert(("m.room.create".into(), String::new()), create.clone());
         left.insert(("m.room.member".into(), "@alice:example.org".into()), join.clone());
-        left.insert(("m.room.topic".into(), String::new()), topic_a);
+        left.insert(("m.room.topic".into(), String::new()), topic_a.clone());
         let mut right = left.clone();
-        right.insert(("m.room.topic".into(), String::new()), topic_b);
-        let chain = HashMap::new();
+        right.insert(("m.room.topic".into(), String::new()), topic_b.clone());
+        let mut chain = HashMap::new();
+        for event in [&create, &join, &leave, &topic_a, &topic_b] {
+            chain.insert(event.event_id.clone(), event.clone());
+        }
         let v2 = resolve(vec![left.clone(), right.clone()], chain.clone()).unwrap();
         let v12 = resolve_v12(vec![left, right], chain).unwrap();
         assert!(v2.contains_key(&("m.room.topic".into(), String::new())));
@@ -2209,19 +2210,104 @@ mod tests {
             "a version 10 room uses state resolution v2"
         );
     }
+
+    /// Room version 11 state resolution is the v2 algorithm. The auth chain of
+    /// an event is its auth_events and theirs, recursively. A conflicted
+    /// resolve must fail when that walk hits an id the chain does not contain.
+    /// Checking only the state event's own auth_events would accept this
+    /// input, because `$pl` itself is present and `$missing` is only cited by
+    /// `$pl`.
+    #[test]
+    fn room_version_11_resolve_rejects_a_missing_recursive_auth_event() {
+        let room = "!r:example.org";
+        let alice = "@alice:example.org";
+        let bob = "@bob:example.org";
+        let mut create = make_create(room, alice);
+        create.content = json!({"creator": alice, "room_version": "11"});
+        let alice_join = make_member(
+            "$alice",
+            alice,
+            alice,
+            room,
+            "join",
+            vec!["$create".into()],
+            2,
+            1_100,
+        );
+        let pl = make_pl(
+            "$pl",
+            alice,
+            room,
+            json!({"users": {alice: 100}}),
+            vec!["$create".into(), "$missing".into()],
+            3,
+            1_200,
+        );
+        let bob_a = make_member(
+            "$bob-a",
+            bob,
+            bob,
+            room,
+            "join",
+            vec!["$create".into(), "$alice".into(), "$pl".into()],
+            4,
+            2_000,
+        );
+        let bob_b = make_member(
+            "$bob-b",
+            bob,
+            bob,
+            room,
+            "join",
+            vec!["$create".into(), "$alice".into(), "$pl".into()],
+            4,
+            3_000,
+        );
+        let left = state_set_from(&[&create, &alice_join, &bob_a]);
+        let right = state_set_from(&[&create, &alice_join, &bob_b]);
+        let mut chain = HashMap::new();
+        for event in [&create, &alice_join, &pl, &bob_a, &bob_b] {
+            chain.insert(event.event_id.clone(), event.clone());
+        }
+
+        let missing = resolve(vec![left.clone(), right.clone()], chain.clone());
+        assert!(
+            matches!(
+                missing,
+                Err(StateResError::MissingAuthEvent { ref event_id }) if event_id == "$missing"
+            ),
+            "a grandchild auth id absent from the chain must fail resolve, got {missing:?}"
+        );
+
+        let present = make_event(
+            "$missing",
+            "m.room.topic",
+            alice,
+            room,
+            Some(""),
+            json!({"topic": "present"}),
+            vec!["$create".into()],
+            2,
+            1_150,
+        );
+        chain.insert(present.event_id.clone(), present);
+        assert!(
+            resolve(vec![left, right], chain).is_ok(),
+            "the same conflict resolves once the recursive auth event is in the chain"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Strict resolve — validates completeness of auth_chain before resolving.
 // ---------------------------------------------------------------------------
 
-/// Like `resolve`, but also validates that every `auth_event` referenced by
-/// any state-set event is present in `auth_chain`.  Returns
-/// `Err(StateResError::MissingAuthEvent)` if the chain is incomplete.
+/// Like `resolve`, but also rejects a missing direct `auth_events` id before
+/// the single-set and unconflicted early returns.
 ///
-/// The default `resolve` does not enforce this for performance (incomplete
-/// chains are treated as "no further auth ancestors").  Use `resolve_strict`
-/// when you need the hard guarantee.
+/// `resolve` rejects a missing auth event, including one reached only by
+/// walking another auth event's `auth_events`, once a conflict forces the
+/// auth-difference walk.
 pub fn resolve_strict(
     state_sets: Vec<StateMap<Event>>,
     auth_chain: HashMap<String, Event>,

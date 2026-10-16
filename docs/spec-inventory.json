@@ -106,9 +106,9 @@
     },
     "rv": {
       "requirement": {
-        "implemented+tested": 55,
+        "implemented+tested": 56,
         "implemented-untested": 0,
-        "partial": 6,
+        "partial": 5,
         "missing": 0,
         "not-applicable": 0,
         "total": 61
@@ -11080,20 +11080,18 @@
       "title": "Room version 11: State resolution algorithm",
       "source": "https://spec.matrix.org/v1.19/rooms/v11/#state-resolution",
       "role": "homeserver",
-      "status": "partial",
+      "status": "implemented+tested",
       "code": [
         {
           "loc": "conduit/src/room/state_res.rs"
         }
       ],
       "tests": [
-        "conduit/src/room/state_res.rs (unit tests)"
+        "conduit/src/room/state_res.rs::room_version_11_resolve_rejects_a_missing_recursive_auth_event"
       ],
       "tests_total": 1,
-      "gap_beads": [
-        "conduit-s6m"
-      ],
-      "notes": "v2 implemented; strict auth-chain recursion open."
+      "gap_beads": [],
+      "notes": "Room version 11 uses state resolution v2. resolve rejects a missing auth event reached through another auth event's auth_events. The same conflict succeeds once that event is in the chain."
     },
     {
       "id": "rv.v11.canonical-json",

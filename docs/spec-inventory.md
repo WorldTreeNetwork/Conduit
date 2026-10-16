@@ -25,9 +25,9 @@ Statuses: **tested** = present and asserted by a named test; **untested** = pres
 | Push Gateway API (homeserver as client) | requirements | 1 | 0 | 0 | 0 | 1 | 2 |
 | Identity Service API (homeserver as consumer) | endpoints | 5 | 0 | 2 | 0 | 16 | 23 |
 | Identity Service API (homeserver as consumer) | requirements | 1 | 0 | 0 | 0 | 0 | 1 |
-| Room versions 1–12 | requirements | 55 | 0 | 6 | 0 | 0 | 61 |
+| Room versions 1–12 | requirements | 56 | 0 | 5 | 0 | 0 | 61 |
 | Appendices | requirements | 10 | 0 | 3 | 4 | 4 | 21 |
-| All |  | 352 | 3 | 56 | 17 | 37 | 465 |
+| All |  | 353 | 3 | 55 | 17 | 37 | 465 |
 ## Gap beads
 
 New beads filed by this inventory (children of `conduit-y99`):
@@ -64,7 +64,7 @@ In-flight / pre-existing beads referenced (not duplicated):
 - `conduit-jt5` - restricted join rule evaluation (2 row(s))
 - `conduit-kqy` - federation knock (rv7+) (2 row(s))
 - `conduit-nq5` - keys/query merges cross-signing signatures (3 row(s))
-- `conduit-s6m` - state res v2 strictness + per-event visibility (3 row(s))
+- `conduit-s6m` - state res v2 strictness + per-event visibility (2 row(s))
 - `conduit-vfm` - distributed UIA session store (1 row(s))
 - `conduit-y99.13` - sync membership/state/pagination semantics (4 row(s))
 - `conduit-y99.13.4` - structured filters across sync streams (3 row(s))
@@ -598,7 +598,7 @@ In-flight / pre-existing beads referenced (not duplicated):
 | `rv.v11.event-format` | [Room version 11: Event format and event IDs](https://spec.matrix.org/v1.19/rooms/v11/#event-format) | tested | `conduit/src/event.rs`<br>`conduit/src/hashing.rs` | `conduit/src/room_version.rs::event_ids_follow_the_version_encoding` | | Reference-hash event ids. v3 is standard base64; v4-v10 share the URL-safe hash; v11 and v12 share the v11 redaction. A v12 create omits room_id. |
 | `rv.v11.auth-rules` | [Room version 11: Authorisation rules](https://spec.matrix.org/v1.19/rooms/v11/#authorisation-rules) | tested | `conduit/src/auth.rs` | `conduit/src/auth.rs (unit tests)` |  |  |
 | `rv.v11.redaction` | [Room version 11: Redaction algorithm](https://spec.matrix.org/v1.19/rooms/v11/#redactions) | tested | `conduit/src/redaction.rs` | `matrix_v11_crypto.rs` |  |  |
-| `rv.v11.state-res` | [Room version 11: State resolution algorithm](https://spec.matrix.org/v1.19/rooms/v11/#state-resolution) | partial | `conduit/src/room/state_res.rs` | `conduit/src/room/state_res.rs (unit tests)` | `conduit-s6m` | v2 implemented; strict auth-chain recursion open. |
+| `rv.v11.state-res` | [Room version 11: State resolution algorithm](https://spec.matrix.org/v1.19/rooms/v11/#state-resolution) | tested | `conduit/src/room/state_res.rs` | `state_res.rs::room_version_11_resolve_rejects_a_missing_recursive_auth_event` |  | Room version 11 uses state resolution v2. resolve rejects a missing auth event reached through another auth event. The same conflict succeeds once that event is in the chain. |
 | `rv.v11.canonical-json` | [Room version 11: Canonical JSON / integer rules](https://spec.matrix.org/v1.19/rooms/v11/#canonical-json) | tested | `conduit/src/canonical_json.rs` | `conduit/src/canonical_json.rs (unit tests)` |  |  |
 | `rv.v12.event-format` | [Room version 12: Event format and event IDs](https://spec.matrix.org/v1.19/rooms/v12/#event-format) | tested |  | `conduit/src/room_version.rs::event_ids_follow_the_version_encoding` | | Reference-hash event ids. v3 is standard base64; v4-v10 share the URL-safe hash; v11 and v12 share the v11 redaction. A v12 create omits room_id. |
 | `rv.v12.auth-rules` | [Room version 12: Authorisation rules](https://spec.matrix.org/v1.19/rooms/v12/#authorisation-rules) | tested |  | `conduit/src/auth.rs::room_version_auth_rules_follow_the_spec` | | v12 create omits room_id. Creators have infinite power and must not be listed in power_levels users. |
