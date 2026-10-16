@@ -1771,6 +1771,59 @@ mod tests {
         assert!(check_auth(&levels, &v6).is_err(), "v6 rejects the same float power level");
     }
 
+    /// Room version 4 still accepts a truncated float and a string power
+    /// level. Later checks use the integers. Version 6 rejects the float.
+    #[test]
+    fn room_version_4_accepts_float_and_string_power_levels() {
+        let alice = "@alice:example.com";
+        let bob = "@bob:example.com";
+        let room = "!room:example.com";
+        let mut v4 = HashMap::new();
+        apply_state_event(&mut v4, &create_with("4", alice, room, json!({ "creator": alice })));
+        apply_state_event(&mut v4, &make_member_event("$aj", alice, alice, room, "join"));
+        apply_state_event(&mut v4, &make_member_event("$bj", alice, bob, room, "join"));
+        let levels = make_power_levels_event(
+            "$pl",
+            alice,
+            room,
+            json!({
+                "events": { "m.room.name": "50", "m.room.topic": "51" },
+                "users": { alice: "100", bob: 50.9 },
+                "events_default": "0"
+            }),
+        );
+        assert!(check_auth(&levels, &v4).is_ok(), "v4 accepts string and float power levels");
+        apply_state_event(&mut v4, &levels);
+        let name = make_event(
+            "$name",
+            "m.room.name",
+            bob,
+            room,
+            Some(""),
+            json!({ "name": "n" }),
+            vec![],
+        );
+        assert!(check_auth(&name, &v4).is_ok(), "v4 truncates 50.9 to 50");
+        let topic = make_event(
+            "$topic",
+            "m.room.topic",
+            bob,
+            room,
+            Some(""),
+            json!({ "topic": "t" }),
+            vec![],
+        );
+        assert!(
+            matches!(check_auth(&topic, &v4), Err(AuthError::InsufficientPowerLevel { .. })),
+            "v4 does not round 50.9 up to 51"
+        );
+        let mut v6 = HashMap::new();
+        apply_state_event(&mut v6, &create_with("6", alice, room, json!({ "creator": alice })));
+        apply_state_event(&mut v6, &make_member_event("$aj", alice, alice, room, "join"));
+        apply_state_event(&mut v6, &make_member_event("$bj", alice, bob, room, "join"));
+        assert!(check_auth(&levels, &v6).is_err(), "v6 rejects the same float power level");
+    }
+
     /// Room version 2 rule 11: below the redact level, the redaction is
     /// allowed only when its event id and the target event id share a domain.
     /// The sender's server is not the thing compared. Version 3 accepts the

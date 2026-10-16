@@ -106,10 +106,10 @@
     },
     "rv": {
       "requirement": {
-        "implemented+tested": 43,
+        "implemented+tested": 44,
         "implemented-untested": 0,
         "partial": 6,
-        "missing": 12,
+        "missing": 11,
         "not-applicable": 0,
         "total": 61
       }
@@ -10363,18 +10363,21 @@
       "title": "Room version 4: Canonical JSON / integer rules",
       "source": "https://spec.matrix.org/v1.19/rooms/v4/#canonical-json",
       "role": "homeserver",
-      "status": "missing",
+      "status": "implemented+tested",
       "code": [
         {
-          "loc": "conduit/src/canonical_json.rs"
+          "loc": "conduit/src/auth.rs"
+        },
+        {
+          "loc": "conduit/src/room_version.rs"
         }
       ],
-      "tests": [],
-      "tests_total": 0,
-      "gap_beads": [
-        "conduit-y99.23"
+      "tests": [
+        "conduit/src/auth.rs::room_version_4_accepts_float_and_string_power_levels"
       ],
-      "notes": "Version-independent canonical JSON implemented; v1-5 accept out-of-range/float power levels (lenient) - not modelled."
+      "tests_total": 1,
+      "gap_beads": [],
+      "notes": "Room version 4 does not strictly enforce canonical JSON. A string power level and a truncated float take effect on later auth checks. Version 6 rejects the same event."
     },
     {
       "id": "rv.v5.event-format",
