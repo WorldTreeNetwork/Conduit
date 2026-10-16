@@ -608,7 +608,11 @@ async fn membership_template(
         unsigned: None,
     };
     let mut auth_events = Vec::new();
+    let version_num = conduit::room_version::version_of_content(&create.content);
     for (kind, key) in auth_event_keys(&template_event) {
+        if kind == "m.room.create" && !conduit::room_version::cites_room_create(version_num) {
+            continue;
+        }
         if let Ok(Some(event)) = state.storage.get_state_entry(room_id, &kind, &key).await {
             auth_events.push(event.event_id);
         }
@@ -991,7 +995,14 @@ pub async fn exchange_third_party_invite(
         unsigned: None,
     };
     let mut auth_events = Vec::new();
+    let version_num = match state.storage.get_state_entry(&room_id, "m.room.create", "").await {
+        Ok(Some(create)) => conduit::room_version::version_of_content(&create.content),
+        _ => 11,
+    };
     for (kind, key) in auth_event_keys(&provisional) {
+        if kind == "m.room.create" && !conduit::room_version::cites_room_create(version_num) {
+            continue;
+        }
         if let Ok(Some(event)) = state.storage.get_state_entry(&room_id, &kind, &key).await {
             auth_events.push(event.event_id);
         }

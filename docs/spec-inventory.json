@@ -42,10 +42,10 @@
         "total": 36
       },
       "requirement": {
-        "implemented+tested": 22,
+        "implemented+tested": 24,
         "implemented-untested": 0,
-        "partial": 13,
-        "missing": 3,
+        "partial": 14,
+        "missing": 0,
         "not-applicable": 3,
         "total": 41
       }
@@ -5055,7 +5055,7 @@
         "conduit-y99.22",
         "conduit-y99.22.4"
       ],
-      "notes": "PDUs persisted and authorised; no ACLs, soft failure or rejection tracking; only to-device and device-list EDUs."
+      "notes": "PDUs are persisted. Rejection and soft failure are recorded per event. /send still lacks ACLs, and only to-device and device-list EDUs are handled."
     },
     {
       "id": "ss.ep.get_matrixfederationv1event_authroomideventid",
@@ -8913,14 +8913,18 @@
       "title": "Auth events selection",
       "source": "https://spec.matrix.org/v1.19/server-server-api/#auth-events-selection",
       "role": "homeserver",
-      "status": "missing",
-      "code": [],
-      "tests": [],
-      "tests_total": 0,
-      "gap_beads": [
-        "conduit-y99.33"
+      "status": "implemented+tested",
+      "code": [
+        {
+          "loc": "conduit-server/src/federation/pipeline.rs"
+        }
       ],
-      "notes": ""
+      "tests": [
+        "conduit-server/tests/production_pdu.rs::auth_event_selection_rejects_and_current_state_soft_fails"
+      ],
+      "tests_total": 1,
+      "gap_beads": [],
+      "notes": "A message whose auth events are not exactly the selection from the state at its prev events is rejected. Room version 12 does not cite m.room.create."
     },
     {
       "id": "ss.pdu.rejection",
@@ -8929,14 +8933,18 @@
       "title": "Rejection",
       "source": "https://spec.matrix.org/v1.19/server-server-api/#rejection",
       "role": "homeserver",
-      "status": "missing",
-      "code": [],
-      "tests": [],
-      "tests_total": 0,
-      "gap_beads": [
-        "conduit-y99.33"
+      "status": "implemented+tested",
+      "code": [
+        {
+          "loc": "conduit-server/src/federation/pipeline.rs"
+        }
       ],
-      "notes": ""
+      "tests": [
+        "conduit-server/tests/production_pdu.rs::auth_event_selection_rejects_and_current_state_soft_fails"
+      ],
+      "tests_total": 1,
+      "gap_beads": [],
+      "notes": "The transaction stays 200. The PDU is stored and omitted from client sync, federation GET /event, and later prev_events. Current state is unchanged."
     },
     {
       "id": "ss.pdu.soft-failure",
@@ -8945,14 +8953,20 @@
       "title": "Soft failure",
       "source": "https://spec.matrix.org/v1.19/server-server-api/#soft-failure",
       "role": "homeserver",
-      "status": "missing",
-      "code": [],
-      "tests": [],
-      "tests_total": 0,
+      "status": "partial",
+      "code": [
+        {
+          "loc": "conduit-server/src/federation/pipeline.rs"
+        }
+      ],
+      "tests": [
+        "conduit-server/tests/production_pdu.rs::auth_event_selection_rejects_and_current_state_soft_fails"
+      ],
+      "tests_total": 1,
       "gap_beads": [
         "conduit-y99.33"
       ],
-      "notes": ""
+      "notes": "Stored, hidden from client sync, omitted from new prev_events, and returned by federation GET /event. Backfill and get_missing_events still return an unreferenced soft-failed event. A soft-failed state event is not pushed to clients if later resolution selects it."
     },
     {
       "id": "ss.edus",

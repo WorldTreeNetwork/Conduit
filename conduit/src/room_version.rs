@@ -70,6 +70,12 @@ pub fn version_of_event(event: &Event) -> u32 {
     version_of_content(&event.content)
 }
 
+/// Room version 12 selects no `m.room.create` auth event. The room id is that
+/// event, so citing it is rejected.
+pub fn cites_room_create(version: u32) -> bool {
+    version < 12
+}
+
 /// Room id of a version-12 room: the create event's id with `!` instead of `$`.
 pub fn room_id_from_event_id(event_id: &str) -> String {
     format!("!{}", event_id.trim_start_matches('$'))

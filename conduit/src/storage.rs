@@ -425,6 +425,14 @@ pub trait Storage: Send + Sync + 'static {
 
     async fn get_event(&self, event_id: &str) -> Result<Option<Event>>;
     async fn put_event(&self, event: &Event) -> Result<()>;
+    /// `rejected` or `soft_failed` for a PDU that stays in the DAG but is not
+    /// current state. Absent for an accepted event.
+    async fn event_disposition(&self, _event_id: &str) -> Result<Option<String>> {
+        Ok(None)
+    }
+    async fn set_event_disposition(&self, _event_id: &str, _kind: &str) -> Result<()> {
+        Ok(())
+    }
     /// Event row and current-state pointer, visible together or not at all.
     async fn publish_event(&self, event: &Event) -> Result<()> {
         self.put_event(event).await?;

@@ -580,6 +580,27 @@ impl Storage for PostgresStorage {
     // Events
     // -----------------------------------------------------------------------
 
+    async fn event_disposition(&self, event_id: &str) -> Result<Option<String>> {
+        sqlx::query_scalar::<_, String>("SELECT kind FROM event_disposition WHERE event_id = $1")
+            .bind(event_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(map_sqlx)
+    }
+
+    async fn set_event_disposition(&self, event_id: &str, kind: &str) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO event_disposition (event_id, kind) VALUES ($1, $2)
+             ON CONFLICT (event_id) DO UPDATE SET kind = EXCLUDED.kind",
+        )
+        .bind(event_id)
+        .bind(kind)
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(())
+    }
+
     async fn get_event(&self, event_id: &str) -> Result<Option<Event>> {
         let row = sqlx::query!(
             r#"

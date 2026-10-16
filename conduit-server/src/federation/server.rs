@@ -571,8 +571,12 @@ pub async fn make_join(
     };
 
     let required_keys = auth_event_keys(&template_for_keys);
+    let room_version_num = conduit::room_version::version_of_content(&create_ev.content);
     let mut auth_events_ids: Vec<String> = Vec::new();
     for (ev_type, sk) in &required_keys {
+        if ev_type == "m.room.create" && !conduit::room_version::cites_room_create(room_version_num) {
+            continue;
+        }
         if let Ok(Some(ev)) = state.storage.get_state_entry(&room_id, ev_type, sk).await {
             auth_events_ids.push(ev.event_id.clone());
         }
@@ -1051,6 +1055,11 @@ pub async fn get_event(
     let event = match state.storage.get_event(&event_id).await {
         Ok(Some(event)) => event,
         Ok(None) => return not_found("Event not found"),
+        Err(e) => return internal(&e.to_string()),
+    };
+    match state.storage.event_disposition(&event_id).await {
+        Ok(Some(kind)) if kind == "rejected" => return not_found("Event not found"),
+        Ok(_) => {}
         Err(e) => return internal(&e.to_string()),
     };
     // ID mismatches stay 404. Erasure strips content for origins that had

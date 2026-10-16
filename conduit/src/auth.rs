@@ -1259,7 +1259,23 @@ pub async fn filter_visible_for_user(
     events: Vec<Event>,
 ) -> crate::Result<Vec<Event>> {
     let members = storage.member_events_for_user(room_id, user_id).await?;
+    let events = without_held_events(storage, events).await?;
     filter_with(storage, room_id, &members, events, user_event_position, Some(user_id)).await
+}
+
+/// Rejected and soft-failed PDUs are not relayed to clients. A soft-failed
+/// event that later wins current state is no longer marked held.
+async fn without_held_events(
+    storage: &dyn crate::storage::Storage,
+    events: Vec<Event>,
+) -> crate::Result<Vec<Event>> {
+    let mut visible = Vec::with_capacity(events.len());
+    for event in events {
+        if storage.event_disposition(&event.event_id).await?.is_none() {
+            visible.push(event);
+        }
+    }
+    Ok(visible)
 }
 
 /// The same filter, for a requesting origin server (federation

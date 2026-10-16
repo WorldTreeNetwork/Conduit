@@ -19,7 +19,7 @@
 //! 7. **Persist** `Event { event_id, pdu, unsigned }` and update state.
 //! 8. **Fanout** — notify local `/sync`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use serde_json::Value;
@@ -193,6 +193,9 @@ pub async fn process_received(
         if let Some(cache) = recent {
             cache.insert(&pdu.event_id).await;
         }
+        if storage.event_disposition(&pdu.event_id).await.ok().flatten().as_deref() == Some("rejected") {
+            return Err(PipelineError::AuthFailed("rejected".into()));
+        }
         return Ok(pdu.event_id);
     }
 
@@ -243,6 +246,32 @@ pub async fn process_received(
     // below may select the event itself, which would make a leave look like
     // Leave -> Leave.
     let prior_state = current_state_map.clone();
+    // Auth-event selection and the state-at-event check happen before state
+    // resolution so a bad `auth_events` list is rejected instead of failing
+    // the chain walk. A PDU that passes there but fails against the room's
+    // current state is soft-failed: stored, not served to clients, not current.
+    if prior_state.contains_key(&("m.room.create".to_owned(), String::new()))
+        && pdu.event_type != "m.room.create"
+    {
+        let state_at = selection_state(storage.as_ref(), &pdu, &prior_state).await;
+        let expected = expected_auth_ids(&pdu, &state_at);
+        let cited: BTreeSet<String> = pdu.auth_events.iter().cloned().collect();
+        if cited != expected {
+            persist_held(storage, &pdu, "rejected").await?;
+            return Err(PipelineError::AuthFailed("auth events selection".into()));
+        }
+        if let Err(error) = check_auth(&pdu, &state_at) {
+            persist_held(storage, &pdu, "rejected").await?;
+            return Err(PipelineError::AuthFailed(error.to_string()));
+        }
+        if check_auth(&pdu, &prior_state).is_err() {
+            persist_held(storage, &pdu, "soft_failed").await?;
+            if let Some(cache) = recent {
+                cache.insert(&pdu.event_id).await;
+            }
+            return Ok(pdu.event_id);
+        }
+    }
     // Resolution needs every auth event of both snapshots, not only the
     // incoming PDU's. A conflicting leave otherwise fails closed on a
     // create-power or membership auth event that the PDU does not list.
@@ -303,6 +332,72 @@ pub async fn process_received(
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
+
+fn expected_auth_ids(event: &Event, state: &StateMap<Event>) -> BTreeSet<String> {
+    let version = state
+        .get(&("m.room.create".to_owned(), String::new()))
+        .map(|event| conduit::room_version::version_of_content(&event.content))
+        .unwrap_or(11);
+    auth_event_keys(event)
+        .into_iter()
+        .filter(|(event_type, _)| conduit::room_version::cites_room_create(version) || event_type != "m.room.create")
+        .filter_map(|(event_type, state_key)| {
+            state.get(&(event_type, state_key)).map(|event| event.event_id.clone())
+        })
+        .collect()
+}
+
+/// State used to decide which auth events a PDU must cite.
+///
+/// At the room tip this is the current state. A PDU whose `prev_events` are
+/// older is checked against those events and their auth events, which is the
+/// state at that point for the auth-event subset.
+async fn selection_state(storage: &dyn Storage, event: &Event, current: &StateMap<Event>) -> StateMap<Event> {
+    if event.prev_events.is_empty() {
+        return current.clone();
+    }
+    let mut prevs = Vec::new();
+    for event_id in &event.prev_events {
+        match storage.get_event(event_id).await {
+            Ok(Some(prev)) => prevs.push(prev),
+            _ => return current.clone(),
+        }
+    }
+    let tip = current.values().map(|event| event.depth).max().unwrap_or(0);
+    if prevs.iter().any(|event| event.depth >= tip) {
+        return current.clone();
+    }
+    let mut map = StateMap::new();
+    for prev in &prevs {
+        for auth_id in &prev.auth_events {
+            if let Ok(Some(auth)) = storage.get_event(auth_id).await {
+                if let Some(state_key) = &auth.state_key {
+                    map.insert((auth.event_type.clone(), state_key.clone()), auth);
+                }
+            }
+        }
+        if let Some(state_key) = &prev.state_key {
+            map.insert((prev.event_type.clone(), state_key.clone()), prev.clone());
+        }
+    }
+    // Room version 12 does not cite create, but auth rules still require it.
+    let create_key = ("m.room.create".to_owned(), String::new());
+    if !map.contains_key(&create_key) {
+        if let Some(create) = current.get(&create_key) {
+            map.insert(create_key, create.clone());
+        }
+    }
+    map
+}
+
+async fn persist_held(storage: &Arc<dyn Storage>, event: &Event, kind: &str) -> Result<(), PipelineError> {
+    storage.put_event(event).await.map_err(|error| PipelineError::Storage(error.to_string()))?;
+    storage
+        .set_event_disposition(&event.event_id, kind)
+        .await
+        .map_err(|error| PipelineError::Storage(error.to_string()))?;
+    Ok(())
+}
 
 /// Resolved state with this event's own key put back to the prior entry.
 ///

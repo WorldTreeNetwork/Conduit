@@ -301,9 +301,25 @@ async fn send_join_validates_sender_state_key_origin_and_path() {
     // A restricted join naming an authoriser elsewhere is refused; one naming
     // our user is co-signed by us before verification.
     let template2 = fed(&server, &remote, Method::GET, &make_join.replace("%40r%3A", "%40r2%3A"), None, 200).await["event"].clone();
+    let alice_id = alice["user_id"].as_str().unwrap();
+    let room_state = server
+        .request(Method::GET, &format!("/_matrix/client/v3/rooms/{}/state", enc(&room)), Some(token), None, 200)
+        .await;
+    let alice_member = room_state
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["type"] == "m.room.member" && event["state_key"] == alice_id)
+        .unwrap()["event_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     let restricted = |authoriser: &str| {
         let mut pdu: Pdu = serde_json::from_value(template2.clone()).unwrap();
         pdu.content["join_authorised_via_users_server"] = json!(authoriser);
+        if authoriser == alice_id {
+            pdu.auth_events.push(alice_member.clone());
+        }
         sign(&remote, pdu)
     };
     let (id, pdu) = restricted("@admin:elsewhere.test");
@@ -1191,7 +1207,7 @@ async fn federation_guest_access_revocation_removes_local_guests() {
             // Later than the creator's event, and still inside the remote key's validity window.
             chrono::Utc::now().timestamp_millis() as u64 + 1_000,
             vec![event_id_of("m.room.create", ""), event_id_of("m.room.power_levels", ""), event_id_of("m.room.member", joiner)],
-            vec![join_id],
+            vec![event_id_of("m.room.power_levels", "")],
             20,
         ),
     );
@@ -2344,6 +2360,164 @@ async fn ss_membership_exchange_third_party_invite_issues_invite() {
     assert!(pdu["signatures"][REMOTE].is_object(), "{pdu}");
     let stored = server.request(Method::GET, &member_path(&room, carol), Some(token), None, 200).await;
     assert_eq!(stored["membership"], "invite", "{stored}");
+}
+
+#[tokio::test]
+async fn auth_event_selection_rejects_and_current_state_soft_fails() {
+    let remote = spawn_remote().await;
+    let server = federated_server(&remote).await;
+    let alice = server.register("alice").await;
+    let token = alice["access_token"].as_str().unwrap();
+    let room = server
+        .request(
+            Method::POST,
+            "/_matrix/client/v3/createRoom",
+            Some(token),
+            Some(json!({"preset": "public_chat"})),
+            200,
+        )
+        .await["room_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let joiner = "@r:remote.test";
+    federation_join(&server, &remote, REMOTE, &room, joiner).await;
+
+    let state = server
+        .request(Method::GET, &format!("/_matrix/client/v3/rooms/{}/state", enc(&room)), Some(token), None, 200)
+        .await;
+    let mut create_id = String::new();
+    let mut power_id = String::new();
+    let mut join_id = String::new();
+    for event in state.as_array().unwrap() {
+        match event["type"].as_str() {
+            Some("m.room.create") => create_id = event["event_id"].as_str().unwrap().to_owned(),
+            Some("m.room.power_levels") => power_id = event["event_id"].as_str().unwrap().to_owned(),
+            Some("m.room.member") if event["state_key"] == joiner => {
+                join_id = event["event_id"].as_str().unwrap().to_owned();
+            }
+            _ => {}
+        }
+    }
+    assert!(!create_id.is_empty() && !power_id.is_empty() && !join_id.is_empty(), "{state}");
+
+    let (bad_id, bad) = sign(
+        &remote,
+        Pdu::new(
+            &room,
+            joiner,
+            "m.room.message",
+            None,
+            json!({"msgtype": "m.text", "body": "wrong auth set"}),
+            1_700_000_000_100,
+            vec![power_id.clone(), join_id.clone(), "$not-selected".into()],
+            vec![join_id.clone()],
+            20,
+        ),
+    );
+    let rejected = fed(
+        &server,
+        &remote,
+        Method::PUT,
+        "/_matrix/federation/v1/send/auth-select-1",
+        Some(txn(vec![bad], vec![])),
+        200,
+    )
+    .await;
+    assert_eq!(rejected["pdus"][&bad_id]["error"], "auth check failed", "{rejected}");
+    let missing = fed(
+        &server,
+        &remote,
+        Method::GET,
+        &format!("/_matrix/federation/v1/event/{}", enc(&bad_id)),
+        None,
+        404,
+    )
+    .await;
+    assert_eq!(missing["errcode"], "M_NOT_FOUND", "{missing}");
+
+    server
+        .request(
+            Method::POST,
+            &format!("/_matrix/client/v3/rooms/{}/ban", enc(&room)),
+            Some(token),
+            Some(json!({"user_id": joiner})),
+            200,
+        )
+        .await;
+    let (soft_id, soft) = sign(
+        &remote,
+        Pdu::new(
+            &room,
+            joiner,
+            "m.room.message",
+            None,
+            json!({"msgtype": "m.text", "body": "sent before the ban arrived"}),
+            1_700_000_000_200,
+            vec![power_id, join_id.clone()],
+            vec![join_id.clone()],
+            21,
+        ),
+    );
+    let accepted = fed(
+        &server,
+        &remote,
+        Method::PUT,
+        "/_matrix/federation/v1/send/soft-fail-1",
+        Some(txn(vec![soft], vec![])),
+        200,
+    )
+    .await;
+    assert_eq!(accepted["pdus"][&soft_id], json!({}), "{accepted}");
+    let served = fed(
+        &server,
+        &remote,
+        Method::GET,
+        &format!("/_matrix/federation/v1/event/{}", enc(&soft_id)),
+        None,
+        200,
+    )
+    .await;
+    assert_eq!(served["pdus"][0]["event_id"].as_str().unwrap_or(&soft_id), &soft_id);
+    assert_eq!(served["pdus"][0]["content"]["body"], "sent before the ban arrived", "{served}");
+
+    let sync = server.request(Method::GET, "/_matrix/client/v3/sync", Some(token), None, 200).await;
+    let timeline = &sync["rooms"]["join"][&room]["timeline"]["events"];
+    let bodies: Vec<&str> = timeline
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|event| event["content"]["body"].as_str())
+        .collect();
+    assert!(!bodies.contains(&"wrong auth set"), "{timeline}");
+    assert!(!bodies.contains(&"sent before the ban arrived"), "{timeline}");
+
+    let after = server
+        .request(
+            Method::PUT,
+            &format!("/_matrix/client/v3/rooms/{}/send/m.room.message/after-soft", enc(&room)),
+            Some(token),
+            Some(json!({"msgtype": "m.text", "body": "still here"})),
+            200,
+        )
+        .await["event_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let after_pdu = fed(
+        &server,
+        &remote,
+        Method::GET,
+        &format!("/_matrix/federation/v1/event/{}", enc(&after)),
+        None,
+        200,
+    )
+    .await;
+    let prevs = after_pdu["pdus"][0]["prev_events"].as_array().unwrap();
+    assert!(
+        prevs.iter().all(|id| id != &json!(soft_id) && id != &json!(bad_id)),
+        "rejected and soft-failed events are not prev_events: {after_pdu}"
+    );
 }
 
 fn remote_key_document(remote: &Remote) -> Value {

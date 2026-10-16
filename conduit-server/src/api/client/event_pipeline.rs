@@ -220,7 +220,15 @@ pub async fn author_event(
             let all = storage.room_events(room_id).await.map_err(|e| {
                 MatrixError::unknown(format!("storage error: {e}"))
             })?;
-            let latest = all.into_iter().max_by_key(|e| e.depth);
+            let mut accepted = Vec::new();
+            for event in all {
+                if storage.event_disposition(&event.event_id).await.map_err(|e| {
+                    MatrixError::unknown(format!("storage error: {e}"))
+                })?.is_none() {
+                    accepted.push(event);
+                }
+            }
+            let latest = accepted.into_iter().max_by_key(|e| e.depth);
             match latest {
                 Some(ev) => {
                     let d = ev.depth + 1;
@@ -250,12 +258,19 @@ pub async fn author_event(
     // Step 4 — auth_events: look up current state for required keys
     // ------------------------------------------------------------------
     let required_keys = auth_event_keys(&event);
+    let room_version = match storage.get_state_entry(room_id, "m.room.create", "").await {
+        Ok(Some(create)) => conduit::room_version::version_of_content(&create.content),
+        _ => 11,
+    };
     let mut auth_events_ids: Vec<String> = Vec::new();
     let mut auth_state: StateMap<Event> = HashMap::new();
 
     for (ev_type, sk) in &required_keys {
         if let Ok(Some(state_ev)) = storage.get_state_entry(room_id, ev_type, sk).await {
-            auth_events_ids.push(state_ev.event_id.clone());
+            // Auth rules still read create. Version 12 must not cite it.
+            if ev_type != "m.room.create" || conduit::room_version::cites_room_create(room_version) {
+                auth_events_ids.push(state_ev.event_id.clone());
+            }
             auth_state.insert((ev_type.clone(), sk.clone()), state_ev);
         }
     }
