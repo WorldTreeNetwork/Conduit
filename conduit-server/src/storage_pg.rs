@@ -246,6 +246,32 @@ fn event_from_row(row: EventRow) -> Event {
     Event { event_id: row.event_id, pdu, unsigned: row.unsigned }
 }
 
+/// Room version of `room_id`, from its create event. An empty id or a
+/// missing create event uses 11, which matches an absent create.
+/// `Some` when `version` is 3–10 and `event` reproduces that version's id.
+fn versioned_pdu(version: u32, event: &Event) -> Option<WirePdu> {
+    if !(3..11).contains(&version) {
+        return None;
+    }
+    let wire = WirePdu::checked_for_version(version, event.pdu.clone())?;
+    (wire.event_id() == event.event_id).then_some(wire)
+}
+
+async fn versioned_wire(storage: &PostgresStorage, event: &Event) -> Result<Option<WirePdu>> {
+    let version = room_version_of(storage, &event.room_id).await?;
+    Ok(versioned_pdu(version, event))
+}
+
+async fn room_version_of(storage: &PostgresStorage, room_id: &str) -> Result<u32> {
+    if room_id.is_empty() {
+        return Ok(11);
+    }
+    Ok(match storage.get_state_entry(room_id, "m.room.create", "").await? {
+        Some(create) => conduit::room_version::version_of_event(&create),
+        None => 11,
+    })
+}
+
 /// Insert one event: authoritative canonical `pdu_json`, NUL-safe JSONB
 /// projections, NUL-free unsigned, and its integrity class. A row whose
 /// reference hash equals its ID is `verified` (including PDUs redacted on
@@ -895,13 +921,22 @@ impl Storage for PostgresStorage {
             None => self.classify_legacy_row(&event, had_pdu_json).await?,
         };
         let wire = match class {
-            IntegrityClass::IdMismatch => None,
+            // The column compares the v11 reference hash. Room versions 3–10
+            // are still servable when their own reference hash matches.
+            IntegrityClass::IdMismatch => versioned_wire(self, &event).await?,
             // Accepted redaction: the row already holds the room version's
-            // pruned PDU. Do not run the v11 content-mismatch redaction over it.
-            IntegrityClass::Redacted => WirePdu::retained(&event.event_id, event.pdu),
-            // Redacted on receipt or lossy: `checked` yields the redaction,
-            // computed now and never written back to retained history.
-            _ => WirePdu::checked(&event.event_id, event.pdu),
+            // pruned PDU. The reference hash is that version's, so a v5
+            // event still carries `aliases` and `origin`.
+            IntegrityClass::Redacted => {
+                let version = room_version_of(self, &event.room_id).await?;
+                WirePdu::retained_for_version(version, &event.event_id, event.pdu)
+            }
+            // Redacted on receipt or lossy: `checked` yields the v11
+            // redaction, computed now and never written back.
+            _ => match WirePdu::checked(&event.event_id, event.pdu.clone()) {
+                Some(wire) => Some(wire),
+                None => versioned_wire(self, &event).await?,
+            },
         };
         Ok(Some((class, wire)))
     }

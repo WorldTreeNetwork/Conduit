@@ -237,14 +237,25 @@ impl WirePdu {
         Some(Self::bundle(event_id, pdu))
     }
 
-    /// A PDU whose reference hash still equals `expected_event_id`.
+    /// A PDU whose v11 reference hash still equals `expected_event_id`.
     ///
-    /// Used for a stored redaction: the content hash no longer matches, and
-    /// running the v11 redaction again would drop fields an older room
-    /// version still protects (for example `aliases` through version 5).
+    /// Room versions 3–10 use [`WirePdu::retained_for_version`]: their
+    /// reference hash keeps fields v11 redaction removes.
     pub fn retained(expected_event_id: &str, pdu: Pdu) -> Option<WirePdu> {
-        match crate::hashing::event_id(&pdu) {
-            Ok(derived) if derived == expected_event_id => Some(Self::bundle(expected_event_id, pdu)),
+        Self::retained_for_version(11, expected_event_id, pdu)
+    }
+
+    /// A stored redaction whose reference hash for `version` still equals
+    /// `expected_event_id`. The content hash no longer matches, and running
+    /// a different version's redaction would drop fields this version still
+    /// protects (for example `aliases` through version 5). Versions 1 and 2
+    /// have no derived id; the stored bytes are the event.
+    pub fn retained_for_version(version: u32, expected_event_id: &str, pdu: Pdu) -> Option<WirePdu> {
+        if version < 3 {
+            return Some(Self::bundle(expected_event_id, pdu));
+        }
+        match crate::room_version::event_id_for(&pdu, version) {
+            Ok(Some(derived)) if derived == expected_event_id => Some(Self::bundle(expected_event_id, pdu)),
             _ => None,
         }
     }
@@ -307,5 +318,35 @@ mod tests {
         assert!(value.get("event_id").is_none());
         assert!(value.get("unsigned").is_none());
         assert!(WirePdu::checked("$other", wire.into_pdu()).is_none());
+    }
+
+    #[test]
+    fn redacted_room_version_5_keeps_aliases_under_its_own_event_id() {
+        use crate::keys::generate_server_key;
+        use crate::signing::sign_authored_for_version;
+
+        let key = generate_server_key();
+        let mut pdu = Pdu::new(
+            "!r:example.org",
+            "@a:example.org",
+            "m.room.aliases",
+            Some("example.org".into()),
+            json!({"aliases": ["#kept:example.org"], "note": "drop-me"}),
+            5,
+            vec![],
+            vec![],
+            1,
+        );
+        pdu.extensions.insert("origin".into(), json!("example.org"));
+        sign_authored_for_version(&mut pdu, 5, &key, "example.org").unwrap();
+        let id = crate::room_version::event_id_for(&pdu, 5).unwrap().unwrap();
+        assert_ne!(crate::hashing::event_id(&pdu).unwrap(), id);
+        let pruned = crate::room_version::redact_pdu(&pdu, 5);
+        assert_eq!(pruned.content["aliases"], json!(["#kept:example.org"]));
+        assert!(pruned.content.get("note").is_none());
+        assert!(WirePdu::retained(&id, pruned.clone()).is_none());
+        let wire = WirePdu::retained_for_version(5, &id, pruned).expect("version 5 id");
+        assert_eq!(wire.event_id(), id);
+        assert_eq!(wire.pdu().content["aliases"], json!(["#kept:example.org"]));
     }
 }

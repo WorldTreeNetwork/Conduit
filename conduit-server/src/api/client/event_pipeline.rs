@@ -460,17 +460,16 @@ pub(crate) async fn fan_out_authored(
             return;
         }
     }
-    let event = match storage.get_event(event_id).await {
-        Ok(Some(event)) => event,
-        Ok(None) => return,
+    let wire = match storage.get_wire_pdu(event_id).await {
+        Ok(Some(wire)) => wire,
+        Ok(None) => {
+            tracing::warn!(event_id, "federation fan-out skipped: PDU does not reproduce its event id");
+            return;
+        }
         Err(error) => {
             tracing::warn!(%error, "federation fan-out skipped: event missing");
             return;
         }
-    };
-    let Some(wire) = conduit::event::WirePdu::checked(event_id, event.pdu) else {
-        tracing::warn!(event_id, "federation fan-out skipped: PDU does not reproduce its event id");
-        return;
     };
     let dests = match storage.joined_remote_servers(room_id, server_name).await {
         Ok(dests) => dests,

@@ -2203,11 +2203,30 @@ impl Storage for MemoryStorage {
         let inner = self.inner.read().await;
         let Some(event) = inner.events.get(event_id) else { return Ok(None) };
         if inner.redacted.contains(event_id) {
-            let wire = WirePdu::retained(&event.event_id, event.pdu.clone());
+            let version = inner
+                .room_state
+                .get(&(event.room_id.clone(), "m.room.create".into(), String::new()))
+                .and_then(|create_id| inner.events.get(create_id))
+                .map(crate::room_version::version_of_event)
+                .unwrap_or(11);
+            let wire = WirePdu::retained_for_version(version, &event.event_id, event.pdu.clone());
             return Ok(Some((IntegrityClass::Redacted, wire)));
         }
+        let version = inner
+            .room_state
+            .get(&(event.room_id.clone(), "m.room.create".into(), String::new()))
+            .and_then(|create_id| inner.events.get(create_id))
+            .map(crate::room_version::version_of_event)
+            .unwrap_or(11);
         let class = crate::event::classify(&event.event_id, &event.pdu);
-        let wire = WirePdu::checked(&event.event_id, event.pdu.clone());
+        let mut wire = WirePdu::checked(&event.event_id, event.pdu.clone());
+        if wire.is_none() && (3..11).contains(&version) {
+            if let Some(candidate) = WirePdu::checked_for_version(version, event.pdu.clone()) {
+                if candidate.event_id() == event.event_id {
+                    wire = Some(candidate);
+                }
+            }
+        }
         Ok(Some((class, wire)))
     }
 

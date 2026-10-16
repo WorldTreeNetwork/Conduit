@@ -2557,6 +2557,16 @@ async fn accepted_redaction_prunes_the_row_and_federation_get_event() {
     assert!(before_content.contains(secret), "{before_content}");
     assert!(before_pdu.contains(secret), "{before_pdu}");
     assert_eq!(before_class, "verified");
+    let parsed: Pdu = serde_json::from_str(&before_pdu).expect("pdu parses");
+    let derived = conduit::hashing::event_id(&parsed).expect("hash");
+    assert_eq!(
+        derived, event_id,
+        "room_id={} state_key={:?} hashes={} keys={:?}\nSTORED={before_pdu}",
+        parsed.room_id,
+        parsed.state_key,
+        parsed.hashes,
+        parsed.extensions.keys().collect::<Vec<_>>(),
+    );
     let before: Value = serde_json::from_str(&before_pdu).unwrap();
     let hash = before["hashes"]["sha256"].clone();
     let signatures = before["signatures"].clone();
