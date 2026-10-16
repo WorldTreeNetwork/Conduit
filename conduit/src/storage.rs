@@ -1173,6 +1173,10 @@ pub trait Storage: Send + Sync + 'static {
     /// walk in the default implementation.
     async fn get_remote_servers_for_user(&self, user_id: &str, server_name: &str) -> Result<Vec<String>>;
 
+    /// Homeservers, other than `server_name`, that have a joined member in
+    /// `room_id`. Typing EDUs are sent to this set.
+    async fn joined_remote_servers(&self, room_id: &str, server_name: &str) -> Result<Vec<String>>;
+
     // --- Published room directory & user directory (conduit-y99.20) --------
 
     /// Publish (`true`) or unpublish a room in the server's main room
@@ -3686,6 +3690,27 @@ impl Storage for MemoryStorage {
         Ok(out)
     }
 
+    async fn joined_remote_servers(&self, room_id: &str, server_name: &str) -> Result<Vec<String>> {
+        let inner = self.inner.read().await;
+        let mut servers = std::collections::HashSet::new();
+        for ((rid, etype, state_key), event_id) in &inner.room_state {
+            if rid != room_id || etype != "m.room.member" {
+                continue;
+            }
+            let Some(event) = inner.events.get(event_id) else { continue };
+            if event.content.get("membership").and_then(|v| v.as_str()) != Some("join") {
+                continue;
+            }
+            let Some(server) = crate::signing::server_of_user_id(state_key) else { continue };
+            if server != server_name {
+                servers.insert(server.to_owned());
+            }
+        }
+        let mut out: Vec<String> = servers.into_iter().collect();
+        out.sort();
+        Ok(out)
+    }
+
     // --- Published room directory & user directory (conduit-y99.20) --------
 
     async fn set_room_published(&self, room_id: &str, published: bool) -> Result<()> {
@@ -4522,6 +4547,42 @@ mod tests {
             .await
             .unwrap()
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn joined_remote_servers_skip_local_and_departed_members() {
+        use crate::event::{Event, Pdu};
+        let store = MemoryStorage::default();
+        let room = "!r:local";
+        for (id, user, membership) in [
+            ("$local", "@a:local", "join"),
+            ("$remote", "@b:example.com:8448", "join"),
+            ("$left", "@c:gone.test", "leave"),
+        ] {
+            let event = Event::new(
+                id,
+                Pdu::new(
+                    room,
+                    user,
+                    "m.room.member",
+                    Some(user.into()),
+                    json!({"membership": membership}),
+                    1,
+                    vec![],
+                    vec![],
+                    1,
+                ),
+            );
+            store.put_event(&event).await.unwrap();
+            store
+                .set_state_entry(room, "m.room.member", user, id)
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            store.joined_remote_servers(room, "local").await.unwrap(),
+            vec!["example.com:8448".to_owned()]
+        );
     }
 
     #[tokio::test]

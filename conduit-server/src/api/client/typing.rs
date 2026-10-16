@@ -18,6 +18,9 @@ use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::{broadcast, watch, RwLock};
 
+use conduit::storage::Storage;
+use serde_json::Value;
+
 use super::{AuthState, AuthedUser, MatrixError};
 
 // ---------------------------------------------------------------------------
@@ -216,9 +219,85 @@ pub async fn put_typing<S: AuthState>(
     }
 
     // Wake any /sync long-pollers for this room.
-    let _ = typing_tx.send(room_id);
+    let _ = typing_tx.send(room_id.clone());
+
+    // Other servers in the room learn about our users' typing (m.typing EDU).
+    if let Some(queue) = state.federation_queue() {
+        fanout_typing(
+            state.storage(),
+            queue,
+            state.server_name(),
+            &room_id,
+            &user_id,
+            body.typing,
+        )
+        .await;
+    }
 
     (StatusCode::OK, Json(json!({}))).into_response()
+}
+
+/// Apply an inbound `m.typing` EDU. The user must belong to `origin` and be
+/// joined. The EDU has no timeout; the local ephemeral entry uses the same
+/// default a client omits. A malformed EDU is ignored.
+pub(crate) async fn apply_inbound_typing(
+    typing: &TypingStore,
+    storage: &dyn Storage,
+    origin: &str,
+    edu: &Value,
+) -> conduit::Result<()> {
+    let Some(content) = edu.get("content") else { return Ok(()) };
+    let Some(room_id) = content.get("room_id").and_then(Value::as_str) else { return Ok(()) };
+    let Some(user_id) = content.get("user_id").and_then(Value::as_str) else { return Ok(()) };
+    let Some(is_typing) = content.get("typing").and_then(Value::as_bool) else { return Ok(()) };
+    if conduit::signing::server_of_user_id(user_id) != Some(origin) {
+        return Ok(());
+    }
+    let joined = storage
+        .get_state_entry(room_id, "m.room.member", user_id)
+        .await?
+        .is_some_and(|event| event.content.get("membership").and_then(Value::as_str) == Some("join"));
+    if !joined {
+        return Ok(());
+    }
+    if is_typing {
+        typing.set_typing(room_id, user_id, DEFAULT_TYPING_TIMEOUT_MS).await;
+    } else {
+        typing.clear_typing(room_id, user_id).await;
+    }
+    Ok(())
+}
+
+/// Send one `m.typing` EDU to every other homeserver with a joined member.
+pub(crate) async fn fanout_typing(
+    storage: &Arc<dyn Storage>,
+    queue: &crate::federation::Queue,
+    server_name: &str,
+    room_id: &str,
+    user_id: &str,
+    is_typing: bool,
+) {
+    let servers = match storage.joined_remote_servers(room_id, server_name).await {
+        Ok(servers) => servers,
+        Err(error) => {
+            tracing::warn!(%error, "typing federation fanout skipped");
+            return;
+        }
+    };
+    if servers.is_empty() {
+        return;
+    }
+    let edu = json!({
+        "edu_type": "m.typing",
+        "content": {
+            "room_id": room_id,
+            "user_id": user_id,
+            "typing": is_typing,
+        }
+    });
+    for dest in servers {
+        queue.enqueue(&dest, vec![], vec![edu.clone()]).await;
+    }
 }
 
 #[cfg(test)]

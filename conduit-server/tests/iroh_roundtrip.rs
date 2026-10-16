@@ -94,6 +94,7 @@ async fn spawn_iroh_server(server_name: &str) -> IrohTestServer {
         fed_client: Arc::clone(&fed_client),
         recent: Arc::new(conduit_server::federation::RecentEventCache::new()),
         app_services: Arc::new(Vec::new()),
+        typing: Arc::new(conduit_server::api::client::TypingStore::default()),
         blob_store: BlobStore::new(std::env::temp_dir().join(format!(
             "conduit_iroh_test_{}_{}",
             server_name.replace('.', "_"),

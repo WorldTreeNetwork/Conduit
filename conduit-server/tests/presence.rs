@@ -135,6 +135,7 @@ struct TestState {
     typing_store: Arc<TypingStore>,
     typing_tx: broadcast::Sender<String>,
     presence_store: Arc<PresenceStore>,
+    federation_queue: Option<Arc<conduit_server::federation::Queue>>,
 }
 
 impl TestState {
@@ -151,6 +152,7 @@ impl TestState {
             typing_store,
             typing_tx,
             presence_store,
+            federation_queue: None,
         }
     }
 }
@@ -179,6 +181,9 @@ impl AuthState for TestState {
     }
     fn presence_store(&self) -> &Arc<PresenceStore> {
         &self.presence_store
+    }
+    fn federation_queue(&self) -> Option<&Arc<conduit_server::federation::Queue>> {
+        self.federation_queue.as_ref()
     }
 }
 
@@ -590,6 +595,171 @@ async fn typing_emits_via_sync() {
         typers.iter().any(|u| u.as_str() == Some(user_a)),
         "user_a not in typers: {typers:?}"
     );
+}
+
+/// A local typing update is sent as an `m.typing` EDU to each other server
+/// that has a joined member, and not to a server whose member has left.
+#[tokio::test]
+async fn local_typing_is_federated_to_joined_remote_servers() {
+    use std::sync::Mutex;
+    use axum::extract::Json;
+    use axum::routing::put;
+    use conduit::event::{Event, Pdu};
+    use conduit_server::federation::{Client, Queue};
+    use conduit_server::RemoteKeyCache;
+    use hickory_resolver::TokioAsyncResolver;
+
+    let captured = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let captured_route = Arc::clone(&captured);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        let app = Router::new().route(
+            "/_matrix/federation/v1/send/:txn_id",
+            put(move |Json(body): Json<Value>| {
+                let captured = Arc::clone(&captured_route);
+                async move {
+                    captured.lock().unwrap().push(body);
+                    Json(json!({ "pdus": {} }))
+                }
+            }),
+        );
+        axum::serve(listener, app).await.ok();
+    });
+
+    let db = TempDb::new().await;
+    let storage = db.storage();
+    let server_key = Arc::new(conduit::keys::generate_server_key());
+    let resolver = TokioAsyncResolver::tokio_from_system_conf().unwrap();
+    let fed = Client::new(
+        reqwest::Client::new(),
+        resolver,
+        Arc::new(RemoteKeyCache::new()),
+        Arc::clone(&server_key),
+        Arc::from("localhost"),
+    )
+    .with_test_base_url(base_url);
+    let queue = Arc::new(Queue::new(Arc::new(fed), Arc::clone(&storage)));
+
+    let mut state = TestState::new(Arc::clone(&storage));
+    state.server_key = Arc::clone(&server_key);
+    state.federation_queue = Some(queue);
+    let app = build_router(state);
+
+    let reg = do_register(&app, "alice_type", "pass").await;
+    let token = reg["access_token"].as_str().unwrap();
+    let user = reg["user_id"].as_str().unwrap().to_owned();
+    let room_id = do_create_room(&app, token).await;
+
+    let bob = Event::new(
+        "$bob:localhost",
+        Pdu::new(
+            &room_id,
+            "@bob:remote.test",
+            "m.room.member",
+            Some("@bob:remote.test".into()),
+            json!({"membership": "join"}),
+            1_700_000_000_000,
+            vec![],
+            vec![],
+            2,
+        ),
+    );
+    let cara = Event::new(
+        "$cara:localhost",
+        Pdu::new(
+            &room_id,
+            "@cara:left.test",
+            "m.room.member",
+            Some("@cara:left.test".into()),
+            json!({"membership": "leave"}),
+            1_700_000_000_001,
+            vec![],
+            vec![],
+            3,
+        ),
+    );
+    storage.put_event(&bob).await.unwrap();
+    storage.put_event(&cara).await.unwrap();
+    storage
+        .set_state_entry(&room_id, "m.room.member", "@bob:remote.test", &bob.event_id)
+        .await
+        .unwrap();
+    storage
+        .set_state_entry(&room_id, "m.room.member", "@cara:left.test", &cara.event_id)
+        .await
+        .unwrap();
+
+    let put = |typing: bool| {
+        let app = app.clone();
+        let token = token.to_owned();
+        let room_id = room_id.clone();
+        let user = user.clone();
+        async move {
+            let req = Request::builder()
+                .method("PUT")
+                .uri(format!("/_matrix/client/v3/rooms/{room_id}/typing/{user}"))
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::from(serde_json::to_vec(&json!({"typing": typing, "timeout": 30000})).unwrap()))
+                .unwrap();
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+        }
+    };
+    put(true).await;
+
+    let edu = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(body) = captured.lock().unwrap().iter().find(|body| {
+                body["edus"].as_array().is_some_and(|edus| {
+                    edus.iter().any(|edu| edu["content"]["typing"] == true)
+                })
+            }) {
+                return body.clone();
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("remote server never received the typing EDU");
+    assert_eq!(edu["origin"], "localhost");
+    assert_eq!(edu["pdus"], json!([]));
+    let typing_edu = edu["edus"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|edu| edu["edu_type"] == "m.typing")
+        .unwrap();
+    assert_eq!(
+        typing_edu["content"],
+        json!({"room_id": room_id, "user_id": user, "typing": true})
+    );
+    assert!(
+        captured.lock().unwrap().iter().all(|body| {
+            body["edus"].as_array().unwrap().iter().all(|edu| edu["content"]["user_id"] != "@cara:left.test")
+        }),
+        "a left member's server must not be a typing destination"
+    );
+
+    put(false).await;
+    let stopped = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let hit = captured.lock().unwrap().iter().any(|body| {
+                body["edus"].as_array().is_some_and(|edus| {
+                    edus.iter().any(|edu| {
+                        edu["edu_type"] == "m.typing" && edu["content"]["typing"] == false
+                    })
+                })
+            });
+            if hit {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    assert!(stopped.is_ok(), "stopping typing must be federated");
 }
 
 // ---------------------------------------------------------------------------

@@ -3636,6 +3636,35 @@ impl Storage for PostgresStorage {
         }).collect())
     }
 
+    async fn joined_remote_servers(&self, room_id: &str, server_name: &str) -> Result<Vec<String>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT DISTINCT substring(rcs.state_key from position(':' in rcs.state_key) + 1) AS server
+            FROM room_current_state rcs
+            JOIN events e ON e.event_id = rcs.event_id
+            WHERE rcs.room_id = $1
+              AND rcs.type = 'm.room.member'
+              AND e.content->>'membership' = 'join'
+              AND position(':' in rcs.state_key) > 1
+              AND substring(rcs.state_key from position(':' in rcs.state_key) + 1) <> $2
+            ORDER BY server
+            "#,
+        )
+        .bind(room_id)
+        .bind(server_name)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(rows
+            .iter()
+            .filter_map(|row| {
+                use sqlx::Row;
+                row.get::<Option<String>, _>("server")
+            })
+            .filter(|server| !server.is_empty())
+            .collect())
+    }
+
     // -----------------------------------------------------------------------
     // Published room directory & user directory (conduit-y99.20)
     // -----------------------------------------------------------------------

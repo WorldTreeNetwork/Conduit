@@ -24,9 +24,9 @@
         "total": 164
       },
       "requirement": {
-        "implemented+tested": 61,
+        "implemented+tested": 62,
         "implemented-untested": 0,
-        "partial": 16,
+        "partial": 15,
         "missing": 0,
         "not-applicable": 9,
         "total": 86
@@ -42,10 +42,10 @@
         "total": 36
       },
       "requirement": {
-        "implemented+tested": 10,
+        "implemented+tested": 11,
         "implemented-untested": 0,
         "partial": 15,
-        "missing": 13,
+        "missing": 12,
         "not-applicable": 3,
         "total": 41
       }
@@ -7719,21 +7719,23 @@
       "title": "Typing notifications",
       "source": "https://spec.matrix.org/v1.19/client-server-api/#typing-notifications",
       "role": "homeserver",
-      "status": "partial",
+      "status": "implemented+tested",
       "code": [
         {
           "loc": "conduit-server/src/api/client/typing.rs"
+        },
+        {
+          "loc": "conduit-server/src/federation/server.rs"
         }
       ],
       "tests": [
-        "conduit-server/tests/production_e2e.rs::production_typing_expiry_and_restart_clear_client_state"
+        "conduit-server/tests/production_e2e.rs::production_typing_expiry_and_restart_clear_client_state",
+        "conduit-server/tests/federation_inbound.rs::inbound_typing_edu_reaches_local_typers_and_rejects_spoofs",
+        "conduit-server/tests/presence.rs::local_typing_is_federated_to_joined_remote_servers"
       ],
-      "tests_total": 1,
-      "gap_beads": [
-        "conduit-y99.15",
-        "conduit-y99.32"
-      ],
-      "notes": ""
+      "tests_total": 3,
+      "gap_beads": [],
+      "notes": "Local typing plus inbound and outbound m.typing EDUs. The user must belong to the sending server and be joined; a denied server's EDU is ignored; stopping typing is federated."
     },
     {
       "id": "cs.mod.receipts",
@@ -9153,14 +9155,22 @@
       "title": "Typing notifications (m.typing EDU)",
       "source": "https://spec.matrix.org/v1.19/server-server-api/#typing-notifications",
       "role": "homeserver",
-      "status": "missing",
-      "code": [],
-      "tests": [],
-      "tests_total": 0,
-      "gap_beads": [
-        "conduit-y99.32"
+      "status": "implemented+tested",
+      "code": [
+        {
+          "loc": "conduit-server/src/api/client/typing.rs"
+        },
+        {
+          "loc": "conduit-server/src/federation/server.rs"
+        }
       ],
-      "notes": ""
+      "tests": [
+        "conduit-server/tests/federation_inbound.rs::inbound_typing_edu_reaches_local_typers_and_rejects_spoofs",
+        "conduit-server/tests/presence.rs::local_typing_is_federated_to_joined_remote_servers"
+      ],
+      "tests_total": 2,
+      "gap_beads": [],
+      "notes": "Inbound EDU requires a joined user of the sending server and is dropped when the room ACL denies that server. Outbound EDUs go to every other server with a joined member, including typing false."
     },
     {
       "id": "ss.presence",

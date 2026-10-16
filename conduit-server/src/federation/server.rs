@@ -65,6 +65,8 @@ pub struct FedState {
     /// Application Service registrations — used to query unknown users/aliases
     /// that fall in an AS namespace (conduit-dhd).
     pub app_services: Arc<Vec<crate::app_service::AppService>>,
+    /// Ephemeral typing state shared with client /sync.
+    pub typing: Arc<crate::api::client::TypingStore>,
 }
 
 impl MediaState for FedState {
@@ -1177,7 +1179,6 @@ pub async fn fed_send_to_device(
 // ---------------------------------------------------------------------------
 
 /// Handle EDUs in an inbound federation transaction.
-/// Currently processes `m.device_list_update`.
 pub(crate) async fn handle_edu(
     state: &FedState,
     origin: &str,
@@ -1190,6 +1191,15 @@ pub(crate) async fn handle_edu(
                 return Ok(());
             }
         }
+    }
+    if edu_type == "m.typing" {
+        crate::api::client::typing::apply_inbound_typing(
+            &state.typing,
+            state.storage.as_ref(),
+            origin,
+            edu,
+        )
+        .await?;
     }
     if edu_type == "m.direct_to_device" {
         #[derive(Deserialize)]

@@ -88,6 +88,7 @@ async fn spawn_server(server_name: &str) -> TestServer {
         blob_store: BlobStore::new(std::env::temp_dir().join(format!("conduit_test_blob_rt_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().subsec_nanos()))).unwrap(),
         recent: Arc::new(conduit_server::federation::RecentEventCache::new()),
         app_services: Arc::new(Vec::new()),
+        typing: Arc::new(conduit_server::api::client::TypingStore::default()),
     };
 
     let rate_limiter = RateLimiter::new(10000.0, 10000.0);
