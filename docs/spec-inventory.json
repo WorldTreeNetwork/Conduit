@@ -1873,9 +1873,13 @@
           "loc": "conduit-server/src/main.rs:540",
           "handler": "rooms::invite_user",
           "kind": "exact"
+        },
+        {
+          "loc": "conduit-server/src/api/client/federated_membership.rs"
         }
       ],
       "tests": [
+        "conduit-server/tests/production_federation_out.rs::remote_invite_is_delivered_and_stores_the_cosignature",
         "conduit-server/tests/production_directory.rs::knock_accept_deny_and_rescind",
         "conduit-server/tests/production_e2e.rs::production_invite_accept_and_kick_are_visible_in_sync",
         "conduit-server/tests/production_rooms.rs::ignored_users_are_filtered_from_sync_messages_and_invites",
@@ -1883,9 +1887,9 @@
         "conduit-server/tests/production_basics.rs::invite_blocking_rejects_invites_and_hides_pending_ones",
         "conduit-server/tests/production_basics.rs::join_by_room_id_and_membership_reasons_reach_member_events"
       ],
-      "tests_total": 6,
+      "tests_total": 7,
       "gap_beads": [],
-      "notes": "Invite by user_id with reason; 403 M_INVITE_BLOCKED for local users blocking invites."
+      "notes": "Invite by user_id with reason; 403 M_INVITE_BLOCKED for local users blocking invites. A remote invitee is offered over federation, and the stored event keeps that server's co-signature."
     },
     {
       "id": "cs.ep.post_matrixclientv3joinroomidoralias",
@@ -1905,9 +1909,13 @@
           "loc": "conduit-server/src/main.rs:535",
           "handler": "rooms::join_room",
           "kind": "exact"
+        },
+        {
+          "loc": "conduit-server/src/api/client/federated_membership.rs"
         }
       ],
       "tests": [
+        "conduit-server/tests/production_federation_out.rs::remote_join_uses_make_join_and_stores_returned_state",
         "conduit-server/tests/production_appservice.rs::join_checks_third_party_key_validity_url",
         "conduit-server/tests/production_basics.rs::restricted_room_join_requires_space_membership",
         "conduit-server/src/api/client/session.rs::guest_allowlist_matches_spec_endpoints",
@@ -1923,9 +1931,9 @@
         "conduit-server/tests/production_directory.rs::appservice_ping_thirdparty_and_network_directory",
         "conduit-server/tests/production_directory.rs::directory_visibility_changes_are_authorized"
       ],
-      "tests_total": 56,
+      "tests_total": 57,
       "gap_beads": [],
-      "notes": "Restricted and knock_restricted joins require membership of an allowed room and record join_authorised_via_users_server. third_party_signed checks key_validity_url before the join is stored."
+      "notes": "Restricted and knock_restricted joins require membership of an allowed room and record join_authorised_via_users_server. third_party_signed checks key_validity_url before the join is stored. A room this server is not in is joined with make_join and send_join, and the returned state is stored."
     },
     {
       "id": "cs.ep.post_matrixclientv3roomsroomidjoin",
@@ -1945,13 +1953,17 @@
           "loc": "conduit-server/src/api/client/room_membership.rs:80",
           "handler": "room_membership::join_by_room_id",
           "kind": "exact"
+        },
+        {
+          "loc": "conduit-server/src/api/client/federated_membership.rs"
         }
       ],
       "tests": [
+        "conduit-server/tests/production_federation_out.rs::remote_join_uses_make_join_and_stores_returned_state",
         "conduit-server/tests/production_appservice.rs::join_checks_third_party_key_validity_url",
         "conduit-server/tests/production_basics.rs::join_by_room_id_and_membership_reasons_reach_member_events"
       ],
-      "tests_total": 2,
+      "tests_total": 3,
       "gap_beads": [],
       "notes": "Room ID only (alias is 400 M_INVALID_PARAM); reason recorded on the member event; same join path as /join. third_party_signed checks key_validity_url before the join is stored."
     },
@@ -1973,16 +1985,18 @@
           "loc": "conduit-server/src/api/client/knock.rs:30",
           "handler": "knock",
           "kind": "exact"
+        },
+        {
+          "loc": "conduit-server/src/api/client/federated_membership.rs"
         }
       ],
       "tests": [
+        "conduit-server/tests/production_federation_out.rs::remote_knock_uses_make_knock_and_send_knock",
         "conduit-server/tests/production_directory.rs::knock_accept_deny_and_rescind"
       ],
-      "tests_total": 1,
-      "gap_beads": [
-        "conduit-y99.20.2"
-      ],
-      "notes": "Local knock tested; federated knock open."
+      "tests_total": 2,
+      "gap_beads": [],
+      "notes": "A local knock is stored. A room this server is not in is knocked with make_knock and send_knock, and the knock appears in /sync."
     },
     {
       "id": "cs.ep.post_matrixclientv3roomsroomidforget",
@@ -8862,6 +8876,9 @@
           "loc": "conduit-server/src/federation/queue.rs"
         },
         {
+          "loc": "conduit-server/src/api/client/event_pipeline.rs"
+        },
+        {
           "loc": "conduit-server/src/storage_pg.rs"
         },
         {
@@ -8874,11 +8891,12 @@
         "conduit-server/tests/production_pdu.rs::send_delivers_nul_to_device_and_receipt_byte_exact",
         "conduit-server/tests/storage_pdu.rs::to_device_content_keeps_nul_and_projects_replacement",
         "conduit-server/tests/production_pdu.rs::send_rejects_transactions_over_fifty_pdus_or_one_hundred_edus",
-        "conduit-server/tests/storage_pdu.rs::transaction_and_sent_outbox_retention_deletes_expired_rows"
+        "conduit-server/tests/storage_pdu.rs::transaction_and_sent_outbox_retention_deletes_expired_rows",
+        "conduit-server/tests/production_federation_out.rs::authored_room_events_are_sent_to_joined_servers"
       ],
-      "tests_total": 6,
+      "tests_total": 7,
       "gap_beads": [],
-      "notes": "At most 50 PDUs and 100 EDUs. The same txn id replays the stored response. Per-PDU results are empty objects or error strings inside HTTP 200. A to-device message and a read receipt containing U+0000 are delivered on /sync after restart. Client transaction rows expire after 30 minutes. Federation replay and to-device message ids expire after 24 hours. Sent outbox rows expire after 7 days. Legacy JSONB replay and payload columns are dropped after copy into text. PDU receipt checks are on ss.pdu.checks."
+      "notes": "At most 50 PDUs and 100 EDUs. The same txn id replays the stored response. Per-PDU results are empty objects or error strings inside HTTP 200. A to-device message and a read receipt containing U+0000 are delivered on /sync after restart. Client transaction rows expire after 30 minutes. Federation replay and to-device message ids expire after 24 hours. Sent outbox rows expire after 7 days. Legacy JSONB replay and payload columns are dropped after copy into text. PDU receipt checks are on ss.pdu.checks. A locally authored room event is sent to joined remote servers on PUT /send."
     },
     {
       "id": "ss.pdu.checks",
@@ -9095,17 +9113,21 @@
         },
         {
           "loc": "conduit-server/src/federation/client.rs"
+        },
+        {
+          "loc": "conduit-server/src/api/client/federated_membership.rs"
         }
       ],
       "tests": [
+        "conduit-server/tests/production_federation_out.rs::remote_join_uses_make_join_and_stores_returned_state",
         "conduit-server/tests/production_pdu.rs::send_join_returns_state_from_before_the_join",
         "conduit-server/tests/production_pdu.rs::make_join_rejects_room_versions_missing_from_ver",
         "conduit-server/tests/federation_roundtrip.rs::rt3_join_room_on_a",
         "conduit-server/tests/federation_inbound.rs::make_send_join_roundtrip"
       ],
-      "tests_total": 4,
+      "tests_total": 5,
       "gap_beads": [],
-      "notes": "make_join negotiates ver and returns M_INCOMPATIBLE_ROOM_VERSION with room_version. Outbound make_join advertises versions 1-12. send_join state is the resolved room state before the join, and the accepted membership is stored."
+      "notes": "make_join negotiates ver and returns M_INCOMPATIBLE_ROOM_VERSION with room_version. Outbound make_join advertises versions 1-12. send_join state is the resolved room state before the join, and the accepted membership is stored. A client join of a remote room calls make_join and send_join and stores the returned state."
     },
     {
       "id": "ss.joining.restricted",
@@ -9145,14 +9167,18 @@
       "code": [
         {
           "loc": "conduit-server/src/federation/spec_v119.rs"
+        },
+        {
+          "loc": "conduit-server/src/api/client/federated_membership.rs"
         }
       ],
       "tests": [
+        "conduit-server/tests/production_federation_out.rs::remote_knock_uses_make_knock_and_send_knock",
         "conduit-server/tests/production_pdu.rs::ss_membership_send_knock_returns_state_array"
       ],
-      "tests_total": 1,
+      "tests_total": 2,
       "gap_beads": [],
-      "notes": "Resident make_knock and send_knock. knock_room_state is an array containing m.room.create and the room name. A non-knock membership is 403. Room version 6 is M_INCOMPATIBLE_ROOM_VERSION. Outbound client knock of a remote room stays open."
+      "notes": "Resident make_knock and send_knock. knock_room_state is an array containing m.room.create and the room name. A non-knock membership is 403. Room version 6 is M_INCOMPATIBLE_ROOM_VERSION. A client knock of a remote room calls make_knock and send_knock."
     },
     {
       "id": "ss.inviting",
@@ -9168,17 +9194,21 @@
         },
         {
           "loc": "conduit-server/src/federation/spec_v119.rs"
+        },
+        {
+          "loc": "conduit-server/src/api/client/federated_membership.rs"
         }
       ],
       "tests": [
+        "conduit-server/tests/production_federation_out.rs::remote_invite_is_delivered_and_stores_the_cosignature",
         "conduit-server/tests/production_e2e.rs::production_chat_survives_restart",
         "conduit-server/tests/production_pdu.rs::ss_membership_v1_invite_keeps_v1_bytes",
         "conduit-server/tests/production_pdu.rs::ss_membership_v2_invite_keeps_every_field_but_the_resident_signature",
         "conduit-server/tests/production_pdu.rs::ss_membership_v2_invite_amends_the_original_event_and_checks_room_state"
       ],
-      "tests_total": 4,
+      "tests_total": 5,
       "gap_beads": [],
-      "notes": "v1 and v2 invites co-sign by inserting this server's signature into the received event object. Removing that signature restores the received JSON bytes, including key order. Room versions other than 1-11 reject invite_room_state that lacks m.room.create, is ill-formatted, or names another room, with 400 M_INVALID_PARAM. Versions 1-11 still accept that state."
+      "notes": "v1 and v2 invites co-sign by inserting this server's signature into the received event object. Removing that signature restores the received JSON bytes, including key order. Room versions other than 1-11 reject invite_room_state that lacks m.room.create, is ill-formatted, or names another room, with 400 M_INVALID_PARAM. Versions 1-11 still accept that state. An outbound invite of a remote user is delivered, and the stored event keeps the co-signature."
     },
     {
       "id": "ss.leaving",

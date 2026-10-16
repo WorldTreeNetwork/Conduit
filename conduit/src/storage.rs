@@ -460,6 +460,12 @@ pub trait Storage: Send + Sync + 'static {
         }
         Ok(())
     }
+    /// Replace the stored PDU bytes of an event whose id and hashes did not
+    /// change. Used when a remote server co-signs an invite: the reference
+    /// hash excludes signatures, so the row already exists.
+    async fn replace_cosigned_pdu(&self, _event: &Event) -> Result<bool> {
+        Ok(false)
+    }
     async fn room_events(&self, room_id: &str) -> Result<Vec<Event>>;
 
     // --- Federation wire integrity (add-pdu-wire) ---------------------------

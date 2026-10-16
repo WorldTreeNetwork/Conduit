@@ -19,7 +19,7 @@
 use std::collections::{HashMap, HashSet};
 
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Path, Query, RawQuery, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     Json,
@@ -224,14 +224,30 @@ pub async fn join_room<S: AuthState>(
     State(state): State<S>,
     authed: AuthedUser,
     Path(room_id_or_alias): Path<String>,
+    RawQuery(raw_query): RawQuery,
     Json(body): Json<JoinRequest>,
 ) -> Response {
     let sender = &authed.user_id;
+    let hinted = super::federated_membership::query_servers(raw_query.as_deref());
 
     // Resolve aliases starting with '#' against the local directory.
     let room_id = if room_id_or_alias.starts_with('#') {
         match state.storage().get_room_for_alias(&room_id_or_alias).await {
             Ok(Some(rid)) => rid,
+            Ok(None) if super::federated_membership::federation_enabled() && body.third_party_signed.is_none() => {
+                return match super::federated_membership::join_remote_alias(
+                    &state,
+                    sender,
+                    &room_id_or_alias,
+                    &hinted,
+                    body.reason.as_deref(),
+                )
+                .await
+                {
+                    Ok(room_id) => finish_join(&state, sender, &room_id).await,
+                    Err(response) => response,
+                };
+            }
             Ok(None) => {
                 return (StatusCode::NOT_FOUND, Json(json!({
                     "errcode": "M_NOT_FOUND",
@@ -244,41 +260,71 @@ pub async fn join_room<S: AuthState>(
         room_id_or_alias
     };
 
+    if body.third_party_signed.is_none()
+        && room_id.starts_with('!')
+        && super::federated_membership::federation_enabled()
+    {
+        match super::federated_membership::room_is_resident(&state, &room_id).await {
+            Ok(false) => {
+                return match super::federated_membership::join_remote_room(
+                    &state,
+                    sender,
+                    &room_id,
+                    &hinted,
+                    body.reason.as_deref(),
+                )
+                .await
+                {
+                    Ok(room_id) => finish_join(&state, sender, &room_id).await,
+                    Err(response) => response,
+                };
+            }
+            Ok(true) => {}
+            Err(response) => return response,
+        }
+    }
+
+    join_resident_room(&state, sender, &room_id, &body).await
+}
+
+async fn finish_join<S: AuthState>(state: &S, sender: &str, room_id: &str) -> Response {
+    if let Ok(Some(create)) = state.storage().get_state_entry(room_id, "m.room.create", "").await {
+        if let Some(old_room) = create.content.get("predecessor").and_then(|p| p.get("room_id")).and_then(Value::as_str) {
+            super::room_content::upgrade::copy_personal_settings(
+                state.storage().as_ref(),
+                sender,
+                old_room,
+                room_id,
+            )
+            .await;
+        }
+    }
+    if let Some(queue) = state.federation_queue() {
+        super::keys::publish_device_lists_after_join(
+            state.storage(),
+            queue,
+            state.server_name(),
+            room_id,
+            sender,
+        )
+        .await;
+    }
+    (StatusCode::OK, Json(json!({ "room_id": room_id }))).into_response()
+}
+
+async fn join_resident_room<S: AuthState>(state: &S, sender: &str, room_id: &str, body: &JoinRequest) -> Response {
     // Key validity is not an auth-rule check: other servers must still accept
     // the membership. Only the resident server, and only when this join is
     // authorised by `third_party_signed`, fetches `key_validity_url`.
     if let Some(signed) = body.third_party_signed.as_ref() {
-        if let Err(response) = super::third_party::accept_third_party_join(&state, sender, &room_id, signed).await {
+        if let Err(response) = super::third_party::accept_third_party_join(state, sender, room_id, signed).await {
             return response;
         }
     }
 
-    let room = Room::new(&room_id);
-    match room.join_with_reason(sender, body.reason.as_deref(), &RoomEventSenderWrapper(&state)).await {
-        Ok(_) => {
-            if let Ok(Some(create)) = state.storage().get_state_entry(&room_id, "m.room.create", "").await {
-                if let Some(old_room) = create.content.get("predecessor").and_then(|p| p.get("room_id")).and_then(Value::as_str) {
-                    super::room_content::upgrade::copy_personal_settings(
-                        state.storage().as_ref(),
-                        sender,
-                        old_room,
-                        &room_id,
-                    )
-                    .await;
-                }
-            }
-            if let Some(queue) = state.federation_queue() {
-                super::keys::publish_device_lists_after_join(
-                    state.storage(),
-                    queue,
-                    state.server_name(),
-                    &room_id,
-                    sender,
-                )
-                .await;
-            }
-            (StatusCode::OK, Json(json!({ "room_id": room_id }))).into_response()
-        }
+    let room = Room::new(room_id);
+    match room.join_with_reason(sender, body.reason.as_deref(), &RoomEventSenderWrapper(state)).await {
+        Ok(_) => finish_join(state, sender, room_id).await,
         Err(e) => MatrixError::from_conduit(e).into_response(),
     }
 }
@@ -421,8 +467,16 @@ pub async fn invite_user<S: AuthState>(
         }
     }
     let room = Room::new(&room_id);
+    let remote = conduit::signing::server_of_user_id(&body.user_id)
+        .is_some_and(|server| server != state.server_name());
     match room.invite_with_reason(sender, &body.user_id, false, body.reason.as_deref(), &RoomEventSenderWrapper(&state)).await {
-        Ok(_) => (StatusCode::OK, Json(json!({}))).into_response(),
+        Ok(event_id) => {
+            if remote {
+                super::federated_membership::deliver_remote_invite(&state, &room_id, &event_id).await;
+                super::federated_membership::fan_out_stored(&state, &room_id, &event_id).await;
+            }
+            (StatusCode::OK, Json(json!({}))).into_response()
+        }
         Err(e) => MatrixError::from_conduit(e).into_response(),
     }
 }

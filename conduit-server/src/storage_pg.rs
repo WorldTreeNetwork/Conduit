@@ -797,6 +797,24 @@ impl Storage for PostgresStorage {
         Ok(())
     }
 
+    async fn replace_cosigned_pdu(&self, event: &Event) -> Result<bool> {
+        use conduit::wire::project_nul;
+        let pdu_json = conduit::canonical_json::to_canonical_string(&event.pdu)
+            .map_err(|error| Error::Storage(error.to_string()))?;
+        let updated = sqlx::query(
+            "UPDATE events SET signatures = $2, pdu_json = $3
+             WHERE event_id = $1 AND hashes = $4",
+        )
+        .bind(&event.event_id)
+        .bind(project_nul(&event.signatures))
+        .bind(&pdu_json)
+        .bind(project_nul(&event.hashes))
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(updated.rows_affected() == 1)
+    }
+
     async fn room_events(&self, room_id: &str) -> Result<Vec<Event>> {
         let rows = sqlx::query!(
             r#"

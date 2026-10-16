@@ -244,6 +244,7 @@ pub async fn join_by_room_id<S: AuthState>(
     state: State<S>,
     authed: AuthedUser,
     Path(room_id): Path<String>,
+    raw: RawQuery,
     body: Json<JoinRequest>,
 ) -> Response {
     if !room_id.starts_with('!') {
@@ -253,7 +254,7 @@ pub async fn join_by_room_id<S: AuthState>(
             "rooms/{roomId}/join takes a room ID; use /join/{roomIdOrAlias} for aliases",
         );
     }
-    join_room(state, authed, Path(room_id), body).await
+    join_room(state, authed, Path(room_id), raw, body).await
 }
 
 // ---------------------------------------------------------------------------

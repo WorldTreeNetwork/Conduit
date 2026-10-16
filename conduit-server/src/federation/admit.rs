@@ -141,6 +141,42 @@ pub async fn admit_cosigned(
     cosigner: &str,
 ) -> Result<Admitted, FetchError> {
     let admitted = admit_fetched(remote_keys, http, value, Expect::Exactly(&sent.event_id())).await?;
+    require_cosigner(remote_keys, http, admitted, sent, cosigner).await
+}
+
+/// [`admit_cosigned`] for an event this server authored. The sender signature
+/// is checked with `local_key` instead of a key fetch for `local_server`.
+pub async fn admit_cosigned_as(
+    remote_keys: &RemoteKeyCache,
+    http: &reqwest::Client,
+    value: Value,
+    sent: &WirePdu,
+    cosigner: &str,
+    local_server: &str,
+    local_key: &conduit::keys::ServerKey,
+) -> Result<Admitted, FetchError> {
+    let decoded = decode_pdu(value, now_ms())?;
+    let received = super::pipeline::verify_received_as(
+        remote_keys,
+        http,
+        decoded.pdu,
+        local_server,
+        local_key,
+        None,
+    )
+    .await?;
+    let admitted = Admitted { received, unsigned: decoded.unsigned };
+    check_expect(&admitted, Expect::Exactly(&sent.event_id()))?;
+    require_cosigner(remote_keys, http, admitted, sent, cosigner).await
+}
+
+async fn require_cosigner(
+    remote_keys: &RemoteKeyCache,
+    http: &reqwest::Client,
+    admitted: Admitted,
+    sent: &WirePdu,
+    cosigner: &str,
+) -> Result<Admitted, FetchError> {
     if admitted.pdu().hashes != sent.hashes {
         return Err(FetchError::HashesChanged);
     }

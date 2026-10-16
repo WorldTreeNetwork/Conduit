@@ -10,11 +10,11 @@
 //! knocker (who then joins), denies it by kicking, and the knocker can
 //! rescind it with `/leave`.
 //!
-//! Only rooms this server participates in can be knocked on; federated
-//! knocking (`make_knock` / `send_knock`) is a follow-up.
+//! A room this server already participates in is knocked locally. A room it
+//! does not have is knocked with `make_knock` / `send_knock`.
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, RawQuery, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::post,
@@ -69,12 +69,36 @@ pub async fn knock<S: AuthState>(
     State(state): State<S>,
     authed: AuthedUser,
     Path(room_id_or_alias): Path<String>,
+    RawQuery(raw_query): RawQuery,
     Json(body): Json<KnockBody>,
 ) -> Response {
-    let room_id = match resolve_local_room(&state, &room_id_or_alias).await {
-        Ok(room_id) => room_id,
-        Err(response) => return response,
+    let hinted = super::federated_membership::query_servers(raw_query.as_deref());
+    let room_id = if room_id_or_alias.starts_with('#') {
+        match state.storage().get_room_for_alias(&room_id_or_alias).await {
+            Ok(Some(room_id)) => room_id,
+            Ok(None) if super::federated_membership::federation_enabled() => {
+                return knock_remote(&state, &authed.user_id, &room_id_or_alias, &hinted, body.reason.as_deref()).await;
+            }
+            Ok(None) => return not_found("Room alias not found"),
+            Err(error) => return MatrixError::unknown(error.to_string()).into_response(),
+        }
+    } else if room_id_or_alias.starts_with('!') {
+        room_id_or_alias
+    } else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"errcode": "M_INVALID_PARAM", "error": "expected a room ID or alias"})),
+        )
+            .into_response();
     };
+    match super::federated_membership::room_is_resident(&state, &room_id).await {
+        Ok(true) => {}
+        Ok(false) if super::federated_membership::federation_enabled() => {
+            return knock_remote(&state, &authed.user_id, &room_id, &hinted, body.reason.as_deref()).await;
+        }
+        Ok(false) => return not_found("That room does not appear to exist"),
+        Err(response) => return response,
+    }
 
     let mut content = json!({"membership": "knock"});
     if let Some(reason) = body.reason.filter(|r| !r.is_empty()) {
@@ -102,5 +126,18 @@ pub async fn knock<S: AuthState>(
     {
         Ok(_) => (StatusCode::OK, Json(json!({"room_id": room_id}))).into_response(),
         Err(error) => error.into_response(),
+    }
+}
+
+async fn knock_remote<S: AuthState>(
+    state: &S,
+    sender: &str,
+    room_id_or_alias: &str,
+    hinted: &[String],
+    reason: Option<&str>,
+) -> Response {
+    match super::federated_membership::knock_remote(state, sender, room_id_or_alias, hinted, reason).await {
+        Ok(room_id) => (StatusCode::OK, Json(json!({"room_id": room_id}))).into_response(),
+        Err(response) => response,
     }
 }

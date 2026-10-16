@@ -105,6 +105,7 @@ impl conduit::room::RoomEventSender for FedState {
             &self.server_name,
             &self.events_tx,
             Some(&self.fed_client),
+            self.federation_queue.as_ref(),
             sender,
             room_id,
             event_type,

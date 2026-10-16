@@ -653,6 +653,59 @@ impl Client {
         resp.get("event").cloned().ok_or_else(|| FederationError::Parse("missing 'event'".to_owned()))
     }
 
+    /// `PUT /_matrix/federation/v1/invite/{roomId}/{eventId}` for room versions 1 and 2.
+    /// The response carries the co-signed event under `event`.
+    pub async fn invite_v1(
+        &self,
+        dest: &str,
+        room_id: &str,
+        pdu: &WirePdu,
+    ) -> Result<Value, FederationError> {
+        let path = format!(
+            "/_matrix/federation/v1/invite/{}/{}",
+            urlencoding(room_id),
+            urlencoding(&pdu.event_id())
+        );
+        let resp: Value = self.signed_put(dest, &path, pdu).await?;
+        resp.get("event").cloned().ok_or_else(|| FederationError::Parse("missing 'event'".to_owned()))
+    }
+
+    /// `GET /_matrix/federation/v1/make_knock/{roomId}/{userId}`.
+    pub async fn make_knock(
+        &self,
+        dest: &str,
+        room_id: &str,
+        user_id: &str,
+    ) -> Result<MakeJoinResponse, FederationError> {
+        let versions = conduit::room_version::SUPPORTED
+            .iter()
+            .map(|version| format!("ver={version}"))
+            .collect::<Vec<_>>()
+            .join("&");
+        let path = format!(
+            "/_matrix/federation/v1/make_knock/{}/{}?{versions}",
+            urlencoding(room_id),
+            urlencoding(user_id)
+        );
+        self.signed_get(dest, &path).await
+    }
+
+    /// `PUT /_matrix/federation/v1/send_knock/{roomId}/{eventId}`.
+    /// The body is the signed membership PDU. The response is `knock_room_state`.
+    pub async fn send_knock(
+        &self,
+        dest: &str,
+        room_id: &str,
+        pdu: &WirePdu,
+    ) -> Result<Value, FederationError> {
+        let path = format!(
+            "/_matrix/federation/v1/send_knock/{}/{}",
+            urlencoding(room_id),
+            urlencoding(&pdu.event_id())
+        );
+        self.signed_put(dest, &path, pdu).await
+    }
+
     /// `GET /_matrix/federation/v1/state/{roomId}?event_id={eventId}`
     pub async fn state(
         &self,

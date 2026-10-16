@@ -1,0 +1,460 @@
+//! Outbound membership when this server is not already in the room, and
+//! delivery of a normal invite to the invitee's server.
+//!
+//! Resident rooms keep the local authoring path. A room with no `m.room.create`
+//! is joined or knocked through `make_*` / `send_*`. A remote invite is stored
+//! locally, offered over `/invite`, and the co-signed PDU replaces the row
+//! when the invitee answers.
+
+use std::future::Future;
+use std::time::Duration;
+
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
+use serde_json::{json, Value};
+
+use conduit::event::{Event, Pdu, WirePdu};
+use conduit::signing::{server_of_user_id, sign_authored};
+use conduit::storage::Storage;
+
+use super::event_pipeline::fan_out_authored;
+use super::{AuthState, MatrixError};
+
+const ATTEMPT: Duration = Duration::from_secs(3);
+const STRIPPED_STATE: &[&str] = &[
+    "m.room.create",
+    "m.room.name",
+    "m.room.avatar",
+    "m.room.topic",
+    "m.room.join_rules",
+    "m.room.canonical_alias",
+    "m.room.encryption",
+    "m.room.history_visibility",
+];
+
+pub(crate) fn federation_enabled() -> bool {
+    std::env::var("CONDUIT_FEDERATION").ok().as_deref() != Some("0")
+}
+
+/// Repeated `via` and the deprecated `server_name` query parameter.
+pub(crate) fn query_servers(query: Option<&str>) -> Vec<String> {
+    let Some(query) = query else { return Vec::new() };
+    url::form_urlencoded::parse(query.as_bytes())
+        .filter(|(key, value)| (key == "via" || key == "server_name") && !value.is_empty())
+        .map(|(_, value)| value.into_owned())
+        .collect()
+}
+
+fn push_dest(out: &mut Vec<String>, name: &str, local: &str) {
+    if name.is_empty() || name == local || out.iter().any(|existing| existing == name) {
+        return;
+    }
+    out.push(name.to_owned());
+}
+
+fn domain_of(id: &str) -> Option<&str> {
+    id.split_once(':').map(|(_, server)| server).filter(|server| !server.is_empty())
+}
+
+fn destinations(id: &str, hinted: &[String], local: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for name in hinted {
+        push_dest(&mut out, name, local);
+    }
+    if let Some(server) = domain_of(id) {
+        push_dest(&mut out, server, local);
+    }
+    out.truncate(5);
+    out
+}
+
+async fn attempt<T, E: std::fmt::Display>(future: impl Future<Output = Result<T, E>>) -> Result<T, String> {
+    match tokio::time::timeout(ATTEMPT, future).await {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(error)) => Err(error.to_string()),
+        Err(_) => Err("timed out".into()),
+    }
+}
+
+fn bad_gateway(message: impl Into<String>) -> Response {
+    MatrixError::forwarded(StatusCode::BAD_GATEWAY, "M_UNKNOWN", message).into_response()
+}
+
+fn incompatible(version: &str) -> Response {
+    MatrixError::forwarded(
+        StatusCode::BAD_REQUEST,
+        "M_INCOMPATIBLE_ROOM_VERSION",
+        format!("room version {version} cannot be joined with this server's event format"),
+    )
+    .into_response()
+}
+
+async fn local_create(storage: &dyn Storage, room_id: &str) -> Result<bool, Response> {
+    match storage.get_state_entry(room_id, "m.room.create", "").await {
+        Ok(found) => Ok(found.is_some()),
+        Err(error) => Err(MatrixError::unknown(error.to_string()).into_response()),
+    }
+}
+
+pub(crate) async fn room_is_resident<S: AuthState>(state: &S, room_id: &str) -> Result<bool, Response> {
+    local_create(state.storage().as_ref(), room_id).await
+}
+
+async fn fill_profile(storage: &dyn Storage, sender: &str, event: &mut Value) {
+    let Some(content) = event.get_mut("content") else { return };
+    if content.get("displayname").is_some() || content.get("avatar_url").is_some() {
+        return;
+    }
+    let Ok(Some(account)) = storage.get_account(sender).await else { return };
+    let Some(object) = content.as_object_mut() else { return };
+    if let Some(name) = account.displayname {
+        object.insert("displayname".into(), json!(name));
+    }
+    if let Some(url) = account.avatar_url {
+        object.insert("avatar_url".into(), json!(url));
+    }
+}
+
+fn sign_template<S: AuthState>(
+    state: &S,
+    room_id: &str,
+    sender: &str,
+    membership: &str,
+    event: Value,
+    reason: Option<&str>,
+    minimum_version: u32,
+) -> Result<(WirePdu, String), Response> {
+    let version = event
+        .get("room_version")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let mut template = event;
+    if let Some(object) = template.as_object_mut() {
+        object.remove("room_version");
+    }
+    let mut pdu: Pdu = serde_json::from_value(template)
+        .map_err(|_| MatrixError::invalid_param("membership template is not a supported event").into_response())?;
+    if pdu.room_id.is_empty() {
+        pdu.room_id = room_id.to_owned();
+    }
+    if pdu.sender != sender || pdu.state_key.as_deref() != Some(sender) || pdu.event_type != "m.room.member" {
+        return Err(MatrixError::invalid_param("membership template does not name this user").into_response());
+    }
+    if pdu.content.get("membership").and_then(Value::as_str) != Some(membership) {
+        return Err(MatrixError::invalid_param("membership template has the wrong membership").into_response());
+    }
+    let version = version.unwrap_or_else(|| "11".into());
+    let parsed = conduit::room_version::parse(&version).unwrap_or(0);
+    if parsed < minimum_version || parsed < 3 {
+        return Err(incompatible(&version));
+    }
+    if let Some(reason) = reason.filter(|reason| !reason.is_empty()) {
+        pdu.content["reason"] = json!(reason);
+    }
+    sign_authored(&mut pdu, &state.server_key(), state.server_name()).map_err(|error| {
+        MatrixError::unknown(format!("signing error: {error}")).into_response()
+    })?;
+    let event_id = conduit::hashing::event_id(&pdu)
+        .map_err(|error| MatrixError::unknown(format!("event_id error: {error}")).into_response())?;
+    let wire = WirePdu::checked(&event_id, pdu)
+        .ok_or_else(|| MatrixError::unknown("signed membership does not reproduce its event id").into_response())?;
+    Ok((wire, version))
+}
+
+async fn store_join_state(
+    storage: &dyn Storage,
+    client: &crate::federation::Client,
+    room_id: &str,
+    join: &Pdu,
+    state: Vec<Value>,
+    auth_chain: Vec<Value>,
+) -> Result<(), Response> {
+    let (state, chain, _) = crate::federation::admit::admit_send_join(
+        &client._keys,
+        &client.http,
+        room_id,
+        join,
+        state,
+        auth_chain,
+    )
+    .await
+    .map_err(|error| bad_gateway(format!("send_join state was refused: {error}")))?;
+    for admitted in chain.into_iter().chain(state) {
+        let event = admitted.into_event();
+        if storage.get_event(&event.event_id).await.ok().flatten().is_some() {
+            continue;
+        }
+        storage.publish_event(&event).await.map_err(|error| MatrixError::unknown(error.to_string()).into_response())?;
+    }
+    Ok(())
+}
+
+async fn store_signed_membership<S: AuthState>(state: &S, wire: WirePdu) -> Result<(), Response> {
+    let event = Event::new(wire.event_id(), wire.into_pdu());
+    state.storage().publish_event(&event).await.map_err(|error| MatrixError::unknown(error.to_string()).into_response())?;
+    if let Ok(position) = state.storage().global_max_stream_position().await {
+        let _ = state.events_tx().send(position);
+    }
+    Ok(())
+}
+
+/// `make_join` + `send_join` against `via` and the room's own server.
+/// Returns the room id once the signed join and the returned state are stored.
+pub(crate) async fn join_remote_room<S: AuthState>(
+    state: &S,
+    sender: &str,
+    room_id: &str,
+    hinted: &[String],
+    reason: Option<&str>,
+) -> Result<String, Response> {
+    let Some(client) = state.federation_client() else {
+        return Err(bad_gateway("federation client is not configured"));
+    };
+    let dests = destinations(room_id, hinted, state.server_name());
+    if dests.is_empty() {
+        return Err(MatrixError::new_not_found("That room does not appear to exist").into_response());
+    }
+    let mut last = "no resident server accepted the join".to_owned();
+    for dest in dests {
+        let made = match attempt(client.make_join(&dest, room_id, sender)).await {
+            Ok(made) => made,
+            Err(error) => {
+                last = error;
+                continue;
+            }
+        };
+        let mut template = made.event;
+        if let Some(version) = made.room_version {
+            if let Some(object) = template.as_object_mut() {
+                object.insert("room_version".into(), json!(version));
+            }
+        }
+        fill_profile(state.storage().as_ref(), sender, &mut template).await;
+        let (wire, _) = match sign_template(state, room_id, sender, "join", template, reason, 3) {
+            Ok(signed) => signed,
+            Err(response) => return Err(response),
+        };
+        let sent = match attempt(client.send_join(&dest, room_id, &wire)).await {
+            Ok(sent) => sent,
+            Err(error) => {
+                last = error;
+                continue;
+            }
+        };
+        store_join_state(state.storage().as_ref(), client, room_id, wire.pdu(), sent.state, sent.auth_chain).await?;
+        store_signed_membership(state, wire).await?;
+        return Ok(room_id.to_owned());
+    }
+    Err(bad_gateway(last))
+}
+
+/// Resolve an alias through federation directory, then join the room id.
+pub(crate) async fn join_remote_alias<S: AuthState>(
+    state: &S,
+    sender: &str,
+    alias: &str,
+    hinted: &[String],
+    reason: Option<&str>,
+) -> Result<String, Response> {
+    let Some(client) = state.federation_client() else {
+        return Err(MatrixError::new_not_found("Room alias not found").into_response());
+    };
+    let mut lookup = destinations(alias, hinted, state.server_name());
+    if lookup.is_empty() {
+        return Err(MatrixError::new_not_found("Room alias not found").into_response());
+    }
+    let mut room_id = None;
+    let mut servers = Vec::new();
+    for dest in &lookup {
+        if let Ok(found) = attempt(client.query_directory(dest, alias)).await {
+            servers = found.servers;
+            room_id = Some(found.room_id);
+            break;
+        }
+    }
+    let Some(room_id) = room_id else {
+        return Err(MatrixError::new_not_found("Room alias not found").into_response());
+    };
+    lookup.extend(servers);
+    join_remote_room(state, sender, &room_id, &lookup, reason).await
+}
+
+/// Offer a stored invite to the invitee's server. A delivery failure leaves
+/// the local event in place; the caller still answers 200.
+pub(crate) async fn deliver_remote_invite<S: AuthState>(state: &S, room_id: &str, event_id: &str) {
+    if !federation_enabled() {
+        return;
+    }
+    let Some(client) = state.federation_client() else { return };
+    let Ok(Some(event)) = state.storage().get_event(event_id).await else { return };
+    let Some(target) = event.state_key.as_deref() else { return };
+    let Some(dest) = server_of_user_id(target) else { return };
+    if dest == state.server_name() {
+        return;
+    }
+    let Some(wire) = WirePdu::checked(event_id, event.pdu.clone()) else { return };
+    let Ok(version) = room_version_of(state.storage().as_ref(), room_id).await else { return };
+    let Ok(stripped) = stripped_state(state.storage().as_ref(), room_id).await else { return };
+    let parsed = conduit::room_version::parse(&version).unwrap_or(0);
+    let sent = if parsed <= 2 {
+        attempt(client.invite_v1(dest, room_id, &wire)).await
+    } else {
+        attempt(client.invite(dest, room_id, &version, stripped, &wire)).await
+    };
+    let returned = match sent {
+        Ok(returned) => returned,
+        Err(error) => {
+            tracing::warn!(dest, %error, "remote invite was not accepted; the local invite stands");
+            return;
+        }
+    };
+    let admitted = match crate::federation::admit::admit_cosigned_as(
+        &client._keys,
+        &client.http,
+        returned,
+        &wire,
+        dest,
+        state.server_name(),
+        &state.server_key(),
+    )
+    .await
+    {
+        Ok(admitted) => admitted,
+        Err(error) => {
+            tracing::warn!(dest, %error, "remote invite response was refused; the local invite stands");
+            return;
+        }
+    };
+    match state.storage().replace_cosigned_pdu(&admitted.into_event()).await {
+        Ok(true) => {}
+        Ok(false) => tracing::warn!(event_id, "co-signed invite did not replace the stored PDU"),
+        Err(error) => tracing::warn!(%error, "co-signed invite was not stored"),
+    }
+}
+
+pub(crate) async fn fan_out_stored<S: AuthState>(state: &S, room_id: &str, event_id: &str) {
+    fan_out_authored(
+        state.storage().as_ref(),
+        state.server_name(),
+        state.federation_queue(),
+        room_id,
+        event_id,
+    )
+    .await;
+}
+
+async fn room_version_of(storage: &dyn Storage, room_id: &str) -> Result<String, ()> {
+    let create = storage.get_state_entry(room_id, "m.room.create", "").await.map_err(|_| ())?.ok_or(())?;
+    Ok(create.content.get("room_version").and_then(Value::as_str).unwrap_or("1").to_owned())
+}
+
+async fn stripped_state(storage: &dyn Storage, room_id: &str) -> Result<Vec<Value>, ()> {
+    let events = storage.get_current_state(room_id).await.map_err(|_| ())?;
+    Ok(events
+        .into_iter()
+        .filter(|event| STRIPPED_STATE.contains(&event.event_type.as_str()) || event.event_type == "m.room.member")
+        .map(|event| {
+            json!({
+                "type": event.event_type,
+                "state_key": event.state_key,
+                "sender": event.sender,
+                "content": event.content,
+            })
+        })
+        .collect())
+}
+
+/// `make_knock` + `send_knock` for a room this server does not participate in.
+pub(crate) async fn knock_remote_room<S: AuthState>(
+    state: &S,
+    sender: &str,
+    room_id: &str,
+    hinted: &[String],
+    reason: Option<&str>,
+) -> Result<String, Response> {
+    let Some(client) = state.federation_client() else {
+        return Err(MatrixError::new_not_found("That room does not appear to exist").into_response());
+    };
+    let dests = destinations(room_id, hinted, state.server_name());
+    if dests.is_empty() {
+        return Err(MatrixError::new_not_found("That room does not appear to exist").into_response());
+    }
+    let mut last = "no resident server accepted the knock".to_owned();
+    for dest in dests {
+        let made = match attempt(client.make_knock(&dest, room_id, sender)).await {
+            Ok(made) => made,
+            Err(error) => {
+                last = error;
+                continue;
+            }
+        };
+        let mut template = made.event;
+        if let Some(version) = made.room_version {
+            if let Some(object) = template.as_object_mut() {
+                object.insert("room_version".into(), json!(version));
+            }
+        }
+        fill_profile(state.storage().as_ref(), sender, &mut template).await;
+        let (wire, _) = match sign_template(state, room_id, sender, "knock", template, reason, 7) {
+            Ok(signed) => signed,
+            Err(response) => return Err(response),
+        };
+        let sent = match attempt(client.send_knock(&dest, room_id, &wire)).await {
+            Ok(sent) => sent,
+            Err(error) => {
+                last = error;
+                continue;
+            }
+        };
+        if let Some(events) = sent.get("knock_room_state").and_then(Value::as_array) {
+            for value in events {
+                let Ok(decoded) = conduit::wire::decode_pdu(value.clone(), crate::federation::now_ms()) else { continue };
+                let origin = server_of_user_id(&decoded.pdu.sender).unwrap_or(dest.as_str()).to_owned();
+                let _ = crate::federation::pipeline::process_incoming_pdu(
+                    state.storage(),
+                    &client._keys,
+                    &client.http,
+                    state.events_tx(),
+                    Some(client),
+                    None,
+                    decoded,
+                    &origin,
+                )
+                .await;
+            }
+        }
+        store_signed_membership(state, wire).await?;
+        return Ok(room_id.to_owned());
+    }
+    Err(bad_gateway(last))
+}
+
+/// Knock a room id, or an alias resolved through the federation directory.
+pub(crate) async fn knock_remote<S: AuthState>(
+    state: &S,
+    sender: &str,
+    room_id_or_alias: &str,
+    hinted: &[String],
+    reason: Option<&str>,
+) -> Result<String, Response> {
+    if !room_id_or_alias.starts_with('#') {
+        return knock_remote_room(state, sender, room_id_or_alias, hinted, reason).await;
+    }
+    let Some(client) = state.federation_client() else {
+        return Err(MatrixError::new_not_found("Room alias not found").into_response());
+    };
+    let lookup = destinations(room_id_or_alias, hinted, state.server_name());
+    let mut found = None;
+    for dest in &lookup {
+        if let Ok(directory) = attempt(client.query_directory(dest, room_id_or_alias)).await {
+            found = Some((directory.room_id, directory.servers));
+            break;
+        }
+    }
+    let Some((room_id, servers)) = found else {
+        return Err(MatrixError::new_not_found("Room alias not found").into_response());
+    };
+    let mut hinted = hinted.to_vec();
+    hinted.extend(servers);
+    knock_remote_room(state, sender, &room_id, &hinted, reason).await
+}

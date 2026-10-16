@@ -167,6 +167,7 @@ async fn build_sign_and_persist_inner<S: AuthState>(
         state.server_name(),
         state.events_tx(),
         state.federation_client(),
+        state.federation_queue(),
         sender,
         room_id,
         type_,
@@ -195,6 +196,7 @@ pub async fn author_event(
     server_name: &str,
     events_tx: &tokio::sync::broadcast::Sender<i64>,
     federation: Option<&Arc<crate::federation::Client>>,
+    queue: Option<&Arc<crate::federation::Queue>>,
     sender: &str,
     room_id: &str,
     type_: &str,
@@ -245,6 +247,13 @@ pub async fn author_event(
     // Restricted joins name a local authoriser before auth events are chosen.
     // ------------------------------------------------------------------
     let content = apply_restricted_join(storage, server_name, sender, room_id, type_, state_key, content).await?;
+    // A remote invite is co-signed before it is queued. Fan-out of the
+    // locally signed copy would deliver an event the invitee has not signed.
+    let defer_remote_invite = type_ == "m.room.member"
+        && content.get("membership").and_then(Value::as_str) == Some("invite")
+        && state_key
+            .and_then(conduit::signing::server_of_user_id)
+            .is_some_and(|server| server != server_name);
 
     // ------------------------------------------------------------------
     // Build the unsigned event template (no event_id yet, no hashes, no sig)
@@ -325,5 +334,59 @@ pub async fn author_event(
         let _ = events_tx.send(pos);
     }
 
+    if !defer_remote_invite {
+        fan_out_authored(storage, server_name, queue, room_id, &eid).await;
+    }
+
     Ok(eid)
+}
+
+/// Queue one stored PDU to every other server joined to the room.
+/// Soft-failed and rejected events stay local. `CONDUIT_FEDERATION=0` and a
+/// missing queue (library stubs) send nothing.
+pub(crate) async fn fan_out_authored(
+    storage: &dyn conduit::storage::Storage,
+    server_name: &str,
+    queue: Option<&Arc<crate::federation::Queue>>,
+    room_id: &str,
+    event_id: &str,
+) {
+    if std::env::var("CONDUIT_FEDERATION").ok().as_deref() == Some("0") {
+        return;
+    }
+    let Some(queue) = queue else { return };
+    match storage.event_disposition(event_id).await {
+        Ok(Some(kind)) if kind == "soft_failed" || kind == "rejected" => return,
+        Ok(_) => {}
+        Err(error) => {
+            tracing::warn!(%error, "federation fan-out skipped: disposition");
+            return;
+        }
+    }
+    let event = match storage.get_event(event_id).await {
+        Ok(Some(event)) => event,
+        Ok(None) => return,
+        Err(error) => {
+            tracing::warn!(%error, "federation fan-out skipped: event missing");
+            return;
+        }
+    };
+    let Some(wire) = conduit::event::WirePdu::checked(event_id, event.pdu) else {
+        tracing::warn!(event_id, "federation fan-out skipped: PDU does not reproduce its event id");
+        return;
+    };
+    let dests = match storage.joined_remote_servers(room_id, server_name).await {
+        Ok(dests) => dests,
+        Err(error) => {
+            tracing::warn!(%error, "federation fan-out skipped: destinations");
+            return;
+        }
+    };
+    for dest in dests {
+        match conduit::server_acl::server_allowed_by_room(storage, room_id, &dest).await {
+            Ok(true) => queue.enqueue(&dest, vec![wire.clone()], vec![]).await,
+            Ok(false) => {}
+            Err(error) => tracing::warn!(%error, dest, "federation fan-out skipped a destination"),
+        }
+    }
 }

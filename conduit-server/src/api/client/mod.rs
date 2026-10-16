@@ -20,6 +20,7 @@ pub mod registration;
 pub mod session;
 pub mod well_known;
 pub mod event_pipeline;
+pub mod federated_membership;
 pub mod filters;
 pub mod guest_access;
 pub mod key_identity;

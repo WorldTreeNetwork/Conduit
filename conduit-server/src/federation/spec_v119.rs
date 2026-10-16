@@ -1047,9 +1047,20 @@ pub async fn exchange_third_party_invite(
         Ok(admitted) => admitted,
         Err(_) => return invite_rejected(),
     };
-    if let Err(error) = state.storage.publish_event(&admitted.into_event()).await {
+    let event = admitted.into_event();
+    let fanout_id = event.event_id.clone();
+    let fanout_room = event.room_id.clone();
+    if let Err(error) = state.storage.publish_event(&event).await {
         return internal(&error.to_string());
     }
+    crate::api::client::event_pipeline::fan_out_authored(
+        state.storage.as_ref(),
+        &state.server_name,
+        state.federation_queue.as_ref(),
+        &fanout_room,
+        &fanout_id,
+    )
+    .await;
     if let Ok(position) = state.storage.global_max_stream_position().await {
         let _ = state.events_tx.send(position);
     }
