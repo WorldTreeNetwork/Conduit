@@ -3,7 +3,8 @@
 //! knock, v1 invite (mounted beside v2), leave, public rooms, hierarchy,
 //! OpenID userinfo, remote devices, and remote key claim/query.
 //!
-//! Third-party invite exchange signs a membership invite as this server.
+//! Third-party invite exchange checks the identity-server key, then issues
+//! the invite to the invitee's server.
 
 use std::collections::HashMap;
 
@@ -15,13 +16,16 @@ use axum::{
 };
 use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine as _};
 use ed25519_dalek::Signer as _;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
+use sha2::{Digest, Sha256};
 
-use conduit::auth::{auth_event_keys, current_state_map};
-use conduit::event::{Event, Pdu};
+use conduit::auth::{auth_event_keys, current_state_map, third_party_signed_matches};
+use conduit::event::{Event, Pdu, WirePdu};
 use conduit::signing::{server_of_user_id, sign_authored};
 use conduit::storage::Storage;
-use conduit::wire::decode_pdu;
+use conduit::wire::{decode_pdu, decode_pdu_for_version};
+
+use crate::identity_service::IdentityClient;
 
 use super::middleware::FederationOrigin;
 use super::pipeline::{process_received, PipelineError};
@@ -726,12 +730,114 @@ pub async fn send_knock(
         return matrix_incompatible("This room version does not support knocking");
     }
     match accept_membership(&state, &origin, &room_id, &event_id, body, "knock").await {
-        Ok(received) => {
-            let event = state.storage.get_wire_pdu(&received.event_id).await.ok().flatten();
-            (StatusCode::OK, Json(json!({ "knock_room_state": event }))).into_response()
-        }
+        Ok(_) => knock_room_state(&state, &origin, &room_id).await,
         Err(response) => response,
     }
+}
+
+/// Identifying state returned with an accepted knock. Full federation PDUs,
+/// including `m.room.create`.
+const KNOCK_ROOM_STATE: &[&str] = &[
+    "m.room.create",
+    "m.room.name",
+    "m.room.avatar",
+    "m.room.topic",
+    "m.room.join_rules",
+    "m.room.canonical_alias",
+    "m.room.encryption",
+    "m.room.history_visibility",
+];
+
+async fn knock_room_state(state: &FedState, origin: &str, room_id: &str) -> Response {
+    let events = match state.storage.get_current_state(room_id).await {
+        Ok(events) => events
+            .into_iter()
+            .filter(|event| KNOCK_ROOM_STATE.contains(&event.event_type.as_str()))
+            .collect::<Vec<_>>(),
+        Err(error) => return internal(&error.to_string()),
+    };
+    let pdus = match wire_pdus(&state.storage, origin, &events).await {
+        Ok(pdus) => pdus,
+        Err(error) => return internal(&error.to_string()),
+    };
+    (StatusCode::OK, Json(json!({ "knock_room_state": pdus }))).into_response()
+}
+
+/// `PUT /_matrix/federation/v1/invite/{roomId}/{eventId}`.
+///
+/// Room versions 1 and 2. The body is the event itself. The response is that
+/// event with this server's signature added and every other field left as it
+/// arrived, including `event_id` and tuple `auth_events` / `prev_events`.
+pub async fn invite_v1(
+    State(state): State<FedState>,
+    origin_ext: Option<axum::extract::Extension<FederationOrigin>>,
+    Path((room_id, path_event_id)): Path<(String, String)>,
+    Json(mut event): Json<Value>,
+) -> Response {
+    let origin = match origin_of(origin_ext) {
+        Ok(origin) => origin,
+        Err(response) => return response,
+    };
+    if let Some(response) = super::server::ensure_server_acl(&state, &origin, &room_id).await {
+        return response;
+    }
+    if event.get("type").and_then(Value::as_str) != Some("m.room.member") {
+        return invalid_param("Expected an m.room.member event");
+    }
+    if event["content"]["membership"].as_str() != Some("invite") {
+        return invalid_param("Expected invite membership");
+    }
+    if event["room_id"].as_str() != Some(room_id.as_str()) {
+        return invalid_param("PDU room_id does not match the path");
+    }
+    let Some(sender) = event["sender"].as_str() else {
+        return bad_json("sender is required");
+    };
+    if server_of_user_id(sender) != Some(origin.as_str()) {
+        return invalid_param("sender is not a user on the requesting server");
+    }
+    let Some(target) = event["state_key"].as_str() else {
+        return bad_json("state_key is required");
+    };
+    if server_of_user_id(target) != Some(state.server_name.as_ref()) {
+        return invalid_param("Invite target is not on this server");
+    }
+    if event["event_id"].as_str() != Some(path_event_id.as_str()) {
+        return invalid_param("Invite event ID must match the event ID in the path");
+    }
+    match v1_content_matches(&event) {
+        Ok(true) => {}
+        Ok(false) => return invalid_param("Invite content hash does not match"),
+        Err(response) => return response,
+    }
+    if let Err(response) = verify_v1_signature(&state, &event, &origin).await {
+        return response;
+    }
+    if crate::api::client::room_membership::blocks_invites(state.storage.as_ref(), target).await {
+        return super::server::matrix_error(
+            StatusCode::FORBIDDEN,
+            "M_INVITE_BLOCKED",
+            &format!("{target} is not accepting invites"),
+        );
+    }
+    if insert_v1_signature(&mut event, &state.server_key, &state.server_name).is_err() {
+        return internal("Failed to sign invite");
+    }
+    let decoded = match decode_pdu_for_version(event.clone(), 1, super::now_ms()) {
+        Ok(decoded) => decoded,
+        Err(error) => return bad_json(&error.to_string()),
+    };
+    let Some(event_id) = decoded.explicit_event_id else {
+        return bad_json("event_id is required");
+    };
+    let stored = Event { event_id, pdu: decoded.pdu, unsigned: decoded.unsigned };
+    if let Err(error) = state.storage.publish_event(&stored).await {
+        return internal(&error.to_string());
+    }
+    if let Ok(position) = state.storage.global_max_stream_position().await {
+        let _ = state.events_tx.send(position);
+    }
+    (StatusCode::OK, Json(json!({ "event": event }))).into_response()
 }
 
 /// `PUT /_matrix/federation/v2/send_leave/{roomId}/{eventId}`.
@@ -755,25 +861,42 @@ pub async fn send_leave(
 }
 
 /// `PUT /_matrix/federation/v1/exchange_third_party_invite/{roomId}`.
+///
+/// The body is a partial member event. A matching signature must also pass
+/// `key_validity_url`. The invite is then issued to the invitee's server and
+/// only the co-signed event is stored.
 pub async fn exchange_third_party_invite(
     State(state): State<FedState>,
     origin_ext: Option<axum::extract::Extension<FederationOrigin>>,
     Path(room_id): Path<String>,
     Json(body): Json<Value>,
 ) -> Response {
-    if origin_of(origin_ext).is_err() {
-        return unauthorized("Not authenticated");
+    let origin = match origin_of(origin_ext) {
+        Ok(origin) => origin,
+        Err(response) => return response,
+    };
+    if let Some(response) = super::server::ensure_server_acl(&state, &origin, &room_id).await {
+        return response;
+    }
+    if body["type"].as_str() != Some("m.room.member") || body["content"]["membership"].as_str() != Some("invite") {
+        return invalid_param("Expected an m.room.member invite");
+    }
+    if body["room_id"].as_str() != Some(room_id.as_str()) {
+        return invalid_param("PDU room_id does not match the path");
     }
     let Some(sender) = body["sender"].as_str() else {
         return bad_json("sender is required");
     };
-    let Some(mxid) = body["mxid"].as_str() else {
-        return bad_json("mxid is required");
-    };
     if server_of_user_id(sender) != Some(state.server_name.as_ref()) {
         return invalid_param("sender is not a user of this server");
     }
-    let signed = &body["signed"];
+    let Some(mxid) = body["state_key"].as_str() else {
+        return bad_json("state_key is required");
+    };
+    if server_of_user_id(mxid) != Some(origin.as_str()) {
+        return invalid_param("state_key is not a user on the requesting server");
+    }
+    let signed = &body["content"]["third_party_invite"]["signed"];
     let Some(token) = signed["token"].as_str() else {
         return bad_json("signed.token is required");
     };
@@ -785,13 +908,8 @@ pub async fn exchange_third_party_invite(
     if invite.sender != sender {
         return forbidden("sender does not match the third-party invite");
     }
-    let content = json!({
-        "membership": "invite",
-        "third_party_invite": {
-            "display_name": invite.content["display_name"].clone(),
-            "signed": signed,
-        },
-    });
+    let third_party = body["content"]["third_party_invite"].clone();
+    let content = json!({ "membership": "invite", "third_party_invite": third_party });
     let events = match state.storage.room_events(&room_id).await {
         Ok(events) => events,
         Err(error) => return internal(&error.to_string()),
@@ -802,7 +920,17 @@ pub async fn exchange_third_party_invite(
     };
     let provisional = Event {
         event_id: String::new(),
-        pdu: Pdu::new(room_id.clone(), sender, "m.room.member", Some(mxid.to_owned()), content.clone(), super::now_ms(), vec![], prev_events.clone(), depth),
+        pdu: Pdu::new(
+            room_id.clone(),
+            sender,
+            "m.room.member",
+            Some(mxid.to_owned()),
+            content.clone(),
+            super::now_ms(),
+            vec![],
+            prev_events.clone(),
+            depth,
+        ),
         unsigned: None,
     };
     let mut auth_events = Vec::new();
@@ -822,6 +950,17 @@ pub async fn exchange_third_party_invite(
         prev_events,
         depth,
     );
+    let candidate = Event { event_id: String::new(), pdu: pdu.clone(), unsigned: None };
+    let auth_state = match current_state_map(state.storage.as_ref(), &room_id).await {
+        Ok(auth_state) => auth_state,
+        Err(error) => return internal(&error.to_string()),
+    };
+    if let Err(error) = conduit::auth::check_auth(&candidate, &auth_state) {
+        return forbidden(&error.to_string());
+    }
+    if !third_party_key_is_valid(signed, &invite.content).await {
+        return forbidden("third-party invite key is not valid");
+    }
     if let Err(error) = sign_authored(&mut pdu, &state.server_key, &state.server_name) {
         return internal(&error.to_string());
     }
@@ -829,16 +968,236 @@ pub async fn exchange_third_party_invite(
         Ok(event_id) => event_id,
         Err(error) => return internal(&error.to_string()),
     };
-    let event = Event::new(event_id.clone(), pdu);
-    let auth_state = match current_state_map(state.storage.as_ref(), &room_id).await {
-        Ok(auth_state) => auth_state,
-        Err(error) => return internal(&error.to_string()),
+    let Some(wire) = WirePdu::checked(&event_id, pdu) else {
+        return internal("invite does not reproduce its event id");
     };
-    if let Err(error) = conduit::auth::check_auth(&event, &auth_state) {
-        return forbidden(&error.to_string());
-    }
-    if let Err(error) = state.storage.publish_event(&event).await {
+    let room_version = match room_version(&state, &room_id).await {
+        Ok(version) => version.to_string(),
+        Err(response) => return response,
+    };
+    let stripped = match stripped_invite_state(&state, &room_id).await {
+        Ok(stripped) => stripped,
+        Err(response) => return response,
+    };
+    let returned = match state.fed_client.invite(mxid_server(mxid), &room_id, &room_version, stripped, &wire).await {
+        Ok(returned) => returned,
+        Err(_) => return invite_rejected(),
+    };
+    let admitted = match super::admit::admit_cosigned(
+        &state.remote_keys,
+        &state.http,
+        returned,
+        &wire,
+        mxid_server(mxid),
+    )
+    .await
+    {
+        Ok(admitted) => admitted,
+        Err(_) => return invite_rejected(),
+    };
+    if let Err(error) = state.storage.publish_event(&admitted.into_event()).await {
         return internal(&error.to_string());
     }
+    if let Ok(position) = state.storage.global_max_stream_position().await {
+        let _ = state.events_tx.send(position);
+    }
     (StatusCode::OK, Json(json!({}))).into_response()
+}
+
+fn mxid_server(mxid: &str) -> &str {
+    server_of_user_id(mxid).unwrap_or(mxid)
+}
+
+fn invite_rejected() -> Response {
+    super::server::matrix_error(
+        StatusCode::BAD_GATEWAY,
+        "M_UNKNOWN",
+        "invitee did not accept the invite",
+    )
+}
+
+async fn stripped_invite_state(state: &FedState, room_id: &str) -> Result<Vec<Value>, Response> {
+    let events = state.storage.get_current_state(room_id).await.map_err(|error| internal(&error.to_string()))?;
+    Ok(events
+        .into_iter()
+        .filter(|event| {
+            KNOCK_ROOM_STATE.contains(&event.event_type.as_str()) || event.event_type == "m.room.member"
+        })
+        .map(|event| {
+            json!({
+                "type": event.event_type,
+                "state_key": event.state_key,
+                "sender": event.sender,
+                "content": event.content,
+            })
+        })
+        .collect())
+}
+
+/// Keys from `public_key` / `key_validity_url` and each `public_keys` entry.
+fn third_party_keys(content: &Value) -> Vec<(String, Option<String>)> {
+    let mut keys = Vec::new();
+    if let Some(key) = content["public_key"].as_str() {
+        keys.push((key.to_owned(), content["key_validity_url"].as_str().map(str::to_owned)));
+    }
+    if let Some(list) = content["public_keys"].as_array() {
+        for entry in list {
+            let Some(key) = entry["public_key"].as_str() else { continue };
+            let url = entry["key_validity_url"]
+                .as_str()
+                .or(content["key_validity_url"].as_str())
+                .map(str::to_owned);
+            keys.push((key.to_owned(), url));
+        }
+    }
+    keys
+}
+
+/// `check_auth` accepts any matching key. Federation also requires that a
+/// signature-matching key is currently valid at its `key_validity_url`.
+async fn third_party_key_is_valid(signed: &Value, invite_content: &Value) -> bool {
+    let identity = IdentityClient::shared();
+    for (key, url) in third_party_keys(invite_content) {
+        if !third_party_signed_matches(signed, &key) {
+            continue;
+        }
+        let Some(url) = url else { continue };
+        if identity.key_is_valid(&url, &key).await.unwrap_or(false) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Room versions 1 and 2 keep these fields when redacting for signatures.
+const V1_SIGN_FIELDS: &[&str] = &[
+    "auth_events",
+    "content",
+    "depth",
+    "event_id",
+    "hashes",
+    "membership",
+    "origin",
+    "origin_server_ts",
+    "prev_events",
+    "prev_state",
+    "room_id",
+    "sender",
+    "state_key",
+    "type",
+];
+
+fn v1_redact_content(event_type: &str, content: &Value) -> Value {
+    let Some(map) = content.as_object() else {
+        return json!({});
+    };
+    let fields: &[&str] = match event_type {
+        "m.room.member" => &["membership"],
+        "m.room.create" => &["creator"],
+        "m.room.join_rules" => &["join_rule"],
+        "m.room.power_levels" => &[
+            "ban",
+            "events",
+            "events_default",
+            "kick",
+            "redact",
+            "state_default",
+            "users",
+            "users_default",
+        ],
+        "m.room.aliases" => &["aliases"],
+        "m.room.history_visibility" => &["history_visibility"],
+        _ => &[],
+    };
+    let mut redacted = Map::new();
+    for field in fields {
+        if let Some(value) = map.get(*field) {
+            redacted.insert((*field).to_owned(), value.clone());
+        }
+    }
+    Value::Object(redacted)
+}
+
+fn v1_signing_bytes(event: &Value) -> Result<Vec<u8>, ()> {
+    let map = event.as_object().ok_or(())?;
+    let mut kept = Map::new();
+    for key in V1_SIGN_FIELDS {
+        if let Some(value) = map.get(*key) {
+            kept.insert((*key).to_owned(), value.clone());
+        }
+    }
+    if let Some(content) = kept.get("content").cloned() {
+        let event_type = kept.get("type").and_then(Value::as_str).unwrap_or("");
+        kept.insert("content".into(), v1_redact_content(event_type, &content));
+    }
+    conduit::canonical_json::to_canonical_bytes(&Value::Object(kept)).map_err(|_| ())
+}
+
+fn v1_content_digest(event: &Value) -> Result<Vec<u8>, ()> {
+    let mut copy = event.as_object().cloned().ok_or(())?;
+    copy.remove("hashes");
+    copy.remove("signatures");
+    copy.remove("unsigned");
+    let bytes = conduit::canonical_json::to_canonical_bytes(&Value::Object(copy)).map_err(|_| ())?;
+    Ok(Sha256::digest(&bytes).to_vec())
+}
+
+fn v1_content_matches(event: &Value) -> Result<bool, Response> {
+    let Some(claimed) = event["hashes"]["sha256"].as_str() else {
+        return Err(invalid_param("Invite content hash does not match"));
+    };
+    let claimed = conduit::hashing::decode_unpadded_base64(claimed)
+        .map_err(|_| invalid_param("Invite content hash does not match"))?;
+    let actual = v1_content_digest(event).map_err(|_| invalid_param("Invite content hash does not match"))?;
+    Ok(claimed == actual)
+}
+
+async fn verify_v1_signature(state: &FedState, event: &Value, origin: &str) -> Result<(), Response> {
+    let bytes = v1_signing_bytes(event).map_err(|_| invalid_param("signature check failed"))?;
+    let timestamp = event["origin_server_ts"].as_u64().unwrap_or(0);
+    let Some(signatures) = event["signatures"].get(origin).and_then(Value::as_object) else {
+        return Err(invalid_param("signature check failed"));
+    };
+    let mut eligible = 0usize;
+    for (key_id, signature) in signatures {
+        let Some(public) = state.remote_keys.eligible_key(&state.http, origin, key_id, timestamp).await else {
+            continue;
+        };
+        eligible += 1;
+        verify_ed25519(&bytes, signature, &public).map_err(|_| invalid_param("signature check failed"))?;
+    }
+    if eligible == 0 {
+        return Err(invalid_param("signature check failed"));
+    }
+    Ok(())
+}
+
+fn insert_v1_signature(event: &mut Value, server_key: &conduit::keys::ServerKey, server_name: &str) -> Result<(), ()> {
+    let bytes = v1_signing_bytes(event)?;
+    let signature = server_key.signing_key.sign(&bytes);
+    let encoded = STANDARD_NO_PAD.encode(signature.to_bytes());
+    let signatures = event.as_object_mut().ok_or(())?.entry("signatures").or_insert_with(|| json!({}));
+    if !signatures.is_object() {
+        *signatures = json!({});
+    }
+    let server_sigs = signatures
+        .as_object_mut()
+        .ok_or(())?
+        .entry(server_name.to_owned())
+        .or_insert_with(|| json!({}));
+    if !server_sigs.is_object() {
+        *server_sigs = json!({});
+    }
+    server_sigs.as_object_mut().ok_or(())?.insert(server_key.key_id.clone(), Value::String(encoded));
+    Ok(())
+}
+
+fn verify_ed25519(bytes: &[u8], signature: &Value, public: &[u8]) -> Result<(), ()> {
+    let encoded = signature.as_str().ok_or(())?;
+    let raw = conduit::hashing::decode_unpadded_base64(encoded).map_err(|_| ())?;
+    let sig_bytes: [u8; 64] = raw.as_slice().try_into().map_err(|_| ())?;
+    let signature = ed25519_dalek::Signature::from_bytes(&sig_bytes);
+    let public: [u8; 32] = public.try_into().map_err(|_| ())?;
+    let key = ed25519_dalek::VerifyingKey::from_bytes(&public).map_err(|_| ())?;
+    key.verify_strict(bytes, &signature).map_err(|_| ())
 }

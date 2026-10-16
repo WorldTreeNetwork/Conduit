@@ -605,13 +605,15 @@ impl Client {
 
     /// `PUT /_matrix/federation/v2/invite/{roomId}/{eventId}`
     ///
-    /// Returns the raw `event` the invitee answered with; callers admit it
-    /// with `admit::admit_cosigned` (`Exactly(id)`, unchanged hashes, valid
-    /// invitee signature) before trusting it.
+    /// `room_version` is the room's real version. Returns the raw `event` the
+    /// invitee answered with; callers admit it with `admit::admit_cosigned`
+    /// (`Exactly(id)`, unchanged hashes, valid invitee signature) before
+    /// trusting it.
     pub async fn invite(
         &self,
         dest: &str,
         room_id: &str,
+        room_version: &str,
         invite_room_state: Vec<Value>,
         pdu: &WirePdu,
     ) -> Result<Value, FederationError> {
@@ -623,7 +625,7 @@ impl Client {
         let body = serde_json::json!({
             "event": pdu,
             "invite_room_state": invite_room_state,
-            "room_version": "11",
+            "room_version": room_version,
         });
         let resp: Value = self.signed_put(dest, &path, &body).await?;
         resp.get("event").cloned().ok_or_else(|| FederationError::Parse("missing 'event'".to_owned()))

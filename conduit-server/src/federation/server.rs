@@ -128,7 +128,7 @@ impl conduit::room::RoomEventSender for FedState {
 // Error helpers
 // ---------------------------------------------------------------------------
 
-fn matrix_error(status: StatusCode, errcode: &str, error: &str) -> Response {
+pub(crate) fn matrix_error(status: StatusCode, errcode: &str, error: &str) -> Response {
     (status, Json(json!({ "errcode": errcode, "error": error }))).into_response()
 }
 
@@ -1565,7 +1565,7 @@ pub fn federation_router() -> axum::Router<FedState> {
         .route("/make_knock/:roomId/:userId", get(super::spec_v119::make_knock))
         .route("/send_knock/:roomId/:eventId", put(super::spec_v119::send_knock))
         .route("/make_leave/:roomId/:userId", get(super::spec_v119::make_leave))
-        .route("/invite/:roomId/:eventId", put(invite))
+        .route("/invite/:roomId/:eventId", put(super::spec_v119::invite_v1))
         .route("/exchange_third_party_invite/:roomId", put(super::spec_v119::exchange_third_party_invite))
         // Media (E07 h9n.8): federation download + thumbnail
         .route("/media/download/:mediaId", get(federation_download::<FedState>))

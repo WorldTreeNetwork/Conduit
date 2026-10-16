@@ -225,9 +225,6 @@ pub async fn process_received(
     // --- Resolve auth events (immediate) -----------------------------------
     fetch_missing_auth_events(storage, remote_keys, http, fed_client, &pdu, origin).await?;
 
-    // --- Build full auth chain ---------------------------------------------
-    let auth_chain = build_auth_chain(storage, &pdu).await?;
-
     // --- Full state resolution ---------------------------------------------
     let current_state_events = storage
         .get_current_state(&pdu.room_id)
@@ -242,6 +239,18 @@ pub async fn process_received(
                 .map(|sk| ((ev.event_type.clone(), sk.clone()), ev.clone()))
         })
         .collect();
+    // Authorization reads the room from before this event. State resolution
+    // below may select the event itself, which would make a leave look like
+    // Leave -> Leave.
+    let prior_state = current_state_map.clone();
+    // Resolution needs every auth event of both snapshots, not only the
+    // incoming PDU's. A conflicting leave otherwise fails closed on a
+    // create-power or membership auth event that the PDU does not list.
+    let mut auth_chain = build_auth_chain(storage, &pdu).await?;
+    for event in prior_state.values() {
+        auth_chain.extend(build_auth_chain(storage, event).await?);
+    }
+    auth_chain.insert(pdu.event_id.clone(), pdu.clone());
 
     let resolved_state = if current_state_map.is_empty() {
         if let Some(state_key) = &pdu.state_key {
@@ -265,7 +274,7 @@ pub async fn process_received(
     let have_room_create = resolved_state.contains_key(&("m.room.create".to_owned(), String::new()))
         || pdu.event_type == "m.room.create";
     if have_room_create {
-        let auth_state = build_auth_state_from_resolved(&pdu, &resolved_state);
+        let auth_state = build_auth_state_from_resolved(&pdu, &auth_state_before(&pdu, &prior_state, &resolved_state));
         check_auth(&pdu, &auth_state)
             .map_err(|e| PipelineError::AuthFailed(e.to_string()))?;
     }
@@ -294,6 +303,26 @@ pub async fn process_received(
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
+
+/// Resolved state with this event's own key put back to the prior entry.
+///
+/// A membership event must be authorised against the membership it replaces.
+fn auth_state_before(event: &Event, prior: &StateMap<Event>, resolved: &StateMap<Event>) -> StateMap<Event> {
+    let mut view = resolved.clone();
+    let Some(state_key) = &event.state_key else { return view };
+    let key = (event.event_type.clone(), state_key.clone());
+    if view.get(&key).is_some_and(|current| current.event_id == event.event_id) {
+        match prior.get(&key) {
+            Some(previous) => {
+                view.insert(key, previous.clone());
+            }
+            None => {
+                view.remove(&key);
+            }
+        }
+    }
+    view
+}
 
 /// Build a `StateMap` suitable for `check_auth` by extracting the auth-event
 /// keys from the resolved room state.

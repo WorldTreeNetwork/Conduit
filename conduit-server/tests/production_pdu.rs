@@ -17,8 +17,9 @@ use std::sync::Arc;
 use axum::extract::Query;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
-use axum::{routing::{get, post}, Json, Router};
+use axum::{routing::{get, post, put}, Json, Router};
 use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine as _};
+use sha2::Digest as _;
 use common::production::Server;
 use reqwest::Method;
 use serde_json::{json, Value};
@@ -1043,26 +1044,27 @@ async fn blocked_invitee_rejects_federation_invites_on_v1_and_v2() {
 
     let blocked = invite(&remote, "!blocked:remote.test", "@r:remote.test", alice_id);
     let id = conduit::hashing::event_id(&blocked).unwrap();
+    let v1_id = "$blockedv1:remote.test";
+    let blocked_v1 = sign_v1(
+        &remote,
+        v1_member_event("!blocked:remote.test", "@r:remote.test", alice_id, v1_id, "Blocked"),
+    );
     let member = format!(
         "/_matrix/client/v3/rooms/{}/state/m.room.member/{}",
         enc("!blocked:remote.test"),
         enc(alice_id)
     );
-    for version in ["v1", "v2"] {
+    let requests = [
+        ("v1", v1_id, blocked_v1),
+        ("v2", id.as_str(), json!({"event": &blocked, "invite_room_state": [], "room_version": "11"})),
+    ];
+    for (version, event_id, body) in requests {
         let path = format!(
             "/_matrix/federation/{version}/invite/{}/{}",
             enc("!blocked:remote.test"),
-            enc(&id)
+            enc(event_id)
         );
-        let error = fed(
-            &server,
-            &remote,
-            Method::PUT,
-            &path,
-            Some(json!({"event": &blocked, "invite_room_state": [], "room_version": "11"})),
-            403,
-        )
-        .await;
+        let error = fed(&server, &remote, Method::PUT, &path, Some(body), 403).await;
         assert_eq!(error["errcode"], "M_INVITE_BLOCKED", "{version}: {error}");
         assert_eq!(error["error"], format!("{alice_id} is not accepting invites"));
         let stored = server.request(Method::GET, &member, Some(token), None, 403).await;
@@ -1687,4 +1689,673 @@ async fn accepted_redaction_prunes_the_row_and_federation_get_event() {
     assert_eq!(alias_pdu_wire["content"]["aliases"], json!(["#kept:production.test"]), "{alias_pdu_wire}");
     assert!(alias_pdu_wire["content"].get("note").is_none(), "{alias_pdu_wire}");
     assert!(!alias_wire.to_string().contains("drop-me-note"), "{alias_wire}");
+}
+
+fn member_path(room: &str, user: &str) -> String {
+    format!("/_matrix/client/v3/rooms/{}/state/m.room.member/{}", enc(room), enc(user))
+}
+
+const V1_SIGN_FIELDS: &[&str] = &[
+    "auth_events",
+    "content",
+    "depth",
+    "event_id",
+    "hashes",
+    "membership",
+    "origin",
+    "origin_server_ts",
+    "prev_events",
+    "prev_state",
+    "room_id",
+    "sender",
+    "state_key",
+    "type",
+];
+
+fn v1_redact_content(event_type: &str, content: &Value) -> Value {
+    let Some(map) = content.as_object() else {
+        return json!({});
+    };
+    let fields: &[&str] = match event_type {
+        "m.room.member" => &["membership"],
+        "m.room.create" => &["creator"],
+        "m.room.join_rules" => &["join_rule"],
+        "m.room.power_levels" => &[
+            "ban",
+            "events",
+            "events_default",
+            "kick",
+            "redact",
+            "state_default",
+            "users",
+            "users_default",
+        ],
+        "m.room.aliases" => &["aliases"],
+        "m.room.history_visibility" => &["history_visibility"],
+        _ => &[],
+    };
+    let mut redacted = serde_json::Map::new();
+    for field in fields {
+        if let Some(value) = map.get(*field) {
+            redacted.insert((*field).to_owned(), value.clone());
+        }
+    }
+    Value::Object(redacted)
+}
+
+/// Room v1/v2 signing bytes: redacted event, `event_id` and tuple auth/prev
+/// kept, signatures omitted, member content reduced to `membership`.
+fn v1_signing_bytes(event: &Value) -> Vec<u8> {
+    let map = event.as_object().unwrap();
+    let mut kept = serde_json::Map::new();
+    for key in V1_SIGN_FIELDS {
+        if let Some(value) = map.get(*key) {
+            kept.insert((*key).to_owned(), value.clone());
+        }
+    }
+    if let Some(content) = kept.get("content").cloned() {
+        let event_type = kept.get("type").and_then(Value::as_str).unwrap_or("");
+        kept.insert("content".into(), v1_redact_content(event_type, &content));
+    }
+    conduit::canonical_json::to_canonical_bytes(&Value::Object(kept)).unwrap()
+}
+
+fn v1_content_hash(event: &Value) -> String {
+    let mut copy = event.as_object().unwrap().clone();
+    copy.remove("hashes");
+    copy.remove("signatures");
+    copy.remove("unsigned");
+    let bytes = conduit::canonical_json::to_canonical_bytes(&Value::Object(copy)).unwrap();
+    STANDARD_NO_PAD.encode(sha2::Sha256::digest(&bytes))
+}
+
+fn v1_member_event(room: &str, sender: &str, target: &str, event_id: &str, displayname: &str) -> Value {
+    json!({
+        "auth_events": [["$create:remote.test", {"sha256": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}]],
+        "content": {"membership": "invite", "displayname": displayname},
+        "depth": 5,
+        "event_id": event_id,
+        "origin": REMOTE,
+        "origin_server_ts": chrono::Utc::now().timestamp_millis() as u64,
+        "prev_events": [["$prev:remote.test", {"sha256": "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"}]],
+        "room_id": room,
+        "sender": sender,
+        "state_key": target,
+        "type": "m.room.member",
+    })
+}
+
+fn sign_v1(remote: &Remote, mut event: Value) -> Value {
+    event.as_object_mut().unwrap().remove("signatures");
+    event["hashes"] = json!({"sha256": v1_content_hash(&event)});
+    let bytes = v1_signing_bytes(&event);
+    use ed25519_dalek::Signer as _;
+    let signature = remote.key.signing_key.sign(&bytes);
+    event["signatures"] = json!({
+        REMOTE: { remote.key.key_id.clone(): STANDARD_NO_PAD.encode(signature.to_bytes()) }
+    });
+    event
+}
+
+async fn assert_local_v1_signature(server: &Server, event: &Value) {
+    let document: Value = server
+        .http
+        .get(format!("{}/_matrix/key/v2/server", server.base_url))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let keys = document["verify_keys"].as_object().expect("published verify_keys");
+    let bytes = v1_signing_bytes(event);
+    let mut verified = false;
+    for (key_id, entry) in keys {
+        let Some(signature) = event["signatures"][LOCAL][key_id].as_str() else { continue };
+        let public = STANDARD_NO_PAD.decode(entry["key"].as_str().unwrap()).unwrap();
+        let raw = STANDARD_NO_PAD.decode(signature).unwrap();
+        let public: [u8; 32] = public.try_into().unwrap();
+        let raw: [u8; 64] = raw.try_into().unwrap();
+        let key = ed25519_dalek::VerifyingKey::from_bytes(&public).unwrap();
+        let signature = ed25519_dalek::Signature::from_bytes(&raw);
+        key.verify_strict(&bytes, &signature).expect("local v1 signature");
+        verified = true;
+    }
+    assert!(verified, "published server key did not sign the v1 invite: {event}");
+}
+
+#[tokio::test]
+async fn ss_membership_send_knock_returns_state_array() {
+    let remote = spawn_remote().await;
+    let server = federated_server(&remote).await;
+    let alice = server.register("alice").await;
+    let token = alice["access_token"].as_str().unwrap();
+    let room = server
+        .request(
+            Method::POST,
+            "/_matrix/client/v3/createRoom",
+            Some(token),
+            Some(json!({
+                "preset": "private_chat",
+                "name": "Knock Room",
+                "initial_state": [{"type": "m.room.join_rules", "state_key": "", "content": {"join_rule": "knock"}}]
+            })),
+            200,
+        )
+        .await["room_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let knocker = "@knocker:remote.test";
+    let made = fed(
+        &server,
+        &remote,
+        Method::GET,
+        &format!("/_matrix/federation/v1/make_knock/{}/{}?ver=12", enc(&room), enc(knocker)),
+        None,
+        200,
+    )
+    .await;
+    assert_eq!(made["room_version"], "12");
+    let template: Pdu = serde_json::from_value(made["event"].clone()).unwrap();
+    let (knock_id, knock_body) = sign(&remote, template.clone());
+    let knocked = fed(
+        &server,
+        &remote,
+        Method::PUT,
+        &format!("/_matrix/federation/v1/send_knock/{}/{}", enc(&room), enc(&knock_id)),
+        Some(knock_body),
+        200,
+    )
+    .await;
+    let state = knocked["knock_room_state"].as_array().expect("knock_room_state is an array");
+    assert!(state.iter().any(|event| event["type"] == "m.room.create"), "{knocked}");
+    assert!(
+        state.iter().any(|event| event["type"] == "m.room.name" && event["content"]["name"] == "Knock Room"),
+        "{knocked}"
+    );
+    let member = server.request(Method::GET, &member_path(&room, knocker), Some(token), None, 200).await;
+    assert_eq!(member["membership"], "knock", "{member}");
+
+    let mut joined = template.clone();
+    joined.content["membership"] = json!("join");
+    let (join_id, join_body) = sign(&remote, joined);
+    let wrong = fed(
+        &server,
+        &remote,
+        Method::PUT,
+        &format!("/_matrix/federation/v1/send_knock/{}/{}", enc(&room), enc(&join_id)),
+        Some(join_body),
+        400,
+    )
+    .await;
+    assert_eq!(wrong["errcode"], "M_INVALID_PARAM", "{wrong}");
+
+    let (_, mut forged) = sign(&remote, template);
+    forged["signatures"][REMOTE][remote.key.key_id.as_str()] = json!("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
+    let bad_sig = fed(
+        &server,
+        &remote,
+        Method::PUT,
+        &format!("/_matrix/federation/v1/send_knock/{}/{}", enc(&room), enc(&knock_id)),
+        Some(forged),
+        400,
+    )
+    .await;
+    assert_eq!(bad_sig["errcode"], "M_INVALID_PARAM", "{bad_sig}");
+
+    let public = server
+        .request(Method::POST, "/_matrix/client/v3/createRoom", Some(token), Some(json!({"preset": "public_chat"})), 200)
+        .await["room_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let public_template: Pdu = serde_json::from_value(
+        fed(
+            &server,
+            &remote,
+            Method::GET,
+            &format!("/_matrix/federation/v1/make_join/{}/{}", enc(&public), enc(knocker)),
+            None,
+            200,
+        )
+        .await["event"]
+        .clone(),
+    )
+    .unwrap();
+    let mut public_knock = public_template;
+    public_knock.content["membership"] = json!("knock");
+    let (public_id, public_body) = sign(&remote, public_knock);
+    let refused = fed(
+        &server,
+        &remote,
+        Method::PUT,
+        &format!("/_matrix/federation/v1/send_knock/{}/{}", enc(&public), enc(&public_id)),
+        Some(public_body),
+        403,
+    )
+    .await;
+    assert_eq!(refused["errcode"], "M_FORBIDDEN", "{refused}");
+
+    let ancient = server
+        .request(
+            Method::POST,
+            "/_matrix/client/v3/createRoom",
+            Some(token),
+            Some(json!({"preset": "public_chat", "room_version": "6"})),
+            200,
+        )
+        .await["room_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let incompatible = fed(
+        &server,
+        &remote,
+        Method::PUT,
+        &format!("/_matrix/federation/v1/send_knock/{}/$unused", enc(&ancient)),
+        Some(json!({})),
+        400,
+    )
+    .await;
+    assert_eq!(incompatible["errcode"], "M_INCOMPATIBLE_ROOM_VERSION", "{incompatible}");
+}
+
+#[tokio::test]
+async fn ss_membership_v1_invite_keeps_v1_bytes() {
+    let remote = spawn_remote().await;
+    let server = federated_server(&remote).await;
+    let alice = server.register("alice").await;
+    let alice_id = alice["user_id"].as_str().unwrap();
+    let token = alice["access_token"].as_str().unwrap();
+    let event_id = "$v1invite:remote.test";
+    let room = "!v1invite:remote.test";
+    let sent = sign_v1(&remote, v1_member_event(room, "@r:remote.test", alice_id, event_id, "Kept"));
+    let path = format!("/_matrix/federation/v1/invite/{}/{}", enc(room), enc(event_id));
+    let response = fed(&server, &remote, Method::PUT, &path, Some(sent.clone()), 200).await;
+    let event = &response["event"];
+    let mut expected = sent.clone();
+    expected["signatures"][LOCAL] = event["signatures"][LOCAL].clone();
+    assert_eq!(event, &expected, "co-sign leaves every other field untouched");
+    assert!(event["auth_events"][0].is_array(), "{event}");
+    assert_eq!(event["event_id"], event_id);
+    assert_eq!(event["content"]["displayname"], "Kept");
+    assert_local_v1_signature(&server, event).await;
+    let sync = server.request(Method::GET, "/_matrix/client/v3/sync", Some(token), None, 200).await;
+    assert!(sync["rooms"]["invite"].get(room).is_some(), "{sync}");
+
+    let wrapped = fed(
+        &server,
+        &remote,
+        Method::PUT,
+        &format!("/_matrix/federation/v1/invite/{}/{}", enc("!wrapped:remote.test"), enc("$wrapped:remote.test")),
+        Some(json!({"event": {"type": "m.room.member"}, "invite_room_state": [], "room_version": "11"})),
+        400,
+    )
+    .await;
+    assert_eq!(wrapped["errcode"], "M_INVALID_PARAM", "{wrapped}");
+
+    let mut joined = v1_member_event(room, "@r:remote.test", alice_id, "$v1join:remote.test", "Kept");
+    joined["content"]["membership"] = json!("join");
+    let joined = sign_v1(&remote, joined);
+    let rejected = fed(
+        &server,
+        &remote,
+        Method::PUT,
+        &format!("/_matrix/federation/v1/invite/{}/{}", enc(room), enc("$v1join:remote.test")),
+        Some(joined),
+        400,
+    )
+    .await;
+    assert_eq!(rejected["errcode"], "M_INVALID_PARAM", "{rejected}");
+
+    let mut tampered = sent.clone();
+    tampered["content"]["displayname"] = json!("Mallory");
+    let hashed = fed(
+        &server,
+        &remote,
+        Method::PUT,
+        &path,
+        Some(tampered),
+        400,
+    )
+    .await;
+    assert_eq!(hashed["errcode"], "M_INVALID_PARAM", "{hashed}");
+}
+
+#[tokio::test]
+async fn ss_membership_send_leave_ends_membership() {
+    let remote = spawn_remote().await;
+    let server = federated_server(&remote).await;
+    let alice = server.register("alice").await;
+    let token = alice["access_token"].as_str().unwrap();
+    let room = server
+        .request(Method::POST, "/_matrix/client/v3/createRoom", Some(token), Some(json!({"preset": "public_chat"})), 200)
+        .await["room_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let joiner = "@joiner:remote.test";
+    federation_join(&server, &remote, REMOTE, &room, joiner).await;
+    let leave_template: Pdu = serde_json::from_value(
+        fed(
+            &server,
+            &remote,
+            Method::GET,
+            &format!("/_matrix/federation/v1/make_leave/{}/{}", enc(&room), enc(joiner)),
+            None,
+            200,
+        )
+        .await["event"]
+        .clone(),
+    )
+    .unwrap();
+    let (leave_id, leave_body) = sign(&remote, leave_template);
+    let left = fed(
+        &server,
+        &remote,
+        Method::PUT,
+        &format!("/_matrix/federation/v2/send_leave/{}/{}", enc(&room), enc(&leave_id)),
+        Some(leave_body),
+        200,
+    )
+    .await;
+    assert_eq!(left, json!({}));
+    let member = server.request(Method::GET, &member_path(&room, joiner), Some(token), None, 200).await;
+    assert_eq!(member["membership"], "leave", "{member}");
+
+    let guest = "@guest:remote.test";
+    server
+        .request(
+            Method::POST,
+            &format!("/_matrix/client/v3/rooms/{}/invite", enc(&room)),
+            Some(token),
+            Some(json!({"user_id": guest})),
+            200,
+        )
+        .await;
+    let invited = server.request(Method::GET, &member_path(&room, guest), Some(token), None, 200).await;
+    assert_eq!(invited["membership"], "invite", "{invited}");
+    let reject_template: Pdu = serde_json::from_value(
+        fed(
+            &server,
+            &remote,
+            Method::GET,
+            &format!("/_matrix/federation/v1/make_leave/{}/{}", enc(&room), enc(guest)),
+            None,
+            200,
+        )
+        .await["event"]
+        .clone(),
+    )
+    .unwrap();
+    let (reject_id, reject_body) = sign(&remote, reject_template);
+    assert_eq!(
+        fed(
+            &server,
+            &remote,
+            Method::PUT,
+            &format!("/_matrix/federation/v2/send_leave/{}/{}", enc(&room), enc(&reject_id)),
+            Some(reject_body),
+            200,
+        )
+        .await,
+        json!({})
+    );
+    let rejected = server.request(Method::GET, &member_path(&room, guest), Some(token), None, 200).await;
+    assert_eq!(rejected["membership"], "leave", "{rejected}");
+
+    let stranger = "@stranger:remote.test";
+    let missing = fed(
+        &server,
+        &remote,
+        Method::GET,
+        &format!("/_matrix/federation/v1/make_leave/{}/{}", enc(&room), enc(stranger)),
+        None,
+        403,
+    )
+    .await;
+    assert_eq!(missing["errcode"], "M_FORBIDDEN", "{missing}");
+    let (stranger_id, stranger_body) = sign(
+        &remote,
+        Pdu::new(
+            &room,
+            stranger,
+            "m.room.member",
+            Some(stranger.into()),
+            json!({"membership": "leave"}),
+            1_700_000_000_000,
+            vec![],
+            vec![],
+            3,
+        ),
+    );
+    let not_in_room = fed(
+        &server,
+        &remote,
+        Method::PUT,
+        &format!("/_matrix/federation/v2/send_leave/{}/{}", enc(&room), enc(&stranger_id)),
+        Some(stranger_body),
+        403,
+    )
+    .await;
+    assert_eq!(not_in_room["errcode"], "M_FORBIDDEN", "{not_in_room}");
+
+    let join_template: Pdu = serde_json::from_value(
+        fed(
+            &server,
+            &remote,
+            Method::GET,
+            &format!("/_matrix/federation/v1/make_join/{}/{}", enc(&room), enc(joiner)),
+            None,
+            200,
+        )
+        .await["event"]
+        .clone(),
+    )
+    .unwrap();
+    let (rejoin_id, rejoin_body) = sign(&remote, join_template);
+    let not_leave = fed(
+        &server,
+        &remote,
+        Method::PUT,
+        &format!("/_matrix/federation/v2/send_leave/{}/{}", enc(&room), enc(&rejoin_id)),
+        Some(rejoin_body),
+        400,
+    )
+    .await;
+    assert_eq!(not_leave["errcode"], "M_INVALID_PARAM", "{not_leave}");
+}
+
+fn identity_signed(mxid: &str, token: &str, signer: &ed25519_dalek::SigningKey) -> Value {
+    let unsigned = json!({"mxid": mxid, "token": token});
+    let bytes = conduit::canonical_json::to_canonical_bytes(&unsigned).unwrap();
+    use ed25519_dalek::Signer as _;
+    let signature = STANDARD_NO_PAD.encode(signer.sign(&bytes).to_bytes());
+    json!({"mxid": mxid, "token": token, "signatures": {"id.test": {"ed25519:0": signature}}})
+}
+
+#[tokio::test]
+async fn ss_membership_exchange_third_party_invite_issues_invite() {
+    use axum::extract::Path as AxPath;
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+
+    let remote = spawn_remote().await;
+    let seen = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let recorded = seen.clone();
+    let invitee_key = remote.key.clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let invitee_addr = listener.local_addr().unwrap();
+    let invitee = Router::new()
+        .route(
+            "/_matrix/key/v2/server",
+            get({
+                let remote = remote_key_document(&remote);
+                move || {
+                    let remote = remote.clone();
+                    async move { Json(remote) }
+                }
+            }),
+        )
+        .route(
+            "/_matrix/federation/v2/invite/:room_id/:event_id",
+            put(move |AxPath((_, event_id)): AxPath<(String, String)>, Json(body): Json<Value>| {
+                let seen = recorded.clone();
+                let key = invitee_key.clone();
+                async move {
+                    if body["event"]["content"]["third_party_invite"]["signed"]["token"] == "down" {
+                        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                    }
+                    let mut pdu: Pdu = serde_json::from_value(body["event"].clone()).unwrap();
+                    conduit::signing::add_signature(&mut pdu, &key, REMOTE).unwrap();
+                    seen.lock().await.push(json!({"path_event_id": event_id, "body": body, "event": pdu}));
+                    Json(json!({"event": pdu})).into_response()
+                }
+            }),
+        );
+    tokio::spawn(async move { axum::serve(listener, invitee).await.ok() });
+
+    let identity = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let identity_addr = identity.local_addr().unwrap();
+    let identity_app = Router::new()
+        .route("/_matrix/identity/v2/pubkey/isvalid", get(|| async { Json(json!({"valid": true})) }))
+        .route("/_matrix/identity/v2/pubkey/notvalid", get(|| async { Json(json!({"valid": false})) }));
+    tokio::spawn(async move { axum::serve(identity, identity_app).await.ok() });
+    let valid_url = format!("http://{identity_addr}/_matrix/identity/v2/pubkey/isvalid");
+    let invalid_url = format!("http://{identity_addr}/_matrix/identity/v2/pubkey/notvalid");
+    let base = format!("http://{invitee_addr}");
+
+    let server = Server::with_env(&[
+        ("CONDUIT_FEDERATION", "1"),
+        ("CONDUIT_REMOTE_KEYS_OVERRIDE", &base),
+        ("CONDUIT_FEDERATION_BASE_URL", &base),
+        ("CONDUIT_IS_INSECURE_HTTP", "1"),
+        ("CONDUIT_IS_ALLOW_CIDRS", "127.0.0.0/8"),
+    ])
+    .await;
+    let alice = server.register("alice").await;
+    let token = alice["access_token"].as_str().unwrap();
+    let alice_id = alice["user_id"].as_str().unwrap();
+    let bob = server.register("bob").await;
+    let bob_id = bob["user_id"].as_str().unwrap();
+    let room = server
+        .request(Method::POST, "/_matrix/client/v3/createRoom", Some(token), Some(json!({"preset": "private_chat"})), 200)
+        .await["room_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let signer = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+    let public = STANDARD_NO_PAD.encode(signer.verifying_key().to_bytes());
+    let put_invite = |token_name: &str, url: &str| {
+        let room = room.clone();
+        let token = token.to_owned();
+        let public = public.clone();
+        let url = url.to_owned();
+        let token_name = token_name.to_owned();
+        let server = &server;
+        async move {
+            server
+                .request(
+                    Method::PUT,
+                    &format!("/_matrix/client/v3/rooms/{}/state/m.room.third_party_invite/{token_name}", enc(&room)),
+                    Some(&token),
+                    Some(json!({
+                        "display_name": "Carol",
+                        "public_key": public,
+                        "key_validity_url": url,
+                        "public_keys": [{"public_key": public, "key_validity_url": url}],
+                    })),
+                    200,
+                )
+                .await
+        }
+    };
+    put_invite("tok", &valid_url).await;
+    put_invite("bad", &invalid_url).await;
+    put_invite("down", &valid_url).await;
+
+    let carol = "@carol:remote.test";
+    let exchange = |sender: &str, mxid: &str, signed: Value, status: u16| {
+        let sender = sender.to_owned();
+        let mxid = mxid.to_owned();
+        let room = room.clone();
+        let server = &server;
+        let remote = &remote;
+        async move {
+            fed(
+                server,
+                remote,
+                Method::PUT,
+                &format!("/_matrix/federation/v1/exchange_third_party_invite/{}", enc(&room)),
+                Some(json!({
+                    "type": "m.room.member",
+                    "room_id": room,
+                    "sender": sender,
+                    "state_key": mxid,
+                    "content": {
+                        "membership": "invite",
+                        "third_party_invite": {"display_name": "Carol", "signed": signed},
+                    },
+                })),
+                status,
+            )
+            .await
+        }
+    };
+
+    let unknown = exchange(alice_id, carol, identity_signed(carol, "missing", &signer), 404).await;
+    assert_eq!(unknown["errcode"], "M_NOT_FOUND", "{unknown}");
+    let mismatch = exchange(bob_id, carol, identity_signed(carol, "tok", &signer), 403).await;
+    assert_eq!(mismatch["errcode"], "M_FORBIDDEN", "{mismatch}");
+    let invalid = exchange(alice_id, carol, identity_signed(carol, "bad", &signer), 403).await;
+    assert_eq!(invalid["errcode"], "M_FORBIDDEN", "{invalid}");
+    let other = ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]);
+    let forged = exchange(alice_id, carol, identity_signed(carol, "tok", &other), 403).await;
+    assert_eq!(forged["errcode"], "M_FORBIDDEN", "{forged}");
+    let down = exchange(alice_id, "@down:remote.test", identity_signed("@down:remote.test", "down", &signer), 502).await;
+    assert_eq!(down["errcode"], "M_UNKNOWN", "{down}");
+    assert!(seen.lock().await.is_empty(), "a rejected exchange must not be stored from a failed invite");
+    server.request(Method::GET, &member_path(&room, carol), Some(token), None, 404).await;
+    server.request(Method::GET, &member_path(&room, "@down:remote.test"), Some(token), None, 404).await;
+
+    let accepted = exchange(alice_id, carol, identity_signed(carol, "tok", &signer), 200).await;
+    assert_eq!(accepted, json!({}));
+    let calls = seen.lock().await.clone();
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert_eq!(calls[0]["body"]["room_version"], "12", "{calls:?}");
+    let stripped = calls[0]["body"]["invite_room_state"].as_array().unwrap();
+    assert!(stripped.iter().any(|event| event["type"] == "m.room.create"), "{calls:?}");
+    assert_eq!(calls[0]["body"]["event"]["state_key"], carol);
+    let event_id = calls[0]["path_event_id"].as_str().unwrap();
+    let served = fed(
+        &server,
+        &remote,
+        Method::GET,
+        &format!("/_matrix/federation/v1/event/{}", enc(event_id)),
+        None,
+        200,
+    )
+    .await;
+    let pdu = &served["pdus"][0];
+    assert_eq!(pdu["content"]["membership"], "invite", "{pdu}");
+    assert!(pdu["signatures"][LOCAL].is_object(), "{pdu}");
+    assert!(pdu["signatures"][REMOTE].is_object(), "{pdu}");
+    let stored = server.request(Method::GET, &member_path(&room, carol), Some(token), None, 200).await;
+    assert_eq!(stored["membership"], "invite", "{stored}");
+}
+
+fn remote_key_document(remote: &Remote) -> Value {
+    let unsigned = json!({
+        "server_name": REMOTE,
+        "verify_keys": { remote.key.key_id.clone(): { "key": STANDARD_NO_PAD.encode(public_bytes(&remote.key)) } },
+        "old_verify_keys": {},
+        "valid_until_ts": chrono::Utc::now().timestamp_millis() + 3_600_000,
+    });
+    use ed25519_dalek::Signer as _;
+    let signature = remote.key.signing_key.sign(&conduit::canonical_json::to_canonical_bytes(&unsigned).unwrap());
+    let mut document = unsigned;
+    document["signatures"] = json!({ REMOTE: { remote.key.key_id.clone(): STANDARD_NO_PAD.encode(signature.to_bytes()) } });
+    document
 }
