@@ -42,9 +42,9 @@
         "total": 36
       },
       "requirement": {
-        "implemented+tested": 32,
+        "implemented+tested": 33,
         "implemented-untested": 0,
-        "partial": 6,
+        "partial": 5,
         "missing": 0,
         "not-applicable": 3,
         "total": 41
@@ -8968,20 +8968,31 @@
       "title": "EDUs (general)",
       "source": "https://spec.matrix.org/v1.19/server-server-api/#edus",
       "role": "homeserver",
-      "status": "partial",
+      "status": "implemented+tested",
       "code": [
         {
-          "loc": "conduit-server/src/federation/server.rs:951"
+          "loc": "conduit-server/src/federation/server.rs"
+        },
+        {
+          "loc": "conduit-server/src/api/client/typing.rs"
+        },
+        {
+          "loc": "conduit-server/src/api/client/receipts.rs"
+        },
+        {
+          "loc": "conduit-server/src/api/client/presence.rs"
         }
       ],
       "tests": [
-        "conduit-server/tests/production_pdu.rs::send_applies_acl_per_pdu_and_inbound_edus"
+        "conduit-server/tests/production_pdu.rs::send_applies_acl_per_pdu_and_inbound_edus",
+        "conduit-server/tests/presence.rs::local_typing_is_federated_to_joined_remote_servers",
+        "conduit-server/tests/presence.rs::local_public_receipt_is_federated_and_private_is_not",
+        "conduit-server/tests/presence.rs::local_presence_is_federated_to_servers_that_share_a_room",
+        "conduit-server/tests/production_sync.rs::signing_key_updates_federate_and_keys_query_merges_cross_signing"
       ],
-      "tests_total": 1,
-      "gap_beads": [
-        "conduit-y99.32"
-      ],
-      "notes": "Inbound typing, receipt, presence, and signing-key updates are applied. Typing and receipt EDUs for an ACL-denied room are ignored. Outbound EDU fanout remains."
+      "tests_total": 5,
+      "gap_beads": [],
+      "notes": "Inbound typing, receipt, presence, and signing-key updates are applied. Typing and receipt EDUs for an ACL-denied room are ignored. Outbound typing, public receipts, presence, and signing-key updates go to servers with a joined member. A left server is not a destination. Private receipts are not federated."
     },
     {
       "id": "ss.state-res",

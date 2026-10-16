@@ -18,7 +18,7 @@ Statuses: **tested** = present and asserted by a named test; **untested** = pres
 | Client-Server API | endpoints | 163 | 0 | 0 | 0 | 1 | 164 |
 | Client-Server API | requirements | 77 | 0 | 0 | 0 | 9 | 86 |
 | Server-Server API | endpoints | 34 | 0 | 1 | 0 | 1 | 36 |
-| Server-Server API | requirements | 32 | 0 | 6 | 0 | 3 | 41 |
+| Server-Server API | requirements | 33 | 0 | 5 | 0 | 3 | 41 |
 | Application Service API | endpoints | 11 | 0 | 0 | 0 | 0 | 11 |
 | Application Service API | requirements | 16 | 0 | 0 | 0 | 2 | 18 |
 | Push Gateway API (homeserver as client) | endpoints | 1 | 0 | 0 | 0 | 0 | 1 |
@@ -27,7 +27,7 @@ Statuses: **tested** = present and asserted by a named test; **untested** = pres
 | Identity Service API (homeserver as consumer) | requirements | 1 | 0 | 0 | 0 | 0 | 1 |
 | Room versions 1–12 | requirements | 61 | 0 | 0 | 0 | 0 | 61 |
 | Appendices | requirements | 10 | 0 | 3 | 4 | 4 | 21 |
-| All |  | 414 | 0 | 10 | 4 | 37 | 465 |
+| All |  | 415 | 0 | 9 | 4 | 37 | 465 |
 ## Gap beads
 
 New beads filed by this inventory (children of `conduit-y99`):
@@ -36,7 +36,7 @@ New beads filed by this inventory (children of `conduit-y99`):
 - `conduit-y99.29` - Room membership, summary and invite-permission gaps (POST /rooms/{id}/join, room_summary, mutual_rooms, M_INVITE_BLOCKED) (0 row(s))
 - `conduit-y99.30` - Push rule evaluation, predefined rules, GET /pushrules/global/, /notifications and thread counts (10 row(s))
 - `conduit-y99.31` - Push gateway delivery conformance (/notify payload, rejected pushkeys, retries) (4 row(s))
-- `conduit-y99.32` - Federation EDUs: m.typing, m.receipt, m.presence, m.signing_key_update in+out (1 row(s))
+- `conduit-y99.32` - Federation EDUs: m.typing, m.receipt, m.presence, m.signing_key_update in+out (0 row(s))
 - `conduit-y99.33` - PDU receipt checks: rejection, soft failure, hash-mismatch redaction, size limits (1 row(s))
 - `conduit-y99.34` - Application service transaction push conformance (Bearer hs_token, durable retry, interest rules, ephemeral) (0 row(s))
 - `conduit-y99.35` - Application service CS-API extensions (identity assertion, ts massaging, m.login.application_service login, rate-limit exemption) (0 row(s))
@@ -418,7 +418,7 @@ In-flight / pre-existing beads referenced (not duplicated):
 | `ss.pdu.auth-events-selection` | [Auth events selection](https://spec.matrix.org/v1.19/server-server-api/#auth-events-selection) | tested | `conduit-server/src/federation/pipeline.rs` | `production_pdu.rs::auth_event_selection_rejects_and_current_state_soft_fails` |  | A message whose auth events are not exactly the selection from the state at its prev events is rejected. Room version 12 does not cite m.room.create. |
 | `ss.pdu.rejection` | [Rejection](https://spec.matrix.org/v1.19/server-server-api/#rejection) | tested | `conduit-server/src/federation/pipeline.rs` | `production_pdu.rs::auth_event_selection_rejects_and_current_state_soft_fails` |  | The transaction stays 200. The PDU is stored and omitted from client sync, federation GET /event, and later prev_events. Current state is unchanged. |
 | `ss.pdu.soft-failure` | [Soft failure](https://spec.matrix.org/v1.19/server-server-api/#soft-failure) | tested | `conduit-server/src/federation/pipeline.rs` | `production_pdu.rs::auth_event_selection_rejects_and_current_state_soft_fails`<br>`production_pdu.rs::soft_failed_topic_is_omitted_until_referenced_and_syncs_when_selected` |  | Stored, hidden from client sync until resolution selects it, omitted from new prev_events, and returned by federation GET /event. Backfill and get_missing_events return a soft-failed event only when a named event lists it in prev_events or auth_events. A later resolution that selects a soft-failed state event is pushed to clients. |
-| `ss.edus` | [EDUs (general)](https://spec.matrix.org/v1.19/server-server-api/#edus) | partial | `conduit-server/src/federation/server.rs:951` | `production_pdu.rs::send_applies_acl_per_pdu_and_inbound_edus` | `conduit-y99.32` | Inbound typing, receipt, presence, and signing-key updates are applied. Typing and receipt EDUs for an ACL-denied room are ignored. Outbound EDU fanout remains. |
+| `ss.edus` | [EDUs (general)](https://spec.matrix.org/v1.19/server-server-api/#edus) | tested | `conduit-server/src/federation/server.rs`<br>`conduit-server/src/api/client/typing.rs`<br>`conduit-server/src/api/client/receipts.rs`<br>`conduit-server/src/api/client/presence.rs` | `production_pdu.rs::send_applies_acl_per_pdu_and_inbound_edus`<br>`presence.rs::local_typing_is_federated_to_joined_remote_servers`<br>`presence.rs::local_public_receipt_is_federated_and_private_is_not`<br>`presence.rs::local_presence_is_federated_to_servers_that_share_a_room`<br>`production_sync.rs::signing_key_updates_federate_and_keys_query_merges_cross_signing` |  | Inbound typing, receipt, presence, and signing-key updates are applied. Typing and receipt EDUs for an ACL-denied room are ignored. Outbound typing, public receipts, presence, and signing-key updates go to servers with a joined member. A left server is not a destination. Private receipts are not federated. |
 | `ss.state-res` | [Room state resolution](https://spec.matrix.org/v1.19/server-server-api/#room-state-resolution) | partial | `conduit/src/room/state_res.rs` | `conduit/src/room/state_res.rs (unit tests)` | `conduit-y99.23` `conduit-s6m` | State res v2 only. |
 | `ss.backfill` | [Backfilling and retrieving missing events](https://spec.matrix.org/v1.19/server-server-api/#backfilling-and-retrieving-missing-events) | tested | `conduit-server/src/federation/server.rs`<br>`conduit-server/src/federation/client.rs` | `production_pdu.rs::backfill_returns_the_named_events_and_their_predecessors`<br>`production_pdu.rs::get_missing_events_returns_prev_events_between_the_bounds` (+1) |  | Backfill returns the named events and their predecessors. get_missing_events walks prev_events of latest_events and stops at earliest_events. |
 | `ss.retrieving-events` | [Retrieving events (event, state, state_ids, timestamp_to_event)](https://spec.matrix.org/v1.19/server-server-api/#retrieving-events) | partial |  | `production_pdu.rs::state_ids_are_the_room_state_before_the_event` | `conduit-y99.22` `conduit-embed-pdu` | state and state_ids return the resolved state before the requested event. timestamp_to_event remains open. |
