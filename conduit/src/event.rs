@@ -184,16 +184,29 @@ pub fn classify(saved_event_id: &str, pdu: &Pdu) -> IntegrityClass {
 
 /// A PDU that may be put on the federation wire.
 ///
-/// The only constructor is [`WirePdu::checked`]: the PDU's reference hash
-/// must equal the expected ID. A content-hash mismatch yields the v11
-/// redaction (the form every peer would compute); an ID mismatch yields
-/// nothing. Authored, co-signed, stored and legacy-queued PDUs all go through
-/// it, so no emitter can send bytes that do not reproduce their identity.
-#[derive(Debug, Clone, Serialize, PartialEq)]
-#[serde(transparent)]
-pub struct WirePdu(Pdu);
+/// [`WirePdu::checked`] accepts a v11 reference hash. [`WirePdu::checked_for_version`]
+/// accepts the id [`crate::room_version::event_id_for`] derives, which is
+/// standard base64 in room version 3. A content-hash mismatch yields the v11
+/// redaction; an ID mismatch yields nothing. The stored id is what emitters
+/// put in the request path. Serialization is the PDU alone: room versions 3
+/// and later do not carry `event_id` on the wire.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WirePdu {
+    pdu: Pdu,
+    event_id: String,
+}
+
+impl Serialize for WirePdu {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.pdu.serialize(serializer)
+    }
+}
 
 impl WirePdu {
+    fn bundle(event_id: impl Into<String>, pdu: Pdu) -> WirePdu {
+        WirePdu { pdu, event_id: event_id.into() }
+    }
+
     pub fn checked(expected_event_id: &str, pdu: Pdu) -> Option<WirePdu> {
         Self::checked_with_class(expected_event_id, pdu).map(|(wire, _)| wire)
     }
@@ -201,14 +214,27 @@ impl WirePdu {
     /// Like [`WirePdu::checked`], also returning the classification.
     pub fn checked_with_class(expected_event_id: &str, pdu: Pdu) -> Option<(WirePdu, IntegrityClass)> {
         match classify(expected_event_id, &pdu) {
-            IntegrityClass::Verified => Some((WirePdu(pdu), IntegrityClass::Verified)),
+            IntegrityClass::Verified => Some((Self::bundle(expected_event_id, pdu), IntegrityClass::Verified)),
             IntegrityClass::ContentMismatch => Some((
-                WirePdu(crate::redaction::redact(&pdu)),
+                Self::bundle(expected_event_id, crate::redaction::redact(&pdu)),
                 IntegrityClass::ContentMismatch,
             )),
-            IntegrityClass::Redacted => Some((WirePdu(pdu), IntegrityClass::Redacted)),
+            IntegrityClass::Redacted => Some((Self::bundle(expected_event_id, pdu), IntegrityClass::Redacted)),
             IntegrityClass::IdMismatch => None,
         }
+    }
+
+    /// An authored PDU whose reference hash is the one `version` defines.
+    ///
+    /// Room version 3 uses standard base64. Versions 4 and later use URL-safe
+    /// base64, with the version's own redaction. Versions 1 and 2 have no
+    /// derived id.
+    pub fn checked_for_version(version: u32, pdu: Pdu) -> Option<WirePdu> {
+        let event_id = crate::room_version::event_id_for(&pdu, version).ok().flatten()?;
+        if !crate::hashing::content_hash_matches(&pdu).unwrap_or(false) {
+            return None;
+        }
+        Some(Self::bundle(event_id, pdu))
     }
 
     /// A PDU whose reference hash still equals `expected_event_id`.
@@ -218,29 +244,29 @@ impl WirePdu {
     /// version still protects (for example `aliases` through version 5).
     pub fn retained(expected_event_id: &str, pdu: Pdu) -> Option<WirePdu> {
         match crate::hashing::event_id(&pdu) {
-            Ok(derived) if derived == expected_event_id => Some(WirePdu(pdu)),
+            Ok(derived) if derived == expected_event_id => Some(Self::bundle(expected_event_id, pdu)),
             _ => None,
         }
     }
 
     pub fn pdu(&self) -> &Pdu {
-        &self.0
+        &self.pdu
     }
 
     pub fn into_pdu(self) -> Pdu {
-        self.0
+        self.pdu
     }
 
-    /// The reference-hash event ID of this PDU.
+    /// The event id this PDU was admitted under.
     pub fn event_id(&self) -> String {
-        crate::hashing::event_id(&self.0).expect("checked PDU hashes")
+        self.event_id.clone()
     }
 }
 
 impl Deref for WirePdu {
     type Target = Pdu;
     fn deref(&self) -> &Pdu {
-        &self.0
+        &self.pdu
     }
 }
 

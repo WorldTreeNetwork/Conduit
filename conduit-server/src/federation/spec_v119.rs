@@ -1235,6 +1235,19 @@ async fn verify_v1_signature(state: &FedState, event: &Value, origin: &str) -> R
     Ok(())
 }
 
+/// Hash and sign a room-version-1 or 2 event. `event_id` is already set.
+/// The signature covers the v1 redaction, including `event_id` and the
+/// tuple form of `auth_events` and `prev_events`.
+pub(crate) fn seal_v1_event(event: &mut Value, server_key: &conduit::keys::ServerKey, server_name: &str) -> Result<(), ()> {
+    let object = event.as_object_mut().ok_or(())?;
+    object.remove("signatures");
+    object.remove("hashes");
+    object.remove("unsigned");
+    let digest = v1_content_digest(event)?;
+    event["hashes"] = json!({ "sha256": STANDARD_NO_PAD.encode(digest) });
+    insert_v1_signature(event, server_key, server_name)
+}
+
 fn insert_v1_signature(event: &mut Value, server_key: &conduit::keys::ServerKey, server_name: &str) -> Result<(), ()> {
     let bytes = v1_signing_bytes(event)?;
     let signature = server_key.signing_key.sign(&bytes);

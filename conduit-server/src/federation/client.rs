@@ -608,6 +608,23 @@ impl Client {
         self.signed_put(dest, &path, pdu).await
     }
 
+    /// `PUT /_matrix/federation/v1/send_join/{roomId}/{eventId}` for room versions 1 and 2.
+    /// The body is the event itself, including `event_id`.
+    pub async fn send_join_v1(
+        &self,
+        dest: &str,
+        room_id: &str,
+        event: &Value,
+    ) -> Result<SendJoinResponse, FederationError> {
+        let event_id = event.get("event_id").and_then(Value::as_str).unwrap_or("");
+        let path = format!(
+            "/_matrix/federation/v1/send_join/{}/{}",
+            urlencoding(room_id),
+            urlencoding(event_id)
+        );
+        self.signed_put(dest, &path, event).await
+    }
+
     /// `PUT /_matrix/federation/v1/exchange_third_party_invite/{roomId}`
     ///
     /// `body` is the partial `m.room.member` invite. The inviting server

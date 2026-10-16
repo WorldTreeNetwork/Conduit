@@ -200,8 +200,47 @@ pub fn sign_json(mut object: Value, server_key: &ServerKey, name: &str) -> Resul
 }
 
 pub fn sign_authored(pdu: &mut Pdu, server_key: &ServerKey, server_name: &str) -> Result<(), SigningError> {
+    sign_authored_for_version(pdu, 11, server_key, server_name)
+}
+
+/// Sign a PDU with the redaction rules of `version`.
+///
+/// The content hash is not versioned. The signature covers
+/// [`crate::room_version::redact_pdu`] for that version, so room version 3
+/// still signs `origin`, `membership`, and `prev_state`. Versions 11 and
+/// later use the same bytes as [`sign_authored`].
+pub fn sign_authored_for_version(
+    pdu: &mut Pdu,
+    version: u32,
+    server_key: &ServerKey,
+    server_name: &str,
+) -> Result<(), SigningError> {
     pdu.hashes = serde_json::json!({ "sha256": content_hash(pdu)? });
-    insert_signature(pdu, server_key, server_name)?;
+    if version >= 11 {
+        insert_signature(pdu, server_key, server_name)?;
+    } else {
+        let redacted = crate::room_version::redact_pdu(pdu, version);
+        let mut value = serde_json::to_value(&redacted)?;
+        if let Some(map) = value.as_object_mut() {
+            map.remove("signatures");
+            map.remove("unsigned");
+        }
+        let bytes = to_canonical_bytes(&value)?;
+        let signature = server_key.signing_key.sign(&bytes);
+        let sig_b64 = STANDARD_NO_PAD.encode(signature.to_bytes());
+        if !pdu.signatures.is_object() {
+            pdu.signatures = serde_json::json!({});
+        }
+        let sigs = pdu.signatures.as_object_mut().expect("just ensured object");
+        let server_obj = sigs.entry(server_name.to_owned()).or_insert_with(|| serde_json::json!({}));
+        if !server_obj.is_object() {
+            *server_obj = serde_json::json!({});
+        }
+        server_obj
+            .as_object_mut()
+            .expect("just ensured object")
+            .insert(server_key.key_id.clone(), serde_json::Value::String(sig_b64));
+    }
     let size = to_canonical_bytes(pdu)?.len();
     if size > MAX_AUTHORED_PDU_BYTES {
         return Err(SigningError::TooLarge { size, limit: MAX_AUTHORED_PDU_BYTES });

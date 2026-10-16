@@ -9,6 +9,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::extract::{Json, Path};
+use axum::http::StatusCode;
+use axum::response::IntoResponse;
 use axum::routing::{get, put};
 use axum::Router;
 use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine as _};
@@ -383,4 +385,268 @@ async fn remote_knock_uses_make_knock_and_send_knock() {
         sync["rooms"]["knock"].get(room).is_some(),
         "knock was not stored for /sync: {sync}"
     );
+}
+
+#[tokio::test]
+async fn remote_invite_refusal_fails_and_drops_membership() {
+    let sent = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let sent_route = Arc::clone(&sent);
+    let url = serve(
+        Arc::new(generate_server_key()),
+        Router::new()
+            .route(
+                "/_matrix/federation/v2/invite/:room_id/:event_id",
+                put(|| async {
+                    (
+                        StatusCode::FORBIDDEN,
+                        Json(json!({"errcode": "M_FORBIDDEN", "error": "no thanks"})),
+                    )
+                }),
+            )
+            .route(
+                "/_matrix/federation/v1/send/:txn",
+                put(move |Json(body): Json<Value>| {
+                    let sent = Arc::clone(&sent_route);
+                    async move {
+                        sent.lock().unwrap().push(body);
+                        Json(json!({ "pdus": {} }))
+                    }
+                }),
+            ),
+    )
+    .await;
+    let server = Server::with_env(&[
+        ("CONDUIT_FEDERATION", "1"),
+        ("CONDUIT_FEDERATION_BASE_URL", url.as_str()),
+        ("CONDUIT_REMOTE_KEYS_OVERRIDE", url.as_str()),
+    ])
+    .await;
+    let alice = server.register("alice").await;
+    let token = alice["access_token"].as_str().unwrap();
+    let room = server
+        .request(Method::POST, "/_matrix/client/v3/createRoom", Some(token), Some(json!({"preset": "private_chat"})), 200)
+        .await["room_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let pool = sqlx::PgPool::connect(&server.database_url).await.unwrap();
+    let storage = conduit_server::PostgresStorage::new(pool.clone());
+    let joined = "@joined:peer.test";
+    let member = Event::new(
+        "$member-join-joined-peer-test",
+        Pdu::new(&room, joined, "m.room.member", Some(joined.to_owned()), json!({"membership": "join"}), 1_700_000_000_000, vec![], vec![], 40),
+    );
+    storage.put_event(&member).await.unwrap();
+    storage.set_state_entry(&room, "m.room.member", joined, &member.event_id).await.unwrap();
+
+    let invitee = "@refused:peer.test";
+    let refused = server
+        .request(
+            Method::POST,
+            &format!("/_matrix/client/v3/rooms/{}/invite", enc(&room)),
+            Some(token),
+            Some(json!({"user_id": invitee})),
+            403,
+        )
+        .await;
+    assert_eq!(refused["errcode"], "M_FORBIDDEN", "{refused}");
+    assert!(
+        storage.get_state_entry(&room, "m.room.member", invitee).await.unwrap().is_none(),
+        "refused invite is still the membership"
+    );
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let bodies = sent.lock().unwrap().clone();
+    assert!(
+        bodies.iter().all(|body| !body.to_string().contains(invitee)),
+        "refused invite was sent: {bodies:?}"
+    );
+    let queued: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM fed_outbound_queue WHERE payload_text LIKE $1",
+    )
+    .bind(format!("%{invitee}%"))
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(queued, 0, "refused invite is still queued");
+}
+
+fn percent_decode(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            if let Ok(value) = u8::from_str_radix(&input[index + 1..index + 3], 16) {
+                out.push(value);
+                index += 3;
+                continue;
+            }
+        }
+        out.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8(out).unwrap()
+}
+
+fn event_id_from_send_path(path: &str) -> String {
+    let rest = path.split("/send_join/").nth(1).unwrap_or(path);
+    let encoded = rest.split('/').nth(1).unwrap_or(rest);
+    percent_decode(encoded)
+}
+
+#[tokio::test]
+async fn remote_join_room_version_3_uses_standard_base64_event_id() {
+    let room = "!outv3:peer.test";
+    let captured = Arc::new(Mutex::new(Vec::<(String, Value)>::new()));
+    let make_room = room.to_owned();
+    let send_captured = Arc::clone(&captured);
+    let url = serve(
+        Arc::new(generate_server_key()),
+        Router::new()
+            .route(
+                "/_matrix/federation/v1/make_join/:room_id/:user_id",
+                get(move |Path((room_id, user_id)): Path<(String, String)>| {
+                    let room = make_room.clone();
+                    async move {
+                        assert_eq!(room_id, room);
+                        Json(json!({
+                            "room_version": "3",
+                            "event": {
+                                "type": "m.room.member",
+                                "room_id": room_id,
+                                "sender": user_id,
+                                "state_key": user_id,
+                                "content": { "membership": "join" },
+                                "auth_events": [],
+                                "prev_events": [],
+                                "depth": 2,
+                                "origin": PEER,
+                                "origin_server_ts": 1_700_000_000_000u64
+                            }
+                        }))
+                    }
+                }),
+            )
+            .fallback(move |request: axum::extract::Request| {
+                let captured = Arc::clone(&send_captured);
+                async move {
+                    let path = request.uri().path().to_owned();
+                    if !path.contains("/send_join/") {
+                        return (StatusCode::NOT_FOUND, Json(json!({}))).into_response();
+                    }
+                    let bytes = axum::body::to_bytes(request.into_body(), 1024 * 1024).await.unwrap();
+                    let body: Value = serde_json::from_slice(&bytes).unwrap();
+                    captured.lock().unwrap().push((path, body));
+                    Json(json!({ "state": [], "auth_chain": [] })).into_response()
+                }
+            }),
+    )
+    .await;
+    let server = Server::with_env(&[
+        ("CONDUIT_FEDERATION", "1"),
+        ("CONDUIT_FEDERATION_BASE_URL", url.as_str()),
+    ])
+    .await;
+    let alice = server.register("alice").await;
+    let token = alice["access_token"].as_str().unwrap();
+    let alice_id = alice["user_id"].as_str().unwrap().to_owned();
+    let joined = server
+        .request(
+            Method::POST,
+            &format!("/_matrix/client/v3/join/{}?via={PEER}", enc(room)),
+            Some(token),
+            Some(json!({})),
+            200,
+        )
+        .await;
+    assert_eq!(joined["room_id"], room);
+    let seen = captured.lock().unwrap().clone();
+    let (path, body) = seen.first().expect("send_join was not called").clone();
+    assert!(path.contains("/_matrix/federation/v2/send_join/"), "room version 3 left v2: {path}");
+    let pdu: Pdu = serde_json::from_value(body).expect("send_join body");
+    let expected = conduit::room_version::event_id_for(&pdu, 3).ok().flatten().expect("version 3 event id");
+    let v11 = conduit::hashing::event_id(&pdu).unwrap();
+    assert_ne!(expected, v11, "version 3 id collapsed to the v11 reference hash");
+    assert!(!expected[1..].contains('_') && !expected[1..].contains('-'), "version 3 id is not standard base64: {expected}");
+    assert_eq!(event_id_from_send_path(&path), expected);
+    let pool = sqlx::PgPool::connect(&server.database_url).await.unwrap();
+    let storage = conduit_server::PostgresStorage::new(pool);
+    let member = storage.get_state_entry(room, "m.room.member", &alice_id).await.unwrap().expect("join missing");
+    assert_eq!(member.event_id, expected);
+    assert_eq!(member.content["membership"], "join");
+}
+
+#[tokio::test]
+async fn remote_join_room_version_2_uses_v1_event_format() {
+    let room = "!outv1:peer.test";
+    let captured = Arc::new(Mutex::new(Vec::<(String, Value)>::new()));
+    let send_captured = Arc::clone(&captured);
+    let url = serve(
+        Arc::new(generate_server_key()),
+        Router::new()
+            .route(
+                "/_matrix/federation/v1/make_join/:room_id/:user_id",
+                get(move |Path((room_id, user_id)): Path<(String, String)>| async move {
+                    Json(json!({
+                        "room_version": "2",
+                        "event": {
+                            "type": "m.room.member",
+                            "room_id": room_id,
+                            "sender": user_id,
+                            "state_key": user_id,
+                            "content": { "membership": "join" },
+                            "auth_events": [["$create:peer.test", {"sha256": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}]],
+                            "prev_events": [["$prev:peer.test", {"sha256": "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"}]],
+                            "depth": 2,
+                            "origin_server_ts": 1_700_000_000_000u64
+                        }
+                    }))
+                }),
+            )
+            .fallback(move |request: axum::extract::Request| {
+                let captured = Arc::clone(&send_captured);
+                async move {
+                    let path = request.uri().path().to_owned();
+                    if !path.contains("/send_join/") {
+                        return (StatusCode::NOT_FOUND, Json(json!({}))).into_response();
+                    }
+                    let bytes = axum::body::to_bytes(request.into_body(), 1024 * 1024).await.unwrap();
+                    let body: Value = serde_json::from_slice(&bytes).unwrap();
+                    captured.lock().unwrap().push((path, body));
+                    Json(json!({ "state": [], "auth_chain": [] })).into_response()
+                }
+            }),
+    )
+    .await;
+    let server = Server::with_env(&[
+        ("CONDUIT_FEDERATION", "1"),
+        ("CONDUIT_FEDERATION_BASE_URL", url.as_str()),
+    ])
+    .await;
+    let alice = server.register("alice").await;
+    let token = alice["access_token"].as_str().unwrap();
+    let alice_id = alice["user_id"].as_str().unwrap().to_owned();
+    let joined = server
+        .request(
+            Method::POST,
+            &format!("/_matrix/client/v3/join/{}?via={PEER}", enc(room)),
+            Some(token),
+            Some(json!({})),
+            200,
+        )
+        .await;
+    assert_eq!(joined["room_id"], room);
+    let seen = captured.lock().unwrap().clone();
+    let (path, body) = seen.first().expect("send_join was not called").clone();
+    assert!(path.contains("/_matrix/federation/v1/send_join/"), "room version 2 did not use v1 send_join: {path}");
+    assert!(body.get("event_id").and_then(Value::as_str).is_some_and(|id| id.starts_with('$') && id.contains(':')), "{body}");
+    assert!(body["auth_events"][0].is_array(), "v1 auth_events were flattened: {body}");
+    assert!(body["prev_events"][0].is_array(), "v1 prev_events were flattened: {body}");
+    assert!(body["signatures"].is_object(), "{body}");
+    assert_eq!(event_id_from_send_path(&path), body["event_id"].as_str().unwrap());
+    let pool = sqlx::PgPool::connect(&server.database_url).await.unwrap();
+    let storage = conduit_server::PostgresStorage::new(pool);
+    let member = storage.get_state_entry(room, "m.room.member", &alice_id).await.unwrap().expect("join missing");
+    assert_eq!(member.content["membership"], "join");
+    assert_eq!(member.event_id, body["event_id"]);
 }

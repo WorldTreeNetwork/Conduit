@@ -1879,6 +1879,7 @@
         }
       ],
       "tests": [
+        "conduit-server/tests/production_federation_out.rs::remote_invite_refusal_fails_and_drops_membership",
         "conduit-server/tests/production_federation_out.rs::remote_invite_is_delivered_and_stores_the_cosignature",
         "conduit-server/tests/production_directory.rs::knock_accept_deny_and_rescind",
         "conduit-server/tests/production_e2e.rs::production_invite_accept_and_kick_are_visible_in_sync",
@@ -1887,9 +1888,9 @@
         "conduit-server/tests/production_basics.rs::invite_blocking_rejects_invites_and_hides_pending_ones",
         "conduit-server/tests/production_basics.rs::join_by_room_id_and_membership_reasons_reach_member_events"
       ],
-      "tests_total": 7,
+      "tests_total": 8,
       "gap_beads": [],
-      "notes": "Invite by user_id with reason; 403 M_INVITE_BLOCKED for local users blocking invites. A remote invitee is offered over federation, and the stored event keeps that server's co-signature."
+      "notes": "Invite by user_id with reason; 403 M_INVITE_BLOCKED for local users blocking invites. A remote invitee is offered over federation, and the stored event keeps that server's co-signature. A remote HTTP refusal, including 403, fails the client request, retracts the membership, and is not sent to other servers."
     },
     {
       "id": "cs.ep.post_matrixclientv3joinroomidoralias",
@@ -1915,6 +1916,8 @@
         }
       ],
       "tests": [
+        "conduit-server/tests/production_federation_out.rs::remote_join_room_version_3_uses_standard_base64_event_id",
+        "conduit-server/tests/production_federation_out.rs::remote_join_room_version_2_uses_v1_event_format",
         "conduit-server/tests/production_federation_out.rs::remote_join_uses_make_join_and_stores_returned_state",
         "conduit-server/tests/production_appservice.rs::join_checks_third_party_key_validity_url",
         "conduit-server/tests/production_basics.rs::restricted_room_join_requires_space_membership",
@@ -1931,9 +1934,9 @@
         "conduit-server/tests/production_directory.rs::appservice_ping_thirdparty_and_network_directory",
         "conduit-server/tests/production_directory.rs::directory_visibility_changes_are_authorized"
       ],
-      "tests_total": 57,
+      "tests_total": 59,
       "gap_beads": [],
-      "notes": "Restricted and knock_restricted joins require membership of an allowed room and record join_authorised_via_users_server. third_party_signed checks key_validity_url before the join is stored. A room this server is not in is joined with make_join and send_join, and the returned state is stored."
+      "notes": "Restricted and knock_restricted joins require membership of an allowed room and record join_authorised_via_users_server. third_party_signed checks key_validity_url before the join is stored. A room this server is not in is joined with make_join and send_join, and the returned state is stored. Room version 3 uses the standard-base64 reference hash. Room versions 1 and 2 use the v1 event format and send_join v1."
     },
     {
       "id": "cs.ep.post_matrixclientv3roomsroomidjoin",
@@ -9119,15 +9122,17 @@
         }
       ],
       "tests": [
+        "conduit-server/tests/production_federation_out.rs::remote_join_room_version_3_uses_standard_base64_event_id",
+        "conduit-server/tests/production_federation_out.rs::remote_join_room_version_2_uses_v1_event_format",
         "conduit-server/tests/production_federation_out.rs::remote_join_uses_make_join_and_stores_returned_state",
         "conduit-server/tests/production_pdu.rs::send_join_returns_state_from_before_the_join",
         "conduit-server/tests/production_pdu.rs::make_join_rejects_room_versions_missing_from_ver",
         "conduit-server/tests/federation_roundtrip.rs::rt3_join_room_on_a",
         "conduit-server/tests/federation_inbound.rs::make_send_join_roundtrip"
       ],
-      "tests_total": 5,
+      "tests_total": 7,
       "gap_beads": [],
-      "notes": "make_join negotiates ver and returns M_INCOMPATIBLE_ROOM_VERSION with room_version. Outbound make_join advertises versions 1-12. send_join state is the resolved room state before the join, and the accepted membership is stored. A client join of a remote room calls make_join and send_join and stores the returned state."
+      "notes": "make_join negotiates ver and returns M_INCOMPATIBLE_ROOM_VERSION with room_version. Outbound make_join advertises versions 1-12. send_join state is the resolved room state before the join, and the accepted membership is stored. A client join of a remote room calls make_join and send_join and stores the returned state. Room version 3 event ids use standard base64. Room versions 1 and 2 are sent with the v1 event format on send_join v1."
     },
     {
       "id": "ss.joining.restricted",
@@ -9200,15 +9205,16 @@
         }
       ],
       "tests": [
+        "conduit-server/tests/production_federation_out.rs::remote_invite_refusal_fails_and_drops_membership",
         "conduit-server/tests/production_federation_out.rs::remote_invite_is_delivered_and_stores_the_cosignature",
         "conduit-server/tests/production_e2e.rs::production_chat_survives_restart",
         "conduit-server/tests/production_pdu.rs::ss_membership_v1_invite_keeps_v1_bytes",
         "conduit-server/tests/production_pdu.rs::ss_membership_v2_invite_keeps_every_field_but_the_resident_signature",
         "conduit-server/tests/production_pdu.rs::ss_membership_v2_invite_amends_the_original_event_and_checks_room_state"
       ],
-      "tests_total": 5,
+      "tests_total": 6,
       "gap_beads": [],
-      "notes": "v1 and v2 invites co-sign by inserting this server's signature into the received event object. Removing that signature restores the received JSON bytes, including key order. Room versions other than 1-11 reject invite_room_state that lacks m.room.create, is ill-formatted, or names another room, with 400 M_INVALID_PARAM. Versions 1-11 still accept that state. An outbound invite of a remote user is delivered, and the stored event keeps the co-signature."
+      "notes": "v1 and v2 invites co-sign by inserting this server's signature into the received event object. Removing that signature restores the received JSON bytes, including key order. Room versions other than 1-11 reject invite_room_state that lacks m.room.create, is ill-formatted, or names another room, with 400 M_INVALID_PARAM. Versions 1-11 still accept that state. An outbound invite of a remote user is delivered, and the stored event keeps the co-signature. An HTTP refusal from the invitee's server fails the inviting client and does not leave the invite as membership."
     },
     {
       "id": "ss.leaving",

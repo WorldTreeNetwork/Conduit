@@ -2,9 +2,11 @@
 //! delivery of a normal invite to the invitee's server.
 //!
 //! Resident rooms keep the local authoring path. A room with no `m.room.create`
-//! is joined or knocked through `make_*` / `send_*`. A remote invite is stored
-//! locally, offered over `/invite`, and the co-signed PDU replaces the row
-//! when the invitee answers.
+//! is joined or knocked through `make_*` / `send_*`. Room versions 1 and 2 use
+//! the v1 event format and `/send_join` v1. A remote invite is stored locally
+//! and offered over `/invite`. An answered refusal retracts that membership.
+//! A co-signed acceptance replaces the row. An unreachable invitee leaves the
+//! local invite in place.
 
 use std::future::Future;
 use std::time::Duration;
@@ -14,7 +16,7 @@ use axum::response::{IntoResponse, Response};
 use serde_json::{json, Value};
 
 use conduit::event::{Event, Pdu, WirePdu};
-use conduit::signing::{server_of_user_id, sign_authored};
+use conduit::signing::server_of_user_id;
 use conduit::storage::Storage;
 
 use super::event_pipeline::fan_out_authored;
@@ -115,6 +117,52 @@ async fn fill_profile(storage: &dyn Storage, sender: &str, event: &mut Value) {
     }
 }
 
+enum SignedMembership {
+    /// Room versions 3 and later. The path id is `event_id_for`.
+    Modern(WirePdu),
+    /// Room versions 1 and 2. The body includes `event_id`.
+    Legacy(Value),
+}
+
+fn sign_legacy_membership<S: AuthState>(
+    state: &S,
+    room_id: &str,
+    sender: &str,
+    membership: &str,
+    mut event: Value,
+    reason: Option<&str>,
+) -> Result<Value, Response> {
+    let Some(object) = event.as_object_mut() else {
+        return Err(MatrixError::invalid_param("membership template is not a supported event").into_response());
+    };
+    if object.get("room_id").and_then(Value::as_str).unwrap_or("").is_empty() {
+        object.insert("room_id".into(), json!(room_id));
+    }
+    if object.get("sender").and_then(Value::as_str) != Some(sender)
+        || object.get("state_key").and_then(Value::as_str) != Some(sender)
+        || object.get("type").and_then(Value::as_str) != Some("m.room.member")
+    {
+        return Err(MatrixError::invalid_param("membership template does not name this user").into_response());
+    }
+    if object.get("content").and_then(|content| content.get("membership")).and_then(Value::as_str) != Some(membership) {
+        return Err(MatrixError::invalid_param("membership template has the wrong membership").into_response());
+    }
+    if let Some(reason) = reason.filter(|reason| !reason.is_empty()) {
+        if let Some(content) = object.get_mut("content").and_then(Value::as_object_mut) {
+            content.insert("reason".into(), json!(reason));
+        }
+    }
+    object.entry("origin".to_owned()).or_insert_with(|| json!(state.server_name()));
+    let timestamp = object.get("origin_server_ts").and_then(Value::as_u64).unwrap_or_else(crate::federation::now_ms);
+    object.insert("origin_server_ts".into(), json!(timestamp));
+    object.remove("room_version");
+    let event_id = format!("${}:{}", uuid::Uuid::new_v4().simple(), state.server_name());
+    object.insert("event_id".into(), json!(event_id));
+    crate::federation::spec_v119::seal_v1_event(&mut event, state.server_key().as_ref(), state.server_name())
+        .map_err(|_| MatrixError::unknown("signing error: v1 membership").into_response())?;
+    Ok(event)
+}
+
 fn sign_template<S: AuthState>(
     state: &S,
     room_id: &str,
@@ -123,7 +171,7 @@ fn sign_template<S: AuthState>(
     event: Value,
     reason: Option<&str>,
     minimum_version: u32,
-) -> Result<(WirePdu, String), Response> {
+) -> Result<(SignedMembership, String), Response> {
     let version = event
         .get("room_version")
         .and_then(Value::as_str)
@@ -131,6 +179,15 @@ fn sign_template<S: AuthState>(
     let mut template = event;
     if let Some(object) = template.as_object_mut() {
         object.remove("room_version");
+    }
+    let version = version.unwrap_or_else(|| "11".into());
+    let parsed = conduit::room_version::parse(&version).unwrap_or(0);
+    if parsed == 0 || parsed < minimum_version {
+        return Err(incompatible(&version));
+    }
+    if parsed < 3 {
+        let legacy = sign_legacy_membership(state, room_id, sender, membership, template, reason)?;
+        return Ok((SignedMembership::Legacy(legacy), version));
     }
     let mut pdu: Pdu = serde_json::from_value(template)
         .map_err(|_| MatrixError::invalid_param("membership template is not a supported event").into_response())?;
@@ -143,22 +200,15 @@ fn sign_template<S: AuthState>(
     if pdu.content.get("membership").and_then(Value::as_str) != Some(membership) {
         return Err(MatrixError::invalid_param("membership template has the wrong membership").into_response());
     }
-    let version = version.unwrap_or_else(|| "11".into());
-    let parsed = conduit::room_version::parse(&version).unwrap_or(0);
-    if parsed < minimum_version || parsed < 3 {
-        return Err(incompatible(&version));
-    }
     if let Some(reason) = reason.filter(|reason| !reason.is_empty()) {
         pdu.content["reason"] = json!(reason);
     }
-    sign_authored(&mut pdu, &state.server_key(), state.server_name()).map_err(|error| {
+    conduit::signing::sign_authored_for_version(&mut pdu, parsed, state.server_key().as_ref(), state.server_name()).map_err(|error| {
         MatrixError::unknown(format!("signing error: {error}")).into_response()
     })?;
-    let event_id = conduit::hashing::event_id(&pdu)
-        .map_err(|error| MatrixError::unknown(format!("event_id error: {error}")).into_response())?;
-    let wire = WirePdu::checked(&event_id, pdu)
+    let wire = WirePdu::checked_for_version(parsed, pdu)
         .ok_or_else(|| MatrixError::unknown("signed membership does not reproduce its event id").into_response())?;
-    Ok((wire, version))
+    Ok((SignedMembership::Modern(wire), version))
 }
 
 async fn store_join_state(
@@ -189,13 +239,16 @@ async fn store_join_state(
     Ok(())
 }
 
-async fn store_signed_membership<S: AuthState>(state: &S, wire: WirePdu) -> Result<(), Response> {
-    let event = Event::new(wire.event_id(), wire.into_pdu());
+async fn store_event<S: AuthState>(state: &S, event: Event) -> Result<(), Response> {
     state.storage().publish_event(&event).await.map_err(|error| MatrixError::unknown(error.to_string()).into_response())?;
     if let Ok(position) = state.storage().global_max_stream_position().await {
         let _ = state.events_tx().send(position);
     }
     Ok(())
+}
+
+async fn store_signed_membership<S: AuthState>(state: &S, wire: WirePdu) -> Result<(), Response> {
+    store_event(state, Event::new(wire.event_id(), wire.into_pdu())).await
 }
 
 /// `make_join` + `send_join` against `via` and the room's own server.
@@ -230,19 +283,40 @@ pub(crate) async fn join_remote_room<S: AuthState>(
             }
         }
         fill_profile(state.storage().as_ref(), sender, &mut template).await;
-        let (wire, _) = match sign_template(state, room_id, sender, "join", template, reason, 3) {
-            Ok(signed) => signed,
+        let signed = match sign_template(state, room_id, sender, "join", template, reason, 1) {
+            Ok((signed, _)) => signed,
             Err(response) => return Err(response),
         };
-        let sent = match attempt(client.send_join(&dest, room_id, &wire)).await {
-            Ok(sent) => sent,
-            Err(error) => {
-                last = error;
-                continue;
+        match signed {
+            SignedMembership::Modern(wire) => {
+                let sent = match attempt(client.send_join(&dest, room_id, &wire)).await {
+                    Ok(sent) => sent,
+                    Err(error) => {
+                        last = error;
+                        continue;
+                    }
+                };
+                store_join_state(state.storage().as_ref(), client, room_id, wire.pdu(), sent.state, sent.auth_chain).await?;
+                store_signed_membership(state, wire).await?;
             }
-        };
-        store_join_state(state.storage().as_ref(), client, room_id, wire.pdu(), sent.state, sent.auth_chain).await?;
-        store_signed_membership(state, wire).await?;
+            SignedMembership::Legacy(event) => {
+                let sent = match attempt(client.send_join_v1(&dest, room_id, &event)).await {
+                    Ok(sent) => sent,
+                    Err(error) => {
+                        last = error;
+                        continue;
+                    }
+                };
+                let decoded = conduit::wire::decode_pdu_for_version(event, 1, crate::federation::now_ms()).map_err(|error| {
+                    MatrixError::unknown(format!("v1 join does not decode: {error}")).into_response()
+                })?;
+                store_join_state(state.storage().as_ref(), client, room_id, &decoded.pdu, sent.state, sent.auth_chain).await?;
+                let Some(event_id) = decoded.explicit_event_id else {
+                    return Err(MatrixError::unknown("v1 join is missing event_id").into_response());
+                };
+                store_event(state, Event { event_id, pdu: decoded.pdu, unsigned: decoded.unsigned }).await?;
+            }
+        }
         return Ok(room_id.to_owned());
     }
     Err(bad_gateway(last))
@@ -279,33 +353,72 @@ pub(crate) async fn join_remote_alias<S: AuthState>(
     join_remote_room(state, sender, &room_id, &lookup, reason).await
 }
 
-/// Offer a stored invite to the invitee's server. A delivery failure leaves
-/// the local event in place; the caller still answers 200.
-pub(crate) async fn deliver_remote_invite<S: AuthState>(state: &S, room_id: &str, event_id: &str) {
+enum InviteFailure {
+    /// The invitee's server answered with an error status.
+    Remote { status: u16, body: String },
+    /// No HTTP answer: DNS, connection, or timeout.
+    Unreachable(String),
+}
+
+async fn attempt_invite<T>(
+    future: impl Future<Output = Result<T, crate::federation::FederationError>>,
+) -> Result<T, InviteFailure> {
+    match tokio::time::timeout(ATTEMPT, future).await {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(crate::federation::FederationError::RemoteError { status, body })) => {
+            Err(InviteFailure::Remote { status, body })
+        }
+        Ok(Err(error)) => Err(InviteFailure::Unreachable(error.to_string())),
+        Err(_) => Err(InviteFailure::Unreachable("timed out".into())),
+    }
+}
+
+fn refusal(status: u16, body: &str) -> Response {
+    let code = StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY);
+    let parsed: Value = serde_json::from_str(body).unwrap_or(Value::Null);
+    let message = parsed
+        .get("error")
+        .and_then(Value::as_str)
+        .unwrap_or("The invitee's server rejected the invite");
+    let errcode = if code == StatusCode::FORBIDDEN { "M_FORBIDDEN" } else { "M_UNKNOWN" };
+    MatrixError::forwarded(code, errcode, message).into_response()
+}
+
+/// Offer a stored invite to the invitee's server.
+///
+/// An HTTP error, including 403, fails the client request and retracts the
+/// invite. No answer from the peer leaves the local invite in place.
+pub(crate) async fn deliver_remote_invite<S: AuthState>(state: &S, room_id: &str, event_id: &str) -> Result<(), Response> {
     if !federation_enabled() {
-        return;
+        return Ok(());
     }
-    let Some(client) = state.federation_client() else { return };
-    let Ok(Some(event)) = state.storage().get_event(event_id).await else { return };
-    let Some(target) = event.state_key.as_deref() else { return };
-    let Some(dest) = server_of_user_id(target) else { return };
+    let Some(client) = state.federation_client() else { return Ok(()) };
+    let Ok(Some(event)) = state.storage().get_event(event_id).await else { return Ok(()) };
+    let Some(target) = event.state_key.clone() else { return Ok(()) };
+    let Some(dest) = server_of_user_id(&target).map(str::to_owned) else { return Ok(()) };
     if dest == state.server_name() {
-        return;
+        return Ok(());
     }
-    let Some(wire) = WirePdu::checked(event_id, event.pdu.clone()) else { return };
-    let Ok(version) = room_version_of(state.storage().as_ref(), room_id).await else { return };
-    let Ok(stripped) = stripped_state(state.storage().as_ref(), room_id).await else { return };
+    let Some(wire) = WirePdu::checked(event_id, event.pdu.clone()) else { return Ok(()) };
+    let Ok(version) = room_version_of(state.storage().as_ref(), room_id).await else { return Ok(()) };
+    let Ok(stripped) = stripped_state(state.storage().as_ref(), room_id).await else { return Ok(()) };
     let parsed = conduit::room_version::parse(&version).unwrap_or(0);
     let sent = if parsed <= 2 {
-        attempt(client.invite_v1(dest, room_id, &wire)).await
+        attempt_invite(client.invite_v1(&dest, room_id, &wire)).await
     } else {
-        attempt(client.invite(dest, room_id, &version, stripped, &wire)).await
+        attempt_invite(client.invite(&dest, room_id, &version, stripped, &wire)).await
     };
     let returned = match sent {
         Ok(returned) => returned,
-        Err(error) => {
-            tracing::warn!(dest, %error, "remote invite was not accepted; the local invite stands");
-            return;
+        Err(InviteFailure::Unreachable(error)) => {
+            tracing::warn!(dest, %error, "remote invite was not answered; the local invite stands");
+            return Ok(());
+        }
+        Err(InviteFailure::Remote { status, body }) => {
+            if let Err(error) = state.storage().retract_current_membership(room_id, &target, event_id).await {
+                return Err(MatrixError::unknown(format!("invite was refused and could not be retracted: {error}")).into_response());
+            }
+            return Err(refusal(status, &body));
         }
     };
     let admitted = match crate::federation::admit::admit_cosigned_as(
@@ -313,7 +426,7 @@ pub(crate) async fn deliver_remote_invite<S: AuthState>(state: &S, room_id: &str
         &client.http,
         returned,
         &wire,
-        dest,
+        &dest,
         state.server_name(),
         &state.server_key(),
     )
@@ -322,7 +435,7 @@ pub(crate) async fn deliver_remote_invite<S: AuthState>(state: &S, room_id: &str
         Ok(admitted) => admitted,
         Err(error) => {
             tracing::warn!(dest, %error, "remote invite response was refused; the local invite stands");
-            return;
+            return Ok(());
         }
     };
     match state.storage().replace_cosigned_pdu(&admitted.into_event()).await {
@@ -330,6 +443,7 @@ pub(crate) async fn deliver_remote_invite<S: AuthState>(state: &S, room_id: &str
         Ok(false) => tracing::warn!(event_id, "co-signed invite did not replace the stored PDU"),
         Err(error) => tracing::warn!(%error, "co-signed invite was not stored"),
     }
+    Ok(())
 }
 
 pub(crate) async fn fan_out_stored<S: AuthState>(state: &S, room_id: &str, event_id: &str) {
@@ -395,8 +509,9 @@ pub(crate) async fn knock_remote_room<S: AuthState>(
             }
         }
         fill_profile(state.storage().as_ref(), sender, &mut template).await;
-        let (wire, _) = match sign_template(state, room_id, sender, "knock", template, reason, 7) {
-            Ok(signed) => signed,
+        let wire = match sign_template(state, room_id, sender, "knock", template, reason, 7) {
+            Ok((SignedMembership::Modern(wire), _)) => wire,
+            Ok((SignedMembership::Legacy(_), version)) => return Err(incompatible(&version)),
             Err(response) => return Err(response),
         };
         let sent = match attempt(client.send_knock(&dest, room_id, &wire)).await {

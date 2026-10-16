@@ -815,6 +815,37 @@ impl Storage for PostgresStorage {
         Ok(updated.rows_affected() == 1)
     }
 
+    async fn retract_current_membership(&self, room_id: &str, state_key: &str, event_id: &str) -> Result<bool> {
+        let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
+        let removed = sqlx::query(
+            "DELETE FROM room_current_state
+             WHERE room_id = $1 AND type = 'm.room.member' AND state_key = $2 AND event_id = $3",
+        )
+        .bind(room_id)
+        .bind(state_key)
+        .bind(event_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(map_sqlx)?
+        .rows_affected();
+        if removed == 0 {
+            transaction.commit().await.map_err(map_sqlx)?;
+            return Ok(false);
+        }
+        sqlx::query("DELETE FROM event_disposition WHERE event_id = $1")
+            .bind(event_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(map_sqlx)?;
+        sqlx::query("DELETE FROM events WHERE event_id = $1")
+            .bind(event_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(map_sqlx)?;
+        transaction.commit().await.map_err(map_sqlx)?;
+        Ok(true)
+    }
+
     async fn room_events(&self, room_id: &str) -> Result<Vec<Event>> {
         let rows = sqlx::query!(
             r#"

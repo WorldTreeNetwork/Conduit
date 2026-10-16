@@ -466,6 +466,13 @@ pub trait Storage: Send + Sync + 'static {
     async fn replace_cosigned_pdu(&self, _event: &Event) -> Result<bool> {
         Ok(false)
     }
+    /// Drop a membership that a remote server refused before it was sent.
+    ///
+    /// Removes the current-state pointer only when it still names `event_id`,
+    /// then deletes that event. Returns false when the pointer already moved.
+    async fn retract_current_membership(&self, _room_id: &str, _state_key: &str, _event_id: &str) -> Result<bool> {
+        Err(Error::Storage("retract_current_membership is not implemented".into()))
+    }
     async fn room_events(&self, room_id: &str) -> Result<Vec<Event>>;
 
     // --- Federation wire integrity (add-pdu-wire) ---------------------------
@@ -2134,6 +2141,18 @@ impl Storage for MemoryStorage {
             );
         }
         Ok(())
+    }
+
+    async fn retract_current_membership(&self, room_id: &str, state_key: &str, event_id: &str) -> Result<bool> {
+        let mut inner = self.inner.write().await;
+        let key = (room_id.to_owned(), "m.room.member".to_owned(), state_key.to_owned());
+        if inner.room_state.get(&key).map(String::as_str) != Some(event_id) {
+            return Ok(false);
+        }
+        inner.room_state.remove(&key);
+        inner.events.remove(event_id);
+        inner.event_positions.remove(event_id);
+        Ok(true)
     }
 
     async fn deliver_to_device_once(&self, key: &TransactionKey, local: &[ToDeviceDelivery], remote: &[OutboundDelivery]) -> Result<bool> {

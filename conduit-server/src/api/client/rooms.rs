@@ -472,7 +472,9 @@ pub async fn invite_user<S: AuthState>(
     match room.invite_with_reason(sender, &body.user_id, false, body.reason.as_deref(), &RoomEventSenderWrapper(&state)).await {
         Ok(event_id) => {
             if remote {
-                super::federated_membership::deliver_remote_invite(&state, &room_id, &event_id).await;
+                if let Err(response) = super::federated_membership::deliver_remote_invite(&state, &room_id, &event_id).await {
+                    return response;
+                }
                 super::federated_membership::fan_out_stored(&state, &room_id, &event_id).await;
             }
             (StatusCode::OK, Json(json!({}))).into_response()
