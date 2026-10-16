@@ -1075,8 +1075,11 @@ async fn federation_directory_openid_and_local_key_query() {
         .json()
         .await
         .unwrap();
-    assert_eq!(hier["rooms"][0]["room_id"], room);
-    assert_eq!(hier["rooms"][0]["join_rule"], "knock");
+    assert_eq!(hier["room"]["room_id"], room);
+    assert_eq!(hier["room"]["join_rule"], "knock");
+    assert!(hier.get("rooms").is_none(), "hierarchy is room/children, not rooms: {hier}");
+    assert_eq!(hier["children"].as_array().map(Vec::len), Some(0));
+    assert_eq!(hier["inaccessible_children"].as_array().map(Vec::len), Some(0));
 
     storage.create_account("@alice:fed.test", None).await.unwrap();
     storage
@@ -1130,6 +1133,203 @@ async fn federation_directory_openid_and_local_key_query() {
         json!({}),
         "a device with no one-time key claims as an empty object: {claimed}"
     );
+}
+
+/// Inbound hierarchy is `{room, children, inaccessible_children}`.
+/// Peekable descendants are flat in `children`. A known room the caller
+/// cannot peek is named and not walked. An unknown child stays only in
+/// `children_state`. `suggested_only` drops rooms that are not suggested.
+#[tokio::test]
+async fn federation_hierarchy_lists_peekable_descendants_and_inaccessible_children() {
+    let (addr, storage, key, _typing, _presence) = spawn_test_server("space.test").await;
+    let base = format!("http://{addr}");
+    let client = reqwest::Client::new();
+    let sender = "@alice:space.test";
+    let space = "!space:space.test";
+    let open = "!open:space.test";
+    let grand = "!grand:space.test";
+    let secret = "!secret:space.test";
+    let quiet = "!quiet:space.test";
+    let missing = "!missing:space.test";
+    let closed = "!closed:space.test";
+    let gate = "!gate:space.test";
+    let club = "!club:space.test";
+
+    async fn put(
+        storage: &MemoryStorage,
+        key: &conduit::keys::ServerKey,
+        room: &str,
+        kind: &str,
+        state_key: &str,
+        content: Value,
+        ts: u64,
+    ) {
+        let event = signed_event(
+            key,
+            "space.test",
+            Pdu::new(room, "@alice:space.test", kind, Some(state_key.into()), content, ts, vec![], vec![], 1),
+        );
+        storage.put_event(&event).await.unwrap();
+        storage.set_state_entry(room, kind, state_key, &event.event_id).await.unwrap();
+    }
+
+    for (room, name, rule, ts) in [
+        (space, "Root", "public", 1_000),
+        (open, "Open", "public", 1_100),
+        (grand, "Grand", "public", 1_200),
+        (secret, "Secret", "invite", 1_300),
+        (quiet, "Quiet", "public", 1_400),
+        (closed, "Closed", "invite", 1_500),
+        (gate, "Gate", "public", 1_600),
+        (club, "Club", "restricted", 1_700),
+    ] {
+        put(&storage, &key, room, "m.room.create", "", json!({ "room_version": "11" }), ts).await;
+        put(&storage, &key, room, "m.room.name", "", json!({ "name": name }), ts + 1).await;
+        let mut content = json!({ "join_rule": rule });
+        if rule == "restricted" {
+            content["allow"] = json!([{ "type": "m.room_membership", "room_id": gate }]);
+        }
+        put(&storage, &key, room, "m.room.join_rules", "", content, ts + 2).await;
+    }
+    put(
+        &storage,
+        &key,
+        gate,
+        "m.room.member",
+        sender,
+        json!({ "membership": "join" }),
+        1_800,
+    )
+    .await;
+    put(
+        &storage,
+        &key,
+        open,
+        "m.space.child",
+        grand,
+        json!({ "via": ["space.test"], "order": "a", "suggested": true }),
+        2_000,
+    )
+    .await;
+    for (child, order, suggested, ts) in [
+        (open, "a", true, 2_100),
+        (secret, "b", true, 2_200),
+        (missing, "c", true, 2_300),
+        (quiet, "d", false, 2_400),
+        (club, "e", true, 2_500),
+    ] {
+        put(
+            &storage,
+            &key,
+            space,
+            "m.space.child",
+            child,
+            json!({ "via": ["space.test"], "order": order, "suggested": suggested }),
+            ts,
+        )
+        .await;
+    }
+    put(
+        &storage,
+        &key,
+        space,
+        "m.space.child",
+        "!invalid:space.test",
+        json!({ "via": [], "order": "f" }),
+        2_600,
+    )
+    .await;
+    put(
+        &storage,
+        &key,
+        space,
+        "m.space.parent",
+        "!parent:space.test",
+        json!({ "via": ["space.test"] }),
+        2_700,
+    )
+    .await;
+
+    let path = format!("/_matrix/federation/v1/hierarchy/{space}");
+    let auth = sign_req("GET", &path, "space.test", "space.test", None, &key);
+    let body: Value = client
+        .get(format!("{base}{path}"))
+        .header("Authorization", auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(body.get("rooms").is_none(), "v1.19 hierarchy has no rooms array: {body}");
+    assert_eq!(body["room"]["room_id"], space);
+    assert_eq!(body["room"]["name"], "Root");
+    assert_eq!(body["room"]["guest_can_join"], false);
+    assert_eq!(body["room"]["world_readable"], false);
+    assert!(body["room"]["num_joined_members"].as_i64().unwrap() >= 0);
+    let state_keys: Vec<&str> = body["room"]["children_state"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|event| event["state_key"].as_str())
+        .collect();
+    assert_eq!(state_keys, vec![open, secret, missing, quiet, club]);
+    assert!(state_keys.iter().all(|key| *key != "!invalid:space.test" && *key != "!parent:space.test"));
+    let child_ids: Vec<&str> = body["children"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|room| room["room_id"].as_str())
+        .collect();
+    assert_eq!(child_ids, vec![open, grand, quiet, club]);
+    assert_eq!(body["children"][0]["name"], "Open");
+    assert_eq!(body["children"][1]["name"], "Grand");
+    assert_eq!(body["children"][0]["children_state"][0]["state_key"], grand);
+    assert_eq!(body["children"][3]["name"], "Club");
+    assert_eq!(body["children"][3]["join_rule"], "restricted");
+    assert_eq!(body["children"][3]["allowed_room_ids"][0], gate);
+    assert_eq!(body["inaccessible_children"], json!([secret]));
+    assert!(!child_ids.contains(&missing));
+    assert!(!body["inaccessible_children"].as_array().unwrap().iter().any(|id| id == missing));
+
+    let suggested_path = format!("/_matrix/federation/v1/hierarchy/{space}?suggested_only=true");
+    let auth = sign_req("GET", &suggested_path, "space.test", "space.test", None, &key);
+    let suggested: Value = client
+        .get(format!("{base}{suggested_path}"))
+        .header("Authorization", auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let suggested_ids: Vec<&str> = suggested["children"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|room| room["room_id"].as_str())
+        .collect();
+    assert_eq!(suggested_ids, vec![open, grand, club]);
+    let suggested_keys: Vec<&str> = suggested["room"]["children_state"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|event| event["state_key"].as_str())
+        .collect();
+    assert_eq!(suggested_keys, vec![open, secret, missing, club]);
+    assert_eq!(suggested["inaccessible_children"], json!([secret]));
+
+    let closed_path = format!("/_matrix/federation/v1/hierarchy/{closed}");
+    let auth = sign_req("GET", &closed_path, "space.test", "space.test", None, &key);
+    let denied = client
+        .get(format!("{base}{closed_path}"))
+        .header("Authorization", auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), 404);
+    let denied: Value = denied.json().await.unwrap();
+    assert_eq!(denied["errcode"], "M_NOT_FOUND");
 }
 
 /// Inbound `m.typing` is applied only for a joined user of the sending server,

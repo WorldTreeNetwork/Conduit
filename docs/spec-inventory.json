@@ -42,10 +42,10 @@
         "total": 36
       },
       "requirement": {
-        "implemented+tested": 13,
+        "implemented+tested": 14,
         "implemented-untested": 0,
         "partial": 15,
-        "missing": 10,
+        "missing": 9,
         "not-applicable": 3,
         "total": 41
       }
@@ -5592,16 +5592,17 @@
       "code": [
         {
           "loc": "conduit-server/src/federation/spec_v119.rs",
-          "handler": "",
+          "handler": "hierarchy",
           "kind": "exact"
         }
       ],
       "tests": [
-        "conduit-server/tests/federation_inbound.rs::federation_directory_openid_and_local_key_query"
+        "conduit-server/tests/federation_inbound.rs::federation_directory_openid_and_local_key_query",
+        "conduit-server/tests/federation_inbound.rs::federation_hierarchy_lists_peekable_descendants_and_inaccessible_children"
       ],
-      "tests_total": 1,
+      "tests_total": 2,
       "gap_beads": [],
-      "notes": "Local space hierarchy the requesting server may peek. join_rule and room_id are returned."
+      "notes": "Returns {room, children, inaccessible_children}. Peekable descendants are listed flat. A known child the caller cannot peek is inaccessible_children and is not walked. A child this server has not created stays only in children_state. suggested_only limits which children are considered. An unknown room or a room the caller cannot peek is 404."
     },
     {
       "id": "ss.ep.get_matrixfederationv1querydirectory",
@@ -8507,7 +8508,7 @@
       ],
       "tests_total": 2,
       "gap_beads": [],
-      "notes": "Unknown children are fetched from each via server with GET /hierarchy. Descendants already described are not requested again. inaccessible_children are not requested. Local state wins over the remote summary. A private remote child is omitted. The federation hierarchy response shape is ss.spaces."
+      "notes": "Unknown children are fetched from each via server with GET /hierarchy. Descendants already described are not requested again. inaccessible_children are not requested. Local state wins over the remote summary. A private remote child is omitted. The inbound federation response is {room, children, inaccessible_children}."
     },
     {
       "id": "cs.mod.event-replacements",
@@ -9147,15 +9148,19 @@
       "title": "Spaces hierarchy over federation",
       "source": "https://spec.matrix.org/v1.19/server-server-api/#spaces",
       "role": "homeserver",
-      "status": "missing",
-      "code": [],
-      "tests": [],
-      "tests_total": 0,
-      "gap_beads": [
-        "conduit-y99.19.2",
-        "conduit-y99.22"
+      "status": "implemented+tested",
+      "code": [
+        {
+          "loc": "conduit-server/src/federation/spec_v119.rs"
+        }
       ],
-      "notes": ""
+      "tests": [
+        "conduit-server/tests/federation_inbound.rs::federation_hierarchy_lists_peekable_descendants_and_inaccessible_children",
+        "conduit-server/tests/federation_inbound.rs::federation_directory_openid_and_local_key_query"
+      ],
+      "tests_total": 2,
+      "gap_beads": [],
+      "notes": "Returns {room, children, inaccessible_children}. Peekable descendants are listed flat. A known child the caller cannot peek is inaccessible_children and is not walked. A child this server has not created stays only in children_state. suggested_only limits which children are considered. An unknown room or a room the caller cannot peek is 404."
     },
     {
       "id": "ss.typing",

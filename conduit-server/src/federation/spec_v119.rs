@@ -228,8 +228,11 @@ pub async fn public_rooms_post(
 
 /// `GET /_matrix/federation/v1/hierarchy/{roomId}`.
 ///
-/// Rooms this server knows. A child the requesting server cannot see is
-/// omitted. Unknown children stay in the parent's `children_state`.
+/// Returns `{room, children, inaccessible_children}`. `children` is the flat
+/// list of descendants the requesting server can peek or join. A known child
+/// it cannot peek is named in `inaccessible_children` and is not walked.
+/// A child this server has not created is left out of both lists; its
+/// `m.space.child` event stays on the parent's `children_state`.
 pub async fn hierarchy(
     State(state): State<FedState>,
     origin_ext: Option<axum::extract::Extension<FederationOrigin>>,
@@ -247,31 +250,68 @@ pub async fn hierarchy(
         Err(error) => return internal(&error.to_string()),
     };
     if !server_may_peek(state.storage.as_ref(), &root, &origin).await {
-        return forbidden("You cannot view or peek on this room");
+        return not_found("You cannot view or peek on this room");
     }
-    let mut rooms = Vec::new();
-    let mut stack = vec![(room_id, root)];
+    let root_children = crate::api::client::room_content::hierarchy::ordered_children(&root, suggested_only);
+    let room = federation_summary(&room_id, &root, &root_children);
+    let mut children = Vec::new();
+    let mut inaccessible = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    while let Some((id, room_state)) = stack.pop() {
+    seen.insert(room_id);
+    let mut stack = Vec::new();
+    for child in root_children.iter().rev() {
+        let Some(child_id) = child.state_key.clone() else { continue };
+        if !seen.contains(&child_id) {
+            stack.push(child_id);
+        }
+    }
+    while let Some(id) = stack.pop() {
         if !seen.insert(id.clone()) {
             continue;
         }
-        let children = crate::api::client::room_content::hierarchy::ordered_children(&room_state, suggested_only);
-        for child in children.iter().rev() {
-            let Some(child_id) = child.state_key.clone() else { continue };
-            if seen.contains(&child_id) {
-                continue;
-            }
-            match current_state_map(state.storage.as_ref(), &child_id).await {
-                Ok(child_state) if server_may_peek(state.storage.as_ref(), &child_state, &origin).await => {
-                    stack.push((child_id, child_state));
-                }
-                _ => {}
+        let child_state = match current_state_map(state.storage.as_ref(), &id).await {
+            Ok(child_state) if child_state.contains_key(&("m.room.create".into(), String::new())) => child_state,
+            Ok(_) => continue,
+            Err(error) => return internal(&error.to_string()),
+        };
+        if !server_may_peek(state.storage.as_ref(), &child_state, &origin).await {
+            inaccessible.push(id);
+            continue;
+        }
+        let child_edges = crate::api::client::room_content::hierarchy::ordered_children(&child_state, suggested_only);
+        for edge in child_edges.iter().rev() {
+            let Some(next_id) = edge.state_key.clone() else { continue };
+            if !seen.contains(&next_id) {
+                stack.push(next_id);
             }
         }
-        rooms.push(crate::api::client::room_content::hierarchy::summary(&id, &room_state, &children));
+        children.push(federation_summary(&id, &child_state, &child_edges));
     }
-    (StatusCode::OK, Json(json!({ "rooms": rooms }))).into_response()
+    (
+        StatusCode::OK,
+        Json(json!({
+            "room": room,
+            "children": children,
+            "inaccessible_children": inaccessible,
+        })),
+    )
+        .into_response()
+}
+
+/// Hierarchy summary. A missing join rule is omitted so callers treat the
+/// room as public, which is the federation default.
+fn federation_summary(
+    room_id: &str,
+    state: &conduit::auth::StateMap<Event>,
+    children: &[Event],
+) -> Value {
+    let mut room = crate::api::client::room_content::hierarchy::summary(room_id, state, children);
+    if !state.contains_key(&("m.room.join_rules".to_owned(), String::new())) {
+        if let Some(object) = room.as_object_mut() {
+            object.remove("join_rule");
+        }
+    }
+    room
 }
 
 async fn server_may_peek(storage: &dyn Storage, state: &conduit::auth::StateMap<Event>, origin: &str) -> bool {
