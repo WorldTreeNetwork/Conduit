@@ -104,6 +104,9 @@ pub enum AuthError {
 
     #[error("third-party invite rejected: {0}")]
     ThirdPartyInvite(&'static str),
+
+    #[error("redaction is not allowed by room versions 1 and 2")]
+    RedactionDenied,
 }
 
 /// v11 auth rule 4.2: "If `content` has a `join_authorised_via_users_server`
@@ -524,6 +527,25 @@ pub fn check_auth(event: &Event, auth_state: &StateMap<Event>) -> Result<(), Aut
                 needed: required,
                 sender_has: sender_level,
             });
+        }
+    }
+
+    // Room versions 1 and 2, rule 11. The redact level gates the event, and
+    // a sender below that level may still redact an event whose id shares
+    // this redaction's event-id domain. Version 3 drops this auth rule.
+    if version <= 2 && event.event_type == "m.room.redaction" {
+        let pl = get_pl_content(auth_state);
+        let sender_level = effective_user_level(&event.sender, auth_state);
+        if sender_level < pl.redact {
+            let target = event
+                .extensions
+                .get("redacts")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            let redaction_domain = domain_of(&event.event_id);
+            if redaction_domain.is_empty() || domain_of(target) != redaction_domain {
+                return Err(AuthError::RedactionDenied);
+            }
         }
     }
 
@@ -1600,6 +1622,80 @@ mod tests {
         apply_state_event(&mut v6, &create_with("6", alice, room, json!({ "creator": alice })));
         apply_state_event(&mut v6, &make_member_event("$join", alice, alice, room, "join"));
         assert!(check_auth(&levels, &v6).is_err(), "v6 rejects a float power level");
+    }
+
+    /// Room version 2 rule 11: below the redact level, the redaction is
+    /// allowed only when its event id and the target event id share a domain.
+    /// The sender's server is not the thing compared. Version 3 accepts the
+    /// same event without consulting the redact level.
+    #[test]
+    fn room_version_2_redaction_auth_matches_event_id_domains() {
+        let alice = "@alice:example.com";
+        let bob = "@bob:example.com";
+        let room = "!room:example.com";
+        let mut state = HashMap::new();
+        apply_state_event(&mut state, &create_with("2", alice, room, json!({ "creator": alice })));
+        apply_state_event(&mut state, &make_member_event("$aj", alice, alice, room, "join"));
+        apply_state_event(&mut state, &make_member_event("$bj", alice, bob, room, "join"));
+        apply_state_event(
+            &mut state,
+            &make_power_levels_event(
+                "$pl",
+                alice,
+                room,
+                json!({ "users": { alice: 100, bob: 0 }, "redact": 50, "events_default": 0 }),
+            ),
+        );
+
+        let same_domain = redaction("$redact:elsewhere.test", bob, room, "$target:elsewhere.test");
+        assert!(
+            check_auth(&same_domain, &state).is_ok(),
+            "v2 allows a redaction whose event id shares the target's domain"
+        );
+        let other_domain = redaction("$redact:elsewhere.test", bob, room, "$target:example.com");
+        assert!(
+            matches!(check_auth(&other_domain, &state), Err(AuthError::RedactionDenied)),
+            "v2 rejects a below-level redaction of a different event-id domain"
+        );
+
+        let mut powerful = state.clone();
+        apply_state_event(
+            &mut powerful,
+            &make_power_levels_event(
+                "$pl2",
+                alice,
+                room,
+                json!({ "users": { alice: 100, bob: 50 }, "redact": 50, "events_default": 0 }),
+            ),
+        );
+        assert!(
+            check_auth(&other_domain, &powerful).is_ok(),
+            "v2 allows any redaction at the redact level"
+        );
+
+        let mut v3 = HashMap::new();
+        apply_state_event(&mut v3, &create_with("3", alice, room, json!({ "creator": alice })));
+        apply_state_event(&mut v3, &make_member_event("$aj", alice, alice, room, "join"));
+        apply_state_event(&mut v3, &make_member_event("$bj", alice, bob, room, "join"));
+        apply_state_event(
+            &mut v3,
+            &make_power_levels_event(
+                "$pl",
+                alice,
+                room,
+                json!({ "users": { alice: 100, bob: 0 }, "redact": 50, "events_default": 0 }),
+            ),
+        );
+        assert!(
+            check_auth(&other_domain, &v3).is_ok(),
+            "v3 auth does not apply the redact level"
+        );
+    }
+
+    fn redaction(event_id: &str, sender: &str, room: &str, target: &str) -> Event {
+        let mut event = make_event(event_id, "m.room.redaction", sender, room, None, json!({}), vec![]);
+        event.pdu.extensions.insert("redacts".into(), json!(target));
+        event
     }
 
     fn v5_state_with_join(alice: &str, room: &str) -> StateMap<Event> {

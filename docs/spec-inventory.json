@@ -106,10 +106,10 @@
     },
     "rv": {
       "requirement": {
-        "implemented+tested": 33,
+        "implemented+tested": 34,
         "implemented-untested": 0,
         "partial": 6,
-        "missing": 22,
+        "missing": 21,
         "not-applicable": 0,
         "total": 61
       }
@@ -10091,14 +10091,18 @@
       "title": "Room version 2: Authorisation rules",
       "source": "https://spec.matrix.org/v1.19/rooms/v2/#authorisation-rules",
       "role": "homeserver",
-      "status": "missing",
-      "code": [],
-      "tests": [],
-      "tests_total": 0,
-      "gap_beads": [
-        "conduit-y99.23"
+      "status": "implemented+tested",
+      "code": [
+        {
+          "loc": "conduit/src/auth.rs"
+        }
       ],
-      "notes": "Kernel implements room version 11 only."
+      "tests": [
+        "conduit/src/auth.rs::room_version_2_redaction_auth_matches_event_id_domains"
+      ],
+      "tests_total": 1,
+      "gap_beads": [],
+      "notes": "Room versions 1 and 2 authorize a redaction when the sender meets the redact level, or when the redaction event id and the target event id share a domain. Version 3 does not apply that auth rule."
     },
     {
       "id": "rv.v2.redaction",
