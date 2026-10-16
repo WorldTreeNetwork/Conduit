@@ -2981,6 +2981,178 @@ async fn ss_membership_v1_invite_keeps_v1_bytes() {
     assert_eq!(hashed["errcode"], "M_INVALID_PARAM", "{hashed}");
 }
 
+/// A v2 invite response is the received PDU plus this server's signature.
+/// Hashes, extensions, and the derived id stay byte-identical. The signature
+/// is checked with the published key over the redacted canonical bytes.
+#[tokio::test]
+async fn ss_membership_v2_invite_keeps_every_field_but_the_resident_signature() {
+    let remote = spawn_remote().await;
+    let server = federated_server(&remote).await;
+    let alice = server.register("alice").await;
+    let alice_id = alice["user_id"].as_str().unwrap();
+    let token = alice["access_token"].as_str().unwrap();
+    let room = "!v2invite:remote.test";
+    let mut pdu = Pdu::new(
+        room,
+        "@r:remote.test",
+        "m.room.member",
+        Some(alice_id.into()),
+        json!({"membership": "invite", "displayname": "Kept", "reason": "come"}),
+        1_700_000_000_123,
+        vec!["$auth:remote.test".into()],
+        vec!["$prev:remote.test".into()],
+        7,
+    );
+    pdu.extensions.insert(
+        "org.example.ext".into(),
+        json!({"unicode": "世界", "n": 9_007_199_254_740_991i64, "flag": true}),
+    );
+    let (event_id, sent) = sign(&remote, pdu);
+    let path = format!("/_matrix/federation/v2/invite/{}/{}", enc(room), enc(&event_id));
+    let response = fed(
+        &server,
+        &remote,
+        Method::PUT,
+        &path,
+        Some(json!({
+            "event": sent,
+            "room_version": "11",
+            "invite_room_state": [{
+                "type": "m.room.name",
+                "state_key": "",
+                "sender": "@r:remote.test",
+                "content": {"name": "Invite Room"}
+            }]
+        })),
+        200,
+    )
+    .await;
+    let event = &response["event"];
+    assert!(event.get("event_id").is_none(), "{event}");
+    assert!(event.get("unsigned").is_none(), "{event}");
+    let mut expected = sent.clone();
+    expected["signatures"][LOCAL] = event["signatures"][LOCAL].clone();
+    assert_eq!(
+        conduit::canonical_json::to_canonical_bytes(event).unwrap(),
+        conduit::canonical_json::to_canonical_bytes(&expected).unwrap(),
+        "co-sign adds only this server's signature"
+    );
+    assert_eq!(event["hashes"], sent["hashes"]);
+    assert_eq!(event["content"]["displayname"], "Kept");
+    assert_eq!(event["org.example.ext"]["unicode"], "世界");
+    assert_eq!(independent_event_id(event), event_id);
+    assert_local_v11_signature(&server, event).await;
+
+    let sync = server.request(Method::GET, "/_matrix/client/v3/sync", Some(token), None, 200).await;
+    let invite = &sync["rooms"]["invite"][room];
+    assert!(invite.get("invite_state").is_some(), "{sync}");
+    let events = invite["invite_state"]["events"].as_array().unwrap();
+    assert!(
+        events.iter().any(|event| event["type"] == "m.room.member" && event["content"]["displayname"] == "Kept"),
+        "{invite}"
+    );
+}
+
+/// A message this server authors is served on GET /event with a content hash
+/// over the unredacted PDU and a signature over the redacted canonical bytes.
+/// Both are recomputed here. The published server key must verify them.
+#[tokio::test]
+async fn authored_message_hash_and_signature_verify_independently() {
+    let remote = spawn_remote().await;
+    let mut server = federated_server(&remote).await;
+    let alice = server.register("alice").await;
+    let token = alice["access_token"].as_str().unwrap();
+    let room = server
+        .request(
+            Method::POST,
+            "/_matrix/client/v3/createRoom",
+            Some(token),
+            Some(json!({"preset": "public_chat", "room_version": "11"})),
+            200,
+        )
+        .await["room_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let sent = server
+        .request(
+            Method::PUT,
+            &format!("/_matrix/client/v3/rooms/{}/send/m.room.message/signed-1", enc(&room)),
+            Some(token),
+            Some(json!({"msgtype": "m.text", "body": "hello 世界"})),
+            200,
+        )
+        .await;
+    let event_id = sent["event_id"].as_str().unwrap().to_owned();
+    let path = format!("/_matrix/federation/v1/event/{}", enc(&event_id));
+    for restart in [false, true] {
+        if restart {
+            server.stop();
+            server.start().await;
+        }
+        let served = fed(&server, &remote, Method::GET, &path, None, 200).await["pdus"][0].clone();
+        assert!(served.get("event_id").is_none(), "{served}");
+        assert_eq!(served["content"]["body"], "hello 世界");
+        assert_eq!(served["content"]["msgtype"], "m.text");
+        assert_eq!(served["hashes"]["sha256"], independent_content_hash(&served));
+        assert_eq!(independent_event_id(&served), event_id);
+        let signing = independent_signing_bytes(&served);
+        assert!(!String::from_utf8_lossy(&signing).contains("hello"), "{served}");
+        assert_local_v11_signature(&server, &served).await;
+    }
+}
+
+fn independent_content_hash(event: &Value) -> String {
+    let mut copy = event.as_object().expect("object").clone();
+    copy.remove("hashes");
+    copy.remove("signatures");
+    copy.remove("unsigned");
+    let bytes = conduit::canonical_json::to_canonical_bytes(&Value::Object(copy)).unwrap();
+    STANDARD_NO_PAD.encode(sha2::Sha256::digest(&bytes))
+}
+
+fn independent_signing_bytes(event: &Value) -> Vec<u8> {
+    let pdu: Pdu = serde_json::from_value(event.clone()).expect("pdu");
+    let redacted = conduit::redaction::redact(&pdu);
+    let mut value = serde_json::to_value(&redacted).unwrap();
+    let map = value.as_object_mut().unwrap();
+    map.remove("signatures");
+    map.remove("unsigned");
+    conduit::canonical_json::to_canonical_bytes(&value).unwrap()
+}
+
+fn independent_event_id(event: &Value) -> String {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    format!("${}", URL_SAFE_NO_PAD.encode(sha2::Sha256::digest(independent_signing_bytes(event))))
+}
+
+async fn assert_local_v11_signature(server: &Server, event: &Value) {
+    let document: Value = server
+        .http
+        .get(format!("{}/_matrix/key/v2/server", server.base_url))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let keys = document["verify_keys"].as_object().expect("published verify_keys");
+    let bytes = independent_signing_bytes(event);
+    let mut verified = false;
+    for (key_id, entry) in keys {
+        let Some(signature) = event["signatures"][LOCAL][key_id].as_str() else { continue };
+        let public = STANDARD_NO_PAD.decode(entry["key"].as_str().unwrap()).unwrap();
+        let raw = STANDARD_NO_PAD.decode(signature).unwrap();
+        let public: [u8; 32] = public.try_into().unwrap();
+        let raw: [u8; 64] = raw.try_into().unwrap();
+        let key = ed25519_dalek::VerifyingKey::from_bytes(&public).unwrap();
+        let signature = ed25519_dalek::Signature::from_bytes(&raw);
+        key.verify_strict(&bytes, &signature).expect("local v11 signature");
+        verified = true;
+    }
+    assert!(verified, "published server key did not sign the event: {event}");
+}
+
 #[tokio::test]
 async fn ss_membership_send_leave_ends_membership() {
     let remote = spawn_remote().await;

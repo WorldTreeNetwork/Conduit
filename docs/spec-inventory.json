@@ -34,17 +34,17 @@
     },
     "ss": {
       "endpoint": {
-        "implemented+tested": 34,
+        "implemented+tested": 35,
         "implemented-untested": 0,
-        "partial": 1,
+        "partial": 0,
         "missing": 0,
         "not-applicable": 1,
         "total": 36
       },
       "requirement": {
-        "implemented+tested": 35,
+        "implemented+tested": 37,
         "implemented-untested": 0,
-        "partial": 3,
+        "partial": 1,
         "missing": 0,
         "not-applicable": 3,
         "total": 41
@@ -5416,10 +5416,10 @@
       "rate_limited": "No",
       "deprecated": false,
       "role": "homeserver",
-      "status": "partial",
+      "status": "implemented+tested",
       "code": [
         {
-          "loc": "conduit-server/src/federation/server.rs:1086",
+          "loc": "conduit-server/src/federation/server.rs",
           "handler": "invite",
           "kind": "exact"
         }
@@ -5428,13 +5428,12 @@
         "conduit-server/tests/federation_inbound.rs::standard_v2_routes_require_authentication",
         "conduit-server/tests/federation_inbound.rs::standard_v2_routes_verify_the_full_signed_uri",
         "conduit-server/tests/production_e2e.rs::production_chat_survives_restart",
-        "conduit-server/tests/production_pdu.rs::blocked_invitee_rejects_federation_invites_on_v1_and_v2"
+        "conduit-server/tests/production_pdu.rs::blocked_invitee_rejects_federation_invites_on_v1_and_v2",
+        "conduit-server/tests/production_pdu.rs::ss_membership_v2_invite_keeps_every_field_but_the_resident_signature"
       ],
-      "tests_total": 4,
-      "gap_beads": [
-        "conduit-embed-pdu"
-      ],
-      "notes": "Inviter signature, path, and content-hash checks run before co-signing. Invite blocking is asserted. Byte-exact wire amendments remain conduit-embed-pdu."
+      "tests_total": 5,
+      "gap_beads": [],
+      "notes": "The 200 body is the received PDU plus this server's signature. Hashes, extensions, and the derived id stay the same. The signature verifies against the published key over the redacted canonical bytes. Invite blocking is asserted."
     },
     {
       "id": "ss.ep.get_matrixfederationv1make_leaveroomiduserid",
@@ -9165,7 +9164,7 @@
       "title": "Inviting to a room (v2; v1 for room versions 1-2)",
       "source": "https://spec.matrix.org/v1.19/server-server-api/#inviting-to-a-room",
       "role": "homeserver",
-      "status": "partial",
+      "status": "implemented+tested",
       "code": [
         {
           "loc": "conduit-server/src/federation/server.rs"
@@ -9176,13 +9175,12 @@
       ],
       "tests": [
         "conduit-server/tests/production_e2e.rs::production_chat_survives_restart",
-        "conduit-server/tests/production_pdu.rs::ss_membership_v1_invite_keeps_v1_bytes"
+        "conduit-server/tests/production_pdu.rs::ss_membership_v1_invite_keeps_v1_bytes",
+        "conduit-server/tests/production_pdu.rs::ss_membership_v2_invite_keeps_every_field_but_the_resident_signature"
       ],
-      "tests_total": 2,
-      "gap_beads": [
-        "conduit-embed-pdu"
-      ],
-      "notes": "v1 invite co-signs the original room-version-1 event and leaves every other field untouched. v2 byte-exact wire amendments remain conduit-embed-pdu."
+      "tests_total": 3,
+      "gap_beads": [],
+      "notes": "v1 and v2 invites co-sign the original event and leave every other field untouched. The v2 signature verifies against the published key over the redacted canonical bytes."
     },
     {
       "id": "ss.leaving",
@@ -9555,23 +9553,28 @@
       "title": "Adding hashes and signatures to outgoing events",
       "source": "https://spec.matrix.org/v1.19/server-server-api/#adding-hashes-and-signatures-to-outgoing-events",
       "role": "homeserver",
-      "status": "partial",
+      "status": "implemented+tested",
       "code": [
         {
           "loc": "conduit/src/hashing.rs"
         },
         {
           "loc": "conduit/src/signing.rs"
+        },
+        {
+          "loc": "conduit-server/src/api/client/event_pipeline.rs"
+        },
+        {
+          "loc": "conduit-server/src/federation/server.rs"
         }
       ],
       "tests": [
-        "conduit/tests/matrix_v11_crypto.rs"
+        "conduit/tests/matrix_v11_crypto.rs",
+        "conduit-server/tests/production_pdu.rs::authored_message_hash_and_signature_verify_independently"
       ],
-      "tests_total": 1,
-      "gap_beads": [
-        "conduit-embed-pdu"
-      ],
-      "notes": "Byte-exact for typed v11 events; wire PDU model in conduit-embed-pdu."
+      "tests_total": 2,
+      "gap_beads": [],
+      "notes": "A locally authored room-version-11 message served by GET /event has no event_id. Its content hash is the unredacted canonical PDU. Its signature verifies against the published key over the redacted canonical bytes, which omit the message body. The reference hash is the client event id, before and after restart."
     },
     {
       "id": "ss.signing.validate",
