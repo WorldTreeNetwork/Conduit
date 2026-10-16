@@ -260,10 +260,17 @@ pub fn auth_event_keys(event: &Event) -> Vec<(String, String)> {
 // ---------------------------------------------------------------------------
 
 fn get_pl_content(auth_state: &StateMap<Event>) -> PowerLevelsContent {
-    auth_state
-        .get(&("m.room.power_levels".to_owned(), String::new()))
-        .and_then(|ev| parse_power_levels(&ev.content).ok())
-        .unwrap_or_default()
+    let Some(ev) = auth_state.get(&("m.room.power_levels".to_owned(), String::new())) else {
+        return PowerLevelsContent::default();
+    };
+    // Room versions 1–5 keep string and truncated-float power levels in the
+    // event. Later checks must see the coerced integers, not a parse failure.
+    let content = if room_version_from_state(auth_state) < 6 {
+        crate::room_version::coerce_power_level_values(&ev.content)
+    } else {
+        ev.content.clone()
+    };
+    parse_power_levels(&content).unwrap_or_default()
 }
 
 fn get_join_rule(auth_state: &StateMap<Event>) -> JoinRule {
@@ -412,7 +419,11 @@ pub fn effective_user_level(user_id: &str, auth_state: &StateMap<Event>) -> i64 
         return i64::MAX;
     }
     let pl_event = auth_state.get(&("m.room.power_levels".to_owned(), String::new()));
-    user_power_level(user_id, pl_event, creator_id(auth_state).as_deref())
+    if pl_event.is_none() {
+        return user_power_level(user_id, None, creator_id(auth_state).as_deref());
+    }
+    let pl = get_pl_content(auth_state);
+    *pl.users.get(user_id).unwrap_or(&pl.users_default)
 }
 
 /// Extract the local-server domain from a Matrix ID or room ID.
@@ -1622,6 +1633,89 @@ mod tests {
         apply_state_event(&mut v6, &create_with("6", alice, room, json!({ "creator": alice })));
         apply_state_event(&mut v6, &make_member_event("$join", alice, alice, room, "join"));
         assert!(check_auth(&levels, &v6).is_err(), "v6 rejects a float power level");
+    }
+
+    /// Room version 2 does not strictly enforce canonical JSON. String power
+    /// levels and a truncated float take effect. A decimal string is rejected.
+    /// Version 6 rejects the same event.
+    #[test]
+    fn room_version_2_accepts_float_and_string_power_levels() {
+        let alice = "@alice:example.com";
+        let bob = "@bob:example.com";
+        let room = "!room:example.com";
+        let mut v2 = HashMap::new();
+        apply_state_event(&mut v2, &create_with("2", alice, room, json!({ "creator": alice })));
+        apply_state_event(&mut v2, &make_member_event("$aj", alice, alice, room, "join"));
+        apply_state_event(&mut v2, &make_member_event("$bj", alice, bob, room, "join"));
+        let levels = make_power_levels_event(
+            "$pl",
+            alice,
+            room,
+            json!({
+                "ban": "050",
+                "events": {
+                    "m.room.name": "50",
+                    "m.room.topic": "51",
+                    "m.room.power_levels": "100"
+                },
+                "events_default": "+0",
+                "state_default": " 50 ",
+                "users": { alice: "+100", bob: 50.9 },
+                "users_default": "0",
+                "notifications": { "room": " 0 " }
+            }),
+        );
+        assert!(
+            check_auth(&levels, &v2).is_ok(),
+            "v2 accepts string and float power levels"
+        );
+        let decimal = make_power_levels_event(
+            "$bad",
+            alice,
+            room,
+            json!({ "users": { alice: "100" }, "events_default": "50.9" }),
+        );
+        assert!(
+            check_auth(&decimal, &v2).is_err(),
+            "v2 rejects a power-level string that contains a decimal point"
+        );
+
+        apply_state_event(&mut v2, &levels);
+        let name = make_event(
+            "$name",
+            "m.room.name",
+            bob,
+            room,
+            Some(""),
+            json!({ "name": "n" }),
+            vec![],
+        );
+        assert!(
+            check_auth(&name, &v2).is_ok(),
+            "v2 truncates 50.9 to 50, which meets the string level 50"
+        );
+        let topic = make_event(
+            "$topic",
+            "m.room.topic",
+            bob,
+            room,
+            Some(""),
+            json!({ "topic": "t" }),
+            vec![],
+        );
+        assert!(
+            matches!(check_auth(&topic, &v2), Err(AuthError::InsufficientPowerLevel { .. })),
+            "v2 truncation does not round 50.9 up to 51"
+        );
+
+        let mut v6 = HashMap::new();
+        apply_state_event(&mut v6, &create_with("6", alice, room, json!({ "creator": alice })));
+        apply_state_event(&mut v6, &make_member_event("$aj", alice, alice, room, "join"));
+        apply_state_event(&mut v6, &make_member_event("$bj", alice, bob, room, "join"));
+        assert!(
+            check_auth(&levels, &v6).is_err(),
+            "v6 rejects the same float power level"
+        );
     }
 
     /// Room version 2 rule 11: below the redact level, the redaction is
