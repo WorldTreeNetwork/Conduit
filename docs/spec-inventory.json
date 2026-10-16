@@ -106,10 +106,10 @@
     },
     "rv": {
       "requirement": {
-        "implemented+tested": 28,
+        "implemented+tested": 29,
         "implemented-untested": 0,
         "partial": 6,
-        "missing": 27,
+        "missing": 26,
         "not-applicable": 0,
         "total": 61
       }
@@ -10535,14 +10535,18 @@
       "title": "Room version 7: Redaction algorithm",
       "source": "https://spec.matrix.org/v1.19/rooms/v7/#redactions",
       "role": "homeserver",
-      "status": "missing",
-      "code": [],
-      "tests": [],
-      "tests_total": 0,
-      "gap_beads": [
-        "conduit-y99.23"
+      "status": "implemented+tested",
+      "code": [
+        {
+          "loc": "conduit/src/room_version.rs"
+        }
       ],
-      "notes": "Kernel implements room version 11 only."
+      "tests": [
+        "conduit/src/room_version.rs::v7_redaction_keeps_the_v6_allow_list"
+      ],
+      "tests_total": 1,
+      "gap_beads": [],
+      "notes": "Unchanged from v6: legacy top-level keys stay, power-level invite is stripped, and a knock member keeps only membership. The v7 reference hash matches v6."
     },
     {
       "id": "rv.v7.state-res",

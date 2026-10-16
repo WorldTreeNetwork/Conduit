@@ -25,9 +25,9 @@ Statuses: **tested** = present and asserted by a named test; **untested** = pres
 | Push Gateway API (homeserver as client) | requirements | 1 | 0 | 0 | 0 | 1 | 2 |
 | Identity Service API (homeserver as consumer) | endpoints | 5 | 0 | 2 | 0 | 16 | 23 |
 | Identity Service API (homeserver as consumer) | requirements | 1 | 0 | 0 | 0 | 0 | 1 |
-| Room versions 1–12 | requirements | 28 | 0 | 6 | 27 | 0 | 61 |
+| Room versions 1–12 | requirements | 29 | 0 | 6 | 26 | 0 | 61 |
 | Appendices | requirements | 9 | 0 | 4 | 4 | 4 | 21 |
-| All |  | 311 | 3 | 66 | 48 | 37 | 465 |
+| All |  | 312 | 3 | 66 | 47 | 37 | 465 |
 ## Gap beads
 
 New beads filed by this inventory (children of `conduit-y99`):
@@ -577,7 +577,7 @@ In-flight / pre-existing beads referenced (not duplicated):
 | `rv.v6.canonical-json` | [Room version 6: Canonical JSON / integer rules](https://spec.matrix.org/v1.19/rooms/v6/#canonical-json) | tested | `conduit/src/canonical_json.rs` | `conduit/src/auth.rs::room_version_auth_rules_follow_the_spec` | | v6 check_auth rejects a string power level. |
 | `rv.v7.event-format` | [Room version 7: Event format and event IDs](https://spec.matrix.org/v1.19/rooms/v7/#event-format) | tested |  | `conduit/src/room_version.rs::event_ids_follow_the_version_encoding` | | Reference-hash event ids. v3 is standard base64; v4-v10 share the URL-safe hash; v11 and v12 share the v11 redaction. A v12 create omits room_id. |
 | `rv.v7.auth-rules` | [Room version 7: Authorisation rules](https://spec.matrix.org/v1.19/rooms/v7/#authorisation-rules) | tested |  | `conduit/src/auth.rs::room_version_auth_rules_follow_the_spec` | | v7 accepts knock membership; v6 rejects it. |
-| `rv.v7.redaction` | [Room version 7: Redaction algorithm](https://spec.matrix.org/v1.19/rooms/v7/#redactions) | missing |  |  | `conduit-y99.23` | Kernel implements room version 11 only. |
+| `rv.v7.redaction` | [Room version 7: Redaction algorithm](https://spec.matrix.org/v1.19/rooms/v7/#redactions) | tested | `conduit/src/room_version.rs` | `room_version.rs::v7_redaction_keeps_the_v6_allow_list` |  | Unchanged from v6: legacy top-level keys stay, power-level invite is stripped, and a knock member keeps only membership. The v7 reference hash matches v6. |
 | `rv.v7.state-res` | [Room version 7: State resolution algorithm](https://spec.matrix.org/v1.19/rooms/v7/#state-resolution) | missing |  |  | `conduit-y99.23` | Kernel implements room version 11 only. |
 | `rv.v7.canonical-json` | [Room version 7: Canonical JSON / integer rules](https://spec.matrix.org/v1.19/rooms/v7/#canonical-json) | partial | `conduit/src/canonical_json.rs` |  | `conduit-y99.23` | Version-independent canonical JSON implemented; v6+ integer-range enforcement shared with v11. |
 | `rv.v8.event-format` | [Room version 8: Event format and event IDs](https://spec.matrix.org/v1.19/rooms/v8/#event-format) | tested |  | `conduit/src/room_version.rs::event_ids_follow_the_version_encoding` | | Reference-hash event ids. v3 is standard base64; v4-v10 share the URL-safe hash; v11 and v12 share the v11 redaction. A v12 create omits room_id. |

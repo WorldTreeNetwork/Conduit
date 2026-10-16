@@ -385,6 +385,50 @@ mod tests {
         assert_eq!(redact_pdu(&levels, 11).content["invite"], 50);
     }
 
+    /// Room version 7 redacts with the v6 keep-list: legacy top-level keys
+    /// stay, `invite` is stripped from power levels, and a knock membership
+    /// keeps only `membership`. Version 11 drops those legacy keys.
+    #[test]
+    fn v7_redaction_keeps_the_v6_allow_list() {
+        let original = message();
+        let redacted = redact_pdu(&original, 7);
+        assert_eq!(redacted.event_type, "m.room.message");
+        assert_eq!(redacted.room_id, original.room_id);
+        assert_eq!(redacted.sender, original.sender);
+        assert_eq!(redacted.depth, original.depth);
+        assert_eq!(redacted.origin_server_ts, original.origin_server_ts);
+        assert_eq!(redacted.prev_events, original.prev_events);
+        assert_eq!(redacted.auth_events, original.auth_events);
+        assert_eq!(redacted.hashes, original.hashes);
+        assert_eq!(redacted.signatures, original.signatures);
+        assert_eq!(redacted.content, json!({}));
+        assert_eq!(redacted.extensions.get("origin").and_then(Value::as_str), Some("example.org"));
+        assert!(redacted.extensions.contains_key("membership"));
+        assert!(redacted.extensions.contains_key("prev_state"));
+        assert!(!redacted.extensions.contains_key("org.example.x"));
+        assert!(!redact_pdu(&original, 11).extensions.contains_key("origin"));
+
+        let mut knock = message();
+        knock.event_type = "m.room.member".into();
+        knock.state_key = Some("@a:example.org".into());
+        knock.content = json!({"membership": "knock", "displayname": "A", "reason": "hi"});
+        assert_eq!(redact_pdu(&knock, 7).content, json!({"membership": "knock"}));
+
+        let mut levels = message();
+        levels.event_type = "m.room.power_levels".into();
+        levels.content = json!({"invite": 0, "ban": 50, "kick": 50, "events": {"m.room.message": 0}});
+        let levels = redact_pdu(&levels, 7);
+        assert!(levels.content.get("invite").is_none());
+        assert_eq!(levels.content["ban"], 50);
+        assert_eq!(levels.content["events"]["m.room.message"], 0);
+
+        assert_eq!(
+            event_id_for(&original, 7).unwrap(),
+            event_id_for(&original, 6).unwrap(),
+            "v7 redaction must not change the v6 reference hash"
+        );
+    }
+
     #[test]
     fn event_ids_follow_the_version_encoding() {
         let pdu = message();
