@@ -16,8 +16,8 @@ Statuses: **tested** = present and asserted by a named test; **untested** = pres
 | API | kind | tested | untested | partial | missing | n/a | total |
 |---|---|---:|---:|---:|---:|---:|---:|
 | Client-Server API | endpoints | 163 | 0 | 0 | 0 | 1 | 164 |
-| Client-Server API | requirements | 72 | 0 | 5 | 0 | 9 | 86 |
-| Server-Server API | endpoints | 22 | 3 | 6 | 4 | 1 | 36 |
+| Client-Server API | requirements | 73 | 0 | 4 | 0 | 9 | 86 |
+| Server-Server API | endpoints | 23 | 2 | 6 | 4 | 1 | 36 |
 | Server-Server API | requirements | 15 | 0 | 14 | 9 | 3 | 41 |
 | Application Service API | endpoints | 11 | 0 | 0 | 0 | 0 | 11 |
 | Application Service API | requirements | 16 | 0 | 0 | 0 | 2 | 18 |
@@ -27,7 +27,7 @@ Statuses: **tested** = present and asserted by a named test; **untested** = pres
 | Identity Service API (homeserver as consumer) | requirements | 1 | 0 | 0 | 0 | 0 | 1 |
 | Room versions 1–12 | requirements | 61 | 0 | 0 | 0 | 0 | 61 |
 | Appendices | requirements | 10 | 0 | 3 | 4 | 4 | 21 |
-| All |  | 378 | 3 | 30 | 17 | 37 | 465 |
+| All |  | 380 | 2 | 29 | 17 | 37 | 465 |
 ## Gap beads
 
 New beads filed by this inventory (children of `conduit-y99`):
@@ -59,7 +59,7 @@ In-flight / pre-existing beads referenced (not duplicated):
 - `conduit-7pk` - outbound presence EDU (0 row(s))
 - `conduit-c3u` - AS query negative-result cache (1 row(s))
 - `conduit-embed-auth` - membership/visibility on reads (kernel) (0 row(s))
-- `conduit-embed-pdu` - PDU wire model (in flight) (9 row(s))
+- `conduit-embed-pdu` - PDU wire model (in flight) (8 row(s))
 - `conduit-g12` - recursive auth-event verification (1 row(s))
 - `conduit-jt5` - restricted join rule evaluation (2 row(s))
 - `conduit-kqy` - federation knock (rv7+) (2 row(s))
@@ -77,7 +77,7 @@ In-flight / pre-existing beads referenced (not duplicated):
 - `conduit-y99.18.4` - remove guests when guest_access changes (0 row(s))
 - `conduit-y99.19.2` - space hierarchy over federation (0 row(s))
 - `conduit-y99.19.3` - room upgrade per-user settings (2 row(s))
-- `conduit-y99.19.4` - prune redacted content from storage (2 row(s))
+- `conduit-y99.19.4` - prune redacted content from storage (0 row(s))
 - `conduit-y99.20.1` - remote publicRooms + POST filters over federation (6 row(s))
 - `conduit-y99.20.2` - federated knocking (4 row(s))
 - `conduit-y99.21.1` - federation media multipart/mixed (0 row(s))
@@ -89,7 +89,7 @@ In-flight / pre-existing beads referenced (not duplicated):
 - `conduit-y99.22.3` - event_auth endpoint (1 row(s))
 - `conduit-y99.22.4` - EDU U+0000 / per-EDU error isolation (2 row(s))
 - `conduit-y99.22.5` - transactions/outbox retention (1 row(s))
-- `conduit-y99.23` - room versions 1-12 (7 row(s))
+- `conduit-y99.23` - room versions 1-12 (6 row(s))
 - `conduit-y99.24` - sync unread_notifications hard-coded to zero (3 row(s))
 - `conduit-y99.25` - profile changes not propagated to member events (0 row(s))
 - `conduit-y99.26` - /messages hides create/initial join (2 row(s))
@@ -148,7 +148,7 @@ In-flight / pre-existing beads referenced (not duplicated):
 | GET | [`/_matrix/client/v3/rooms/{roomId}/initialSync`](https://spec.matrix.org/v1.19/client-server-api/#get_matrixclientv3roomsroomidinitialsync) | tested | `conduit-server/src/api/client/legacy.rs (room_initial_sync)` | `production_modules.rs::legacy_events_stream_event_lookup_and_initial_sync`<br>`production_modules.rs::legacy_room_preview_peeks_only_world_readable_rooms` |  | Members, past members and world_readable peekers; 403 M_FORBIDDEN otherwise. |
 | PUT | [`/_matrix/client/v3/rooms/{roomId}/state/{eventType}/{stateKey}`](https://spec.matrix.org/v1.19/client-server-api/#put_matrixclientv3roomsroomidstateeventtypestatekey) | tested | `conduit-server/src/main.rs:546` | `production_e2e.rs::production_lazy_members_include_self_and_timeline_senders`<br>`production_rooms.rs::room_upgrade_replaces_and_tombstones` (+3) |  | m.room.canonical_alias: invalid syntax is M_INVALID_PARAM; an alias that does not point at the room is M_BAD_ALIAS. |
 | PUT | [`/_matrix/client/v3/rooms/{roomId}/send/{eventType}/{txnId}`](https://spec.matrix.org/v1.19/client-server-api/#put_matrixclientv3roomsroomidsendeventtypetxnid) | tested | `conduit-server/src/main.rs:541` | `conduit-server/src/api/client/session.rs::guest_allowlist_matches_spec_endpoints`<br>`e2e.rs::e2e_two_users_send_and_receive_messages` (+32) |  | Durable txn idempotency tested; m.room.message msgtype/body validation is conduit-y99.40. |
-| PUT | [`/_matrix/client/v3/rooms/{roomId}/redact/{eventId}/{txnId}`](https://spec.matrix.org/v1.19/client-server-api/#put_matrixclientv3roomsroomidredacteventidtxnid) | tested | `conduit-server/src/api/client/room_content/mod.rs:67` | `production_rooms.rs::redaction_permissions_idempotency_and_serving`<br>`production_rooms.rs::relations_threads_and_edit_aggregation` | `conduit-y99.19.4` | Served pruned with redacted_because; original content still stored (y99.19.4). |
+| PUT | [`/_matrix/client/v3/rooms/{roomId}/redact/{eventId}/{txnId}`](https://spec.matrix.org/v1.19/client-server-api/#put_matrixclientv3roomsroomidredacteventidtxnid) | tested | `conduit-server/src/api/client/room_content/mod.rs:67` | `production_rooms.rs::redaction_permissions_idempotency_and_serving`<br>`production_pdu.rs::accepted_redaction_prunes_the_row_and_federation_get_event` |  | Served pruned with redacted_because. An accepted redaction removes the unprotected keys from the events row. |
 | GET | [`/_matrix/client/v1/rooms/{roomId}/relations/{eventId}`](https://spec.matrix.org/v1.19/client-server-api/#get_matrixclientv1roomsroomidrelationseventid) | tested | `conduit-server/src/api/client/room_content/mod.rs:76` | `production_rooms.rs::relations_threads_and_edit_aggregation` |  | dir/from/to/limit/recurse. |
 | GET | [`/_matrix/client/v1/rooms/{roomId}/relations/{eventId}/{relType}`](https://spec.matrix.org/v1.19/client-server-api/#get_matrixclientv1roomsroomidrelationseventidreltype) | tested | `conduit-server/src/api/client/room_content/mod.rs:77` | `production_rooms.rs::relations_threads_and_edit_aggregation` |  | dir/from/to/limit/recurse. |
 | GET | [`/_matrix/client/v1/rooms/{roomId}/relations/{eventId}/{relType}/{eventType}`](https://spec.matrix.org/v1.19/client-server-api/#get_matrixclientv1roomsroomidrelationseventidreltypeeventtype) | tested | `conduit-server/src/api/client/room_content/mod.rs:81` | `production_rooms.rs::relations_threads_and_edit_aggregation` |  | dir/from/to/limit/recurse. |
@@ -302,7 +302,7 @@ In-flight / pre-existing beads referenced (not duplicated):
 | `cs.events.sync` | [Syncing semantics (sections, since/next_batch, timeline limits, full_state, ephemeral, to-device ack)](https://spec.matrix.org/v1.19/client-server-api/#syncing) | tested | `conduit-server/src/api/client/sync.rs`<br>`conduit/src/room/state_res.rs`<br>`conduit-server/src/storage_pg.rs` | `production_e2e.rs::production_sync_pagination_covers_a_limited_gap_and_full_state`<br>`production_e2e.rs::production_invite_accept_and_kick_are_visible_in_sync`<br>`production_sync.rs::joining_preserves_state_across_a_history_visibility_gap`<br>`production_sync.rs::state_after_covers_timeline_and_filtered_state_changes` (+3 state_after journeys)<br>`production_sync.rs::sync_state_follows_resolution_not_arrival_order`<br>`production_state_publication.rs::event_is_not_visible_while_its_current_state_update_is_blocked`<br>`state_res.rs::self_leave_replaces_the_earlier_join`<br>`sync.rs::resolved_snapshot_ignores_a_losing_current_state_pointer`<br>`sync.rs::invite_preview_stops_at_the_invite_not_the_current_pointer` |  | Sync state is the resolution of retained events at or before the cursor. A current-state pointer is not the snapshot, and invite stripped state stops at the invite. |
 | `cs.events.get` | [Getting events for a room (event, members, state, messages, context, timestamp_to_event)](https://spec.matrix.org/v1.19/client-server-api/#getting-events-for-a-room) | tested | `conduit-server/src/api/client/rooms.rs`<br>`conduit-server/src/api/client/room_content/events.rs`<br>`conduit-server/src/api/client/room_content/mod.rs` | `production_rooms.rs::events_members_context_and_joined_rooms`<br>`production_rooms.rs::timestamp_to_event_finds_nearest_visible_event` (+3)<br>`production_sync.rs::back_pagination_reaches_the_room_creation_under_any_visibility`<br>`production_sync.rs::sync_state_follows_resolution_not_arrival_order` |  | Back-pagination includes the creator create and join, and /messages applies a RoomEventFilter. Historical state (context and /members?at=) is the resolved state at that stream position, not the last arrival. |
 | `cs.events.send` | [Sending events (state and message, power-level authorisation)](https://spec.matrix.org/v1.19/client-server-api/#sending-events-to-a-room) | tested | `conduit-server/src/api/client/rooms.rs`<br>`conduit-server/src/api/client/event_pipeline.rs` | `production_e2e.rs::production_rejected_transaction_replays_after_permissions_change` |  |  |
-| `cs.events.redactions` | [Redactions (client endpoint, redaction auth, algorithm per room version)](https://spec.matrix.org/v1.19/client-server-api/#redactions) | partial | `conduit/src/redaction.rs`<br>`conduit-server/src/api/client/room_content/redact.rs` (+1) | `production_rooms.rs::redaction_keeps_aliases_through_version_5_and_strips_them_after`<br>`serve.rs::alias_redaction_follows_the_room_version` | `conduit-y99.23` `conduit-y99.19.4` | Client reads prune with the room version. Federation get_event and stored PDUs still return the original (y99.23, y99.19.4). |
+| `cs.events.redactions` | [Redactions (client endpoint, redaction auth, algorithm per room version)](https://spec.matrix.org/v1.19/client-server-api/#redactions) | tested | `conduit/src/redaction.rs`<br>`conduit-server/src/api/client/room_content/redact.rs` (+1) | `production_pdu.rs::accepted_redaction_prunes_the_row_and_federation_get_event`<br>`production_rooms.rs::redaction_keeps_aliases_through_version_5_and_strips_them_after`<br>`storage_pdu.rs::extended_pdu_survives_every_read_and_a_pool_restart_on_postgres` |  | Client reads prune with the room version and attach redacted_because. An accepted redaction removes those keys from the events row, keeping hashes and signatures. Federation GET /event serves that PDU. Version 5 keeps aliases. |
 | `cs.events.relationships` | [Forming relationships between events (relations API, aggregations)](https://spec.matrix.org/v1.19/client-server-api/#forming-relationships-between-events) | tested | `conduit-server/src/api/client/room_content/relations.rs`<br>`conduit-server/src/api/client/room_content/serve.rs` | `production_rooms.rs::relations_threads_and_edit_aggregation` |  | Relations API and bundled aggregations. |
 | `cs.rooms.creation` | [Room creation (presets, initial state ordering, invite, invite_3pid, room_version)](https://spec.matrix.org/v1.19/client-server-api/#creation) | tested | `conduit-server/src/api/client/rooms.rs`<br>`conduit/src/room/mod.rs` | `production_rooms.rs::create_room_applies_preset_order_power_and_creators`<br>`room/mod.rs::create_room_event_order_matches_the_spec` |  | Preset order, guest access, v12 tombstone power, trusted-private creators, and topic mimetype. |
 | `cs.rooms.aliases` | [Room aliases (directory + m.room.canonical_alias validation)](https://spec.matrix.org/v1.19/client-server-api/#room-aliases) | tested | `conduit-server/src/api/client/directory.rs` | `production_directory.rs::room_alias_directory_and_join_by_alias`<br>`production_rooms.rs::canonical_alias_must_point_at_the_room` |  | Directory put/get/delete and join-by-alias. m.room.canonical_alias rejects invalid syntax with M_INVALID_PARAM and an alias that does not point at the room with M_BAD_ALIAS. |
@@ -373,7 +373,7 @@ In-flight / pre-existing beads referenced (not duplicated):
 | GET | [`/_matrix/federation/v1/event_auth/{roomId}/{eventId}`](https://spec.matrix.org/v1.19/server-server-api/#get_matrixfederationv1event_authroomideventid) | tested |  | `conduit-server/tests/federation_inbound.rs::federation_directory_openid_and_local_key_query` | | Returns the auth chain of the event as federation PDUs. |
 | GET | [`/_matrix/federation/v1/backfill/{roomId}`](https://spec.matrix.org/v1.19/server-server-api/#get_matrixfederationv1backfillroomid) | tested | `conduit-server/src/federation/server.rs:1076` | `federation_inbound.rs::backfill_returns_history_visibility_filtered_events`<br>`production_pdu.rs::server_acl_denies_remote_participation_until_lifted` |  | History visibility filtering plus server ACL denial. |
 | POST | [`/_matrix/federation/v1/get_missing_events/{roomId}`](https://spec.matrix.org/v1.19/server-server-api/#post_matrixfederationv1get_missing_eventsroomid) | untested | `conduit-server/src/federation/server.rs:1078` |  | `conduit-y99.22` | No test; ACL protection open. |
-| GET | [`/_matrix/federation/v1/event/{eventId}`](https://spec.matrix.org/v1.19/server-server-api/#get_matrixfederationv1eventeventid) | untested | `conduit-server/src/federation/server.rs:1077` |  | `conduit-embed-pdu` | No Rust test (exercised only by the Synapse peer script); wire format is conduit-embed-pdu. |
+| GET | [`/_matrix/federation/v1/event/{eventId}`](https://spec.matrix.org/v1.19/server-server-api/#get_matrixfederationv1eventeventid) | tested | `conduit-server/src/federation/server.rs:982` | `production_pdu.rs::accepted_redaction_prunes_the_row_and_federation_get_event`<br>`production_pdu.rs::later_joining_servers_get_redacted_federation_events` |  | Accepted redaction is the room version's pruned PDU with the original hashes and signatures. Erasure redacts only servers that joined after the sender was erased. |
 | GET | [`/_matrix/federation/v1/state/{roomId}`](https://spec.matrix.org/v1.19/server-server-api/#get_matrixfederationv1stateroomid) | tested | `conduit-server/src/federation/server.rs:1074` | `federation_inbound.rs::state_endpoint_returns_room_state` | `conduit-y99.22` |  |
 | GET | [`/_matrix/federation/v1/state_ids/{roomId}`](https://spec.matrix.org/v1.19/server-server-api/#get_matrixfederationv1state_idsroomid) | untested | `conduit-server/src/federation/server.rs:1075` |  | `conduit-y99.22` |  |
 | GET | [`/_matrix/federation/v1/timestamp_to_event/{roomId}`](https://spec.matrix.org/v1.19/server-server-api/#get_matrixfederationv1timestamp_to_eventroomid) | tested |  | `conduit-server/tests/federation_inbound.rs::federation_directory_openid_and_local_key_query` | | Nearest event at or after ts when dir=f, and at or before ts when dir=b. |

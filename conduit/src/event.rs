@@ -140,6 +140,9 @@ pub enum IntegrityClass {
     /// The ID matches but the content hash does not: lost extensions, or a
     /// copy that was redacted on receipt. Served only as its redaction.
     ContentMismatch,
+    /// An accepted redaction replaced the content. Hashes and signatures are
+    /// the originals. Served as the stored bytes, not re-redacted as v11.
+    Redacted,
     /// The reference hash differs from the saved ID. Never served.
     IdMismatch,
 }
@@ -149,6 +152,7 @@ impl IntegrityClass {
         match self {
             IntegrityClass::Verified => "verified",
             IntegrityClass::ContentMismatch => "content_mismatch",
+            IntegrityClass::Redacted => "redacted",
             IntegrityClass::IdMismatch => "id_mismatch",
         }
     }
@@ -157,6 +161,7 @@ impl IntegrityClass {
         match value {
             "verified" => Some(IntegrityClass::Verified),
             "content_mismatch" => Some(IntegrityClass::ContentMismatch),
+            "redacted" => Some(IntegrityClass::Redacted),
             "id_mismatch" => Some(IntegrityClass::IdMismatch),
             _ => None,
         }
@@ -201,7 +206,20 @@ impl WirePdu {
                 WirePdu(crate::redaction::redact(&pdu)),
                 IntegrityClass::ContentMismatch,
             )),
+            IntegrityClass::Redacted => Some((WirePdu(pdu), IntegrityClass::Redacted)),
             IntegrityClass::IdMismatch => None,
+        }
+    }
+
+    /// A PDU whose reference hash still equals `expected_event_id`.
+    ///
+    /// Used for a stored redaction: the content hash no longer matches, and
+    /// running the v11 redaction again would drop fields an older room
+    /// version still protects (for example `aliases` through version 5).
+    pub fn retained(expected_event_id: &str, pdu: Pdu) -> Option<WirePdu> {
+        match crate::hashing::event_id(&pdu) {
+            Ok(derived) if derived == expected_event_id => Some(WirePdu(pdu)),
+            _ => None,
         }
     }
 

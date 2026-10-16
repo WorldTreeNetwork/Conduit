@@ -1261,3 +1261,141 @@ async fn later_joining_servers_get_redacted_federation_events() {
     assert_eq!(pdu_with_hash(late_missing["events"].as_array().unwrap(), &hash)["content"], json!({}));
     assert!(!late_missing.to_string().contains("my secret"), "{late_missing}");
 }
+
+async fn stored_event(server: &Server, event_id: &str) -> (String, String, String) {
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&server.database_url)
+        .await
+        .expect("production database");
+    let row: (String, String, String) = sqlx::query_as(
+        "SELECT content::text, pdu_json, id_integrity FROM events WHERE event_id = $1",
+    )
+    .bind(event_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    pool.close().await;
+    row
+}
+
+/// An accepted redaction removes the unprotected keys from the events row
+/// and from federation `GET /event`. Hashes and signatures stay. Room
+/// version 5 keeps `aliases`; version 12 does not.
+#[tokio::test]
+async fn accepted_redaction_prunes_the_row_and_federation_get_event() {
+    let remote = spawn_remote().await;
+    let server = federated_server(&remote).await;
+    let alice = server.register("alice").await;
+    let token = alice["access_token"].as_str().unwrap();
+
+    let room = server
+        .request(Method::POST, "/_matrix/client/v3/createRoom", Some(token), Some(json!({"preset": "public_chat", "room_version": "12"})), 200)
+        .await["room_id"].as_str().unwrap().to_owned();
+    let secret = "redact-me-body-9f3a";
+    let sent = server
+        .request(
+            Method::PUT,
+            &format!("/_matrix/client/v3/rooms/{}/send/m.room.message/secret", enc(&room)),
+            Some(token),
+            Some(json!({"msgtype": "m.text", "body": secret})),
+            200,
+        )
+        .await;
+    let event_id = sent["event_id"].as_str().unwrap().to_owned();
+    let (before_content, before_pdu, before_class) = stored_event(&server, &event_id).await;
+    assert!(before_content.contains(secret), "{before_content}");
+    assert!(before_pdu.contains(secret), "{before_pdu}");
+    assert_eq!(before_class, "verified");
+    let before: Value = serde_json::from_str(&before_pdu).unwrap();
+    let hash = before["hashes"]["sha256"].clone();
+    let signatures = before["signatures"].clone();
+
+    server
+        .request(
+            Method::PUT,
+            &format!("/_matrix/client/v3/rooms/{}/redact/{}/prune", enc(&room), enc(&event_id)),
+            Some(token),
+            Some(json!({"reason": "spill"})),
+            200,
+        )
+        .await;
+    let (after_content, after_pdu, after_class) = stored_event(&server, &event_id).await;
+    assert!(!after_content.contains(secret), "content column still holds the body: {after_content}");
+    assert!(!after_pdu.contains(secret), "pdu_json still holds the body: {after_pdu}");
+    assert_eq!(after_class, "redacted");
+    let after: Value = serde_json::from_str(&after_pdu).unwrap();
+    assert_eq!(after["hashes"]["sha256"], hash);
+    assert_eq!(after["signatures"], signatures);
+    assert!(after.get("event_id").is_none(), "{after}");
+
+    let wire = fed(
+        &server,
+        &remote,
+        Method::GET,
+        &format!("/_matrix/federation/v1/event/{}", enc(&event_id)),
+        None,
+        200,
+    )
+    .await;
+    let pdu = &wire["pdus"][0];
+    assert!(pdu.get("event_id").is_none(), "{pdu}");
+    assert!(!pdu.to_string().contains(secret), "{pdu}");
+    assert_eq!(pdu["content"], json!({}));
+    assert_eq!(pdu["hashes"]["sha256"], hash, "federation keeps the original content hash");
+    assert_eq!(pdu["signatures"], signatures);
+
+    let served = server
+        .request(
+            Method::GET,
+            &format!("/_matrix/client/v3/rooms/{}/event/{}", enc(&room), enc(&event_id)),
+            Some(token),
+            None,
+            200,
+        )
+        .await;
+    assert_eq!(served["content"], json!({}));
+    assert_eq!(served["unsigned"]["redacted_because"]["content"]["reason"], "spill");
+
+    let room5 = server
+        .request(Method::POST, "/_matrix/client/v3/createRoom", Some(token), Some(json!({"preset": "private_chat", "room_version": "5"})), 200)
+        .await["room_id"].as_str().unwrap().to_owned();
+    let alias = server
+        .request(
+            Method::PUT,
+            &format!("/_matrix/client/v3/rooms/{}/state/m.room.aliases/production.test", enc(&room5)),
+            Some(token),
+            Some(json!({"aliases": ["#kept:production.test"], "note": "drop-me-note"})),
+            200,
+        )
+        .await;
+    let alias_id = alias["event_id"].as_str().unwrap();
+    server
+        .request(
+            Method::PUT,
+            &format!("/_matrix/client/v3/rooms/{}/redact/{}/alias", enc(&room5), enc(alias_id)),
+            Some(token),
+            Some(json!({})),
+            200,
+        )
+        .await;
+    let (alias_content, alias_pdu, alias_class) = stored_event(&server, alias_id).await;
+    assert!(!alias_content.contains("drop-me-note"), "{alias_content}");
+    assert!(!alias_pdu.contains("drop-me-note"), "{alias_pdu}");
+    assert!(alias_content.contains("#kept:production.test"), "v5 keeps aliases in the row: {alias_content}");
+    assert!(alias_pdu.contains("#kept:production.test"), "v5 keeps aliases in pdu_json: {alias_pdu}");
+    assert_eq!(alias_class, "redacted");
+    let alias_wire = fed(
+        &server,
+        &remote,
+        Method::GET,
+        &format!("/_matrix/federation/v1/event/{}", enc(alias_id)),
+        None,
+        200,
+    )
+    .await;
+    let alias_pdu_wire = &alias_wire["pdus"][0];
+    assert_eq!(alias_pdu_wire["content"]["aliases"], json!(["#kept:production.test"]), "{alias_pdu_wire}");
+    assert!(alias_pdu_wire["content"].get("note").is_none(), "{alias_pdu_wire}");
+    assert!(!alias_wire.to_string().contains("drop-me-note"), "{alias_wire}");
+}

@@ -1749,6 +1749,8 @@ struct MemoryInner {
     requests: HashMap<TransactionKey, Value>,
     transactions: HashMap<TransactionKey, Value>,
     events: HashMap<String, Event>,
+    /// Event ids whose stored PDU was pruned by an accepted redaction.
+    redacted: std::collections::HashSet<String>,
     event_positions: HashMap<String, i64>,
     event_next_position: i64,
     accounts: HashMap<String, Account>,
@@ -1832,6 +1834,7 @@ impl Default for MemoryInner {
     fn default() -> Self {
         Self {
             events: HashMap::new(),
+            redacted: std::collections::HashSet::new(),
             filters: HashMap::new(),
             event_positions: HashMap::new(),
             event_next_position: 0,
@@ -1877,6 +1880,59 @@ impl Default for MemoryInner {
             aliases: HashMap::new(),
             account_lane: AccountLaneMemory::default(),
         }
+    }
+}
+
+/// Drop unprotected keys when `just_inserted` is an applying redaction, or
+/// when an applying redaction of it is already stored. Same-server senders
+/// apply; another server's redaction applies only at the redact level.
+fn prune_locked(inner: &mut MemoryInner, just_inserted: &Event) {
+    let mut ids = Vec::new();
+    if let Some(target) = crate::room_content::redaction_target(just_inserted) {
+        ids.push(target.to_owned());
+    }
+    ids.push(just_inserted.event_id.clone());
+    ids.sort();
+    ids.dedup();
+    for id in ids {
+        let Some(target) = inner.events.get(&id).cloned() else { continue };
+        let redactions: Vec<Event> = inner
+            .events
+            .values()
+            .filter(|event| crate::room_content::redaction_target(event) == Some(id.as_str()))
+            .cloned()
+            .collect();
+        let applies = redactions.iter().any(|redaction| {
+            let mut power_levels = None;
+            let mut creator = None;
+            for auth_id in &redaction.auth_events {
+                if let Some(event) = inner.events.get(auth_id) {
+                    if event.event_type == "m.room.power_levels" {
+                        power_levels = Some(event.clone());
+                    } else if event.event_type == "m.room.create" {
+                        creator = Some(event.sender.clone());
+                    }
+                }
+            }
+            crate::room_content::redaction_applies(redaction, &target, power_levels.as_ref(), creator.as_deref())
+        });
+        if !applies {
+            continue;
+        }
+        let version = inner
+            .room_state
+            .get(&(target.room_id.clone(), "m.room.create".into(), String::new()))
+            .and_then(|create_id| inner.events.get(create_id))
+            .map(crate::room_version::version_of_event)
+            .unwrap_or(11);
+        let pruned = crate::room_version::redact_pdu(&target.pdu, version);
+        if pruned.content == target.content && pruned.extensions == target.extensions {
+            continue;
+        }
+        let mut updated = target;
+        updated.pdu = pruned;
+        inner.events.insert(id.clone(), updated);
+        inner.redacted.insert(id);
     }
 }
 
@@ -1934,6 +1990,7 @@ impl Storage for MemoryStorage {
             let position = inner.event_next_position;
             inner.event_positions.insert(event.event_id.clone(), position);
             inner.events.insert(event.event_id.clone(), event.clone());
+            prune_locked(&mut inner, event);
         }
         inner.transactions.insert(key.clone(), serde_json::json!({"event_id": event.event_id}));
         Ok((event.event_id.clone(), true))
@@ -1946,6 +2003,7 @@ impl Storage for MemoryStorage {
             let position = inner.event_next_position;
             inner.event_positions.insert(event.event_id.clone(), position);
             inner.events.insert(event.event_id.clone(), event.clone());
+            prune_locked(&mut inner, event);
         }
         if let Some(state_key) = &event.state_key {
             let room_id = if event.room_id.is_empty() {
@@ -2000,8 +2058,21 @@ impl Storage for MemoryStorage {
             let position = inner.event_next_position;
             inner.event_positions.insert(event.event_id.clone(), position);
             inner.events.insert(event.event_id.clone(), event.clone());
+            prune_locked(&mut inner, event);
         }
         Ok(())
+    }
+
+    async fn get_wire_pdu_with_class(&self, event_id: &str) -> Result<Option<(IntegrityClass, Option<WirePdu>)>> {
+        let inner = self.inner.read().await;
+        let Some(event) = inner.events.get(event_id) else { return Ok(None) };
+        if inner.redacted.contains(event_id) {
+            let wire = WirePdu::retained(&event.event_id, event.pdu.clone());
+            return Ok(Some((IntegrityClass::Redacted, wire)));
+        }
+        let class = crate::event::classify(&event.event_id, &event.pdu);
+        let wire = WirePdu::checked(&event.event_id, event.pdu.clone());
+        Ok(Some((class, wire)))
     }
 
     async fn room_events(&self, room_id: &str) -> Result<Vec<Event>> {

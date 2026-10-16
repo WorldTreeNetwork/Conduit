@@ -24,9 +24,9 @@
         "total": 164
       },
       "requirement": {
-        "implemented+tested": 72,
+        "implemented+tested": 73,
         "implemented-untested": 0,
-        "partial": 5,
+        "partial": 4,
         "missing": 0,
         "not-applicable": 9,
         "total": 86
@@ -34,8 +34,8 @@
     },
     "ss": {
       "endpoint": {
-        "implemented+tested": 22,
-        "implemented-untested": 3,
+        "implemented+tested": 23,
+        "implemented-untested": 2,
         "partial": 6,
         "missing": 4,
         "not-applicable": 1,
@@ -1587,13 +1587,12 @@
       ],
       "tests": [
         "conduit-server/tests/production_rooms.rs::redaction_permissions_idempotency_and_serving",
-        "conduit-server/tests/production_rooms.rs::relations_threads_and_edit_aggregation"
+        "conduit-server/tests/production_rooms.rs::relations_threads_and_edit_aggregation",
+        "conduit-server/tests/production_pdu.rs::accepted_redaction_prunes_the_row_and_federation_get_event"
       ],
-      "tests_total": 2,
-      "gap_beads": [
-        "conduit-y99.19.4"
-      ],
-      "notes": "Served pruned with redacted_because; original content still stored (y99.19.4)."
+      "tests_total": 3,
+      "gap_beads": [],
+      "notes": "Served pruned with redacted_because. An accepted redaction also removes the unprotected keys from the events row."
     },
     {
       "id": "cs.ep.get_matrixclientv1roomsroomidrelationseventid",
@@ -5152,20 +5151,21 @@
       "rate_limited": "No",
       "deprecated": false,
       "role": "homeserver",
-      "status": "implemented-untested",
+      "status": "implemented+tested",
       "code": [
         {
-          "loc": "conduit-server/src/federation/server.rs:1077",
+          "loc": "conduit-server/src/federation/server.rs:982",
           "handler": "get_event",
           "kind": "exact"
         }
       ],
-      "tests": [],
-      "tests_total": 0,
-      "gap_beads": [
-        "conduit-embed-pdu"
+      "tests": [
+        "conduit-server/tests/production_pdu.rs::accepted_redaction_prunes_the_row_and_federation_get_event",
+        "conduit-server/tests/production_pdu.rs::later_joining_servers_get_redacted_federation_events"
       ],
-      "notes": "No Rust test (exercised only by the Synapse peer script); wire format is conduit-embed-pdu."
+      "tests_total": 2,
+      "gap_beads": [],
+      "notes": "GET /event returns the stored PDU. An accepted redaction is the room version's pruned form with the original hashes and signatures. Erasure redacts only for servers that had not joined before the sender was erased."
     },
     {
       "id": "ss.ep.get_matrixfederationv1stateroomid",
@@ -7419,7 +7419,7 @@
       "title": "Redactions (client endpoint, redaction auth, algorithm per room version)",
       "source": "https://spec.matrix.org/v1.19/client-server-api/#redactions",
       "role": "homeserver",
-      "status": "partial",
+      "status": "implemented+tested",
       "code": [
         {
           "loc": "conduit/src/redaction.rs"
@@ -7429,20 +7429,25 @@
         },
         {
           "loc": "conduit-server/src/api/client/room_content/serve.rs"
+        },
+        {
+          "loc": "conduit-server/src/storage_pg.rs"
+        },
+        {
+          "loc": "conduit-server/src/federation/server.rs"
         }
       ],
       "tests": [
         "conduit-server/tests/production_rooms.rs::redaction_permissions_idempotency_and_serving",
         "conduit-server/tests/production_rooms.rs::redaction_keeps_aliases_through_version_5_and_strips_them_after",
         "conduit-server/src/api/client/room_content/serve.rs::alias_redaction_follows_the_room_version",
-        "conduit/tests/matrix_v11_crypto.rs"
+        "conduit/tests/matrix_v11_crypto.rs",
+        "conduit-server/tests/production_pdu.rs::accepted_redaction_prunes_the_row_and_federation_get_event",
+        "conduit-server/tests/storage_pdu.rs::extended_pdu_survives_every_read_and_a_pool_restart_on_postgres"
       ],
-      "tests_total": 4,
-      "gap_beads": [
-        "conduit-y99.23",
-        "conduit-y99.19.4"
-      ],
-      "notes": "Client reads (event, messages, sync, relations, search) prune with the room version's algorithm. Federation get_event and stored PDUs still return the original (y99.23, y99.19.4)."
+      "tests_total": 6,
+      "gap_beads": [],
+      "notes": "Client reads prune with the room version's algorithm and attach redacted_because. An accepted redaction removes those keys from the events row in the same transaction, keeping hashes and signatures. Federation GET /event serves that pruned PDU. Version 5 keeps aliases."
     },
     {
       "id": "cs.events.relationships",

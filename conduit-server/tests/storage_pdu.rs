@@ -39,14 +39,14 @@ fn fixture_events(key: &ServerKey) -> Vec<Event> {
     let member = signed(key, Pdu::new(ROOM, ALICE, "m.room.member", Some(ALICE.into()),
         json!({"membership": "join", "displayname": "Al\u{0}ice"}), 1_001,
         vec![create.event_id.clone()], vec![create.event_id.clone()], 2));
-    let mut message_pdu = Pdu::new(ROOM, ALICE, "m.room.message", None,
+    let message = signed(key, Pdu::new(ROOM, ALICE, "m.room.message", None,
         json!({"msgtype": "m.text", "body": "hello wo\u{0}rld", "n": MAX_SAFE}), 1_002,
-        vec![create.event_id.clone(), member.event_id.clone()], vec![member.event_id.clone()], 3);
-    message_pdu.extensions.insert("org.example.ext".into(), json!({"nested": ["a\u{0}", MAX_SAFE]}));
-    let message = signed(key, message_pdu);
-    let thread = signed(key, Pdu::new(ROOM, ALICE, "m.room.message", None,
+        vec![create.event_id.clone(), member.event_id.clone()], vec![member.event_id.clone()], 3));
+    let mut thread_pdu = Pdu::new(ROOM, ALICE, "m.room.message", None,
         json!({"body": "reply", "m.relates_to": {"rel_type": "m.thread", "event_id": message.event_id}}), 1_003,
-        vec![create.event_id.clone(), member.event_id.clone()], vec![message.event_id.clone()], 4));
+        vec![create.event_id.clone(), member.event_id.clone()], vec![message.event_id.clone()], 4);
+    thread_pdu.extensions.insert("org.example.ext".into(), json!({"nested": ["a\u{0}", MAX_SAFE]}));
+    let thread = signed(key, thread_pdu);
     let redaction = signed(key, Pdu::new(ROOM, ALICE, "m.room.redaction", None,
         json!({"redacts": message.event_id}), 1_004,
         vec![create.event_id.clone(), member.event_id.clone()], vec![thread.event_id.clone()], 5));
@@ -65,16 +65,15 @@ async fn write_fixture(store: &dyn Storage, events: &[Event]) {
 /// Every public `Storage` method that returns events must return them intact.
 async fn assert_every_read_round_trips(store: &dyn Storage, events: &[Event]) {
     let by_id = |id: &str| events.iter().find(|e| e.event_id == id).unwrap_or_else(|| panic!("unexpected {id}"));
+    let message = &events[2];
+    let pruned_message = conduit::room_version::redact_pdu(&message.pdu, 11);
     let check = |label: &str, got: &Event| {
         let want = by_id(&got.event_id);
-        assert_eq!(got.pdu, want.pdu, "{label}: {}", got.event_id);
-        assert_eq!(
-            conduit::hashing::content_hash(&got.pdu).unwrap(),
-            conduit::hashing::content_hash(&want.pdu).unwrap(),
-            "{label}"
-        );
+        let want_pdu = if want.event_id == message.event_id { &pruned_message } else { &want.pdu };
+        assert_eq!(&got.pdu, want_pdu, "{label}: {}", got.event_id);
+        assert_eq!(got.hashes, want.hashes, "{label}: hashes survive redaction");
+        assert_eq!(got.signatures, want.signatures, "{label}: signatures survive redaction");
     };
-    let message = &events[2];
     for event in events {
         check("get_event", &store.get_event(&event.event_id).await.unwrap().unwrap());
     }
@@ -104,10 +103,16 @@ async fn assert_every_read_round_trips(store: &dyn Storage, events: &[Event]) {
     let hits = store.search_room_events(&[ROOM.to_owned()], "reply", SearchKeys::ALL, false, 10).await.unwrap();
     assert!(!hits.is_empty(), "search found the thread reply");
     hits.iter().for_each(|hit| check("search_room_events", &hit.event));
-    // The wire form of the extended message is exactly its Pdu.
+    // The accepted redaction removed the body. The wire form is that prune,
+    // with the original hashes, and still has no event_id.
     let wire = store.get_wire_pdu(&message.event_id).await.unwrap().unwrap();
-    assert_eq!(wire.pdu(), &message.pdu);
+    assert_eq!(wire.pdu(), &pruned_message);
+    assert!(wire.content.get("body").is_none(), "{wire:?}");
+    assert_eq!(wire.hashes, message.hashes);
     assert!(serde_json::to_value(&wire).unwrap().get("event_id").is_none());
+    let thread = &events[3];
+    let thread_wire = store.get_wire_pdu(&thread.event_id).await.unwrap().unwrap();
+    assert_eq!(thread_wire.pdu(), &thread.pdu, "an unredacted extension still round-trips");
 }
 
 #[tokio::test]
@@ -121,7 +126,9 @@ async fn extended_pdu_survives_every_read_and_a_pool_restart_on_postgres() {
     // New rows are written authoritative and verified.
     let rows: Vec<(String, Option<String>)> = sqlx::query_as("SELECT id_integrity, pdu_json FROM events")
         .fetch_all(&db.pool).await.unwrap();
-    assert!(rows.iter().all(|(class, json)| class == "verified" && json.is_some()), "{rows:?}");
+    let redacted = rows.iter().filter(|(class, _)| class == "redacted").count();
+    assert_eq!(redacted, 1, "the redacted message is the only pruned row: {rows:?}");
+    assert!(rows.iter().all(|(class, json)| json.is_some() && (class == "verified" || class == "redacted")), "{rows:?}");
 }
 
 #[tokio::test]

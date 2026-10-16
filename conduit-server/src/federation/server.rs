@@ -154,20 +154,50 @@ pub(crate) fn invalid_param(msg: &str) -> Response {
 /// ones are the v11 redaction. A sender who asked for erasure is served that
 /// redaction to an origin whose first join in the room is absent or not
 /// strictly before `erased_at`. Origins that already had a member keep the
-/// original. The redacted copy keeps the original hashes and signatures (no
-/// redaction event is invented). It is not a [`WirePdu`]: stripping content
-/// changes the reference hash, and [`WirePdu::checked`] would drop it.
+/// original. An accepted `m.room.redaction` is served with the room version's
+/// algorithm. Either redacted copy keeps the original hashes and signatures
+/// (no redaction event is invented).
 pub(crate) async fn wire_pdus(
     storage: &Arc<dyn Storage>,
     origin: &str,
     events: &[Event],
 ) -> conduit::Result<Vec<Value>> {
     let redact = erased_ids_for_origin(storage.as_ref(), origin, events).await?;
+    let mut accepted: HashSet<String> = HashSet::new();
+    let mut by_room: HashMap<String, Vec<String>> = HashMap::new();
+    for event in events {
+        by_room.entry(event.room_id.clone()).or_default().push(event.event_id.clone());
+    }
+    for (room_id, ids) in by_room {
+        for redaction in storage.redactions_targeting(&room_id, &ids).await? {
+            let Some(target_id) = conduit::room_content::redaction_target(&redaction) else { continue };
+            let Some(target) = events.iter().find(|event| event.event_id == target_id) else { continue };
+            let mut power_levels = None;
+            let mut creator = None;
+            for auth_id in &redaction.auth_events {
+                if let Some(auth) = storage.get_event(auth_id).await? {
+                    if auth.event_type == "m.room.power_levels" {
+                        power_levels = Some(auth);
+                    } else if auth.event_type == "m.room.create" {
+                        creator = Some(auth.sender.clone());
+                    }
+                }
+            }
+            if conduit::room_content::redaction_applies(
+                &redaction,
+                target,
+                power_levels.as_ref(),
+                creator.as_deref(),
+            ) {
+                accepted.insert(target_id.to_owned());
+            }
+        }
+    }
     let mut versions: HashMap<String, u32> = HashMap::new();
     let mut out = Vec::with_capacity(events.len());
     for event in events {
         let Some(wire) = storage.get_wire_pdu(&event.event_id).await? else { continue };
-        if redact.contains(&event.event_id) {
+        if redact.contains(&event.event_id) || accepted.contains(&event.event_id) {
             let version = match versions.get(&event.room_id) {
                 Some(version) => *version,
                 None => {

@@ -222,6 +222,112 @@ async fn insert_event(connection: &mut sqlx::PgConnection, event: &Event) -> Res
     Ok(())
 }
 
+/// After a row is inserted, drop unprotected keys from any event an
+/// *applying* redaction now covers. Hashes and signatures stay. The write
+/// is in the caller's transaction, so the redaction and the prune commit
+/// together. A redaction that does not apply (another server, below the
+/// redact level) leaves the target untouched.
+async fn prune_after_insert(conn: &mut sqlx::PgConnection, event: &Event) -> Result<()> {
+    let mut ids = Vec::new();
+    if let Some(target) = conduit::room_content::redaction_target(event) {
+        ids.push(target.to_owned());
+    }
+    ids.push(event.event_id.clone());
+    ids.sort();
+    ids.dedup();
+    for id in ids {
+        prune_target(conn, &id).await?;
+    }
+    Ok(())
+}
+
+async fn load_pdu(conn: &mut sqlx::PgConnection, event_id: &str) -> Result<Option<Event>> {
+    let row: Option<(String, Option<String>)> = sqlx::query_as(
+        "SELECT event_id, pdu_json FROM events WHERE event_id = $1 FOR UPDATE",
+    )
+    .bind(event_id)
+    .fetch_optional(&mut *conn)
+    .await
+    .map_err(map_sqlx)?;
+    let Some((id, pdu_json)) = row else { return Ok(None) };
+    let Some(pdu_json) = pdu_json else { return Ok(None) };
+    let pdu: conduit::event::Pdu = serde_json::from_str(&pdu_json)
+        .map_err(|error| Error::Storage(format!("unreadable pdu_json for {id}: {error}")))?;
+    Ok(Some(Event::new(id, pdu)))
+}
+
+async fn prune_target(conn: &mut sqlx::PgConnection, event_id: &str) -> Result<()> {
+    let Some(target) = load_pdu(conn, event_id).await? else { return Ok(()) };
+    let redaction_rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT event_id, pdu_json FROM events
+         WHERE room_id = $1 AND type = 'm.room.redaction'
+           AND content->>'redacts' = $2 AND pdu_json IS NOT NULL",
+    )
+    .bind(&target.room_id)
+    .bind(&target.event_id)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(map_sqlx)?;
+    let mut applies = false;
+    for (redaction_id, pdu_json) in redaction_rows {
+        let pdu: conduit::event::Pdu = serde_json::from_str(&pdu_json)
+            .map_err(|error| Error::Storage(format!("unreadable redaction {redaction_id}: {error}")))?;
+        let redaction = Event::new(redaction_id, pdu);
+        let (power_levels, creator) = redaction_auth(conn, &redaction).await?;
+        if conduit::room_content::redaction_applies(&redaction, &target, power_levels.as_ref(), creator.as_deref()) {
+            applies = true;
+            break;
+        }
+    }
+    if !applies {
+        return Ok(());
+    }
+    let version: Option<String> = sqlx::query_scalar(
+        "SELECT e.content->>'room_version' FROM room_current_state s
+         JOIN events e ON e.event_id = s.event_id
+         WHERE s.room_id = $1 AND s.type = 'm.room.create' AND s.state_key = ''",
+    )
+    .bind(&target.room_id)
+    .fetch_optional(&mut *conn)
+    .await
+    .map_err(map_sqlx)?;
+    let version = version.as_deref().and_then(|text| text.parse().ok()).unwrap_or(11);
+    let pruned = conduit::room_version::redact_pdu(&target.pdu, version);
+    if pruned.content == target.content && pruned.extensions == target.extensions {
+        return Ok(());
+    }
+    let pdu_json = conduit::canonical_json::to_canonical_string(&pruned)
+        .map_err(|error| Error::Storage(format!("redacted PDU is not canonical JSON: {error}")))?;
+    let content = conduit::wire::project_nul(&pruned.content);
+    sqlx::query(
+        "UPDATE events SET content = $2, pdu_json = $3, id_integrity = 'redacted' WHERE event_id = $1",
+    )
+    .bind(&target.event_id)
+    .bind(content)
+    .bind(pdu_json)
+    .execute(&mut *conn)
+    .await
+    .map_err(map_sqlx)?;
+    Ok(())
+}
+
+async fn redaction_auth(
+    conn: &mut sqlx::PgConnection,
+    redaction: &Event,
+) -> Result<(Option<Event>, Option<String>)> {
+    let mut power_levels = None;
+    let mut creator = None;
+    for id in &redaction.auth_events {
+        let Some(event) = load_pdu(conn, id).await? else { continue };
+        if event.event_type == "m.room.power_levels" {
+            power_levels = Some(event);
+        } else if event.event_type == "m.room.create" {
+            creator = Some(event.sender.clone());
+        }
+    }
+    Ok((power_levels, creator))
+}
+
 // ---------------------------------------------------------------------------
 // Commit-ordered stream positions (conduit-y99.16)
 // ---------------------------------------------------------------------------
@@ -387,6 +493,7 @@ impl Storage for PostgresStorage {
         }
         lock_stream(&mut transaction, Stream::Events).await?;
         insert_event(&mut transaction, event).await?;
+        prune_after_insert(&mut transaction, event).await?;
         transaction.commit().await.map_err(map_sqlx)?;
         Ok((event.event_id.clone(), true))
     }
@@ -461,6 +568,7 @@ impl Storage for PostgresStorage {
         let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
         lock_stream(&mut transaction, Stream::Events).await?;
         insert_event(&mut transaction, event).await?;
+        prune_after_insert(&mut transaction, event).await?;
         transaction.commit().await.map_err(map_sqlx)?;
         Ok(())
     }
@@ -469,6 +577,7 @@ impl Storage for PostgresStorage {
         let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
         lock_stream(&mut transaction, Stream::Events).await?;
         insert_event(&mut transaction, event).await?;
+        prune_after_insert(&mut transaction, event).await?;
         if let Some(state_key) = &event.state_key {
             let room_id = if event.room_id.is_empty() {
                 conduit::room_version::room_id_from_event_id(&event.event_id)
@@ -545,6 +654,9 @@ impl Storage for PostgresStorage {
         };
         let wire = match class {
             IntegrityClass::IdMismatch => None,
+            // Accepted redaction: the row already holds the room version's
+            // pruned PDU. Do not run the v11 content-mismatch redaction over it.
+            IntegrityClass::Redacted => WirePdu::retained(&event.event_id, event.pdu),
             // Redacted on receipt or lossy: `checked` yields the redaction,
             // computed now and never written back to retained history.
             _ => WirePdu::checked(&event.event_id, event.pdu),
@@ -579,6 +691,8 @@ impl Storage for PostgresStorage {
                 IntegrityClass::Verified => sweep.verified += 1,
                 IntegrityClass::ContentMismatch => sweep.content_mismatch += 1,
                 IntegrityClass::IdMismatch => sweep.id_mismatch += 1,
+                // Legacy classification never writes this class.
+                IntegrityClass::Redacted => {}
             }
         }
         Ok(sweep)
