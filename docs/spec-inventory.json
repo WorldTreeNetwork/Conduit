@@ -42,9 +42,9 @@
         "total": 36
       },
       "requirement": {
-        "implemented+tested": 34,
+        "implemented+tested": 35,
         "implemented-untested": 0,
-        "partial": 4,
+        "partial": 3,
         "missing": 0,
         "not-applicable": 3,
         "total": 41
@@ -8854,7 +8854,7 @@
       "title": "Transactions (\u226450 PDUs/\u2264100 EDUs, idempotent txnId, per-PDU results)",
       "source": "https://spec.matrix.org/v1.19/server-server-api/#transactions",
       "role": "homeserver",
-      "status": "partial",
+      "status": "implemented+tested",
       "code": [
         {
           "loc": "conduit-server/src/federation/server.rs"
@@ -8864,20 +8864,22 @@
         },
         {
           "loc": "conduit-server/src/storage_pg.rs"
+        },
+        {
+          "loc": "conduit-server/src/main.rs"
         }
       ],
       "tests": [
         "conduit-server/tests/federation_inbound.rs::send_transaction_persists_pdus",
         "conduit-server/tests/federation.rs::queue_retries_on_failure",
         "conduit-server/tests/production_pdu.rs::send_delivers_nul_to_device_and_receipt_byte_exact",
-        "conduit-server/tests/storage_pdu.rs::to_device_content_keeps_nul_and_projects_replacement"
+        "conduit-server/tests/storage_pdu.rs::to_device_content_keeps_nul_and_projects_replacement",
+        "conduit-server/tests/production_pdu.rs::send_rejects_transactions_over_fifty_pdus_or_one_hundred_edus",
+        "conduit-server/tests/storage_pdu.rs::transaction_and_sent_outbox_retention_deletes_expired_rows"
       ],
-      "tests_total": 4,
-      "gap_beads": [
-        "conduit-y99.22.5",
-        "conduit-y99.33"
-      ],
-      "notes": "A to-device message and a read receipt containing U+0000 are delivered on /sync after restart. Typing and presence keep U+0000 in memory. Device-list and signing-key JSONB sinks still drop that one EDU on SQLSTATE class 22. Transaction and sent-outbox retention remains."
+      "tests_total": 6,
+      "gap_beads": [],
+      "notes": "At most 50 PDUs and 100 EDUs. The same txn id replays the stored response. Per-PDU results are empty objects or error strings inside HTTP 200. A to-device message and a read receipt containing U+0000 are delivered on /sync after restart. Client transaction rows expire after 30 minutes. Federation replay and to-device message ids expire after 24 hours. Sent outbox rows expire after 7 days. Legacy JSONB replay and payload columns are dropped after copy into text. PDU receipt checks are on ss.pdu.checks."
     },
     {
       "id": "ss.pdu.checks",

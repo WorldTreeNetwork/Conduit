@@ -381,6 +381,60 @@ async fn send_delivers_nul_to_device_and_receipt_byte_exact() {
     );
 }
 
+/// Fifty PDUs and one hundred EDUs are accepted. One more of either is
+/// `400 M_BAD_JSON`. The empty PDUs are invalid and produce no results;
+/// raising either cap, or rejecting a legal transaction, fails this.
+#[tokio::test]
+async fn send_rejects_transactions_over_fifty_pdus_or_one_hundred_edus() {
+    let remote = spawn_remote().await;
+    let server = federated_server(&remote).await;
+    let edus = |n: usize| (0..n).map(|_| json!({"edu_type": "org.unknown", "content": {}})).collect();
+    let pdus = |n: usize| (0..n).map(|_| json!({})).collect();
+
+    let over_edus = fed(
+        &server,
+        &remote,
+        Method::PUT,
+        "/_matrix/federation/v1/send/over-edus",
+        Some(txn(vec![], edus(101))),
+        400,
+    )
+    .await;
+    assert_eq!(over_edus["errcode"], "M_BAD_JSON", "{over_edus}");
+    let at_edus = fed(
+        &server,
+        &remote,
+        Method::PUT,
+        "/_matrix/federation/v1/send/at-edus",
+        Some(txn(vec![], edus(100))),
+        200,
+    )
+    .await;
+    assert!(at_edus.get("errcode").is_none(), "{at_edus}");
+
+    let over_pdus = fed(
+        &server,
+        &remote,
+        Method::PUT,
+        "/_matrix/federation/v1/send/over-pdus",
+        Some(txn(pdus(51), vec![])),
+        400,
+    )
+    .await;
+    assert_eq!(over_pdus["errcode"], "M_BAD_JSON", "{over_pdus}");
+    let at_pdus = fed(
+        &server,
+        &remote,
+        Method::PUT,
+        "/_matrix/federation/v1/send/at-pdus",
+        Some(txn(pdus(50), vec![])),
+        200,
+    )
+    .await;
+    assert!(at_pdus.get("errcode").is_none(), "{at_pdus}");
+    assert!(at_pdus["pdus"].as_object().unwrap().is_empty(), "{at_pdus}");
+}
+
 fn invite(remote: &Remote, room: &str, sender: &str, invitee: &str) -> Pdu {
     let mut pdu = Pdu::new(room, sender, "m.room.member", Some(invitee.into()),
         json!({"membership": "invite", "displayname": "Alice"}), 1_700_000_000_000, vec![], vec![], 1);

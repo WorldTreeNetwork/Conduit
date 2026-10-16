@@ -478,89 +478,143 @@ impl Storage for PostgresStorage {
         Ok(Box::new(PostgresTransactionGuard {_transaction: transaction}))
     }
 
-    // Replay bodies and results are lossless JSON text (`*_text`, migration
-    // 0091); rows written before it keep their JSONB columns, read as a
-    // fallback. Text keeps U+0000 (`\u0000`) and floats, which JSONB or the
-    // canonical encoder would refuse.
+    // Replay bodies and results are lossless JSON text (migration 0091).
+    // Migration 0098 copied any leftover JSONB and dropped those columns.
+    // Text keeps U+0000 (`\u0000`) and floats, which JSONB or the canonical
+    // encoder would refuse. The first stored body or result wins.
 
     async fn transaction_original(&self, key: &conduit::storage::TransactionKey) -> Result<Option<Value>> {
-        let row = sqlx::query!("SELECT request_text, request FROM transactions WHERE scope = $1 AND owner = $2 AND endpoint = $3 AND txn_id = $4",
-            key.scope, key.owner, key.endpoint, key.txn_id).fetch_optional(&self.pool).await.map_err(map_sqlx)?;
+        let row = sqlx::query(
+            "SELECT request_text FROM transactions WHERE scope = $1 AND owner = $2 AND endpoint = $3 AND txn_id = $4",
+        )
+        .bind(&key.scope)
+        .bind(&key.owner)
+        .bind(&key.endpoint)
+        .bind(&key.txn_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
         match row {
-            Some(row) if row.request_text.is_some() || row.request.is_some() => Ok(Some(text_or_json(row.request_text, row.request)?)),
-            _ => Ok(None),
+            Some(row) => match row.try_get::<Option<String>, _>("request_text").map_err(map_sqlx)? {
+                Some(text) => text_or_json(Some(text), None).map(Some),
+                None => Ok(None),
+            },
+            None => Ok(None),
         }
     }
 
     async fn transaction_request(&self, key: &conduit::storage::TransactionKey, request: &Value) -> Result<Value> {
-        let row = sqlx::query!(
+        let row = sqlx::query(
             r#"INSERT INTO transactions (scope, owner, endpoint, txn_id, request_text)
             VALUES ($1, $2, $3, $4, $5)
             ON CONFLICT (scope, owner, endpoint, txn_id) DO UPDATE
-                SET request_text = CASE WHEN transactions.request IS NULL
-                    THEN COALESCE(transactions.request_text, EXCLUDED.request_text)
-                    ELSE transactions.request_text END
-            RETURNING request_text, request"#,
-            key.scope, key.owner, key.endpoint, key.txn_id, json_text(request)
-        ).fetch_one(&self.pool).await.map_err(map_sqlx)?;
-        if row.request_text.is_none() && row.request.is_none() {
-            return Err(Error::Storage("missing original transaction request".into()));
-        }
-        text_or_json(row.request_text, row.request)
+                SET request_text = COALESCE(transactions.request_text, EXCLUDED.request_text)
+            RETURNING request_text"#,
+        )
+        .bind(&key.scope)
+        .bind(&key.owner)
+        .bind(&key.endpoint)
+        .bind(&key.txn_id)
+        .bind(json_text(request))
+        .fetch_one(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        let text: Option<String> = row.try_get("request_text").map_err(map_sqlx)?;
+        text.ok_or_else(|| Error::Storage("missing original transaction request".into()))
+            .and_then(|text| text_or_json(Some(text), None))
     }
 
     async fn finish_transaction(&self, key: &conduit::storage::TransactionKey, result: &Value) -> Result<Value> {
-        let row = sqlx::query!(
+        let row = sqlx::query(
             r#"INSERT INTO transactions (scope, owner, endpoint, txn_id, result_text)
             VALUES ($1, $2, $3, $4, $5)
             ON CONFLICT (scope, owner, endpoint, txn_id) DO UPDATE
-                SET result_text = CASE WHEN transactions.result IS NULL
-                    THEN COALESCE(transactions.result_text, EXCLUDED.result_text)
-                    ELSE transactions.result_text END
-            RETURNING result_text, result"#,
-            key.scope, key.owner, key.endpoint, key.txn_id, json_text(result)
-        ).fetch_one(&self.pool).await.map_err(map_sqlx)?;
-        if row.result_text.is_none() && row.result.is_none() {
-            return Err(Error::Storage("missing completed transaction result".into()));
-        }
-        text_or_json(row.result_text, row.result)
+                SET result_text = COALESCE(transactions.result_text, EXCLUDED.result_text)
+            RETURNING result_text"#,
+        )
+        .bind(&key.scope)
+        .bind(&key.owner)
+        .bind(&key.endpoint)
+        .bind(&key.txn_id)
+        .bind(json_text(result))
+        .fetch_one(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        let text: Option<String> = row.try_get("result_text").map_err(map_sqlx)?;
+        text.ok_or_else(|| Error::Storage("missing completed transaction result".into()))
+            .and_then(|text| text_or_json(Some(text), None))
     }
 
     async fn transaction_result(&self, key: &conduit::storage::TransactionKey) -> Result<Option<Value>> {
-        let row = sqlx::query!(
-            "SELECT result_text, result FROM transactions WHERE scope = $1 AND owner = $2 AND endpoint = $3 AND txn_id = $4",
-            key.scope, key.owner, key.endpoint, key.txn_id
-        ).fetch_optional(&self.pool).await.map_err(map_sqlx)?;
+        let row = sqlx::query(
+            "SELECT result_text FROM transactions WHERE scope = $1 AND owner = $2 AND endpoint = $3 AND txn_id = $4",
+        )
+        .bind(&key.scope)
+        .bind(&key.owner)
+        .bind(&key.endpoint)
+        .bind(&key.txn_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
         match row {
-            Some(row) if row.result_text.is_some() || row.result.is_some() => Ok(Some(text_or_json(row.result_text, row.result)?)),
-            _ => Ok(None),
+            Some(row) => match row.try_get::<Option<String>, _>("result_text").map_err(map_sqlx)? {
+                Some(text) => text_or_json(Some(text), None).map(Some),
+                None => Ok(None),
+            },
+            None => Ok(None),
         }
     }
 
     async fn put_event_once(&self, key: &conduit::storage::TransactionKey, event: &Event) -> Result<(String, bool)> {
         let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
-        // The client event-transaction result is a fixed, NUL-free object
-        // ({"event_id": "$<base64>"}); it is also kept in the JSONB column
-        // for the 0051 event -> transaction_id lookup index.
-        let result_json = serde_json::json!({"event_id": event.event_id});
-        let result = json_text(&result_json);
-        let inserted = sqlx::query!(
-            "INSERT INTO transactions (scope, owner, endpoint, txn_id, result_text, result) VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING",
-            key.scope, key.owner, key.endpoint, key.txn_id, result, result_json
-        ).execute(&mut *transaction).await.map_err(map_sqlx)?.rows_affected() > 0;
+        // The client event-transaction result is {"event_id": "$<base64>"}.
+        // 0098's expression index looks that id up in result_text.
+        let result = json_text(&serde_json::json!({"event_id": event.event_id}));
+        let inserted = sqlx::query(
+            "INSERT INTO transactions (scope, owner, endpoint, txn_id, result_text) VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING",
+        )
+        .bind(&key.scope)
+        .bind(&key.owner)
+        .bind(&key.endpoint)
+        .bind(&key.txn_id)
+        .bind(&result)
+        .execute(&mut *transaction)
+        .await
+        .map_err(map_sqlx)?
+        .rows_affected()
+            > 0;
         if !inserted {
-            let row = sqlx::query!(
-                "SELECT result_text, result FROM transactions WHERE scope = $1 AND owner = $2 AND endpoint = $3 AND txn_id = $4 FOR UPDATE",
-                key.scope, key.owner, key.endpoint, key.txn_id
-            ).fetch_one(&mut *transaction).await.map_err(map_sqlx)?;
-            if row.result_text.is_some() || row.result.is_some() {
-                let stored = text_or_json(row.result_text, row.result)?;
-                let id = stored["event_id"].as_str().ok_or_else(|| Error::Storage("invalid stored event transaction".into()))?.to_owned();
+            let row = sqlx::query(
+                "SELECT result_text FROM transactions WHERE scope = $1 AND owner = $2 AND endpoint = $3 AND txn_id = $4 FOR UPDATE",
+            )
+            .bind(&key.scope)
+            .bind(&key.owner)
+            .bind(&key.endpoint)
+            .bind(&key.txn_id)
+            .fetch_one(&mut *transaction)
+            .await
+            .map_err(map_sqlx)?;
+            let stored_text: Option<String> = row.try_get("result_text").map_err(map_sqlx)?;
+            if stored_text.is_some() {
+                let stored = text_or_json(stored_text, None)?;
+                let id = stored["event_id"]
+                    .as_str()
+                    .ok_or_else(|| Error::Storage("invalid stored event transaction".into()))?
+                    .to_owned();
                 transaction.commit().await.map_err(map_sqlx)?;
                 return Ok((id, false));
             }
-            sqlx::query!("UPDATE transactions SET result_text = $5, result = $6 WHERE scope = $1 AND owner = $2 AND endpoint = $3 AND txn_id = $4",
-                key.scope, key.owner, key.endpoint, key.txn_id, result, result_json).execute(&mut *transaction).await.map_err(map_sqlx)?;
+            sqlx::query(
+                "UPDATE transactions SET result_text = $5 WHERE scope = $1 AND owner = $2 AND endpoint = $3 AND txn_id = $4",
+            )
+            .bind(&key.scope)
+            .bind(&key.owner)
+            .bind(&key.endpoint)
+            .bind(&key.txn_id)
+            .bind(&result)
+            .execute(&mut *transaction)
+            .await
+            .map_err(map_sqlx)?;
         }
         if event.state_key.is_some() {
             return Err(Error::InvalidEvent("put_event_once accepts non-state events only".into()));
@@ -581,9 +635,21 @@ impl Storage for PostgresStorage {
             key.scope, key.owner, key.endpoint, key.txn_id, result
         ).execute(&mut *transaction).await.map_err(map_sqlx)?.rows_affected() > 0;
         if !inserted {
-            let row = sqlx::query!("SELECT result_text, result FROM transactions WHERE scope = $1 AND owner = $2 AND endpoint = $3 AND txn_id = $4 FOR UPDATE",
-                key.scope, key.owner, key.endpoint, key.txn_id).fetch_one(&mut *transaction).await.map_err(map_sqlx)?;
-            if row.result_text.is_some() || row.result.is_some() { transaction.commit().await.map_err(map_sqlx)?; return Ok(false); }
+            let row = sqlx::query(
+                "SELECT result_text FROM transactions WHERE scope = $1 AND owner = $2 AND endpoint = $3 AND txn_id = $4 FOR UPDATE",
+            )
+            .bind(&key.scope)
+            .bind(&key.owner)
+            .bind(&key.endpoint)
+            .bind(&key.txn_id)
+            .fetch_one(&mut *transaction)
+            .await
+            .map_err(map_sqlx)?;
+            let stored: Option<String> = row.try_get("result_text").map_err(map_sqlx)?;
+            if stored.is_some() {
+                transaction.commit().await.map_err(map_sqlx)?;
+                return Ok(false);
+            }
             sqlx::query!("UPDATE transactions SET result_text = $5 WHERE scope = $1 AND owner = $2 AND endpoint = $3 AND txn_id = $4",
                 key.scope, key.owner, key.endpoint, key.txn_id, result).execute(&mut *transaction).await.map_err(map_sqlx)?;
         }
@@ -3734,9 +3800,9 @@ impl Storage for PostgresStorage {
         destination: &str,
         limit: i64,
     ) -> Result<Vec<OutboundEntry>> {
-        let rows = sqlx::query!(
+        let rows = sqlx::query(
             r#"
-            SELECT id, destination, kind, txn_id, payload, payload_text, attempts
+            SELECT id, destination, kind, txn_id, payload_text, attempts
             FROM fed_outbound_queue
             WHERE status = 'pending'
               AND destination = $1
@@ -3744,22 +3810,25 @@ impl Storage for PostgresStorage {
             ORDER BY next_attempt_at, id
             LIMIT $2
             "#,
-            destination,
-            limit,
         )
+        .bind(destination)
+        .bind(limit)
         .fetch_all(&self.pool)
         .await
         .map_err(map_sqlx)?;
-        rows.into_iter()
-            .map(|r| Ok(OutboundEntry {
-                id: r.id,
-                destination: r.destination,
-                kind: r.kind,
-                txn_id: r.txn_id,
-                payload: text_or_json(r.payload_text, r.payload)?,
-                attempts: r.attempts,
-            }))
-            .collect()
+        let mut entries = Vec::with_capacity(rows.len());
+        for row in rows {
+            let payload_text: Option<String> = row.try_get("payload_text").map_err(map_sqlx)?;
+            entries.push(OutboundEntry {
+                id: row.try_get("id").map_err(map_sqlx)?,
+                destination: row.try_get("destination").map_err(map_sqlx)?,
+                kind: row.try_get("kind").map_err(map_sqlx)?,
+                txn_id: row.try_get("txn_id").map_err(map_sqlx)?,
+                payload: text_or_json(payload_text, None)?,
+                attempts: row.try_get("attempts").map_err(map_sqlx)?,
+            });
+        }
+        Ok(entries)
     }
 
     async fn record_legacy_snapshot_verdicts(&self, outbound_id: i64, verdicts: &Value, note: Option<&str>) -> Result<()> {
@@ -3886,6 +3955,25 @@ impl Storage for PostgresStorage {
             total += n as i64;
         }
         Ok(total)
+    }
+
+    async fn gc_transactions(&self, client_cutoff_ms: i64, federation_cutoff_ms: i64) -> Result<i64> {
+        let client_cut = DateTime::<Utc>::from_timestamp_millis(client_cutoff_ms).unwrap_or_else(Utc::now);
+        let federation_cut = DateTime::<Utc>::from_timestamp_millis(federation_cutoff_ms).unwrap_or_else(Utc::now);
+        let deleted = sqlx::query(
+            r#"
+            DELETE FROM transactions
+            WHERE (scope = 'client' AND created_at < $1)
+               OR (scope IN ('federation', 'federation_request') AND created_at < $2)
+            "#,
+        )
+        .bind(client_cut)
+        .bind(federation_cut)
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?
+        .rows_affected();
+        Ok(deleted as i64)
     }
 
     async fn list_outbound_dlq(
@@ -5352,23 +5440,27 @@ impl Storage for PostgresStorage {
             return Ok(HashMap::new());
         }
         let owner = conduit::storage::TransactionKey::client(user, device, &[], "").owner;
-        let rows = sqlx::query!(
-            // Results moved to lossless `result_text` in 0091; older rows
-            // keep JSONB `result`.  Read both without casting text to JSONB
-            // (a stored U+0000 would make the cast fail).
-            r#"SELECT event_id AS "event_id!", txn_id FROM (
-                   SELECT COALESCE(result->>'event_id',
-                                   substring(result_text from '"event_id":"([^"]+)"')) AS event_id,
+        let rows = sqlx::query(
+            r#"SELECT event_id, txn_id FROM (
+                   SELECT substring(result_text from '"event_id":"([^"]+)"') AS event_id,
                           txn_id
                    FROM transactions WHERE scope = 'client' AND owner = $1
                ) t WHERE event_id = ANY($2)"#,
-            owner,
-            event_ids
         )
+        .bind(&owner)
+        .bind(event_ids)
         .fetch_all(&self.pool)
         .await
         .map_err(map_sqlx)?;
-        Ok(rows.into_iter().map(|row| (row.event_id, row.txn_id)).collect())
+        let mut ids = HashMap::new();
+        for row in rows {
+            let event_id: Option<String> = row.try_get("event_id").map_err(map_sqlx)?;
+            let txn_id: String = row.try_get("txn_id").map_err(map_sqlx)?;
+            if let Some(event_id) = event_id {
+                ids.insert(event_id, txn_id);
+            }
+        }
+        Ok(ids)
     }
 
     async fn user_receipts_in_room(

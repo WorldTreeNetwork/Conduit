@@ -262,11 +262,81 @@ async fn migrations_0090_and_0091_rewrite_no_table_and_keep_legacy_rows_readable
     let key_t2 = TransactionKey { scope: "federation".into(), owner: "a.test".into(), endpoint: "send".into(), txn_id: "t2".into() };
     store.transaction_request(&key_t2, &json!({"new": 1})).await.unwrap();
     store.finish_transaction(&key_t2, &json!({"done": 1})).await.unwrap();
-    let row: (Option<Value>, Option<Value>, Option<String>, Option<String>) = sqlx::query_as(
-        "SELECT request, result, request_text, result_text FROM transactions WHERE txn_id = 't2'")
+    let row: (Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT request_text, result_text FROM transactions WHERE txn_id = 't2'")
         .fetch_one(&db.pool).await.unwrap();
-    assert_eq!((row.0, row.1), (None, None));
-    assert!(row.2.is_some() && row.3.is_some());
+    assert!(row.0.is_some() && row.1.is_some());
+    let columns: Vec<(String,)> = sqlx::query_as(
+        "SELECT column_name::text FROM information_schema.columns
+         WHERE table_name = 'transactions' AND column_name IN ('request', 'result')
+         UNION ALL
+         SELECT column_name::text FROM information_schema.columns
+         WHERE table_name = 'fed_outbound_queue' AND column_name = 'payload'")
+        .fetch_all(&db.pool).await.unwrap();
+    assert!(columns.is_empty(), "legacy JSONB columns remain: {columns:?}");
+}
+
+#[tokio::test]
+async fn transaction_and_sent_outbox_retention_deletes_expired_rows() {
+    let db = TempDb::new().await;
+    let store = db.storage();
+    let now = chrono::Utc::now();
+    let stamp = |ago_secs: i64| now - chrono::Duration::seconds(ago_secs);
+    sqlx::query(
+        "INSERT INTO transactions (scope, owner, endpoint, txn_id, result_text, created_at) VALUES
+         ('client', 'o', 'e', 'client-old', '{}', $1),
+         ('client', 'o', 'e', 'client-new', '{}', $2),
+         ('federation_request', 'o', 'send', 'fed-old', '{}', $3),
+         ('federation_request', 'o', 'send', 'fed-new', '{}', $4),
+         ('federation', 'o', 'm.direct_to_device', 'edu-old', '{}', $3)",
+    )
+    .bind(stamp(31 * 60))
+    .bind(stamp(60))
+    .bind(stamp(25 * 60 * 60))
+    .bind(stamp(60 * 60))
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO fed_outbound_queue (destination, kind, txn_id, payload_text, status, sent_at, created_at) VALUES
+         ('d.test', 'transaction', 'sent-old', '{}', 'sent', $1, $1),
+         ('d.test', 'transaction', 'sent-new', '{}', 'sent', $2, $2),
+         ('d.test', 'transaction', 'still-pending', '{}', 'pending', NULL, $1)",
+    )
+    .bind(stamp(8 * 24 * 60 * 60))
+    .bind(stamp(24 * 60 * 60))
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    let now_ms = now.timestamp_millis();
+    let deleted_tx = store
+        .gc_transactions(now_ms - 30 * 60 * 1000, now_ms - 24 * 60 * 60 * 1000)
+        .await
+        .unwrap();
+    assert_eq!(deleted_tx, 3, "client-old, fed-old, and edu-old");
+    let deleted_out = store
+        .gc_outbound_queue(now_ms - 7 * 24 * 60 * 60 * 1000, Some(now_ms - 30 * 24 * 60 * 60 * 1000))
+        .await
+        .unwrap();
+    assert_eq!(deleted_out, 1, "sent rows older than 7 days");
+
+    let txns: Vec<(String,)> = sqlx::query_as("SELECT txn_id FROM transactions ORDER BY txn_id")
+        .fetch_all(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        txns.iter().map(|row| row.0.as_str()).collect::<Vec<_>>(),
+        vec!["client-new", "fed-new"]
+    );
+    let queued: Vec<(String,)> = sqlx::query_as("SELECT txn_id FROM fed_outbound_queue ORDER BY txn_id")
+        .fetch_all(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        queued.iter().map(|row| row.0.as_str()).collect::<Vec<_>>(),
+        vec!["sent-new", "still-pending"]
+    );
 }
 
 #[tokio::test]

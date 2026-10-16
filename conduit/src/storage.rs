@@ -1209,6 +1209,19 @@ pub trait Storage: Send + Sync + 'static {
         dead_cutoff_ms: Option<i64>,
     ) -> Result<i64>;
 
+    /// Delete idempotency rows older than the cutoffs.
+    ///
+    /// Client transaction responses stay for 30 minutes, matching Synapse's
+    /// response cache. Federation `/send` replay and to-device `message_id`
+    /// rows stay for 24 hours, which covers origin retry schedules. The
+    /// hourly server task passes those windows. `MemoryStorage` has no row
+    /// clock and deletes nothing.
+    async fn gc_transactions(
+        &self,
+        client_cutoff_ms: i64,
+        federation_cutoff_ms: i64,
+    ) -> Result<i64>;
+
     /// List dead-lettered rows, paginated by created_at desc (conduit-4l9).
     async fn list_outbound_dlq(&self, from: i64, limit: i64) -> Result<Vec<DlqEntry>>;
 
@@ -3865,6 +3878,14 @@ impl Storage for MemoryStorage {
             .filter(|r| r.status == "pending" && r.entry.destination == destination)
             .map(|r| r.next_attempt_at_ms)
             .min())
+    }
+
+    async fn gc_transactions(
+        &self,
+        _client_cutoff_ms: i64,
+        _federation_cutoff_ms: i64,
+    ) -> Result<i64> {
+        Ok(0)
     }
 
     async fn gc_outbound_queue(

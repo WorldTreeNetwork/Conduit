@@ -783,6 +783,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Ok(_) => {}
                     Err(e) => tracing::warn!(error = %e, "fed_outbound_queue GC failed"),
                 }
+                // Client txn responses: 30 minutes. Federation /send replay
+                // and to-device message ids: 24 hours.
+                let client_txn_ms: i64 = 30 * 60 * 1000;
+                let federation_txn_ms: i64 = 24 * 60 * 60 * 1000;
+                match storage_clone
+                    .gc_transactions(now_ms - client_txn_ms, now_ms - federation_txn_ms)
+                    .await
+                {
+                    Ok(n) if n > 0 => tracing::info!(deleted = n, "transactions GC"),
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!(error = %e, "transactions GC failed"),
+                }
             }
         });
     }

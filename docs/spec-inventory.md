@@ -18,7 +18,7 @@ Statuses: **tested** = present and asserted by a named test; **untested** = pres
 | Client-Server API | endpoints | 163 | 0 | 0 | 0 | 1 | 164 |
 | Client-Server API | requirements | 77 | 0 | 0 | 0 | 9 | 86 |
 | Server-Server API | endpoints | 34 | 0 | 1 | 0 | 1 | 36 |
-| Server-Server API | requirements | 34 | 0 | 4 | 0 | 3 | 41 |
+| Server-Server API | requirements | 35 | 0 | 3 | 0 | 3 | 41 |
 | Application Service API | endpoints | 11 | 0 | 0 | 0 | 0 | 11 |
 | Application Service API | requirements | 16 | 0 | 0 | 0 | 2 | 18 |
 | Push Gateway API (homeserver as client) | endpoints | 1 | 0 | 0 | 0 | 0 | 1 |
@@ -27,7 +27,7 @@ Statuses: **tested** = present and asserted by a named test; **untested** = pres
 | Identity Service API (homeserver as consumer) | requirements | 1 | 0 | 0 | 0 | 0 | 1 |
 | Room versions 1–12 | requirements | 61 | 0 | 0 | 0 | 0 | 61 |
 | Appendices | requirements | 10 | 0 | 3 | 4 | 4 | 21 |
-| All |  | 416 | 0 | 8 | 4 | 37 | 465 |
+| All |  | 417 | 0 | 7 | 4 | 37 | 465 |
 ## Gap beads
 
 New beads filed by this inventory (children of `conduit-y99`):
@@ -37,7 +37,7 @@ New beads filed by this inventory (children of `conduit-y99`):
 - `conduit-y99.30` - Push rule evaluation, predefined rules, GET /pushrules/global/, /notifications and thread counts (10 row(s))
 - `conduit-y99.31` - Push gateway delivery conformance (/notify payload, rejected pushkeys, retries) (4 row(s))
 - `conduit-y99.32` - Federation EDUs: m.typing, m.receipt, m.presence, m.signing_key_update in+out (0 row(s))
-- `conduit-y99.33` - PDU receipt checks: rejection, soft failure, hash-mismatch redaction, size limits (1 row(s))
+- `conduit-y99.33` - PDU receipt checks: rejection, soft failure, hash-mismatch redaction, size limits (0 row(s))
 - `conduit-y99.34` - Application service transaction push conformance (Bearer hs_token, durable retry, interest rules, ephemeral) (0 row(s))
 - `conduit-y99.35` - Application service CS-API extensions (identity assertion, ts massaging, m.login.application_service login, rate-limit exemption) (0 row(s))
 - `conduit-y99.36` - Third-party invites and identity-server integration (lookup, store-invite, onbind, 3PID bind/unbind) (28 row(s))
@@ -88,7 +88,7 @@ In-flight / pre-existing beads referenced (not duplicated):
 - `conduit-y99.22.2` - make_join ver / M_INCOMPATIBLE_ROOM_VERSION (0 row(s))
 - `conduit-y99.22.3` - event_auth endpoint (1 row(s))
 - `conduit-y99.22.4` - EDU U+0000 / per-EDU error isolation (0 row(s))
-- `conduit-y99.22.5` - transactions/outbox retention (1 row(s))
+- `conduit-y99.22.5` - transactions/outbox retention (0 row(s))
 - `conduit-y99.23` - room versions 1-12 (5 row(s))
 - `conduit-y99.24` - sync unread_notifications hard-coded to zero (3 row(s))
 - `conduit-y99.25` - profile changes not propagated to member events (0 row(s))
@@ -413,7 +413,7 @@ In-flight / pre-existing beads referenced (not duplicated):
 | `ss.discovery.keys.notary` | [Querying keys through another server (notary)](https://spec.matrix.org/v1.19/server-server-api/#querying-keys-through-another-server) | tested | `conduit-server/src/federation/spec_v119.rs`<br>`conduit-server/src/remote_keys.rs` | `production_notary.rs::notary_signs_remote_keys_and_fetches_through_a_notary` |  | Inbound notary signs fetched key documents. Direct key fetch failure retries GET /_matrix/key/v2/query/{serverName} on CONDUIT_TRUSTED_KEY_SERVERS and stores the document only when that notary's signature verifies. |
 | `ss.auth.xmatrix` | [Request authentication (X-Matrix, destination, signed URI)](https://spec.matrix.org/v1.19/server-server-api/#authentication) | tested | `conduit-server/src/federation/auth.rs`<br>`conduit-server/src/federation/middleware.rs` | `federation_inbound.rs::standard_v2_routes_verify_the_full_signed_uri`<br>`federation.rs::xmatrix_signature_roundtrip` |  |  |
 | `ss.auth.client-tls` | [Client TLS certificates](https://spec.matrix.org/v1.19/server-server-api/#client-tls-certificates) | n/a |  |  |  | *informative* Spec: requests are authenticated at the HTTP layer; client certificates are not used. |
-| `ss.transactions` | [Transactions (≤50 PDUs/≤100 EDUs, idempotent txnId, per-PDU results)](https://spec.matrix.org/v1.19/server-server-api/#transactions) | partial | `conduit-server/src/federation/server.rs`<br>`conduit-server/src/federation/queue.rs`<br>`conduit-server/src/storage_pg.rs` | `federation_inbound.rs::send_transaction_persists_pdus`<br>`federation.rs::queue_retries_on_failure`<br>`production_pdu.rs::send_delivers_nul_to_device_and_receipt_byte_exact` (+1) | `conduit-y99.22.5` `conduit-y99.33` | A to-device message and a read receipt containing U+0000 are delivered on /sync after restart. Typing and presence keep U+0000 in memory. Device-list and signing-key JSONB sinks still drop that one EDU on SQLSTATE class 22. Transaction and sent-outbox retention remains. |
+| `ss.transactions` | [Transactions (≤50 PDUs/≤100 EDUs, idempotent txnId, per-PDU results)](https://spec.matrix.org/v1.19/server-server-api/#transactions) | tested | `conduit-server/src/federation/server.rs`<br>`conduit-server/src/federation/queue.rs`<br>`conduit-server/src/storage_pg.rs`<br>`conduit-server/src/main.rs` | `federation_inbound.rs::send_transaction_persists_pdus`<br>`federation.rs::queue_retries_on_failure`<br>`production_pdu.rs::send_rejects_transactions_over_fifty_pdus_or_one_hundred_edus`<br>`production_pdu.rs::send_delivers_nul_to_device_and_receipt_byte_exact` (+2) |  | At most 50 PDUs and 100 EDUs. The same txn id replays the stored response. Per-PDU results sit inside HTTP 200. A to-device message and a read receipt containing U+0000 are delivered on /sync after restart. Client transaction rows expire after 30 minutes. Federation replay and to-device message ids expire after 24 hours. Sent outbox rows expire after 7 days. Legacy JSONB columns are dropped after copy into text. |
 | `ss.pdu.checks` | [Checks performed on receipt of a PDU (format, signatures, hashes, auth events, state-before, current state)](https://spec.matrix.org/v1.19/server-server-api/#checks-performed-on-receipt-of-a-pdu) | tested | `conduit-server/src/federation/pipeline.rs`<br>`conduit/src/wire.rs` | `federation_inbound.rs::inbound_signature_verified_or_rejected`<br>`production_pdu.rs::send_applies_acl_per_pdu_and_inbound_edus`<br>`production_pdu.rs::fetched_auth_chain_that_fails_auth_is_not_stored`<br>`production_pdu.rs::received_pdu_is_served_as_the_same_canonical_bytes` |  | Hash-mismatch redaction, rejection, soft failure, and the size limit are asserted on PUT /send. A missing auth event is fetched with the events it cites. A fetched event that fails the auth rules is not stored, and the PDU is rejected. GET /event serves a received PDU as the same canonical JSON, including extensions and U+0000, with no event_id, before and after restart. |
 | `ss.pdu.auth-events-selection` | [Auth events selection](https://spec.matrix.org/v1.19/server-server-api/#auth-events-selection) | tested | `conduit-server/src/federation/pipeline.rs` | `production_pdu.rs::auth_event_selection_rejects_and_current_state_soft_fails` |  | A message whose auth events are not exactly the selection from the state at its prev events is rejected. Room version 12 does not cite m.room.create. |
 | `ss.pdu.rejection` | [Rejection](https://spec.matrix.org/v1.19/server-server-api/#rejection) | tested | `conduit-server/src/federation/pipeline.rs` | `production_pdu.rs::auth_event_selection_rejects_and_current_state_soft_fails` |  | The transaction stays 200. The PDU is stored and omitted from client sync, federation GET /event, and later prev_events. Current state is unchanged. |
