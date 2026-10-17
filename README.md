@@ -1,7 +1,17 @@
 # Conduit
 
+[![Matrix v1.19 homeserver](https://img.shields.io/badge/Matrix-v1.19_homeserver-0DBD8B)](docs/spec-inventory.md)
+
 A Matrix homeserver, as a pure Rust library — plus a thin webserver
 binary to run it.
+
+The homeserver implements [Matrix v1.19](https://spec.matrix.org/v1.19/).
+The [spec inventory](docs/spec-inventory.md) lists 465 rows: 428 are
+implemented and covered by a named test, and 37 sit outside the
+homeserver role. New rooms use room version 12. Room versions 1 through
+12 are implemented. The evidence register is
+[docs/matrix-compliance.json](docs/matrix-compliance.json). The web
+client is a first-party UI; Olm and Megolm stay in clients.
 
 ## Layout
 
@@ -86,9 +96,9 @@ Details: [docs/features/client.md](docs/features/client.md) and
 
 The shape of a real Matrix homeserver is in. Working subsystems:
 
-- **Storage** — PostgreSQL via sqlx; migrations `0001` through `0091` apply on startup; full `Storage` trait covers events, rooms, accounts, devices, tokens, signing keys, account data, receipts, media, push, app services, audit log.
-- **Events & signing** — v11 PDUs, canonical JSON, content hash, event ID (reference hash), Ed25519 keypair generation with restart-stable persistence, sign/verify events, `GET /_matrix/key/v2/server`, remote key cache, key rotation with grace window.
-- **Auth & state machine** — room v11 authorization rules, typed state-event content (create / member / power_levels / join_rules / history_visibility), auth-event lookup, `apply_state_event`, state resolution v2.
+- **Storage** — PostgreSQL via sqlx; migrations `0001` through `0098` apply on startup; full `Storage` trait covers events, rooms, accounts, devices, tokens, signing keys, account data, receipts, media, push, app services, audit log.
+- **Events & signing** — room versions 1–12, including the v1/v2 event format and the later reference-hash ids, canonical JSON, content hash, Ed25519 keypair generation with restart-stable persistence, sign/verify events, `GET /_matrix/key/v2/server`, remote key cache, key rotation with grace window.
+- **Auth & state machine** — authorization and state resolution for room versions 1–12, typed state-event content (create / member / power_levels / join_rules / history_visibility), auth-event lookup, `apply_state_event`.
 - **Client-Server API** — register / login / logout / whoami, createRoom + the initial-state cascade, membership ops (join / leave / kick / ban / unban / invite), send + state PUT/GET, /messages with pagination, **`/sync` with long-poll**, filters, profile, account data, typing, receipts, presence.
 - **Media** — upload, download (legacy + authenticated), thumbnail generation (`image` crate), federation fetch + cache, safe headers (CSP sandbox / nosniff / Content-Disposition), retention policy.
 - **End-to-end encryption support** — `/keys/upload`, `/query`, atomic `/claim`, `/changes`, fallback keys, `/sendToDevice`, cross-signing (master / self-signing / user-signing), `m.device_list_update` EDU, server-side room-keys backup.
@@ -125,15 +135,11 @@ for the peer extension; `CONDUIT_PEER_SDK` can select another compatible SDK.
 The default certificate/hostname verification and public trust roots remain
 enabled. This supports private federation deployments and the peer test CA.
 
-**Status caveats** — full Matrix compliance is not yet established. The initial
-[requirement evidence register](docs/matrix-compliance.json) records verified
-assertions and uncovered scope; the complete server/client effort is tracked in
-`conduit-y99`. Known gaps include:
-
-- v11 cryptographic bytes and redaction have independent protocol-vector tests. The separate PDU wire model (including unknown-field preservation) remains tracked as `conduit-embed-pdu`.
-- AS ghost user auto-creation (`conduit-5vr`) and AS query endpoints (`conduit-dhd`) are stubbed.
-- Some `/sync` streams are still scaffolding-only (presence federation, full filter implementation).
-- Run `bd ready` to see the current backlog.
+**Spec coverage** is the [v1.19 inventory](docs/spec-inventory.md): 428
+implemented-and-tested rows and 37 rows that are not a homeserver
+obligation (serving the Identity Service API, acting as a policy server,
+and the other n/a rows). A tested row means the named test asserts that
+behavior. `bd ready` still lists beads that are outside that inventory.
 
 **Experimental** — the `iroh` feature is a stub module; story group `conduit-91r` will wire up real `iroh::Endpoint` peer-to-peer federation.
 
@@ -180,5 +186,5 @@ The separate room-PDU contract regression is
 `python conduit-server/tests/peers/synapse_pdu_wire.py`, run from the pinned peer
 venv after building Conduit. The integrated wire model accepts standard v11
 PDUs without a local `event_id`, retains extensions and uses derived identities;
-this journey verifies those assertions independently with Synapse. Broader PDU
-and federation conformance remains tracked under the full protocol goal.
+this journey checks those assertions independently with Synapse. Room versions
+1 and 2 keep their own event id and tuple references on the wire.
