@@ -607,7 +607,8 @@ pub(crate) async fn knock_remote_room<S: AuthState>(
             }
         };
         let mut template = made.event;
-        if let Some(version) = made.room_version {
+        let parsed_version = made.room_version.as_deref().and_then(conduit::room_version::parse).unwrap_or(11);
+        if let Some(version) = made.room_version.as_deref() {
             if let Some(object) = template.as_object_mut() {
                 object.insert("room_version".into(), json!(version));
             }
@@ -626,20 +627,45 @@ pub(crate) async fn knock_remote_room<S: AuthState>(
             }
         };
         if let Some(events) = sent.get("knock_room_state").and_then(Value::as_array) {
+            let version = parsed_version;
             for value in events {
-                let Ok(decoded) = conduit::wire::decode_pdu(value.clone(), crate::federation::now_ms()) else { continue };
+                let version = if value.get("event_id").and_then(Value::as_str).is_some_and(|id| id.starts_with('$') && id.contains(':')) {
+                    1
+                } else {
+                    version
+                };
+                let Ok(decoded) = crate::federation::pipeline::admit_received(version, value.clone()) else { continue };
                 let origin = server_of_user_id(&decoded.pdu.sender).unwrap_or(dest.as_str()).to_owned();
-                let _ = crate::federation::pipeline::process_incoming_pdu(
-                    state.storage(),
-                    &client._keys,
-                    &client.http,
-                    state.events_tx(),
-                    Some(client),
-                    None,
-                    decoded,
-                    &origin,
-                )
-                .await;
+                if version < 3 {
+                    let unsigned = decoded.unsigned.clone();
+                    let Ok(received) = crate::federation::pipeline::receive_legacy_pdu(&client._keys, &client.http, value, decoded).await else {
+                        continue;
+                    };
+                    let _ = crate::federation::pipeline::process_received(
+                        state.storage(),
+                        &client._keys,
+                        &client.http,
+                        state.events_tx(),
+                        Some(client),
+                        None,
+                        received,
+                        unsigned,
+                        &origin,
+                    )
+                    .await;
+                } else {
+                    let _ = crate::federation::pipeline::process_incoming_pdu(
+                        state.storage(),
+                        &client._keys,
+                        &client.http,
+                        state.events_tx(),
+                        Some(client),
+                        None,
+                        decoded,
+                        &origin,
+                    )
+                    .await;
+                }
             }
         }
         store_signed_membership(state, wire).await?;

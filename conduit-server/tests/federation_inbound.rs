@@ -516,6 +516,33 @@ async fn room_version_1_and_2_send_stores_a_sealed_event() {
         assert!(document["prev_events"][0].is_array(), "tuple prev_events were flattened: {document}");
         assert_eq!(document["event_id"], join_id);
 
+        let bad_id = format!("$bad{version}:{server_name}");
+        let mut bad = sealed_v1_event(&key, server_name, json!({
+            "auth_events": [[create_id, {"sha256": "aabb"}], [join_id, {"sha256": "ccdd"}]],
+            "content": {"membership": "join", "note": "stripped"},
+            "depth": 3,
+            "event_id": bad_id,
+            "origin": server_name,
+            "origin_server_ts": chrono::Utc::now().timestamp_millis(),
+            "prev_events": [[join_id, {"sha256": "eeff"}]],
+            "room_id": room,
+            "sender": sender,
+            "state_key": sender,
+            "type": "m.room.member"
+        }));
+        bad["io.conduit.tamper"] = json!(true);
+        let bad_result = put_one_pdu(&client, &base, &key, server_name, &format!("txn-badhash-{version}"), bad.clone()).await;
+        assert_eq!(bad_result[&bad_id], json!({}), "{version} bad-hash join was not accepted: {bad_result}");
+        let bad_wire = storage.get_wire_pdu(&bad_id).await.unwrap().expect("bad-hash wire");
+        let bad_document = serde_json::to_value(&bad_wire).unwrap();
+        assert_eq!(bad_document["event_id"], bad_id);
+        assert!(bad_document["auth_events"][0].is_array(), "bad-hash auth tuples were dropped: {bad_document}");
+        assert!(bad_document["prev_events"][0].is_array(), "bad-hash prev tuples were dropped: {bad_document}");
+        assert_eq!(bad_document["content"]["membership"], "join");
+        assert!(bad_document["content"].get("note").is_none(), "redacted content kept note: {bad_document}");
+        assert!(bad_document.get("io.conduit.tamper").is_none(), "redacted document kept the tamper key: {bad_document}");
+        assert_ne!(bad_document, bad);
+
         let mut forged = sealed_v1_event(&key, server_name, json!({
             "auth_events": [],
             "content": {"creator": sender, "room_version": version},

@@ -246,24 +246,38 @@ fn event_from_row(row: EventRow) -> Event {
     Event { event_id: row.event_id, pdu, unsigned: row.unsigned }
 }
 
-/// Room version of `room_id`, from its create event. An empty id or a
-/// missing create event uses 11, which matches an absent create.
-/// `Some` when `version` is 3–10 and `event` reproduces that version's id.
-fn versioned_pdu(version: u32, event: &Event) -> Option<WirePdu> {
+/// Serve a stored PDU in the form `version` defines.
+///
+/// A legacy document is served at any version. Room versions 1 and 2
+/// without that document are an error. Versions 11 and 12 without one
+/// return `None` so the caller uses the v11 checked form. Versions 3–10
+/// are served when their own reference hash matches the stored id.
+fn versioned_pdu(version: u32, event: &Event) -> Result<Option<WirePdu>> {
     if let Some(wire) = WirePdu::stored_legacy(&event.event_id, event.pdu.clone()) {
-        return Some(wire);
+        return Ok(Some(wire));
+    }
+    if version < 3 {
+        return Err(Error::InvalidEvent(format!(
+            "room version {version} event {} is missing its legacy document",
+            event.event_id
+        )));
     }
     if !(3..11).contains(&version) {
-        return None;
+        return Ok(None);
     }
-    let wire = WirePdu::checked_for_version(version, event.pdu.clone())?;
-    (wire.event_id() == event.event_id).then_some(wire)
+    let Some(wire) = WirePdu::checked_for_version(version, event.pdu.clone()) else {
+        return Ok(None);
+    };
+    Ok((wire.event_id() == event.event_id).then_some(wire))
 }
 
 async fn versioned_wire(storage: &PostgresStorage, event: &Event) -> Result<Option<WirePdu>> {
     let version = room_version_of(storage, &event.room_id).await?;
-    Ok(versioned_pdu(version, event))
+    versioned_pdu(version, event)
 }
+
+/// Room version of `room_id`, from its create event. An empty id or a
+/// missing create event uses 11, which matches an absent create.
 
 async fn room_version_of(storage: &PostgresStorage, room_id: &str) -> Result<u32> {
     if room_id.is_empty() {

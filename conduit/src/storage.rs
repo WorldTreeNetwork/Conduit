@@ -2223,6 +2223,12 @@ impl Storage for MemoryStorage {
         if wire.is_none() {
             wire = WirePdu::stored_legacy(&event.event_id, event.pdu.clone());
         }
+        if wire.is_none() && version < 3 {
+            return Err(crate::Error::InvalidEvent(format!(
+                "room version {version} event {} is missing its legacy document",
+                event.event_id
+            )));
+        }
         if wire.is_none() && (3..11).contains(&version) {
             if let Some(candidate) = WirePdu::checked_for_version(version, event.pdu.clone()) {
                 if candidate.event_id() == event.event_id {

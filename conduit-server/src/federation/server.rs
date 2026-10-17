@@ -31,7 +31,6 @@ use tokio::sync::broadcast;
 use conduit::auth::auth_event_keys;
 use conduit::event::{Event, WirePdu};
 use conduit::signing::{add_signature, is_third_party_invite, server_of_user_id};
-use conduit::wire::decode_pdu;
 use conduit::storage::Storage;
 
 use crate::RemoteKeyCache;
@@ -41,7 +40,7 @@ use crate::media_storage::BlobStore;
 use crate::api::client::media::MediaState;
 
 use super::middleware::FederationOrigin;
-use super::pipeline::{process_incoming_pdu, process_received, receive_legacy_pdu, verify_received, verify_received_as, PipelineError};
+use super::pipeline::{admit_received, process_incoming_pdu, process_received, receive_legacy_pdu, verify_received, verify_received_as, PipelineError};
 
 // ---------------------------------------------------------------------------
 // Shared handler state
@@ -382,7 +381,6 @@ pub async fn send_transaction(
     }
 
     let mut pdu_results: HashMap<String, Value> = HashMap::new();
-    let received_ts = crate::federation::now_ms();
 
     for pdu_val in body.pdus {
         // "Is a valid event, otherwise it is dropped": no result entry, since
@@ -391,7 +389,7 @@ pub async fn send_transaction(
         // stored create) selects the tuple format. A missing room_version
         // stays on the v3+ decoder.
         let version = received_room_version(state.storage.as_ref(), &pdu_val).await;
-        let decoded = match conduit::wire::decode_pdu_for_version(pdu_val.clone(), version, received_ts) {
+        let decoded = match admit_received(version, pdu_val.clone()) {
             Ok(decoded) => decoded,
             Err(error) => {
                 tracing::info!(%origin, %txn_id, %error, "dropped invalid PDU");
@@ -697,45 +695,65 @@ pub async fn send_join(
         return response;
     }
 
-    let decoded = match decode_pdu(pdu_val, crate::federation::now_ms()) {
+    let version = received_room_version(state.storage.as_ref(), &pdu_val).await;
+    let original = pdu_val.clone();
+    let mut decoded = match admit_received(version, pdu_val) {
         Ok(decoded) => decoded,
         Err(error) => return bad_json(&error.to_string()),
     };
-    let mut pdu = decoded.pdu;
 
-    if pdu.room_id != room_id {
+    if decoded.pdu.room_id != room_id {
         return invalid_param("PDU room_id does not match the path");
     }
-    if pdu.event_type != "m.room.member" {
+    if decoded.pdu.event_type != "m.room.member" {
         return invalid_param("Expected an m.room.member event");
     }
-    if pdu.content.get("membership").and_then(|v| v.as_str()) != Some("join") {
+    if decoded.pdu.content.get("membership").and_then(|v| v.as_str()) != Some("join") {
         return invalid_param("Expected join membership");
     }
-    if pdu.state_key.as_deref() != Some(pdu.sender.as_str()) {
+    if decoded.pdu.state_key.as_deref() != Some(decoded.pdu.sender.as_str()) {
         return invalid_param("state_key must equal sender");
     }
-    if server_of_user_id(&pdu.sender) != Some(origin.as_str()) {
+    if server_of_user_id(&decoded.pdu.sender) != Some(origin.as_str()) {
         return invalid_param("sender is not a user on the requesting server");
     }
 
-    // Restricted join: as resident we are the authorising server.
-    if let Some(authoriser) = pdu.content.get("join_authorised_via_users_server") {
-        match authoriser.as_str().and_then(server_of_user_id) {
-            Some(server) if server == &*state.server_name => {
-                if let Err(e) = add_signature(&mut pdu, &state.server_key, &state.server_name) {
-                    return internal(&format!("Failed to co-sign join: {e}"));
+    // Restricted join is a later room version. Versions 1 and 2 keep the
+    // received document and are checked over v1 signing bytes.
+    if version >= 3 {
+        if let Some(authoriser) = decoded.pdu.content.get("join_authorised_via_users_server") {
+            match authoriser.as_str().and_then(server_of_user_id) {
+                Some(server) if server == &*state.server_name => {
+                    if let Err(e) = add_signature(&mut decoded.pdu, &state.server_key, &state.server_name) {
+                        return internal(&format!("Failed to co-sign join: {e}"));
+                    }
                 }
+                _ => return invalid_param("We can only authorise joins for users on this server"),
             }
-            _ => return invalid_param("We can only authorise joins for users on this server"),
         }
     }
 
-    let received = match verify_received_as(&state.remote_keys, &state.http, pdu.clone(),
-        &state.server_name, &state.server_key, None).await
-    {
-        Ok(received) => received,
-        Err(_) => return invalid_param("Join event signature check failed"),
+    let unsigned = decoded.unsigned.clone();
+    let received = if version < 3 {
+        match receive_legacy_pdu(&state.remote_keys, &state.http, &original, decoded).await {
+            Ok(received) => received,
+            Err(_) => return invalid_param("Join event signature check failed"),
+        }
+    } else {
+        let explicit = decoded.explicit_event_id.clone();
+        match verify_received_as(
+            &state.remote_keys,
+            &state.http,
+            decoded.pdu,
+            &state.server_name,
+            &state.server_key,
+            explicit,
+        )
+        .await
+        {
+            Ok(received) => received,
+            Err(_) => return invalid_param("Join event signature check failed"),
+        }
     };
     if received.event_id != path_event_id {
         return invalid_param("Join event ID does not match the path");
@@ -749,7 +767,7 @@ pub async fn send_join(
         Some(&state.fed_client),
         Some(&state.recent),
         received.clone(),
-        decoded.unsigned,
+        unsigned,
         &origin,
     )
     .await
@@ -761,7 +779,7 @@ pub async fn send_join(
                     queue,
                     &state.server_name,
                     &room_id,
-                    &pdu.sender,
+                    &received.pdu.sender,
                 )
                 .await;
             }
@@ -778,7 +796,7 @@ pub async fn send_join(
         Err(response) => return response,
     };
     let mut chain_roots = state_events.clone();
-    chain_roots.push(Event::new(received.event_id.clone(), pdu.clone()));
+    chain_roots.push(Event::new(received.event_id.clone(), received.pdu.clone()));
     let auth_chain = build_auth_chain(&state.storage, &chain_roots).await;
     let (state_pdus, chain_pdus) = match (
         wire_pdus(&state.storage, &origin, &state_events).await,
@@ -788,7 +806,13 @@ pub async fn send_join(
         (Err(e), _) | (_, Err(e)) => return internal(&e.to_string()),
     };
     // The join exactly as received plus our co-signature (when restricted).
-    let Some(event) = WirePdu::checked(&received.event_id, pdu) else {
+    // Versions 1 and 2 answer with the stored legacy document.
+    let event = if version < 3 {
+        WirePdu::stored_legacy(&received.event_id, received.pdu)
+    } else {
+        WirePdu::checked(&received.event_id, received.pdu)
+    };
+    let Some(event) = event else {
         return internal("join no longer reproduces its ID");
     };
 
@@ -836,31 +860,82 @@ pub async fn invite(
         return response;
     }
 
+    let version = body.room_version.as_deref().and_then(conduit::room_version::parse).unwrap_or(11);
     let original_event = body.event.clone();
-    let decoded = match decode_pdu(body.event, crate::federation::now_ms()) {
+    let decoded = match admit_received(version, body.event) {
         Ok(decoded) => decoded,
         Err(error) => return bad_json(&error.to_string()),
     };
-    let mut pdu = decoded.pdu;
 
-    if pdu.room_id != room_id {
+    if decoded.pdu.room_id != room_id {
         return invalid_param("PDU room_id does not match the path");
     }
-    if pdu.event_type != "m.room.member" {
+    if decoded.pdu.event_type != "m.room.member" {
         return invalid_param("Expected an m.room.member event");
     }
-    if pdu.content.get("membership").and_then(|v| v.as_str()) != Some("invite") {
+    if decoded.pdu.content.get("membership").and_then(|v| v.as_str()) != Some("invite") {
         return invalid_param("Expected invite membership");
     }
-    let target_server = pdu.state_key.as_deref().and_then(server_of_user_id);
+    let target_server = decoded.pdu.state_key.as_deref().and_then(server_of_user_id);
     if target_server != Some(&*state.server_name) {
         return invalid_param("Invite target is not on this server");
     }
-    if !is_third_party_invite(&pdu) && server_of_user_id(&pdu.sender) != Some(origin.as_str()) {
+    if !is_third_party_invite(&decoded.pdu) && server_of_user_id(&decoded.pdu.sender) != Some(origin.as_str()) {
         return invalid_param("sender is not a user on the requesting server");
     }
 
-    let received = match verify_received(&state.remote_keys, &state.http, pdu.clone(), None).await {
+    if version < 3 {
+        let received = match receive_legacy_pdu(&state.remote_keys, &state.http, &original_event, decoded).await {
+            Ok(received) => received,
+            Err(_) => return invalid_param("Invite signature check failed"),
+        };
+        if received.event_id != path_event_id {
+            return invalid_param("Invite event ID must match the event ID in the path");
+        }
+        if received.redacted_on_receipt {
+            return invalid_param("Invite content hash does not match");
+        }
+        if let Some(target) = received.pdu.state_key.as_deref() {
+            if crate::api::client::room_membership::blocks_invites(state.storage.as_ref(), target).await {
+                return matrix_error(
+                    StatusCode::FORBIDDEN,
+                    "M_INVITE_BLOCKED",
+                    &format!("{target} is not accepting invites"),
+                );
+            }
+        }
+        if let Some(reason) = invite_room_state_error(body.room_version.as_deref(), &room_id, &body.invite_room_state) {
+            return invalid_param(reason);
+        }
+        let mut event = original_event;
+        if super::spec_v119::insert_v1_signature(&mut event, &state.server_key, &state.server_name).is_err() {
+            return internal("Failed to sign invite");
+        }
+        let stored_decoded = match admit_received(version, event.clone()) {
+            Ok(decoded) => decoded,
+            Err(error) => return internal(&error.to_string()),
+        };
+        let mut unsigned = stored_decoded.unsigned.unwrap_or_else(|| json!({}));
+        if !body.invite_room_state.is_empty() {
+            unsigned["invite_room_state"] = Value::Array(body.invite_room_state);
+        }
+        let unsigned = unsigned.as_object().is_some_and(|map| !map.is_empty()).then_some(unsigned);
+        let stored = Event {
+            event_id: stored_decoded.explicit_event_id.unwrap_or(received.event_id),
+            pdu: stored_decoded.pdu,
+            unsigned,
+        };
+        if let Err(error) = state.storage.publish_event(&stored).await {
+            return internal(&format!("Failed to store invite: {error}"));
+        }
+        if let Ok(pos) = state.storage.global_max_stream_position().await {
+            let _ = state.events_tx.send(pos);
+        }
+        return (StatusCode::OK, Json(json!({ "event": event }))).into_response();
+    }
+
+    let mut pdu = decoded.pdu;
+    let received = match verify_received(&state.remote_keys, &state.http, pdu.clone(), decoded.explicit_event_id).await {
         Ok(received) => received,
         Err(_) => return invalid_param("Invite signature check failed"),
     };

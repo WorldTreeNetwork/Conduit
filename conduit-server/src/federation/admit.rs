@@ -26,7 +26,7 @@ use thiserror::Error;
 
 use conduit::event::{Event, Pdu, WirePdu};
 use conduit::signing::{Received, VerifyError};
-use conduit::wire::{decode_pdu, PduDecodeError};
+use conduit::wire::PduDecodeError;
 
 use crate::RemoteKeyCache;
 use crate::federation::StateIdsResponse;
@@ -87,22 +87,33 @@ impl From<VerifyError> for FetchError {
     }
 }
 
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+/// Room versions 1 and 2 are the only formats that carry `event_id`.
+fn returned_room_version(value: &Value) -> u32 {
+    match value.get("event_id").and_then(Value::as_str) {
+        Some(id) if id.starts_with('$') && id.split_once(':').is_some_and(|(opaque, domain)| !opaque.is_empty() && !domain.is_empty()) => 1,
+        _ => 11,
+    }
 }
 
 /// Decode, verify and hash-check one returned PDU.
+///
+/// A PDU with `$opaque:server` is a room-version-1 or 2 event: the signature
+/// covers that document, and the legacy JSON is kept even when the content
+/// hash does not match.
 pub async fn verify_returned(
     remote_keys: &RemoteKeyCache,
     http: &reqwest::Client,
     value: Value,
 ) -> Result<Admitted, FetchError> {
-    let decoded = decode_pdu(value, now_ms())?;
-    let received = super::pipeline::verify_received(remote_keys, http, decoded.pdu, None).await?;
-    Ok(Admitted { received, unsigned: decoded.unsigned })
+    let version = returned_room_version(&value);
+    let decoded = super::pipeline::admit_received(version, value.clone())?;
+    let unsigned = decoded.unsigned.clone();
+    let received = if version < 3 {
+        super::pipeline::receive_legacy_pdu(remote_keys, http, &value, decoded).await.map_err(|error| FetchError::Signature(error.to_string()))?
+    } else {
+        super::pipeline::verify_received(remote_keys, http, decoded.pdu, decoded.explicit_event_id).await?
+    };
+    Ok(Admitted { received, unsigned })
 }
 
 fn check_expect(admitted: &Admitted, expect: Expect<'_>) -> Result<(), FetchError> {
@@ -155,17 +166,15 @@ pub async fn admit_cosigned_as(
     local_server: &str,
     local_key: &conduit::keys::ServerKey,
 ) -> Result<Admitted, FetchError> {
-    let decoded = decode_pdu(value, now_ms())?;
-    let received = super::pipeline::verify_received_as(
-        remote_keys,
-        http,
-        decoded.pdu,
-        local_server,
-        local_key,
-        None,
-    )
-    .await?;
-    let admitted = Admitted { received, unsigned: decoded.unsigned };
+    let version = returned_room_version(&value);
+    let decoded = super::pipeline::admit_received(version, value.clone())?;
+    let unsigned = decoded.unsigned.clone();
+    let received = if version < 3 {
+        super::pipeline::receive_legacy_pdu(remote_keys, http, &value, decoded).await.map_err(|error| FetchError::Signature(error.to_string()))?
+    } else {
+        super::pipeline::verify_received_as(remote_keys, http, decoded.pdu, local_server, local_key, decoded.explicit_event_id).await?
+    };
+    let admitted = Admitted { received, unsigned };
     check_expect(&admitted, Expect::Exactly(&sent.event_id()))?;
     require_cosigner(remote_keys, http, admitted, sent, cosigner).await
 }

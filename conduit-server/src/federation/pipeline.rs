@@ -112,12 +112,34 @@ pub async fn verify_received(
     Ok(received)
 }
 
+/// Decode one received PDU for `version`.
+///
+/// Versions 1 and 2 always keep a legacy document on the PDU: the received
+/// JSON when its content hash matches, otherwise the redacted v1 JSON. That
+/// document still carries `event_id` and the tuple references. Later versions
+/// are the v3+ decoder.
+pub fn admit_received(version: u32, value: Value) -> Result<DecodedPdu, conduit::wire::PduDecodeError> {
+    let mut decoded = conduit::wire::decode_pdu_for_version(value.clone(), version, super::now_ms())?;
+    if version < 3 {
+        let document = if super::spec_v119::v1_hash_matches(&value) {
+            value
+        } else {
+            super::spec_v119::redact_v1_document(&value)
+        };
+        decoded.pdu.extensions.insert(
+            conduit::event::LEGACY_EVENT_DOCUMENT.to_owned(),
+            Value::String(document.to_string()),
+        );
+    }
+    Ok(decoded)
+}
+
 /// Receipt checks for a room-version-1 or 2 PDU.
 ///
 /// The signature covers `document` (`event_id` and tuple references). The
-/// projected PDU is what auth and state resolution read. When the v1 content
-/// hash matches, that document is kept on the PDU so a later send still has
-/// the legacy shape.
+/// projected PDU is what auth and state resolution read. The legacy document
+/// is kept either way: the received JSON when the content hash matches, and
+/// the redacted v1 JSON when it does not.
 pub async fn receive_legacy_pdu(
     remote_keys: &RemoteKeyCache,
     http: &reqwest::Client,
@@ -128,16 +150,14 @@ pub async fn receive_legacy_pdu(
         .map_err(|_| PipelineError::SignatureError(VerifyError::SignaturesNotObject))?;
     let event_id = decoded.explicit_event_id.ok_or(PipelineError::SignatureError(VerifyError::SignaturesNotObject))?;
     let hash_ok = super::spec_v119::v1_hash_matches(document);
+    let kept = if hash_ok { document.clone() } else { super::spec_v119::redact_v1_document(document) };
     let mut pdu = decoded.pdu;
-    if hash_ok {
-        pdu.extensions.insert(
-            conduit::event::LEGACY_EVENT_DOCUMENT.to_owned(),
-            Value::String(document.to_string()),
-        );
-    }
     let keys = eligible_keys(remote_keys, http, &pdu).await;
     let signed_by = conduit::signing::verify_signatures_over(&pdu, &bytes, lookup(keys))?;
-    let pdu = if hash_ok { pdu } else { conduit::room_version::redact_pdu(&pdu, 1) };
+    if !hash_ok {
+        pdu = conduit::room_version::redact_pdu(&pdu, 1);
+    }
+    pdu.extensions.insert(conduit::event::LEGACY_EVENT_DOCUMENT.to_owned(), Value::String(kept.to_string()));
     Ok(Received { event_id, pdu, redacted_on_receipt: !hash_ok, signed_by })
 }
 
@@ -676,5 +696,39 @@ async fn fetch_missing_auth_events(
 async fn notify_sync(storage: &Arc<dyn Storage>, events_tx: &broadcast::Sender<i64>) {
     if let Ok(pos) = storage.global_max_stream_position().await {
         let _ = events_tx.send(pos);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    /// Room versions 1 and 2 enter through [`super::admit_received`]. Calling
+    /// the v3+ decoder directly rejects `event_id` before that format is recognized.
+    #[test]
+    fn homeserver_ingress_admits_by_room_version() {
+        let needle = format!("decode_pdu{}", "(");
+        fn walk(dir: &Path, needle: &str, hits: &mut Vec<String>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    walk(&path, needle, hits);
+                    continue;
+                }
+                if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+                    continue;
+                }
+                let text = std::fs::read_to_string(&path).unwrap();
+                for (index, line) in text.lines().enumerate() {
+                    if line.contains(needle) {
+                        hits.push(format!("{}:{}:{line}", path.display(), index + 1));
+                    }
+                }
+            }
+        }
+        let mut hits = Vec::new();
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        walk(&root.join("src"), &needle, &mut hits);
+        assert!(hits.is_empty(), "direct v3 decoder call remains:\n{}", hits.join("\n"));
     }
 }

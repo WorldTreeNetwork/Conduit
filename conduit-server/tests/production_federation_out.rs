@@ -1023,10 +1023,45 @@ async fn remote_join_room_version_3_uses_standard_base64_event_id() {
 #[tokio::test]
 async fn remote_join_room_version_2_uses_v1_event_format() {
     let room = "!outv1:peer.test";
+    let key = Arc::new(generate_server_key());
+    let now = chrono::Utc::now().timestamp_millis();
+    let create_id = "$create:peer.test";
+    let rules_id = "$rules:peer.test";
+    let creator = "@creator:peer.test";
+    let mut create = json!({
+        "auth_events": [],
+        "content": {"creator": creator, "room_version": "2"},
+        "depth": 1,
+        "event_id": create_id,
+        "origin": PEER,
+        "origin_server_ts": now,
+        "prev_events": [],
+        "room_id": room,
+        "sender": creator,
+        "state_key": "",
+        "type": "m.room.create"
+    });
+    conduit_server::federation::spec_v119::seal_v1_event(&mut create, &key, PEER).expect("seal create");
+    let mut rules = json!({
+        "auth_events": [[create_id, {"sha256": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}]],
+        "content": {"join_rule": "public"},
+        "depth": 2,
+        "event_id": rules_id,
+        "origin": PEER,
+        "origin_server_ts": now,
+        "prev_events": [[create_id, {"sha256": "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"}]],
+        "room_id": room,
+        "sender": creator,
+        "state_key": "",
+        "type": "m.room.join_rules"
+    });
+    conduit_server::federation::spec_v119::seal_v1_event(&mut rules, &key, PEER).expect("seal rules");
+    rules["io.conduit.tamper"] = json!(true);
+    let returned = json!({ "state": [create.clone(), rules.clone()], "auth_chain": [create.clone()] });
     let captured = Arc::new(Mutex::new(Vec::<(String, Value)>::new()));
     let send_captured = Arc::clone(&captured);
     let url = serve(
-        Arc::new(generate_server_key()),
+        Arc::clone(&key),
         Router::new()
             .route(
                 "/_matrix/federation/v1/make_join/:room_id/:user_id",
@@ -1049,6 +1084,7 @@ async fn remote_join_room_version_2_uses_v1_event_format() {
             )
             .fallback(move |request: axum::extract::Request| {
                 let captured = Arc::clone(&send_captured);
+                let returned = returned.clone();
                 async move {
                     let path = request.uri().path().to_owned();
                     if !path.contains("/send_join/") {
@@ -1057,7 +1093,7 @@ async fn remote_join_room_version_2_uses_v1_event_format() {
                     let bytes = axum::body::to_bytes(request.into_body(), 1024 * 1024).await.unwrap();
                     let body: Value = serde_json::from_slice(&bytes).unwrap();
                     captured.lock().unwrap().push((path, body));
-                    Json(json!({ "state": [], "auth_chain": [] })).into_response()
+                    Json(returned).into_response()
                 }
             }),
     )
@@ -1065,6 +1101,7 @@ async fn remote_join_room_version_2_uses_v1_event_format() {
     let server = Server::with_env(&[
         ("CONDUIT_FEDERATION", "1"),
         ("CONDUIT_FEDERATION_BASE_URL", url.as_str()),
+        ("CONDUIT_REMOTE_KEYS_OVERRIDE", url.as_str()),
     ])
     .await;
     let alice = server.register("alice").await;
@@ -1099,4 +1136,13 @@ async fn remote_join_room_version_2_uses_v1_event_format() {
     assert!(served["auth_events"][0].is_array(), "stored join dropped tuple auth_events: {served}");
     assert!(served["prev_events"][0].is_array(), "stored join dropped tuple prev_events: {served}");
     assert_eq!(served, body);
+    let create_wire = storage.get_wire_pdu(create_id).await.unwrap().expect("sealed create in state");
+    assert_eq!(serde_json::to_value(&create_wire).unwrap(), create);
+    let rules_wire = storage.get_wire_pdu(rules_id).await.unwrap().expect("bad-hash join rules");
+    let rules_served = serde_json::to_value(&rules_wire).unwrap();
+    assert_eq!(rules_served["event_id"], rules_id);
+    assert!(rules_served["auth_events"][0].is_array(), "bad-hash state dropped tuple auth: {rules_served}");
+    assert!(rules_served["prev_events"][0].is_array(), "bad-hash state dropped tuple prev: {rules_served}");
+    assert_eq!(rules_served["content"]["join_rule"], "public");
+    assert!(rules_served.get("io.conduit.tamper").is_none(), "redacted state kept the tamper key: {rules_served}");
 }

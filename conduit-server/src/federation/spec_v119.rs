@@ -23,12 +23,12 @@ use conduit::auth::{auth_event_keys, current_state_map, third_party_signed_match
 use conduit::event::{Event, Pdu, WirePdu};
 use conduit::signing::{server_of_user_id, sign_authored};
 use conduit::storage::Storage;
-use conduit::wire::{decode_pdu, decode_pdu_for_version};
+use conduit::wire::decode_pdu_for_version;
 
 use crate::identity_service::IdentityClient;
 
 use super::middleware::FederationOrigin;
-use super::pipeline::{process_received, PipelineError};
+use super::pipeline::{admit_received, process_received, receive_legacy_pdu, verify_received, PipelineError};
 use super::server::{
     bad_json, build_auth_chain, forbidden, internal, invalid_param, not_found, unauthorized, wire_pdus,
     FedState,
@@ -706,6 +706,13 @@ fn matrix_incompatible(message: &str) -> Response {
         .into_response()
 }
 
+async fn stored_room_version(state: &FedState, room_id: &str) -> u32 {
+    match state.storage.get_state_entry(room_id, "m.room.create", "").await {
+        Ok(Some(create)) => conduit::room_version::version_of_event(&create),
+        _ => 11,
+    }
+}
+
 async fn accept_membership(
     state: &FedState,
     origin: &str,
@@ -714,23 +721,31 @@ async fn accept_membership(
     pdu_val: Value,
     membership: &str,
 ) -> Result<conduit::signing::Received, Response> {
-    let decoded = decode_pdu(pdu_val, super::now_ms()).map_err(|error| bad_json(&error.to_string()))?;
-    let pdu = decoded.pdu;
-    if pdu.room_id != room_id {
+    let version = stored_room_version(state, room_id).await;
+    let original = pdu_val.clone();
+    let decoded = admit_received(version, pdu_val).map_err(|error| bad_json(&error.to_string()))?;
+    let unsigned = decoded.unsigned.clone();
+    if decoded.pdu.room_id != room_id {
         return Err(invalid_param("PDU room_id does not match the path"));
     }
-    if pdu.event_type != "m.room.member" || pdu.content["membership"] != membership {
+    if decoded.pdu.event_type != "m.room.member" || decoded.pdu.content["membership"] != membership {
         return Err(invalid_param("membership does not match this endpoint"));
     }
-    if pdu.state_key.as_deref() != Some(pdu.sender.as_str()) {
+    if decoded.pdu.state_key.as_deref() != Some(decoded.pdu.sender.as_str()) {
         return Err(invalid_param("state_key must equal sender"));
     }
-    if server_of_user_id(&pdu.sender) != Some(origin) {
+    if server_of_user_id(&decoded.pdu.sender) != Some(origin) {
         return Err(invalid_param("sender is not a user on the requesting server"));
     }
-    let received = super::pipeline::verify_received(&state.remote_keys, &state.http, pdu, None)
-        .await
-        .map_err(|_| invalid_param("signature check failed"))?;
+    let received = if version < 3 {
+        receive_legacy_pdu(&state.remote_keys, &state.http, &original, decoded)
+            .await
+            .map_err(|_| invalid_param("signature check failed"))?
+    } else {
+        verify_received(&state.remote_keys, &state.http, decoded.pdu, decoded.explicit_event_id)
+            .await
+            .map_err(|_| invalid_param("signature check failed"))?
+    };
     if received.event_id != path_event_id {
         return Err(invalid_param("event id does not match the path"));
     }
@@ -742,7 +757,7 @@ async fn accept_membership(
         Some(&state.fed_client),
         Some(&state.recent),
         received.clone(),
-        decoded.unsigned,
+        unsigned,
         origin,
     )
     .await
@@ -1257,7 +1272,7 @@ pub fn seal_v1_event(event: &mut Value, server_key: &conduit::keys::ServerKey, s
     insert_v1_signature(event, server_key, server_name)
 }
 
-fn insert_v1_signature(event: &mut Value, server_key: &conduit::keys::ServerKey, server_name: &str) -> Result<(), ()> {
+pub(crate) fn insert_v1_signature(event: &mut Value, server_key: &conduit::keys::ServerKey, server_name: &str) -> Result<(), ()> {
     let bytes = v1_signing_bytes(event)?;
     let signature = server_key.signing_key.sign(&bytes);
     let encoded = STANDARD_NO_PAD.encode(signature.to_bytes());
@@ -1275,6 +1290,42 @@ fn insert_v1_signature(event: &mut Value, server_key: &conduit::keys::ServerKey,
     }
     server_sigs.as_object_mut().ok_or(())?.insert(server_key.key_id.clone(), Value::String(encoded));
     Ok(())
+}
+
+/// Room versions 1 and 2 redacted event. `event_id`, tuple `auth_events` /
+/// `prev_events`, hashes, and signatures stay. Unprotected content is removed.
+pub(crate) fn redact_v1_document(event: &Value) -> Value {
+    const KEEP: &[&str] = &[
+        "auth_events",
+        "content",
+        "depth",
+        "event_id",
+        "hashes",
+        "membership",
+        "origin",
+        "origin_server_ts",
+        "prev_events",
+        "prev_state",
+        "room_id",
+        "sender",
+        "signatures",
+        "state_key",
+        "type",
+    ];
+    let Some(map) = event.as_object() else {
+        return json!({});
+    };
+    let mut kept = Map::new();
+    for key in KEEP {
+        if let Some(value) = map.get(*key) {
+            kept.insert((*key).to_owned(), value.clone());
+        }
+    }
+    if let Some(content) = kept.get("content").cloned() {
+        let event_type = kept.get("type").and_then(Value::as_str).unwrap_or("");
+        kept.insert("content".into(), v1_redact_content(event_type, &content));
+    }
+    Value::Object(kept)
 }
 
 pub(crate) fn v1_hash_matches(event: &Value) -> bool {
