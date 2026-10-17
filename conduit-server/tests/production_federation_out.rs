@@ -1093,4 +1093,10 @@ async fn remote_join_room_version_2_uses_v1_event_format() {
     let member = storage.get_state_entry(room, "m.room.member", &alice_id).await.unwrap().expect("join missing");
     assert_eq!(member.content["membership"], "join");
     assert_eq!(member.event_id, body["event_id"]);
+    let wire = storage.get_wire_pdu(&member.event_id).await.unwrap().expect("v1 join is servable");
+    let served = serde_json::to_value(&wire).unwrap();
+    assert_eq!(served["event_id"], body["event_id"]);
+    assert!(served["auth_events"][0].is_array(), "stored join dropped tuple auth_events: {served}");
+    assert!(served["prev_events"][0].is_array(), "stored join dropped tuple prev_events: {served}");
+    assert_eq!(served, body);
 }

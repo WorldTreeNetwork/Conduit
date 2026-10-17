@@ -28,6 +28,7 @@ use serde_json::{json, Value};
 
 use conduit::event::Pdu;
 use conduit::keys::{generate_server_key, public_bytes, server_key_from_bytes, ServerKey};
+use conduit::storage::Storage;
 use conduit::signing::{add_signature, sign_authored};
 use conduit_server::federation::auth::sign_request;
 
@@ -2950,6 +2951,14 @@ async fn ss_membership_v1_invite_keeps_v1_bytes() {
     assert_eq!(event["event_id"], event_id);
     assert_eq!(event["content"]["displayname"], "Kept");
     assert_local_v1_signature(&server, event).await;
+    let pool = sqlx::PgPool::connect(&server.database_url).await.unwrap();
+    let storage = conduit_server::PostgresStorage::new(pool);
+    let wire = storage.get_wire_pdu(event_id).await.unwrap().expect("v1 invite is servable");
+    let served = serde_json::to_value(&wire).unwrap();
+    assert_eq!(served["event_id"], event_id);
+    assert!(served["auth_events"][0].is_array(), "stored invite dropped tuple auth_events: {served}");
+    assert!(served["signatures"][LOCAL].is_object(), "stored invite dropped the resident co-signature: {served}");
+    assert_eq!(served, *event);
     let sync = server.request(Method::GET, "/_matrix/client/v3/sync", Some(token), None, 200).await;
     assert!(sync["rooms"]["invite"].get(room).is_some(), "{sync}");
 

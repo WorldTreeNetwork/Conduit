@@ -307,14 +307,16 @@ pub(crate) async fn join_remote_room<S: AuthState>(
                         continue;
                     }
                 };
-                let decoded = conduit::wire::decode_pdu_for_version(event, 1, crate::federation::now_ms()).map_err(|error| {
+                let decoded = conduit::wire::decode_pdu_for_version(event.clone(), 1, crate::federation::now_ms()).map_err(|error| {
                     MatrixError::unknown(format!("v1 join does not decode: {error}")).into_response()
                 })?;
                 store_join_state(state.storage().as_ref(), client, room_id, &decoded.pdu, sent.state, sent.auth_chain).await?;
                 let Some(event_id) = decoded.explicit_event_id else {
                     return Err(MatrixError::unknown("v1 join is missing event_id").into_response());
                 };
-                store_event(state, Event { event_id, pdu: decoded.pdu, unsigned: decoded.unsigned }).await?;
+                let mut pdu = decoded.pdu;
+                pdu.extensions.insert(super::event_pipeline::LEGACY_WIRE.to_owned(), json!(event.to_string()));
+                store_event(state, Event { event_id, pdu, unsigned: decoded.unsigned }).await?;
             }
         }
         return Ok(room_id.to_owned());

@@ -875,7 +875,9 @@ pub async fn invite_v1(
     let Some(event_id) = decoded.explicit_event_id else {
         return bad_json("event_id is required");
     };
-    let stored = Event { event_id, pdu: decoded.pdu, unsigned: decoded.unsigned };
+    let mut pdu = decoded.pdu;
+    pdu.extensions.insert(conduit::event::LEGACY_EVENT_DOCUMENT.to_owned(), serde_json::json!(event.to_string()));
+    let stored = Event { event_id, pdu, unsigned: decoded.unsigned };
     if let Err(error) = state.storage.publish_event(&stored).await {
         return internal(&error.to_string());
     }
@@ -1245,7 +1247,7 @@ async fn verify_v1_signature(state: &FedState, event: &Value, origin: &str) -> R
 /// Hash and sign a room-version-1 or 2 event. `event_id` is already set.
 /// The signature covers the v1 redaction, including `event_id` and the
 /// tuple form of `auth_events` and `prev_events`.
-pub(crate) fn seal_v1_event(event: &mut Value, server_key: &conduit::keys::ServerKey, server_name: &str) -> Result<(), ()> {
+pub fn seal_v1_event(event: &mut Value, server_key: &conduit::keys::ServerKey, server_name: &str) -> Result<(), ()> {
     let object = event.as_object_mut().ok_or(())?;
     object.remove("signatures");
     object.remove("hashes");
@@ -1273,6 +1275,13 @@ fn insert_v1_signature(event: &mut Value, server_key: &conduit::keys::ServerKey,
     }
     server_sigs.as_object_mut().ok_or(())?.insert(server_key.key_id.clone(), Value::String(encoded));
     Ok(())
+}
+
+pub(crate) fn v1_hash_matches(event: &Value) -> bool {
+    let Some(claimed) = event["hashes"]["sha256"].as_str() else { return false };
+    let Ok(claimed) = conduit::hashing::decode_unpadded_base64(claimed) else { return false };
+    let Ok(actual) = v1_content_digest(event) else { return false };
+    claimed == actual
 }
 
 pub(crate) fn v1_signature_verifies(event: &Value, signature: &Value, public: &[u8]) -> bool {

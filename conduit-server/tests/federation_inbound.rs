@@ -464,6 +464,104 @@ async fn room_version_2_send_accepts_tuple_events() {
     assert_eq!(dropped, json!({}), "{dropped}");
 }
 
+/// A PDU sealed with `seal_v1_event` is checked over the v1 signing bytes
+/// (event id and tuple references), stored under that id, and served back
+/// as the same document. A flipped signature is reported and not stored.
+#[tokio::test]
+async fn room_version_1_and_2_send_stores_a_sealed_event() {
+    for (server_name, version) in [("v1.test", "1"), ("v2.test", "2")] {
+        let (addr, storage, key, _typing, _presence) = spawn_test_server(server_name).await;
+        let base = format!("http://{addr}");
+        let client = reqwest::Client::new();
+        let sender = format!("@alice:{server_name}");
+        let room = format!("!sealed:{server_name}");
+        let create_id = format!("$create{version}:{server_name}");
+        let create = sealed_v1_event(&key, server_name, json!({
+            "auth_events": [],
+            "content": {"creator": sender, "room_version": version},
+            "depth": 1,
+            "event_id": create_id,
+            "origin": server_name,
+            "origin_server_ts": chrono::Utc::now().timestamp_millis(),
+            "prev_events": [],
+            "room_id": room,
+            "sender": sender,
+            "state_key": "",
+            "type": "m.room.create"
+        }));
+        let created = put_one_pdu(&client, &base, &key, server_name, &format!("txn-seal-{version}"), create.clone()).await;
+        assert_eq!(created[&create_id], json!({}), "{version} create was not accepted: {created}");
+        assert_legacy_round_trip(&storage, &create_id, &create).await;
+
+        let join_id = format!("$join{version}:{server_name}");
+        let join = sealed_v1_event(&key, server_name, json!({
+            "auth_events": [[create_id, {"sha256": "aabb"}]],
+            "content": {"membership": "join"},
+            "depth": 2,
+            "event_id": join_id,
+            "origin": server_name,
+            "origin_server_ts": chrono::Utc::now().timestamp_millis(),
+            "prev_events": [[create_id, {"sha256": "ccdd"}]],
+            "room_id": room,
+            "sender": sender,
+            "state_key": sender,
+            "type": "m.room.member"
+        }));
+        let joined = put_one_pdu(&client, &base, &key, server_name, &format!("txn-join-{version}"), join.clone()).await;
+        assert_eq!(joined[&join_id], json!({}), "{version} join was not accepted: {joined}");
+        assert_legacy_round_trip(&storage, &join_id, &join).await;
+        let served = storage.get_wire_pdu(&join_id).await.unwrap().expect("join wire");
+        let document = serde_json::to_value(&served).unwrap();
+        assert!(document["auth_events"][0].is_array(), "tuple auth_events were flattened: {document}");
+        assert!(document["prev_events"][0].is_array(), "tuple prev_events were flattened: {document}");
+        assert_eq!(document["event_id"], join_id);
+
+        let mut forged = sealed_v1_event(&key, server_name, json!({
+            "auth_events": [],
+            "content": {"creator": sender, "room_version": version},
+            "depth": 1,
+            "event_id": format!("$forged{version}:{server_name}"),
+            "origin": server_name,
+            "origin_server_ts": chrono::Utc::now().timestamp_millis(),
+            "prev_events": [],
+            "room_id": format!("!forged:{server_name}"),
+            "sender": sender,
+            "state_key": "",
+            "type": "m.room.create"
+        }));
+        let forged_id = forged["event_id"].as_str().unwrap().to_owned();
+        let signature = forged["signatures"][server_name][&key.key_id].as_str().unwrap().to_owned();
+        let mut flipped: String = signature.chars().rev().collect();
+        if flipped == signature {
+            flipped.push('A');
+        }
+        forged["signatures"][server_name][&key.key_id] = json!(flipped);
+        let rejected = put_one_pdu(&client, &base, &key, server_name, &format!("txn-bad-{version}"), forged).await;
+        assert_eq!(rejected[&forged_id]["error"], "signature verification failed", "{rejected}");
+        assert!(storage.get_event(&forged_id).await.unwrap().is_none());
+    }
+}
+
+fn sealed_v1_event(key: &conduit::keys::ServerKey, server: &str, mut event: Value) -> Value {
+    conduit_server::federation::spec_v119::seal_v1_event(&mut event, key, server).expect("seal");
+    event
+}
+
+async fn assert_legacy_round_trip(storage: &MemoryStorage, event_id: &str, sealed: &Value) {
+    let stored = storage.get_event(event_id).await.unwrap().expect("stored");
+    assert_eq!(stored.event_id, event_id);
+    let raw = stored
+        .pdu
+        .extensions
+        .get(conduit::event::LEGACY_EVENT_DOCUMENT)
+        .and_then(Value::as_str)
+        .expect("legacy document");
+    let document: Value = serde_json::from_str(raw).expect("legacy document json");
+    assert_eq!(document, *sealed);
+    let wire = storage.get_wire_pdu(event_id).await.unwrap().expect("wire");
+    assert_eq!(serde_json::to_value(&wire).unwrap(), *sealed);
+}
+
 fn v1_wire(event_id: &str, room_id: &str) -> Value {
     json!({
         "auth_events": [["$create:v1.test", {"sha256": "aabb"}]],

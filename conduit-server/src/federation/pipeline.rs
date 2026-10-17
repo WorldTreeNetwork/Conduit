@@ -112,6 +112,35 @@ pub async fn verify_received(
     Ok(received)
 }
 
+/// Receipt checks for a room-version-1 or 2 PDU.
+///
+/// The signature covers `document` (`event_id` and tuple references). The
+/// projected PDU is what auth and state resolution read. When the v1 content
+/// hash matches, that document is kept on the PDU so a later send still has
+/// the legacy shape.
+pub async fn receive_legacy_pdu(
+    remote_keys: &RemoteKeyCache,
+    http: &reqwest::Client,
+    document: &Value,
+    decoded: DecodedPdu,
+) -> Result<Received, PipelineError> {
+    let bytes = super::spec_v119::v1_signing_bytes(document)
+        .map_err(|_| PipelineError::SignatureError(VerifyError::SignaturesNotObject))?;
+    let event_id = decoded.explicit_event_id.ok_or(PipelineError::SignatureError(VerifyError::SignaturesNotObject))?;
+    let hash_ok = super::spec_v119::v1_hash_matches(document);
+    let mut pdu = decoded.pdu;
+    if hash_ok {
+        pdu.extensions.insert(
+            conduit::event::LEGACY_EVENT_DOCUMENT.to_owned(),
+            Value::String(document.to_string()),
+        );
+    }
+    let keys = eligible_keys(remote_keys, http, &pdu).await;
+    let signed_by = conduit::signing::verify_signatures_over(&pdu, &bytes, lookup(keys))?;
+    let pdu = if hash_ok { pdu } else { conduit::room_version::redact_pdu(&pdu, 1) };
+    Ok(Received { event_id, pdu, redacted_on_receipt: !hash_ok, signed_by })
+}
+
 /// [`verify_received`] where this server is itself a required signer (the
 /// authorising resident of a restricted join): our own key is used directly
 /// instead of being fetched from ourselves.

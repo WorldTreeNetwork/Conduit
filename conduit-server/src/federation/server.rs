@@ -41,7 +41,7 @@ use crate::media_storage::BlobStore;
 use crate::api::client::media::MediaState;
 
 use super::middleware::FederationOrigin;
-use super::pipeline::{process_incoming_pdu, process_received, verify_received, verify_received_as, PipelineError};
+use super::pipeline::{process_incoming_pdu, process_received, receive_legacy_pdu, verify_received, verify_received_as, PipelineError};
 
 // ---------------------------------------------------------------------------
 // Shared handler state
@@ -391,7 +391,7 @@ pub async fn send_transaction(
         // stored create) selects the tuple format. A missing room_version
         // stays on the v3+ decoder.
         let version = received_room_version(state.storage.as_ref(), &pdu_val).await;
-        let decoded = match conduit::wire::decode_pdu_for_version(pdu_val, version, received_ts) {
+        let decoded = match conduit::wire::decode_pdu_for_version(pdu_val.clone(), version, received_ts) {
             Ok(decoded) => decoded,
             Err(error) => {
                 tracing::info!(%origin, %txn_id, %error, "dropped invalid PDU");
@@ -414,17 +414,37 @@ pub async fn send_transaction(
             Ok(true) => {}
             Err(error) => return internal(&error.to_string()),
         }
-        match process_incoming_pdu(
-            &state.storage,
-            &state.remote_keys,
-            &state.http,
-            &state.events_tx,
-            Some(&state.fed_client),
-            Some(&state.recent),
-            decoded,
-            &origin,
-        )
-        .await
+        let outcome = if version < 3 {
+            let unsigned = decoded.unsigned.clone();
+            match receive_legacy_pdu(&state.remote_keys, &state.http, &pdu_val, decoded).await {
+                Ok(received) => process_received(
+                    &state.storage,
+                    &state.remote_keys,
+                    &state.http,
+                    &state.events_tx,
+                    Some(&state.fed_client),
+                    Some(&state.recent),
+                    received,
+                    unsigned,
+                    &origin,
+                )
+                .await,
+                Err(error) => Err(error),
+            }
+        } else {
+            process_incoming_pdu(
+                &state.storage,
+                &state.remote_keys,
+                &state.http,
+                &state.events_tx,
+                Some(&state.fed_client),
+                Some(&state.recent),
+                decoded,
+                &origin,
+            )
+            .await
+        };
+        match outcome
         {
             Ok(event_id) => {
                 pdu_results.insert(event_id, json!({}));

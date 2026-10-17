@@ -5073,13 +5073,14 @@
         "conduit-server/tests/production_pdu.rs::server_acl_denies_remote_participation_until_lifted",
         "conduit-server/tests/production_pdu.rs::auth_event_selection_rejects_and_current_state_soft_fails",
         "conduit-server/tests/production_pdu.rs::soft_failed_topic_is_omitted_until_referenced_and_syncs_when_selected",
-        "conduit-server/tests/production_pdu.rs::send_applies_acl_per_pdu_and_inbound_edus"
+        "conduit-server/tests/production_pdu.rs::send_applies_acl_per_pdu_and_inbound_edus",
+        "conduit-server/tests/federation_inbound.rs::room_version_1_and_2_send_stores_a_sealed_event"
       ],
-      "tests_total": 11,
+      "tests_total": 12,
       "gap_beads": [
         "conduit-y99.22"
       ],
-      "notes": "HTTP 200 with a per-event pdus map. A server denied by m.room.server_acl gets an error for that PDU; an allowed room's PDU in the same transaction is accepted. Typing and receipt EDUs for a denied room are ignored. Presence, and master and self-signing key updates, are applied; a user-signing key in the EDU is not stored. A content-hash mismatch is stored redacted. Rejection, soft failure, the 65536-byte limit, NUL EDU isolation, and transaction replay are covered by the named tests."
+      "notes": "HTTP 200 with a per-event pdus map. A server denied by m.room.server_acl gets an error for that PDU; an allowed room's PDU in the same transaction is accepted. Typing and receipt EDUs for a denied room are ignored. Presence, and master and self-signing key updates, are applied; a user-signing key in the EDU is not stored. A content-hash mismatch is stored redacted. A room-version-1 or 2 PDU is verified over its v1 signing bytes and stored under the explicit id with that document. An unsigned or bad signature is reported and not stored. Rejection, soft failure, the 65536-byte limit, NUL EDU isolation, and transaction replay are covered by the named tests."
     },
     {
       "id": "ss.ep.get_matrixfederationv1event_authroomideventid",
@@ -9135,7 +9136,7 @@
       ],
       "tests_total": 7,
       "gap_beads": [],
-      "notes": "make_join negotiates ver and returns M_INCOMPATIBLE_ROOM_VERSION with room_version. Outbound make_join advertises versions 1-12. send_join state is the resolved room state before the join, and the accepted membership is stored. A client join of a remote room calls make_join and send_join and stores the returned state. Room version 3 event ids use standard base64. Room versions 1 and 2 are sent with the v1 event format on send_join v1."
+      "notes": "make_join negotiates ver and returns M_INCOMPATIBLE_ROOM_VERSION with room_version. Outbound make_join advertises versions 1-12. send_join state is the resolved room state before the join, and the accepted membership is stored. A client join of a remote room calls make_join and send_join and stores the returned state. Room version 3 event ids use standard base64. Room versions 1 and 2 are sent with the v1 event format on send_join v1, and the stored membership keeps that document, including event_id and tuple references."
     },
     {
       "id": "ss.joining.restricted",

@@ -365,11 +365,22 @@ pub fn verify_signatures<F>(pdu: &Pdu, lookup: F) -> Result<SignedBy, VerifyErro
 where
     F: Fn(&str, &str) -> Option<Vec<u8>>,
 {
+    let bytes = signing_bytes(pdu)?;
+    verify_signatures_over(pdu, &bytes, lookup)
+}
+
+/// [`verify_signatures`] over caller-supplied bytes.
+///
+/// Room versions 1 and 2 sign the v1 redaction (`event_id` and tuple
+/// `auth_events`), which the v11 [`signing_bytes`] projection does not cover.
+pub fn verify_signatures_over<F>(pdu: &Pdu, bytes: &[u8], lookup: F) -> Result<SignedBy, VerifyError>
+where
+    F: Fn(&str, &str) -> Option<Vec<u8>>,
+{
     if !pdu.signatures.is_object() {
         return Err(VerifyError::SignaturesNotObject);
     }
     let signers = signers(pdu)?;
-    let bytes = signing_bytes(pdu)?;
     let mut signed_by = SignedBy::new();
     for server in &signers.required {
         verify_server(pdu, &bytes, server, &lookup)?;
