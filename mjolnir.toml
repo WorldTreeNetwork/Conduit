@@ -12,9 +12,13 @@
 # (/var/lib/mjolnir/deploy/secrets/conduit.json) and the tenant role.
 # DATABASE_URL is written by tenant ensure. Do not put it in this file.
 #
-# The Matrix server name is conduit.vm.worldtree.network. User ids on this
-# database keep that name forever. Federation is advertised on :443 because
-# the gateway, not the guest, terminates TLS.
+# The Matrix server name is conduit.worldtree.network. User ids keep that
+# name. The homeserver process still listens on conduit.vm.worldtree.network.
+# Federation well-known delegates there on :443 because the gateway, not the
+# guest, terminates TLS. OIDC client id and audience stay
+# conduit.vm.worldtree.network so the registered Identikey client does not
+# change when the server name does. The callback is the public name, which
+# conduit-web proxies to this process.
 #
 # Registration stays on and requires CONDUIT_REGISTRATION_TOKENS. Guests stay
 # off. Browser SSO needs CONDUIT_OIDC_CLIENT_SECRET for a confidential client
@@ -37,21 +41,22 @@
 # Postgres and survive cutover.
 #
 # The Svelte client is a second app, deployed from web/ as `conduit-web`
-# (https://conduit-web.vm.worldtree.network). It calls this homeserver
-# cross-origin. CORS allows any origin. When SSO is on, the allowlist below
-# is what lets the browser return to that origin. Without a client secret
-# the SSO button stays off either way.
+# (https://conduit.worldtree.network). It proxies /_matrix to this
+# homeserver. CORS allows any origin. When SSO is on, the allowlist below
+# is what lets the browser return to that origin. The old web host
+# https://conduit-web.vm.worldtree.network stays on the allowlist and
+# redirects. Without a client secret the SSO button stays off either way.
 #
-#   mj deploy web --name conduit-web --memory 512 \
-#     --domain conduit-web.vm.worldtree.network
-#   mj cert issue conduit-web.vm.worldtree.network
+#   mj deploy /Users/dukejones/work/WorldTree/Conduit/web --name conduit-web \
+#     --memory 512 --domain conduit.worldtree.network
+#   mj cert issue conduit.worldtree.network
 #
 # start_command is one line. Runtime embeds it in ExecStart=/bin/sh -lc '…',
 # and a newline there makes systemd reject the unit ("Bad message").
 
 base_image = "ubuntu-24.04"
 port = 8008
-start_command = "set -e; if [ -f /run/mjolnir/secrets.env ]; then . /run/mjolnir/secrets.env; fi; mkdir -p /var/lib/conduit/media; exec env CONDUIT_LISTEN_ADDR=0.0.0.0:8008 CONDUIT_SERVER_NAME=conduit.vm.worldtree.network CONDUIT_ALLOW_GUEST_ACCESS=false CONDUIT_MEDIA_ROOT=/var/lib/conduit/media CONDUIT_WELL_KNOWN_CLIENT_BASE_URL=https://conduit.vm.worldtree.network CONDUIT_WELL_KNOWN_SERVER=conduit.vm.worldtree.network:443 CONDUIT_OIDC_REDIRECT_URI=https://conduit.vm.worldtree.network/_matrix/client/v3/login/identikey/callback CONDUIT_SSO_REDIRECT_ALLOWLIST=https://conduit-web.vm.worldtree.network/ ./target/release/conduit-server"
+start_command = "set -e; if [ -f /run/mjolnir/secrets.env ]; then . /run/mjolnir/secrets.env; fi; mkdir -p /var/lib/conduit/media; exec env CONDUIT_LISTEN_ADDR=0.0.0.0:8008 CONDUIT_SERVER_NAME=conduit.worldtree.network CONDUIT_ALLOW_GUEST_ACCESS=false CONDUIT_MEDIA_ROOT=/var/lib/conduit/media CONDUIT_WELL_KNOWN_CLIENT_BASE_URL=https://conduit.worldtree.network CONDUIT_WELL_KNOWN_SERVER=conduit.vm.worldtree.network:443 CONDUIT_OIDC_CLIENT_ID=conduit.vm.worldtree.network CONDUIT_OIDC_AUDIENCE=conduit.vm.worldtree.network CONDUIT_OIDC_REDIRECT_URI=https://conduit.worldtree.network/_matrix/client/v3/login/identikey/callback CONDUIT_SSO_REDIRECT_ALLOWLIST=https://conduit.worldtree.network/,https://conduit-web.vm.worldtree.network/ ./target/release/conduit-server"
 # Empty inputs keep apt and the getty mask off the source hash, so a
 # code change does not reinstall the toolchain. The `mise` step must
 # start with `mise` or Orchestrator treats it as a source build. The

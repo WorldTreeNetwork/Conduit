@@ -2,10 +2,17 @@
 // Unknown paths fall back to index.html so client routes survive a refresh.
 // Directory names named `build` are stripped from the deploy tarball, so this
 // file serves the tree the guest build step writes at /app/build.
+//
+// conduit-web.vm.worldtree.network redirects to conduit.worldtree.network.
+// Matrix paths on the public origin are proxied to the homeserver, which
+// stays reachable at CONDUIT_UPSTREAM (conduit.vm.worldtree.network).
+
+import { legacyRedirect, proxyToHomeserver } from './src/lib/public-host.ts';
 
 const root = `${import.meta.dir}/build`;
-const port = Number(process.env.PORT ?? "8080");
-const hostname = process.env.HOST ?? "0.0.0.0";
+const port = Number(process.env.PORT ?? '8080');
+const hostname = process.env.HOST ?? '0.0.0.0';
+const upstream = (process.env.CONDUIT_UPSTREAM ?? 'https://conduit.vm.worldtree.network').replace(/\/+$/, '');
 
 function relativePath(pathname: string): string | null {
 	let decoded: string;
@@ -14,8 +21,8 @@ function relativePath(pathname: string): string | null {
 	} catch {
 		return null;
 	}
-	if (decoded.includes("\0") || decoded.split("/").includes("..")) return null;
-	return decoded.replace(/^\/+/, "");
+	if (decoded.includes('\0') || decoded.split('/').includes('..')) return null;
+	return decoded.replace(/^\/+/, '');
 }
 
 async function fileResponse(path: string): Promise<Response | null> {
@@ -25,14 +32,40 @@ async function fileResponse(path: string): Promise<Response | null> {
 	return new Response(file);
 }
 
+async function proxy(req: Request, url: URL): Promise<Response> {
+	const headers = new Headers(req.headers);
+	headers.delete('host');
+	const body = req.method === 'GET' || req.method === 'HEAD' ? undefined : req.body;
+	const upstreamResponse = await fetch(`${upstream}${url.pathname}${url.search}`, {
+		method: req.method,
+		headers,
+		body,
+		redirect: 'manual',
+		// Bun requires duplex when a request body is a stream.
+		...(body ? { duplex: 'half' as const } : {}),
+	});
+	const responseHeaders = new Headers(upstreamResponse.headers);
+	responseHeaders.delete('transfer-encoding');
+	return new Response(upstreamResponse.body, {
+		status: upstreamResponse.status,
+		statusText: upstreamResponse.statusText,
+		headers: responseHeaders,
+	});
+}
+
 Bun.serve({
 	hostname,
 	port,
 	async fetch(req) {
-		const relative = relativePath(new URL(req.url).pathname);
-		if (relative === null) return new Response("bad path", { status: 400 });
+		const url = new URL(req.url);
+		const redirect = legacyRedirect(req.headers.get('host'), `${url.pathname}${url.search}`);
+		if (redirect) return Response.redirect(redirect, 308);
+		if (proxyToHomeserver(url.pathname)) return proxy(req, url);
 
-		if (relative !== "") {
+		const relative = relativePath(url.pathname);
+		if (relative === null) return new Response('bad path', { status: 400 });
+
+		if (relative !== '') {
 			const exact = await fileResponse(`${root}/${relative}`);
 			if (exact) return exact;
 			const nested = await fileResponse(`${root}/${relative}/index.html`);
@@ -41,7 +74,7 @@ Bun.serve({
 
 		const index = await fileResponse(`${root}/index.html`);
 		if (index) return index;
-		return new Response("client build missing", { status: 503 });
+		return new Response('client build missing', { status: 503 });
 	},
 });
 
