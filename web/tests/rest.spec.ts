@@ -127,7 +127,12 @@ test('settings, media, people, directory, threads and reconnect', async ({ brows
 	 await expect(bob.getByText('A Svelte conversation', { exact: true })).toBeVisible();
 
 	 const publicName = `Directory ${run}`;
-	 const publicRoom = await api(a, 'POST', '/createRoom', { name: publicName, preset: 'public_chat', visibility: 'public' });
+	 await alice.getByRole('button', { name: 'Create room', exact: true }).first().click();
+	 await alice.getByLabel('Room name', { exact: true }).fill(publicName);
+	 await alice.getByRole('radio', { name: 'Public', exact: false }).check();
+	 await dialog(alice).getByRole('button', { name: 'Create room', exact: true }).click();
+	 await expect(alice.getByRole('heading', { name: publicName, exact: true })).toBeVisible();
+	 const publicRoom = { room_id: decodeURIComponent(new URL(alice.url()).hash.replace('#/room/', '')) };
 	 await bob.getByRole('button', { name: 'Directory', exact: true }).click();
 	 await dialog(bob).getByLabel('Search public rooms', { exact: true }).fill(publicName);
 	 const entry = dialog(bob).getByTestId('directory-room').filter({ hasText: publicName });

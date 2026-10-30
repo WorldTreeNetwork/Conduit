@@ -48,6 +48,7 @@
  let open = $state(false);
  let dialogTrigger: HTMLElement | null = null;
  let field = $state('');
+ let roomAccess = $state<'private' | 'public'>('private');
  let working = $state(false);
  let error = $state('');
  let historyError = $state('');
@@ -82,13 +83,13 @@
  }
  function home() { location.hash = '#/'; selected = null; settings = false; }
  function roomRoute(id: string) { settings = false; panelOpen = false; location.hash = `#/room/${encodeURIComponent(id)}`; selected = id; }
- function show(kind: typeof dialog) { dialogTrigger = document.activeElement as HTMLElement | null; dialog = kind; field = ''; error = ''; open = true; }
+ function show(kind: typeof dialog) { dialogTrigger = document.activeElement as HTMLElement | null; dialog = kind; field = ''; roomAccess = 'private'; error = ''; open = true; }
  async function submit() {
   if (working || !field.trim()) return;
   const kind = dialog, target = selected;
   working = true; error = '';
   try {
-   if (kind === 'create') roomRoute(await client.createRoom({ name: field, visibility: 'private' }));
+   if (kind === 'create') roomRoute(await client.createRoom({ name: field, visibility: roomAccess }));
    else if (kind === 'join') roomRoute(await client.joinRoom(field));
    else if (target) await client.invite(target, field);
    open = false;
@@ -178,8 +179,8 @@
 {/if}
 <Dialog.Root bind:open>
  <Dialog.Content onCloseAutoFocus={e => { e.preventDefault(); dialogTrigger?.focus(); }} showCloseButton={!working} onInteractOutside={e => { if (working) e.preventDefault(); }} onEscapeKeydown={e => { if (working) e.preventDefault(); }}>
-  <Dialog.Header><Dialog.Title>{dialog === 'create' ? 'Create room' : dialog === 'join' ? 'Join room' : 'Invite someone'}</Dialog.Title><Dialog.Description>{dialog === 'create' ? 'Start a private conversation. You can invite people next.' : dialog === 'join' ? 'Enter a room ID or alias, including its homeserver.' : `Invite a Matrix account to ${view?.name ?? 'this room'}.`}</Dialog.Description></Dialog.Header>
-  <form class="dialog-form" onsubmit={e => { e.preventDefault(); void submit(); }}><label for="room-field">{dialog === 'create' ? 'Room name' : dialog === 'join' ? 'Room ID or alias' : 'Matrix user ID'}</label><Input id="room-field" bind:value={field} disabled={working} required placeholder={dialog === 'create' ? 'Weekend plans' : dialog === 'join' ? '#room:example.org' : '@person:example.org'} />{#if dialog === 'invite'}<UserSuggestions {client} term={field} onPick={id => { field = id; }} />{/if}{#if error}<p class="error" role="alert">{error}</p>{/if}<Dialog.Footer><Button type="button" variant="outline" disabled={working} onclick={() => { open = false; }}>Cancel</Button><Button type="submit" disabled={working || !field.trim()}>{working ? 'Please wait…' : dialog === 'create' ? 'Create room' : dialog === 'join' ? 'Join room' : 'Send invitation'}</Button></Dialog.Footer></form>
+  <Dialog.Header><Dialog.Title>{dialog === 'create' ? 'Create room' : dialog === 'join' ? 'Join room' : 'Invite someone'}</Dialog.Title><Dialog.Description>{dialog === 'create' ? (roomAccess === 'public' ? 'Anyone can join, and the room is listed in the directory.' : 'Only people you invite can join. You can invite them next.') : dialog === 'join' ? 'Enter a room ID or alias, including its homeserver.' : `Invite a Matrix account to ${view?.name ?? 'this room'}.`}</Dialog.Description></Dialog.Header>
+  <form class="dialog-form" onsubmit={e => { e.preventDefault(); void submit(); }}><label for="room-field">{dialog === 'create' ? 'Room name' : dialog === 'join' ? 'Room ID or alias' : 'Matrix user ID'}</label><Input id="room-field" bind:value={field} disabled={working} required placeholder={dialog === 'create' ? 'Weekend plans' : dialog === 'join' ? '#room:example.org' : '@person:example.org'} />{#if dialog === 'create'}<fieldset class="access" disabled={working}><legend>Who can join</legend><label><input type="radio" name="room-access" value="private" bind:group={roomAccess} /><span><strong>Private</strong><small>Only people you invite. Not listed in the directory.</small></span></label><label><input type="radio" name="room-access" value="public" bind:group={roomAccess} /><span><strong>Public</strong><small>Anyone can join. Listed in the directory.</small></span></label></fieldset>{/if}{#if dialog === 'invite'}<UserSuggestions {client} term={field} onPick={id => { field = id; }} />{/if}{#if error}<p class="error" role="alert">{error}</p>{/if}<Dialog.Footer><Button type="button" variant="outline" disabled={working} onclick={() => { open = false; }}>Cancel</Button><Button type="submit" disabled={working || !field.trim()}>{working ? 'Please wait…' : dialog === 'create' ? 'Create room' : dialog === 'join' ? 'Join room' : 'Send invitation'}</Button></Dialog.Footer></form>
  </Dialog.Content>
 </Dialog.Root>
 
@@ -236,6 +237,13 @@
  .action-error { padding:1rem; }
  .dialog-form { display:flex; flex-direction:column; gap:.75rem; }
  .dialog-form label { font-weight:600; font-size:var(--text-sm); }
+ .access { border:0; margin:0; padding:0; display:flex; flex-direction:column; gap:.15rem; }
+ .access legend { font-weight:600; font-size:var(--text-sm); margin-bottom:.15rem; }
+ .access label { display:flex; align-items:flex-start; gap:.6rem; min-height:44px; padding:.2rem 0; font-weight:400; }
+ .access input { margin-top:.25rem; flex-shrink:0; width:1rem; height:1rem; accent-color:var(--color-brass); }
+ .access span { display:flex; flex-direction:column; gap:.1rem; }
+ .access strong { font-weight:600; }
+ .access small { color:var(--color-ink-muted); font-size:var(--text-xs); font-weight:400; line-height:1.4; }
  a:focus-visible { outline:2px solid #10dde0; outline-offset:-3px; }
  @media(max-width:640px) { .rail { width:100%; } .conversation { display:none; } .in-room .rail { display:none; } .in-room .conversation { display:flex; } .back { display:inline-flex; min-height:44px; align-items:center; color:var(--color-brass-text); font-size:var(--text-sm); } .room-heading { padding:.75rem 1rem; flex-wrap:wrap; } .timeline,.composer { padding:1rem; } }
 </style>
