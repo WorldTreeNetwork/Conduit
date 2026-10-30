@@ -16,6 +16,7 @@
  import Media from './Media.svelte';
  import UserSuggestions from './UserSuggestions.svelte';
  import Reauth from './Reauth.svelte';
+ import RoomRail from './RoomRail.svelte';
  import '#lib/styles/rest.css';
  let { client, displayName, signOut, onProfileChanged, onDeactivated }: { client: MatrixClient; displayName: string; signOut: () => void; onProfileChanged: (name: string) => void; onDeactivated: () => void } = $props();
  let settings = $state(false);
@@ -57,8 +58,6 @@
  let previousRoom: string | null = null;
  let previousLast: string | undefined;
  const entries = $derived.by(() => { version; return client.roomList(); });
- const joined = $derived(entries.filter(e => e.membership === 'join'));
- const invitations = $derived(entries.filter(e => e.membership === 'invite'));
  const view = $derived.by(() => {
   version;
   const room = selected ? client.getRoom(selected) : undefined;
@@ -148,14 +147,7 @@
   <header class="identity"><a class="brand" href="#/">Conduit</a><p data-testid="profile-display-name">{displayName}</p><p class="account">{client.userId}</p></header>
   <div class="actions"><Button onclick={() => show('create')}>Create room</Button><Button variant="outline" onclick={() => show('join')}>Join room</Button></div>
   <ScrollArea class="min-h-0 flex-1">
-   {#if invitations.length}<section class="invitations" aria-label="Invitations"><h2>Invitations</h2>{#each invitations as entry (entry.roomId)}<div class="invitation"><strong>{entry.name}</strong><p>{entry.inviter ?? 'You have been invited'}</p><Button variant="outline" disabled={working} onclick={() => void accept(entry.roomId)}>Accept invitation</Button></div>{/each}</section>{/if}
-   <nav aria-label="Joined rooms"><h2 class="rail-label">Your rooms <span>{joined.length}</span></h2>
-    {#each joined as entry (entry.roomId)}
-     <a class="room-link" class:active={selected === entry.roomId} href={`#/room/${encodeURIComponent(entry.roomId)}`} aria-current={selected === entry.roomId ? 'page' : undefined}>
-      <span class="room-name">{entry.name}</span>{#if entry.unread > 0}<span class="count" aria-label={`${entry.unread} unread`}>{entry.unread}</span>{/if}<span class="preview">{entry.preview?.body || 'No messages yet'}</span>
-     </a>
-    {:else}<p class="rail-empty">Your conversations will appear here.</p>{/each}
-   </nav>
+   <RoomRail {client} {version} {entries} {selected} {working} onAccept={(id) => void accept(id)} />
   </ScrollArea>
   {#if error && !open}<p class="error action-error" role="alert">{error}</p>{/if}
   <footer><ConnectionBanner {client} {version} line /><div class="rest-row"><Button variant="outline" href="#/settings">Settings</Button><Button variant="outline" onclick={() => showPanel('directory')}>Directory</Button><Button variant="outline" onclick={signOut}>Sign out</Button></div></footer>
@@ -207,22 +199,15 @@
  .typing { min-height:1.5rem; padding:0 1rem; color:var(--color-ink-muted); font-size:var(--text-sm); }
  .workspace { height:100dvh; display:flex; flex-direction:column; }
  .chat { display:flex; flex:1; min-height:0; overflow:hidden; }
- .rail { display:flex; flex-direction:column; width:var(--board-width); flex-shrink:0; background:var(--color-board); color:var(--color-board-ink); }
- .identity { padding:1.5rem 1.25rem 1rem; border-bottom:1px solid var(--color-board-rule); }
- .brand { font-family:var(--font-title); font-weight:600; font-size:var(--text-2xl); font-variation-settings:'wdth' 100; }
- .identity p { margin-top:.5rem; overflow-wrap:anywhere; }
- .identity .account { color:var(--color-board-ink-muted); font-size:var(--text-xs); margin-top:0; }
- .actions { display:flex; flex-wrap:wrap; gap:.5rem; padding:1rem 1.25rem; }
- .rail-label { display:flex; justify-content:space-between; padding:1rem 1.25rem .5rem; color:var(--color-board-ink-muted); font-size:var(--text-sm); }
- .rail-label span { font-family:var(--font-text); }
- .room-link { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:.25rem .5rem; padding:.75rem 1.25rem; border-left:3px solid transparent; }
- .room-link:hover { background:var(--color-board-raised); }
- .room-link.active { background:var(--color-board-selected); border-left-color:var(--color-brass); }
- .room-name { font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
- .preview { grid-column:1/-1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:var(--text-sm); color:var(--color-board-ink-muted); }
- .count { border-radius:var(--radius-pill); padding:0 .5rem; background:var(--color-brass); color:var(--color-brass-ink); font-size:var(--text-sm); }
- .rail-empty { padding:1rem 1.25rem; color:var(--color-board-ink-muted); }
- .rail footer { padding:1rem 1.25rem; border-top:1px solid var(--color-board-rule); }
+ .rail { display:flex; flex-direction:column; width:16.25rem; flex-shrink:0; background:#212026; color:#f4f4f5; }
+ .identity { padding:.9rem 1rem .55rem; }
+ .brand { font-family:var(--font-title); font-weight:600; font-size:1.05rem; font-variation-settings:'wdth' 100; color:#fff; }
+ .identity p { margin-top:.15rem; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+ .identity .account { color:#c6c6cf; font-size:var(--text-xs); margin-top:0; }
+ .actions { display:flex; gap:.35rem; padding:0 .5rem .35rem; }
+ .actions :global(a), .actions :global(button) { color:#f4f4f5; }
+ .rail footer { padding:.75rem; border-top:1px solid rgb(255 255 255 / 0.08); }
+ .actions :global(button), .rail footer :global(button), .rail footer :global(a) { color:#f4f4f5; border-color:rgb(255 255 255 / 0.16); background:transparent; }
  .conversation { min-width:0; flex:1; display:flex; flex-direction:column; background:var(--color-surface); }
  .room-heading { min-height:6rem; padding:1.25rem 2rem; display:flex; gap:1rem; align-items:center; border-bottom:1px solid var(--color-rule); }
  .room-heading > div { min-width:0; flex:1; }
@@ -251,10 +236,6 @@
  .action-error { padding:1rem; }
  .dialog-form { display:flex; flex-direction:column; gap:.75rem; }
  .dialog-form label { font-weight:600; font-size:var(--text-sm); }
- .invitations { padding:1rem 1.25rem; border-bottom:1px solid var(--color-board-rule); }
- .invitations h2 { font-size:var(--text-sm); color:var(--color-board-ink-muted); }
- .invitation { margin-top:.75rem; overflow-wrap:anywhere; }
- .invitation p { font-size:var(--text-xs); margin-bottom:.5rem; color:var(--color-board-ink-muted); }
- a:focus-visible { outline:2px solid var(--color-focus); outline-offset:-3px; }
+ a:focus-visible { outline:2px solid #10dde0; outline-offset:-3px; }
  @media(max-width:640px) { .rail { width:100%; } .conversation { display:none; } .in-room .rail { display:none; } .in-room .conversation { display:flex; } .back { display:inline-flex; min-height:44px; align-items:center; color:var(--color-brass-text); font-size:var(--text-sm); } .room-heading { padding:.75rem 1rem; flex-wrap:wrap; } .timeline,.composer { padding:1rem; } }
 </style>

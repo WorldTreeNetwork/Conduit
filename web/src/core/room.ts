@@ -3,6 +3,7 @@
 // current state; live events do.
 import { aggregate, redactEvent, redactsOf, type Aggregations } from "./relations";
 import type {
+  BasicEvent,
   JsonObject,
   MatrixEvent,
   Membership,
@@ -21,6 +22,7 @@ export interface RoomSnapshot {
   unread: { notifications: number; highlights: number };
   summary: RoomSummary;
   readUpTo?: string;
+  tags?: Record<string, { order?: number }>;
 }
 
 /** How many timeline events to keep when persisting a room. */
@@ -54,6 +56,8 @@ export class Room {
   readonly receipts = new Map<string, { eventId: string; ts: number }>();
   /** The latest event this user has read (own receipt or local mark). */
   readUpTo: string | undefined;
+  /** Room tags from `m.tag` account data. `m.favourite` is the marked set. */
+  tags: Record<string, { order?: number }> = {};
   /** Thread replies fetched through /relations (older than the window). */
   readonly threadHistory = new Map<string, MatrixEvent[]>();
   /** Bumped on every timeline mutation; keys memoized views. */
@@ -124,6 +128,24 @@ export class Room {
 
   get isPublic(): boolean {
     return this.joinRule === "public";
+  }
+
+  /** Starred in the room list. Stored as the Matrix `m.favourite` tag. */
+  get marked(): boolean {
+    return Object.prototype.hasOwnProperty.call(this.tags, "m.favourite");
+  }
+
+  applyAccountData(event: BasicEvent): void {
+    if (event.type !== "m.tag") return;
+    const raw = event.content.tags;
+    const next: Record<string, { order?: number }> = {};
+    if (raw && typeof raw === "object") {
+      for (const [name, value] of Object.entries(raw as Record<string, unknown>)) {
+        const order = value && typeof value === "object" ? (value as { order?: unknown }).order : undefined;
+        next[name] = typeof order === "number" ? { order } : {};
+      }
+    }
+    this.tags = next;
   }
 
   get creator(): string | undefined {
@@ -381,6 +403,7 @@ export class Room {
       unread: this.unread,
       summary: this.summary,
       readUpTo: this.readUpTo,
+      tags: this.tags,
     };
   }
 
@@ -398,6 +421,7 @@ export class Room {
     room.unread = snapshot.unread ?? { notifications: 0, highlights: 0 };
     room.summary = snapshot.summary ?? {};
     room.readUpTo = snapshot.readUpTo;
+    room.tags = snapshot.tags ?? {};
     return room;
   }
 }

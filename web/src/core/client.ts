@@ -326,6 +326,7 @@ export class MatrixClient {
           highlights: joined.unread_notifications.highlight_count ?? 0,
         };
       }
+      for (const event of joined.account_data?.events ?? []) room.applyAccountData(event);
       for (const event of joined.ephemeral?.events ?? []) this.applyEphemeral(room, event);
     }
 
@@ -798,6 +799,23 @@ export class MatrixClient {
 
   acceptInvite(roomId: string): Promise<string> {
     return this.joinRoom(roomId);
+  }
+
+  /** Mark or unmark a joined room. The server stores this as `m.favourite`. */
+  setMarked(roomId: string, marked: boolean): Promise<void> {
+    return this.track(async () => {
+      const path = `/_matrix/client/v3/user/${enc(this.userId)}/rooms/${enc(roomId)}/tags/m.favourite`;
+      if (marked) await this.http.request("PUT", path, { body: { order: 0.5 }, maxRetries: 1 });
+      else await this.http.request("DELETE", path, { maxRetries: 1 });
+      const room = this.rooms.get(roomId);
+      if (!room) return;
+      const tags = { ...room.tags };
+      if (marked) tags["m.favourite"] = { order: 0.5 };
+      else delete tags["m.favourite"];
+      room.tags = tags;
+      if (this.sync.since) this.persistSnapshot(this.sync.since);
+      this.emit();
+    });
   }
 
   invite(roomId: string, userId: string): Promise<void> {

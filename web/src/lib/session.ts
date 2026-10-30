@@ -7,7 +7,7 @@ import {
 import { homeserverProblem } from './homeserver.js';
 
 export { describeError, validateUsername, relatesTo, formatBytes, MatrixError } from '../core/index';
-export type { MatrixClient, Session, Room, MatrixEvent, JsonObject, PublicRoom, DeviceInfo } from '../core/index';
+export type { MatrixClient, Session, Room, MatrixEvent, JsonObject, PublicRoom, DeviceInfo, RoomListEntry } from '../core/index';
 export const PENDING_SSO_KEY = 'conduit:pending-sso';
 export const sessionStore = new LocalStorageStore('conduit:web:');
 

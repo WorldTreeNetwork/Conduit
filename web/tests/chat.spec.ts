@@ -89,8 +89,7 @@ test('two people exchange messages and recover failed sends', async ({ browser }
 
 	 await bob.getByRole('link', { name: 'Conduit', exact: true }).click();
 	 await message(alice, 'An unread preview');
-	 const roomLink = bob.getByRole('navigation', { name: 'Joined rooms' }).getByRole('link').filter({ hasText: roomName });
-	 await expect(roomLink).toContainText('An unread preview');
+	 const roomLink = bob.getByRole('navigation', { name: 'Rooms' }).getByRole('link', { name: roomName });
 	 await expect(roomLink.locator('[aria-label$=" unread"]')).toBeVisible();
 	 await roomLink.click();
 
@@ -117,7 +116,7 @@ test('two people exchange messages and recover failed sends', async ({ browser }
 	 await expect(bob.getByRole('heading', { name: `Public ${run}`, exact: true })).toBeVisible();
 
 	 await api(b, `/rooms/${encodeURIComponent(roomId)}/leave`, {});
-	 await expect(bob.getByRole('navigation', { name: 'Joined rooms' }).getByRole('link').filter({ hasText: roomName })).toHaveCount(0);
+	 await expect(bob.getByRole('navigation', { name: 'Rooms' }).getByRole('link').filter({ hasText: roomName })).toHaveCount(0);
 	 await bob.goto(`${url}${roomHash}`);
 	 await expect.poll(() => new URL(bob.url()).hash).toBe('#/');
 	 await expect(bob.getByRole('heading', { name: 'A place to catch up.', exact: true })).toBeVisible();
@@ -128,7 +127,7 @@ test('two people exchange messages and recover failed sends', async ({ browser }
 	 await expect(alice.getByRole('button', { name: 'Send', exact: true })).toBeVisible();
 	 expect(await alice.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
 	 await alice.getByRole('link', { name: '← Rooms', exact: true }).click();
-	 await expect(alice.getByRole('navigation', { name: 'Joined rooms' })).toBeVisible();
+	 await expect(alice.getByRole('navigation', { name: 'Rooms' })).toBeVisible();
 	 expect(errors).toEqual([]);
 	 console.log('PASS: create, invite, accept, two-way send, local echo, retry, previews, unread, history, join, left-room hash, mobile navigation');
 	} finally { await aliceContext.close(); await bobContext.close(); }

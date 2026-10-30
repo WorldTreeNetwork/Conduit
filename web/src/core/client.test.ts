@@ -85,6 +85,19 @@ describe("sync processing", () => {
     await client.stop();
   });
 
+  it("keeps a marked room from the m.tag account data", async () => {
+    const { client } = makeClient();
+    const response = joinedSync("s1", []);
+    response.rooms!.join![ROOM]!.account_data = { events: [{ type: "m.tag", content: { tags: { "m.favourite": { order: 0.5 } } } }] };
+    response.rooms!.join![ROOM]!.state = { events: [makeEvent({ type: "m.room.join_rules", state_key: "", content: { join_rule: "public" } })] };
+    await client.processSync(response, true);
+    const room = client.getRoom(ROOM)!;
+    expect(room.marked).toBe(true);
+    expect(room.isPublic).toBe(true);
+    const restored = (await import("./room")).Room.fromSnapshot(JSON.parse(JSON.stringify(room.toSnapshot())));
+    expect(restored.marked).toBe(true);
+  });
+
   it("uses state_after exclusively and keeps timeline state as history", async () => {
     const { client } = makeClient();
     const old = makeEvent({ type: "m.room.name", state_key: "", content: { name: "Timeline name" } });
